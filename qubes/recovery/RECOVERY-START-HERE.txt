@@ -1,0 +1,57 @@
+================================================================
+  START HERE — emergency recovery kit
+================================================================
+
+WHAT THIS IS
+  You are holding part of a recovery kit for the custodial crypto wallet
+  operated by:   [OWNER NAME / COMPANY]                 <-- fill in
+  This kit exists so the funds can be recovered if that person is
+  incapacitated or unavailable. Inside this case: a disc (DVD), a small
+  recovery card, this sheet, a SEALED custodian-contact sheet, and some
+  printed words and/or a stamped metal plate. Those words/metal are a
+  SECRET "share" — keep them private.
+
+ARE YOU ALLOWED TO DO THIS?
+  Only proceed if you are the authorized person and the agreed condition
+  has happened (e.g. death/incapacity confirmed). The named executor and
+  the rule are on the SEALED custodian-contact sheet in this case:
+      Executor:  [NAME + how to reach]                  <-- fill in
+  If you are not that person, contact the executor. Doing this without
+  authorization is theft.
+
+YOU NEED 4 OF 6
+  There are SIX of these cases. You need any FOUR of them to recover.
+  The sealed custodian-contact sheet lists all six holders and how to
+  reach them. Gather four cases.
+
+YOU WILL LIKELY NEED TECHNICAL HELP — THAT'S NORMAL
+  Recovering crypto safely needs someone comfortable with a computer
+  command line, working OFFLINE. We named a person who can do this:
+      Technical helper:  [NAME + how to reach]          <-- fill in
+  If they're unavailable, hire a reputable, bonded crypto-recovery
+  professional. Give them:
+     (1) the four cases you gathered,
+     (2) the disc from this case (it has the step-by-step instructions
+         file "RECOVERY-TECHNICAL.md" and all the software),
+     (3) this sheet.
+  IMPORTANT: only hand the SECRET share words/metal to the trusted helper,
+  in person, on an OFFLINE computer. Never type them into a phone, a
+  website, email, or any internet-connected device. No legitimate helper
+  needs you to send the words over the internet.
+
+WHAT THE HELPER WILL DO (so you can sanity-check them)
+  - Work on a computer with the internet TURNED OFF.
+  - Combine the share-words from your 4 cases to rebuild the wallet.
+  - Confirm the rebuilt wallet matches the address recorded on the
+    SEALED custodian-contact sheet (proof it's correct).
+  - Move the funds to the agreed safe address:
+      Safe destination: [ADDRESS or "see executor"]     <-- fill in
+  - Then destroy the working copies.
+
+DO NOT
+  - Do not photograph or type the secret words into any online device.
+  - Do not give shares to anyone who contacts YOU first claiming to help.
+  - Do not throw away the disc or the metal plate.
+
+The disc's file "RECOVERY-TECHNICAL.md" is the exact recipe for the helper.
+================================================================

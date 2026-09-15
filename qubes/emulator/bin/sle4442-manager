@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""sle4442-manager — drive an SLE-4442 memory card over PC/SC.
+
+This is a real ceremony-style route: a PC/SC application that stores / retrieves a small
+secret payload (e.g. a Shamir share, a PIN, or a recovery pointer) on an SLE-4442 memory
+card, using the standard PC/SC memory-card pseudo-APDUs (CLA=0xFF). Against the emulator
+it talks to sle4442-vpicc.py through pcscd + vpcd; against a real Identiv/SCM reader with
+a real SLE-4442 it works unchanged.
+
+  sle4442-manager info
+  sle4442-manager verify  --psc FFFFFF
+  sle4442-manager read    --addr 32 --len 16
+  sle4442-manager write   --psc FFFFFF --addr 32 --hex-file share.hex
+  SLE4442_PSC=... SLE4442_TEXT="share-1-..." sle4442-manager store --addr 32   # share off argv
+
+The PSC *and* the secret payload (--text/--hex) resolve off the command line: prefer the
+SLE4442_PSC / SLE4442_TEXT / SLE4442_HEX env vars or the --psc-file/--text-file/--hex-file
+inputs. Passing any of them directly on argv warns, because argv is visible in `ps` /
+`/proc/<pid>/cmdline` / shell history.
+"""
+import argparse
+import os
+import sys
+
+try:
+    from smartcard.System import readers
+    from smartcard.util import toBytes, toHexString
+except Exception as exc:  # pragma: no cover - only in the emulator image
+    sys.exit(f"sle4442-manager: pyscard not available ({exc}); run inside the emulator image")
+
+
+def _connect(reader_substr):
+    rl = readers()
+    if not rl:
+        sys.exit("no PC/SC readers found — is pcscd + vpcd + the vpicc running?")
+    chosen = None
+    for r in rl:
+        if reader_substr is None or reader_substr.lower() in str(r).lower():
+            chosen = r
+            break
+    if chosen is None:
+        sys.exit(f"no reader matching '{reader_substr}'. readers: {[str(r) for r in rl]}")
+    conn = chosen.createConnection()
+    conn.connect()
+    return conn, str(chosen)
+
+
+def _xmit(conn, apdu_hex):
+    data, sw1, sw2 = conn.transmit(toBytes(apdu_hex))
+    return data, sw1, sw2
+
+
+def _ok(sw1, sw2):
+    return sw1 == 0x90 and sw2 == 0x00
+
+
+def select_sle4442(conn):
+    _, sw1, sw2 = _xmit(conn, "FF A4 00 00 01 06")
+    if not _ok(sw1, sw2):
+        sys.exit(f"SELECT SLE4442 failed: {sw1:02X} {sw2:02X}")
+
+
+def cmd_info(conn):
+    select_sle4442(conn)
+    sec, s1, s2 = _xmit(conn, "FF B1 00 00 04")
+    prot, p1, p2 = _xmit(conn, "FF B2 00 00 04")
+    attempts = bin(sec[0] & 0x07).count("1") if _ok(s1, s2) else "?"
+    # NOTE: deliberately does NOT print main-memory contents — the card may hold a secret
+    # (a Shamir share). `info` shows only non-secret status (counter + protection map). Use
+    # the explicit `read` subcommand if you really intend to display stored bytes.
+    print(f"card: SLE4442 (emulated or real)")
+    print(f"  error counter   : {sec[0]:#04x}  ({attempts} PSC attempts left)")
+    print(f"  protection bits : {toHexString(prot)}")
+    print(f"  memory          : 256 bytes (contents not shown; use `read` to display)")
+
+
+def cmd_verify(conn, psc):
+    select_sle4442(conn)
+    _, sw1, sw2 = _xmit(conn, "FF 20 00 00 03 " + psc)
+    if _ok(sw1, sw2):
+        print("PSC verified — card unlocked for writing")
+    elif sw1 == 0x63:
+        sys.exit(f"PSC wrong — {sw2 & 0x0F} attempts left")
+    else:
+        sys.exit(f"verify failed: {sw1:02X} {sw2:02X}")
+
+
+def cmd_read(conn, addr, length):
+    select_sle4442(conn)
+    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {length:02X}")
+    if not _ok(sw1, sw2):
+        sys.exit(f"read failed: {sw1:02X} {sw2:02X}")
+    print(toHexString(data).replace(" ", ""))
+
+
+def _write(conn, psc, addr, payload):
+    select_sle4442(conn)
+    _, sw1, sw2 = _xmit(conn, "FF 20 00 00 03 " + psc)
+    if not _ok(sw1, sw2):
+        sys.exit(f"PSC verify failed before write: {sw1:02X} {sw2:02X}")
+    hexpayload = " ".join(f"{b:02X}" for b in payload)
+    apdu = f"FF D0 00 {addr:02X} {len(payload):02X} " + hexpayload
+    _, w1, w2 = _xmit(conn, apdu)
+    if not _ok(w1, w2):
+        sys.exit(f"write failed: {w1:02X} {w2:02X}")
+
+
+def cmd_write(conn, psc, addr, hexdata):
+    payload = bytes.fromhex(hexdata)
+    _write(conn, psc, addr, payload)
+    # verify-read back: a card can ACK the UPDATE (SW=90 00) yet persist zeros/garbage (a
+    # weak/faulty EEPROM cell or a hostile card). For a set-once key backup, never report
+    # success on the status word alone — read the bytes back and fail loudly on any mismatch.
+    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {len(payload):02X}")
+    if not _ok(sw1, sw2) or bytes(data) != payload:
+        # never echo `payload` — it is the secret share; report only non-secret status
+        sys.exit(f"verify-read mismatch after write at {addr}: the card did not persist the "
+                 f"payload (read status {sw1:02X} {sw2:02X})")
+    print(f"wrote and verified {len(payload)} bytes at {addr}")
+
+
+def cmd_store(conn, psc, addr, text):
+    payload = text.encode()
+    if len(payload) > 256 - addr:
+        sys.exit("payload too large for the card at that address")
+    _write(conn, psc, addr, payload)
+    # verify-read back
+    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {len(payload):02X}")
+    if not _ok(sw1, sw2) or bytes(data) != payload:
+        sys.exit("verify-read mismatch after store")
+    # NOTE: never echo `text` — it is the secret payload (e.g. a Shamir share). Print only
+    # non-secret status so a tee/script log or screenshot of the ceremony can't leak it.
+    print(f"stored and verified {len(payload)} bytes at {addr}")
+
+
+DEFAULT_PSC = "FFFFFF"   # the factory PSC — public, not a secret
+
+
+def resolve_psc(args):
+    """Resolve the PSC without exposing a real one on the command line. Order:
+       SLE4442_PSC env  >  --psc-file <path>  >  --psc <hex>. A non-default PSC passed on
+       argv warns, because it would be visible in `ps` / /proc/<pid>/cmdline / shell history."""
+    env = os.environ.get("SLE4442_PSC")
+    if env:
+        return env.strip()
+    pf = getattr(args, "psc_file", None)
+    if pf:
+        with open(pf) as fh:
+            return fh.read().strip()
+    psc = getattr(args, "psc", None)
+    if psc and psc.upper() != DEFAULT_PSC:
+        sys.stderr.write("WARNING: a non-default PSC was passed on the command line — it is "
+                         "visible in `ps`/shell history. Use SLE4442_PSC env or --psc-file.\n")
+    return psc or DEFAULT_PSC
+
+
+def resolve_secret(args, kind):
+    """Resolve the secret payload (the share/seed itself) WITHOUT exposing it on the command
+    line — the same protection resolve_psc gives the far-less-sensitive PSC. Order:
+       SLE4442_<KIND> env  >  --<kind>-file <path>  >  --<kind> <value>.
+    A payload passed directly on argv warns, because it is visible in `ps` /
+    `/proc/<pid>/cmdline` / shell history; the warning never echoes the value itself. `kind`
+    is "text" (store) or "hex" (write). env/file inputs are whitespace-stripped (an editor's
+    trailing newline is not part of the share); an argv value is returned verbatim."""
+    upper = kind.upper()
+    env = os.environ.get(f"SLE4442_{upper}")
+    if env is not None:
+        return env.strip()
+    pf = getattr(args, f"{kind}_file", None)
+    if pf:
+        with open(pf) as fh:
+            return fh.read().strip()
+    val = getattr(args, kind, None)
+    if val is None:
+        sys.exit(f"no secret payload: pass SLE4442_{upper} env, --{kind}-file <path>, or "
+                 f"--{kind} <value>")
+    sys.stderr.write(f"WARNING: the secret payload was passed via --{kind} on the command line "
+                     f"— it is visible in `ps`/`/proc/<pid>/cmdline`/shell history. Prefer "
+                     f"SLE4442_{upper} env or --{kind}-file to keep it off argv.\n")
+    return val
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="drive an SLE-4442 card over PC/SC")
+    ap.add_argument("--reader", default=None, help="reader name substring (default: first)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub.add_parser("info")
+    for name_ in ("verify", "write", "store"):
+        sp = sub.add_parser(name_)
+        sp.add_argument("--psc", default=None,
+                        help="PSC hex (PREFER SLE4442_PSC env or --psc-file to keep it off argv)")
+        sp.add_argument("--psc-file", default=None, help="read the PSC from this file (not argv)")
+        if name_ in ("write", "store"):
+            sp.add_argument("--addr", type=int, required=True)
+        if name_ == "verify":
+            pass
+        if name_ == "write":
+            sp.add_argument("--hex", default=None,
+                            help="hex payload (PREFER SLE4442_HEX env or --hex-file to keep it off argv)")
+            sp.add_argument("--hex-file", default=None,
+                            help="read the hex payload from this file (not argv)")
+        if name_ == "store":
+            sp.add_argument("--text", default=None,
+                            help="secret text payload (PREFER SLE4442_TEXT env or --text-file to keep it off argv)")
+            sp.add_argument("--text-file", default=None,
+                            help="read the secret text payload from this file (not argv)")
+    p = sub.add_parser("read");   p.add_argument("--addr", type=int, required=True); p.add_argument("--len", type=int, required=True)
+    args = ap.parse_args(argv)
+
+    conn, name = _connect(args.reader)
+    try:
+        if args.cmd == "info":
+            cmd_info(conn)
+        elif args.cmd == "verify":
+            cmd_verify(conn, resolve_psc(args))
+        elif args.cmd == "read":
+            cmd_read(conn, args.addr, args.len)
+        elif args.cmd == "write":
+            cmd_write(conn, resolve_psc(args), args.addr, resolve_secret(args, "hex"))
+        elif args.cmd == "store":
+            cmd_store(conn, resolve_psc(args), args.addr, resolve_secret(args, "text"))
+    finally:
+        try:
+            conn.disconnect()
+        except Exception:
+            pass
+
+
+if __name__ == "__main__":
+    main()

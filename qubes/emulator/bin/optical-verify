@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# optical-verify — emulate the M-DISC cross-drive verify: read the burned image back from a
+# SECOND emulated optical drive (independent xorriso read, no loop mount needed) and check
+# every file's checksum against a manifest. This catches the classic silent failure where
+# the WRITING drive can still read a marginal burn but a second drive cannot.
+#
+#   optical-verify --image <iso> --manifest <sha256-manifest> [--fault]
+#
+# --fault flips a byte during the read-back to prove the verify actually fails on a bad burn.
+set -euo pipefail
+OPT_DIR="${EMU_OPTICAL_DIR:-/run/vault-emu/optical}"
+img=""; manifest=""; fault=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --image) img="$2"; shift 2;;
+    --manifest) manifest="$2"; shift 2;;
+    --fault) fault=1; shift;;
+    *) echo "optical-verify: unknown arg $1" >&2; exit 2;;
+  esac
+done
+[ -s "$img" ] || { echo "optical-verify: image '$img' missing/empty" >&2; exit 1; }
+
+# "Second drive" read-back: extract the ISO contents to a fresh tree via xorriso (osirrox).
+out="$(mktemp -d)"; trap 'rm -rf "$out"' EXIT
+xorriso -osirrox on -indev "$img" -extract / "$out" >/dev/null 2>&1 \
+  || { echo "optical-verify: SECOND DRIVE could not read the image (marginal burn!)"; exit 1; }
+
+mname="$(basename "${manifest:-manifest.sha256}")"
+
+if [ "$fault" = 1 ]; then
+  # simulate a marginal burn: corrupt one extracted DATA file that the manifest COVERS.
+  # NEVER the manifest itself — appending/altering the manifest leaves its real checksum
+  # lines intact, so `sha256sum -c` would still pass and hide the fault. Pick deterministically
+  # (sorted) and flip an INTERIOR byte (XOR 0xFF, guaranteed to change the content hash)
+  # rather than appending trailing junk that could masquerade as a malformed manifest line.
+  f="$(find "$out" -type f ! -name "$mname" | LC_ALL=C sort | head -1)"
+  [ -n "$f" ] || { echo "optical-verify: [fault] no manifest-covered file to corrupt" >&2; exit 3; }
+  b0="$(dd if="$f" bs=1 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')"
+  : "${b0:=0}"
+  printf "$(printf '\\%03o' "$(( b0 ^ 0xFF ))")" | dd of="$f" bs=1 count=1 conv=notrunc 2>/dev/null
+  echo "optical-verify: [fault injected] corrupted interior byte of $f on read-back" >&2
+fi
+
+if [ -n "$manifest" ]; then
+  # Subset-corruption guard (real M-DISC weakness): `sha256sum -c` only checks the files the
+  # manifest lists, so a truncated/short manifest lets an uncovered (blank/corrupt) file slip
+  # through. Require every extracted data file to be COVERED by the manifest before checksumming.
+  if [ -f "$out/$mname" ]; then
+    while IFS= read -r df; do
+      rel="./${df#"$out"/}"
+      grep -qF "  $rel" "$out/$mname" \
+        || { echo "optical-verify: file $rel on second drive is NOT covered by the manifest — REJECT this disc"; exit 1; }
+    done < <(find "$out" -type f ! -name "$mname")
+  fi
+  ( cd "$out" && sha256sum -c "$manifest" >/dev/null 2>&1 ) \
+    && { echo "optical-verify: cross-drive checksum OK — burn is sound"; exit 0; } \
+    || { echo "optical-verify: CHECKSUM MISMATCH on second drive — REJECT this disc"; exit 1; }
+else
+  echo "optical-verify: read-back OK (no manifest given to checksum against)"
+fi

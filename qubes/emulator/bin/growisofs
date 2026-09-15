@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# growisofs shim — emulate burning an M-DISC by writing a real ISO image with xorriso to a
+# file that stands in for the optical device (e.g. /dev/sr0 -> $EMU_OPTICAL_DIR/sr0.iso).
+#
+# Mirrors the ceremony's invocation:  growisofs -Z /dev/srN -R -J <dir>
+# so step_archive's burn command runs for real against the emulated drive. The companion
+# `optical-verify` reads it back from a SECOND emulated drive and checksums — the
+# cross-drive verify that catches a marginal burn.
+set -euo pipefail
+OPT_DIR="${EMU_OPTICAL_DIR:-/run/vault-emu/optical}"; mkdir -p "$OPT_DIR"
+
+dev=""; src=""
+args=("$@")
+i=0
+while [ $i -lt $# ]; do
+  a="${args[$i]}"
+  case "$a" in
+    -Z|-M)
+      i=$((i+1)); raw="${args[$i]}"
+      # accept either "/dev/srN" or "/dev/srN=dir"
+      dev="${raw%%=*}"
+      [ "$raw" != "$dev" ] && src="${raw#*=}"
+      ;;
+    -R|-J|-r|-graft-points|-iso-level|*=*) : ;;   # iso options we can ignore for the model
+    /dev/*) dev="$a" ;;
+    *) [ -d "$a" ] && src="$a" ;;
+  esac
+  i=$((i+1))
+done
+
+[ -n "$dev" ] || { echo "growisofs(emu): no device (-Z /dev/srN) given" >&2; exit 1; }
+[ -n "$src" ] && [ -d "$src" ] || { echo "growisofs(emu): no source directory to burn" >&2; exit 1; }
+
+img="$OPT_DIR/$(basename "$dev").iso"
+echo "growisofs(emu): burning $src -> $dev (image: $img)" >&2
+xorriso -as mkisofs -R -J -o "$img" "$src" >/dev/null 2>"$OPT_DIR/burn.log" \
+  || { echo "growisofs(emu): xorriso failed"; cat "$OPT_DIR/burn.log" >&2; exit 1; }
+sha256sum "$img" | awk '{print $1}' > "$img.sha256"
+echo "growisofs(emu): wrote $(wc -c <"$img") bytes; image sha256 $(cat "$img.sha256")" >&2

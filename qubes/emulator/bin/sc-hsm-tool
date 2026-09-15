@@ -1,0 +1,604 @@
+#!/usr/bin/env python3
+"""sc-hsm-tool model — emulates the SmartCard-HSM (Nitrokey HSM 2) operations the
+ceremony uses, so the DKEK + key-wrap route runs end-to-end with no physical card.
+
+Fidelity:
+  * --create-dkek-share : FUNCTIONALLY FAITHFUL. Generates a real random 256-bit AES
+      DKEK and writes a real password-encrypted DKEK blob. With --pwd-shares-threshold /
+      --pwd-shares-total it follows OpenSC's own password-share path: an 8-byte random
+      password split with Shamir over a 64-bit prime, printed in OpenSC's share format, and
+      rebuilt on import the way OpenSC rebuilds it — including the leading-zero drop (#464).
+      See "OpenSC's password-share path" below. (Set EMU_SCHSM_REAL=1 to call the real
+      OpenSC binary instead.)
+  * --initialize / --import-dkek-share : MODELLED. Tracks card init + how many DKEK
+      shares have been imported; activates the DKEK once enough are present. There is no
+      free SmartCard-HSM applet to run the true APDUs, so this is a state model — the
+      cryptographically meaningful key ops (keygen, sign, pubkey) run for real on
+      SoftHSM2 via the pkcs11-tool shim. This boundary is the one documented gap.
+  * --wrap-key / --unwrap-key : FUNCTIONALLY FAITHFUL round-trip. AES-wraps the key
+      material under the active DKEK and unwraps it back, so a disaster-recovery drill
+      (wrap -> fresh card -> import DKEK -> unwrap) actually reconstructs the bytes.
+
+State lives under $EMU_SCHSM_STATE (default /run/vault-emu/schsm). Throwaway only.
+"""
+import argparse
+import hashlib
+import hmac
+import os
+import re
+import secrets
+import shutil
+import sys
+
+STATE = os.environ.get("EMU_SCHSM_STATE", "/run/vault-emu/schsm")
+
+# This model writes DKEK material and (for the recovery drill) a cleartext share password
+# to disk. Force a tight umask so every file it creates is 0600 — never group/world readable.
+os.umask(0o077)
+
+
+def _state_dir():
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    try:
+        os.chmod(STATE, 0o700)
+    except OSError:
+        pass
+    return STATE
+
+
+def _keystream(enc_key, nonce, n):
+    out = bytearray()
+    counter = 0
+    while len(out) < n:
+        out += hashlib.sha256(enc_key + nonce + counter.to_bytes(8, "big")).digest()
+        counter += 1
+    return bytes(out[:n])
+
+
+def _derive(dkek, nonce, label):
+    # distinct enc / mac subkeys per wrap, bound to a random nonce (so wrapping two keys
+    # under the same DKEK is NOT a two-time pad, and the cipher key != the MAC key).
+    return hashlib.sha256(dkek + nonce + label).digest()
+
+
+def _wrap(dkek, plaintext):
+    nonce = secrets.token_bytes(16)
+    enc = _derive(dkek, nonce, b"enc")
+    mac = _derive(dkek, nonce, b"mac")
+    ct = bytes(a ^ b for a, b in zip(plaintext, _keystream(enc, nonce, len(plaintext))))
+    tag = hmac.new(mac, nonce + ct, hashlib.sha256).digest()
+    return b"SCHSMW2" + nonce + len(ct).to_bytes(4, "big") + ct + tag
+
+
+def _unwrap(dkek, blob):
+    if blob[:7] != b"SCHSMW2":
+        raise ValueError("bad wrapped-key magic (expected SCHSMW2)")
+    nonce = blob[7:23]
+    n = int.from_bytes(blob[23:27], "big")
+    ct = blob[27:27 + n]
+    tag = blob[27 + n:27 + n + 32]
+    mac = _derive(dkek, nonce, b"mac")
+    if not hmac.compare_digest(hmac.new(mac, nonce + ct, hashlib.sha256).digest(), tag):
+        raise ValueError("DKEK wrong / tag mismatch — cannot unwrap")
+    enc = _derive(dkek, nonce, b"enc")
+    return bytes(a ^ b for a, b in zip(ct, _keystream(enc, nonce, n)))
+
+
+DKEK_KDF_ITERS = 200_000
+
+
+def _share_kek(password, salt):
+    """Derive the share-encryption key from the share password.
+
+    Uses PBKDF2-HMAC-SHA256, matching what the real sc-hsm-tool does for DKEK share
+    encryption. The model previously used a bare sha256(password), which is a single cheap
+    hash: fine as a stand-in for wiring, but wrong as a model of a password-derived key and
+    flagged (correctly) as weak sensitive-data hashing. A per-share random salt is stored
+    alongside the blob so two shares with the same password do not derive the same key.
+    """
+    # The password-share path's password is 8 binary bytes, not text.
+    if isinstance(password, str):
+        password = password.encode()
+    return hashlib.pbkdf2_hmac("sha256", password, salt, DKEK_KDF_ITERS, dklen=32)
+
+
+def _resolve_password_arg(spec):
+    """Resolve the real tool's --password argument.
+
+    The real sc-hsm-tool documents: "Define password for DKEK share encryption. If set to
+    env:VARIABLE, the password is read from the environment variable VARIABLE." Supplying it
+    replaces the generate-and-split behaviour entirely — no ssss shares are produced.
+
+    The model previously ignored --password and always generated a random password, which made
+    the UNATTENDED import path (hsm-auto-import.sh, which relies on env:VAR to remove every
+    interactive prompt) untestable against the emulator. That was a fidelity gap in the model,
+    not a missing feature of the real tool, so it is closed here rather than worked around.
+    """
+    if spec is None:
+        return None
+    if spec.startswith("env:"):
+        var = spec[4:]
+        val = os.environ.get(var)
+        if not val:
+            sys.exit("sc-hsm-tool(model): --password env:%s but %s is unset/empty" % (var, var))
+        return val
+    return spec
+
+
+# ---- OpenSC's password-share path (--pwd-shares-threshold / --pwd-shares-total) -------------
+#
+# Modelled on OpenSC 0.27.1 sc-hsm-tool.c, generate_pwd_shares and recreate_password_from_shares
+# (#464). It keeps what the ceremony depends on:
+#
+#   * The DKEK-share password is 8 random bytes with the top bit of the first cleared, split
+#     with Shamir over a 64-bit prime. The password itself is never printed; only the shares are.
+#   * The shares print as OpenSC prints them ("Prime       :", "Share ID    :", "Share value :"),
+#     so ceremony.sh and the recovery drill parse the same text here as on the day.
+#   * Import reads shares from stdin ONLY when --pwd-shares-total is given. Without it the real
+#     tool asks for a typed password, which no custodian has ever seen, and the import fails. A
+#     wizard that forgets the flag fails here the way it fails on a card.
+#   * THE LEADING-ZERO DROP. Import rebuilds the password as the minimal big-endian encoding of
+#     the reconstructed integer (OpenSC: `*pwdlen = BN_bn2bin(secret)`), so a password whose
+#     first byte is zero comes back 7 bytes long, derives a different key and is refused — with
+#     the correct shares. On the real tool that is 1 share file in 128 (#460).
+#
+# Nothing is stashed. The explicit --password path below keeps a derived-key stash for the
+# same-machine drill; a stash here would let an import succeed without the shares, which is
+# exactly the missing-flag mistake this path exists to show.
+#
+# EMU_SCHSM_PWD_LEADING_BYTE chooses the first password byte: "nonzero" (the default, so every
+# rehearsal is deterministic), "zero" (forces the 1-in-128 case, so a test can watch the ceremony
+# refuse it) or "random" (the real tool's distribution). The drop itself is not switchable.
+#
+# NOT MODELLED: OpenSC's only check on a decrypted share is PKCS#7 padding, so about 1 wrong key
+# in 255 "decrypts" to a garbage share and imports. This model's unwrap is authenticated and
+# refuses every wrong key. The <enter> pauses between shares on CREATE are not modelled; the one
+# blank line per share that IMPORT consumes is.
+DKEK_SHARE_MAGIC = b"SCHSMDKEK3"
+_MR_BASES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+
+
+def _probable_prime(n):
+    # Miller-Rabin with the first twelve primes as bases is exact for every n below 3.3e24.
+    if n < 2:
+        return False
+    for q in _MR_BASES:
+        if n % q == 0:
+            return n == q
+    d, r = n - 1, 0
+    while d % 2 == 0:
+        d, r = d // 2, r + 1
+    for a in _MR_BASES:
+        x = pow(a, d, n)
+        if x in (1, n - 1):
+            continue
+        for _ in range(r - 1):
+            x = pow(x, 2, n)
+            if x == n - 1:
+                break
+        else:
+            return False
+    return True
+
+
+def _share_password():
+    password = bytearray(secrets.token_bytes(8))
+    password[0] &= 0x7F  # OpenSC: `**pwd &= 0x7F`, so the secret stays below a 64-bit prime
+    mode = os.environ.get("EMU_SCHSM_PWD_LEADING_BYTE", "nonzero")
+    if mode == "zero":
+        password[0] = 0
+    elif mode == "nonzero":
+        if password[0] == 0:
+            password[0] = 1 + secrets.randbelow(0x7F)
+    elif mode != "random":
+        sys.exit("sc-hsm-tool(model): EMU_SCHSM_PWD_LEADING_BYTE must be nonzero, zero or random")
+    return bytes(password)
+
+
+def _minimal_bytes(n):
+    # BN_bn2bin: no leading zero bytes, and zero encodes as nothing at all.
+    return n.to_bytes((n.bit_length() + 7) // 8, "big")
+
+
+def _hex_out(n):
+    return ":".join("%02x" % b for b in _minimal_bytes(n))
+
+
+def _hex_in(line):
+    try:
+        return int.from_bytes(bytes.fromhex(line.strip().replace(":", "")), "big")
+    except ValueError:
+        return 0
+
+
+def _share_id_in(line):
+    # BN_hex2bn reads the leading hex digits. The ID prints in decimal, which reads back the
+    # same for IDs 1-9.
+    digits = re.match(r"[0-9a-fA-F]*", line.strip()).group(0)
+    return int(digits, 16) if digits else 0
+
+
+def _split(secret, threshold, total):
+    while True:
+        prime = secrets.randbits(64) | (1 << 63) | 1
+        if _probable_prime(prime):
+            break
+    coefficients = [secret] + [secrets.randbelow(prime) for _ in range(threshold - 1)]
+    shares = [(x, sum(c * pow(x, i, prime) for i, c in enumerate(coefficients)) % prime)
+              for x in range(1, total + 1)]
+    return prime, shares
+
+
+def _reconstruct(prime, shares):
+    # None when the shares cannot be interpolated: no usable prime, or two shares with the same
+    # ID, whose difference has no inverse.
+    if prime < 2:
+        return None
+    secret = 0
+    for i, (xi, yi) in enumerate(shares):
+        numerator, denominator = 1, 1
+        for j, (xj, _) in enumerate(shares):
+            if i != j:
+                numerator = numerator * -xj % prime
+                denominator = denominator * (xi - xj) % prime
+        try:
+            secret = (secret + yi * numerator * pow(denominator, -1, prime)) % prime
+        except ValueError:
+            return None
+    return secret
+
+
+def _refuse(*lines):
+    for line in lines:
+        sys.stderr.write(line + "\n")
+    sys.exit(1)
+
+
+def _create_password_shares(path, threshold, total):
+    if threshold is None or total is None:
+        _refuse("Must specify both, --pwd-shares-total and --pwd-shares-threshold",
+                "Creating DKEK share failed")
+    if total < 3:
+        _refuse("--pwd-shares-total must be 3 or larger", "Creating DKEK share failed")
+    if threshold < 2:
+        _refuse("--pwd-shares-threshold must 2 or larger", "Creating DKEK share failed")
+    if threshold > total:
+        _refuse("--pwd-shares-threshold must be smaller or equal to --pwd-shares-total",
+                "Creating DKEK share failed")
+    password = _share_password()
+    prime, shares = _split(int.from_bytes(password, "big"), threshold, total)
+    salt = secrets.token_bytes(16)
+    blob = _wrap(_share_kek(password, salt), secrets.token_bytes(32))
+    print("Creating DKEK share (MODEL — SmartCard-HSM emulation).")
+    print("The DKEK will be enciphered using a randomly generated 64 bit password.")
+    print(f"This password is split using a ({threshold}-of-{total}) threshold scheme.")
+    for i, (x, y) in enumerate(shares, 1):
+        print(f"\nShare {i} of {total}\n")
+        print(f"\nPrime       : {_hex_out(prime)}")
+        print(f"Share ID    : {x}")
+        print(f"Share value : {_hex_out(y)}")
+    with open(path, "wb") as fh:
+        fh.write(DKEK_SHARE_MAGIC + salt + blob)
+    print(f"DKEK share written to {path}")
+
+
+def _input_line():
+    line = sys.stdin.readline()
+    if not line:
+        _refuse("Input aborted")
+    return line
+
+
+def _recreate_password_from_shares(total):
+    if total < 2:
+        _refuse("--pwd-shares-total must 2 or larger")
+    print(f"Deciphering the DKEK for import into the SmartCard-HSM requires {total} key custodians")
+    print("Please enter prime: ", end="", flush=True)
+    prime = _hex_in(_input_line())
+    shares = []
+    for i in range(total):
+        print(f"\nPress <enter> to enter share {i + 1} of {total}", flush=True)
+        sys.stdin.readline()  # waitForEnterKeyPressed: consumes one line, and EOF is not an error
+        print(f"Share {i + 1} of {total}\nPlease enter share ID: ", end="", flush=True)
+        x = _share_id_in(_input_line())
+        print("Please enter share value: ", end="", flush=True)
+        shares.append((x, _hex_in(_input_line())))
+    secret = _reconstruct(prime, shares)
+    if secret is None:
+        print("\nError during reconstruction of secret. Wrong shares?")
+        sys.exit(1)
+    return _minimal_bytes(secret)  # THE LEADING-ZERO DROP — see the block comment above
+
+
+def _open_password_share(salt, blob, password_spec, shares_total):
+    if password_spec is not None:
+        password = _resolve_password_arg(password_spec)
+    elif shares_total is None:
+        # Neither --password nor --pwd-shares-total: OpenSC reads a typed password from stdin.
+        print("Enter password to decrypt DKEK share : ", end="", flush=True)
+        password = sys.stdin.readline().rstrip("\n")
+        print()
+    else:
+        password = _recreate_password_from_shares(shares_total)
+    print("Deciphering DKEK share, please wait...")
+    try:
+        return _unwrap(_share_kek(password, salt), blob)
+    except ValueError:
+        _refuse("Error decrypting DKEK share. Password correct ?")
+
+
+def create_dkek_share(path, threshold, total, password_spec=None):
+    if os.environ.get("EMU_SCHSM_REAL") == "1" and shutil.which("/usr/bin/sc-hsm-tool"):
+        real = ["/usr/bin/sc-hsm-tool", "--create-dkek-share", path]
+        if password_spec:
+            real += ["--password", password_spec]
+        if threshold is not None:
+            real += ["--pwd-shares-threshold", str(threshold)]
+        if total is not None:
+            real += ["--pwd-shares-total", str(total)]
+        os.execv("/usr/bin/sc-hsm-tool", real)
+
+    if password_spec is None:
+        if threshold is None and total is None:
+            sys.exit("sc-hsm-tool(model): with neither --password nor --pwd-shares-* the real tool "
+                     "prompts for a typed password; that prompt is not modelled.")
+        _create_password_shares(path, threshold, total)
+        return
+
+    # Explicit password: no threshold split at all, matching the real tool.
+    password = _resolve_password_arg(password_spec)
+    dkek = secrets.token_bytes(32)
+    # Per-share random salt, stored in the file ahead of the blob so import can re-derive.
+    salt = secrets.token_bytes(16)
+    kek = _share_kek(password, salt)
+    blob = _wrap(kek, dkek)
+    with open(path, "wb") as fh:
+        fh.write(b"SCHSMDKEK2" + salt + blob)
+    # Same-machine drill convenience: a later --import-dkek-share needs to reopen this share
+    # without the custodians reassembling the password from ssss shares.
+    #
+    # Stash the DERIVED KEY, never the password. A password may be reused by the operator
+    # elsewhere; a share-specific derived key cannot be. This keeps the drill working and the
+    # wrap/unwrap round trip genuinely exercised, while no password is written to disk.
+    sd = _state_dir()
+    kekfile = os.path.join(sd, "dkek-share-" + os.path.basename(path) + ".kek")
+    with open(os.open(kekfile, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as fh:
+        fh.write(kek.hex())
+    print("Creating DKEK share (MODEL — SmartCard-HSM emulation).")
+    print(f"DKEK share written to {path}")
+    # The real tool prints no shares because none are generated. Never echo the supplied password.
+    print("Enciphering DKEK share with the supplied password (no threshold split).")
+
+
+def initialize(dkek_shares, label):
+    sd = _state_dir()
+    with open(os.path.join(sd, "card.init"), "w") as fh:
+        fh.write(f"label={label}\ndkek_shares_required={dkek_shares}\nimported=0\n")
+    # reset accumulated DKEK — and the device's OBJECT STORE. --initialize wipes the card, so
+    # a device that was previously cloned onto must enumerate as BLANK afterwards; leaving the
+    # object registry behind would make the ceremony's blank-card guard refuse a genuinely
+    # erased card (and, worse, let a stale entry vouch for a key that is no longer there).
+    for f in ("dkek.active", "dkek.accum", "objects", "restored.keyref", "restored-pub.der"):
+        p = os.path.join(sd, f)
+        if os.path.exists(p):
+            os.unlink(p)
+    print(f"SmartCard-HSM initialised (MODEL). label={label}, DKEK shares required={dkek_shares}")
+
+
+def import_dkek_share(path, password_spec=None, shares_total=None):
+    sd = _state_dir()
+    init = os.path.join(sd, "card.init")
+    if not os.path.exists(init):
+        sys.exit("sc-hsm-tool(model): card not initialised (run --initialize first)")
+    meta = dict(line.split("=", 1) for line in open(init).read().splitlines() if "=" in line)
+    required = int(meta.get("dkek_shares_required", "1"))
+    imported = int(meta.get("imported", "0"))
+    # Import must be idempotent/monotonic. Re-accumulating an already-imported share
+    # XOR-cancels it back out of the DKEK (share XOR share == 0), silently corrupting an
+    # active DKEK and making every key wrapped under it unrecoverable — so refuse it, and
+    # refuse importing more than the required number of shares. Fail loudly, never overwrite.
+    share_id = os.path.basename(path)
+    seen = [s for s in meta.get("imported_shares", "").split(",") if s]
+    if share_id in seen:
+        sys.exit(f"sc-hsm-tool(model): DKEK share '{share_id}' already imported "
+                 "— refusing to re-accumulate (would corrupt the active DKEK)")
+    if imported >= required:
+        sys.exit(f"sc-hsm-tool(model): DKEK already complete ({imported}/{required} present) "
+                 "— refusing to import an extra share (would corrupt the active DKEK)")
+    raw = open(path, "rb").read()
+    if raw[:10] == DKEK_SHARE_MAGIC:
+        dkek = _open_password_share(raw[10:26], raw[26:], password_spec, shares_total)
+    else:
+        dkek = _open_explicit_password_share(sd, path, share_id, raw)
+    # XOR-accumulate shares (real SmartCard-HSM combines shares into the device DKEK)
+    accum_p = os.path.join(sd, "dkek.accum")
+    accum = open(accum_p, "rb").read() if os.path.exists(accum_p) else bytes(32)
+    accum = bytes(a ^ b for a, b in zip(accum.ljust(32, b"\0"), dkek))
+    with open(accum_p, "wb") as fh:
+        fh.write(accum)
+    imported = imported + 1
+    meta["imported"] = str(imported)
+    meta["imported_shares"] = ",".join(seen + [share_id])
+    with open(init, "w") as fh:
+        fh.write("".join(f"{k}={v}\n" for k, v in meta.items()))
+    remaining = required - imported
+    print(f"DKEK share imported (MODEL). {imported}/{required} present.")
+    if remaining <= 0:
+        shutil.copyfile(os.path.join(sd, "dkek.accum"), os.path.join(sd, "dkek.active"))
+        kcv = hashlib.sha256(open(os.path.join(sd, "dkek.active"), "rb").read()).hexdigest()[:8].upper()
+        # Print the key check value using the REAL OpenSC label. Two SmartCard-HSMs hold the
+        # same DKEK iff their KCVs match, and the ceremony compares them across devices before
+        # cloning — so this line has to look like the tool the wizard will meet on the day.
+        print("DKEK complete and active (MODEL).")
+        print(f"DKEK key check value           : {kcv}")
+    else:
+        print(f"{remaining} more DKEK share(s) needed.")
+
+
+def _open_explicit_password_share(sd, path, share_id, raw):
+    # A share created with an explicit --password. (A password-share file never reaches here:
+    # import_dkek_share sends it through _open_password_share.) Recover the key that opens it.
+    # Two paths, both real:
+    #   * same-machine drill: creation stashed the DERIVED KEY ($STATE/dkek-share-*.kek).
+    #     No password is stored anywhere — the derived key is share-specific and cannot be
+    #     replayed as a password elsewhere.
+    #   * OFFLINE RESTORE on a fresh machine/qube: there is NO stash. The operator supplies
+    #     the password the share was created with, out-of-band, via a 0600 file
+    #     ($EMU_SCHSM_SHARE_PW_FILE) or, as a fallback, $EMU_SCHSM_SHARE_PW. Without it we
+    #     CANNOT rebuild the DKEK — so we must
+    #     refuse, never claim an import with no recovered key material (which would leave
+    #     no active DKEK and make --unwrap-key impossible while reporting success).
+    kekfile = os.path.join(sd, "dkek-share-" + os.path.basename(path) + ".kek")
+    stashed_kek = None
+    if os.path.exists(kekfile):
+        with open(kekfile) as fh:
+            stashed_kek = bytes.fromhex(fh.read().strip())
+    password = None
+    if stashed_kek is None and os.environ.get("EMU_SCHSM_SHARE_PW_FILE"):
+        with open(os.environ["EMU_SCHSM_SHARE_PW_FILE"]) as fh:
+            password = fh.read().strip()
+    elif stashed_kek is None and os.environ.get("EMU_SCHSM_SHARE_PW"):
+        password = os.environ["EMU_SCHSM_SHARE_PW"]
+    if stashed_kek is None and not password:
+        sys.exit(f"sc-hsm-tool(model): no share password available to decrypt '{share_id}'. "
+                 "For an offline restore, provide the password it was created with via "
+                 "$EMU_SCHSM_SHARE_PW_FILE (0600) or "
+                 "$EMU_SCHSM_SHARE_PW — refusing to import with no recovered DKEK material.")
+
+    # SCHSMDKEK2 carries a per-share PBKDF2 salt ahead of the wrapped blob. Reject the older
+    # SCHSMDKEK1 layout explicitly rather than mis-slicing it into garbage.
+    if raw[:10] == b"SCHSMDKEK2":
+        salt, blob = raw[10:26], raw[26:]
+    elif raw[:10] == b"SCHSMDKEK1":
+        sys.exit(f"sc-hsm-tool(model): DKEK share '{share_id}' uses the superseded SCHSMDKEK1 "
+                 "layout (sha256-derived, unsalted). Re-create the share with "
+                 "--create-dkek-share; the model no longer derives keys that way.")
+    else:
+        sys.exit(f"sc-hsm-tool(model): '{share_id}' is not a DKEK share (bad magic).")
+
+    kek = stashed_kek if stashed_kek is not None else _share_kek(password, salt)
+    try:
+        return _unwrap(kek, blob)
+    except ValueError:
+        # wrong password / corrupt blob — never leak the password, just fail loudly
+        sys.exit(f"sc-hsm-tool(model): DKEK share '{share_id}' failed to decrypt "
+                 "(wrong share password or corrupt blob) — nothing imported.")
+
+
+def _register_object(sd, key_reference, label):
+    """Record a key object on THIS emulated device. SoftHSM2 is a single shared token, so
+    without a per-device registry every 'card' would enumerate every other card's keys — and
+    the ceremony's blank-card guard (which refuses to --initialize a card that already holds a
+    funding key) would refuse a genuinely blank clone target. Keyed by state dir = by device."""
+    ref = str(key_reference).lstrip("0") or "0"
+    path = os.path.join(sd, "objects")
+    seen = set()
+    if os.path.exists(path):
+        seen = {ln.strip() for ln in open(path) if ln.strip()}
+    seen.add(f"{ref}:{label}")
+    with open(path, "w") as fh:
+        fh.write("\n".join(sorted(seen)) + "\n")
+
+
+def _active_dkek():
+    p = os.path.join(_state_dir(), "dkek.active")
+    if not os.path.exists(p):
+        sys.exit("sc-hsm-tool(model): no active DKEK (import enough shares first)")
+    return open(p, "rb").read()
+
+
+def _wrap_pubkey_sidecar(out_path):
+    """Path where we stash the funding PUBLIC key that this wrapped blob restores to, so a
+    later --unwrap-key can reconstruct + prove it (the ceremony's restore-verify reads the
+    restored pubkey and byte-compares it to funding-pub.der). The real card wraps the private
+    key and the pubkey is intrinsic; here the EC key lives in SoftHSM2, decoupled from the DKEK
+    model, so we carry the pubkey alongside the blob keyed by the blob's basename."""
+    return os.path.join(_state_dir(), "wrappedpub-" + os.path.basename(out_path) + ".der")
+
+
+def wrap_key(out_path, key_reference):
+    dkek = _active_dkek()
+    # In the model the "key material" is the SoftHSM key id we wrap; for a drill we wrap a
+    # deterministic representation so unwrap round-trips. Real card wraps the EC private key.
+    material = ("HSM-KEYREF-%s" % key_reference).encode() + os.urandom(0)  # stable for ref
+    blob = _wrap(dkek, material)
+    with open(out_path, "wb") as fh:
+        fh.write(blob)
+    # Remember the funding pubkey this backup restores to, so --unwrap-key can prove the restore.
+    # Best-effort: the ceremony exports it to a sibling funding-pub.der next to the wrap output
+    # (or the caller can point EMU_SCHSM_WRAP_PUBKEY at it). Absent (e.g. the raw crypto unit
+    # tests) -> we simply carry no pubkey and unwrap prints the keyref tag only, as before.
+    pub_src = os.environ.get("EMU_SCHSM_WRAP_PUBKEY") or \
+        os.path.join(os.path.dirname(os.path.abspath(out_path)), "funding-pub.der")
+    if os.path.exists(pub_src):
+        shutil.copyfile(pub_src, _wrap_pubkey_sidecar(out_path))
+    print(f"Wrapped key reference {key_reference} under the active DKEK -> {out_path} (MODEL)")
+
+
+def unwrap_key(in_path, key_reference):
+    dkek = _active_dkek()
+    material = _unwrap(dkek, open(in_path, "rb").read())
+    sd = _state_dir()
+    # If this blob carried a funding pubkey, publish it as the RESTORED pubkey so the pkcs11-tool
+    # shim can serve it at the key-reference the ceremony reads for its restore-verify.
+    sidecar = _wrap_pubkey_sidecar(in_path)
+    if os.path.exists(sidecar):
+        shutil.copyfile(sidecar, os.path.join(sd, "restored-pub.der"))
+    # Record WHICH key-reference received the restore. The ceremony reads the restored pubkey at
+    # key-reference 2 for a same-card scratch verify, but at key-reference 1 on a CLONE TARGET.
+    # Without this the shim could only special-case id 02, and a clone-target read of id 01 would
+    # fall through to the shared SoftHSM token and return the PRIMARY card's key — a byte-compare
+    # that passes while proving nothing. Pin the restore to its slot so that cannot happen.
+    with open(os.path.join(sd, "restored.keyref"), "w") as fh:
+        fh.write(str(key_reference).lstrip("0") or "0")
+    _register_object(sd, key_reference, "akash-funding")
+    print(f"Unwrapped key into the (emulated) card: {material.decode(errors='replace')} (MODEL)")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(add_help=False)
+    ap.add_argument("--create-dkek-share")
+    # No defaults: the real tool's behaviour turns on whether these were given at all (#464).
+    ap.add_argument("--pwd-shares-threshold", type=int)
+    ap.add_argument("--pwd-shares-total", type=int)
+    ap.add_argument("--initialize", action="store_true")
+    ap.add_argument("--dkek-shares", type=int, default=1)
+    ap.add_argument("--label", default="akash-funding")
+    ap.add_argument("--import-dkek-share")
+    ap.add_argument("--wrap-key")
+    ap.add_argument("--unwrap-key")
+    ap.add_argument("--key-reference", default="1")
+    ap.add_argument("--password")
+    args, _unknown = ap.parse_known_args(argv)
+
+    if args.create_dkek_share:
+        create_dkek_share(args.create_dkek_share, args.pwd_shares_threshold,
+                          args.pwd_shares_total, args.password)
+    elif args.initialize:
+        initialize(args.dkek_shares, args.label)
+    elif args.import_dkek_share:
+        import_dkek_share(args.import_dkek_share, args.password, args.pwd_shares_total)
+    elif args.wrap_key:
+        wrap_key(args.wrap_key, args.key_reference)
+    elif args.unwrap_key:
+        unwrap_key(args.unwrap_key, args.key_reference)
+    else:
+        # No operation: real OpenSC sc-hsm-tool prints the device info, incl. BOTH retry
+        # counters using the exact labels 'SO-PIN tries left : N' and 'User PIN tries left : N'
+        # (OpenSC never prints 'PIN retry counter'). The go/no-go gate reads the USER-PIN line
+        # to STOP on a near-locked HSM (one wrong PIN from lockout) before the keygen step.
+        # Read-only: consumes no attempt. $EMU_HSM_PIN_RETRIES sets the reported USER-PIN
+        # counter (default 3), mirroring the ykman shim's EMU_YKMAN_PIV_RETRIES, so a lockout
+        # drill can be exercised end-to-end. The SO-PIN counter stays healthy (15) so the gate
+        # is exercised against the same wrong-counter trap real hardware presents.
+        retries = os.environ.get("EMU_HSM_PIN_RETRIES", "3")
+        print("Version              : 3.4")
+        print("Config options:")
+        print("  User PIN reset with SO-PIN enabled")
+        print("SO-PIN tries left    : 15")
+        print(f"User PIN tries left  : {retries}")
+        print("DKEK shares          : 1")
+
+
+if __name__ == "__main__":
+    main()

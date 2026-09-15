@@ -1,0 +1,48 @@
+# apt packages for the vault-tools TemplateVM (Debian).
+# Non-apt tools (sops, age-plugin-yubikey) are fetched + hash-pinned in
+# salt/vault-tools.sls because they are not in Debian stable.
+
+# age encryption (1.1.1 is in Debian bookworm — new enough for the vault image)
+age
+
+# OpenSC: pkcs11-tool + sc-hsm-tool (Nitrokey HSM 2 DKEK + secp256k1 keygen)
+opensc
+pcscd
+libccid
+pcsc-tools
+
+# YubiKey management (PIV slots, touch policy, reset)
+yubikey-manager
+
+# Shamir's Secret Sharing for arbitrary secrets (breakglass age key)
+ssss
+
+# Build toolchain: requirements.txt pins pycryptodome 3.23.0 as an sdist-only hash, so pip
+# must COMPILE it — that needs a C compiler and the Python headers.
+build-essential
+python3-dev
+
+# SLIP-0039 word-list Shamir library comes via pip. Mint shares with
+# scripts/slip39-mint.py — NEVER `shamir create`: the CLI prints the master secret to
+# stdout (rated Critical / total-compromise in emulator/README.md bug #13).
+python3-pip
+python3-venv
+# pip install: shamir-mnemonic (hash-pinned in requirements.txt)
+
+# Paper backup: QR encode/decode for printing + scanning archival paper shares
+qrencode
+zbar-tools
+
+# OpenPGP / smartcard stack (optional OpenPGP paths, scdaemon)
+gnupg
+scdaemon
+
+# Misc ceremony hygiene
+secure-delete
+
+# Hardened editor for sops-edit-airgap.sh (it fails CLOSED without vim/nano so the decrypted
+# vault is never edited by an ambient editor that could leave a recovery copy on disk).
+vim
+
+# Offline release verification (bundle SHA-256 plus centralized-KMS P-256 signature)
+openssl

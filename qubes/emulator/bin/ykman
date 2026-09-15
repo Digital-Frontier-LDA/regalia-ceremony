@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+# ykman shim — emulates the YubiKey Manager CLI surface the ceremony touches (presence
+# check, PIV info, touch-policy hints). No physical YubiKey, so this reports a plausible
+# emulated YubiKey 5 so any `ykman …` route in a rehearsal runs without aborting.
+#
+# The age identity itself is handled by the age-plugin-yubikey shim (real age key); this
+# only covers the management/inspection calls.
+set -euo pipefail
+SERIAL="${EMU_YKMAN_SERIAL:-12345678}"
+
+case "${1:-}" in
+  list|"--version")
+    [ "${1:-}" = "--version" ] && { echo "YubiKey Manager (ykman) 5.5.1 [EMULATED]"; exit 0; }
+    echo "YubiKey 5 NFC (5.4.3) [Emulated] Serial: $SERIAL" ;;
+  info)
+    cat <<EOF
+Device type: YubiKey 5 NFC [EMULATED]
+Serial number: $SERIAL
+Firmware version: 5.4.3
+Applications: OTP, FIDO2, PIV, OpenPGP
+EOF
+    ;;
+  piv)
+    case "${2:-}" in
+      info)
+        cat <<EOF
+PIV version: 5.4.3 [EMULATED]
+PIN tries remaining: ${EMU_YKMAN_PIV_RETRIES:-3}
+Slot 9a (AUTHENTICATION): occupied (P-256, touch policy: ALWAYS)
+EOF
+        ;;
+      *) echo "[EMULATED] ykman piv ${*:2}" ;;
+    esac
+    ;;
+  *)
+    echo "[EMULATED] ykman $* (no-op)" ;;
+esac

@@ -1,0 +1,27 @@
+{
+  "_notice": "Expected outputs of run-vector.py over vector.json (TEST VECTOR, NEVER CUSTODY MATERIAL). Every supported ceremony profile must reproduce these exactly. bip39.akash_address is independently the address PICO-DRILL-RUNBOOK.md publishes for this mnemonic, and spki.akash_address is the cosmjs-canonical value prove-ceremony.sh pins for the same DER.",
+  "deterministic": {
+    "age.pinned_ciphertext.plaintext_sha256": "53ba23a50e925c45a1b0d08b5e497be87cd7173658ee1aaa53f806e7c07e3c4b",
+    "age.recipient": "age1mnwzpjtddt6rfs77nlmdkc3l2m0lrpgg3tumkgkrp7gznvx0jy2qhcwh2w",
+    "bip39.akash_address": "akash19rl4cm2hmr8afy4kldpxz3fka4jguq0a3mq6x0",
+    "pkcs12.akash_address": "akash19rl4cm2hmr8afy4kldpxz3fka4jguq0a3mq6x0",
+    "qr.ascii_level_h_sha256": "564095293bb951ec951dee341fb3ed53b3db3f0ddc2f8f985776da827b8001ac",
+    "slip39.recover_1234.akash_address": "akash19rl4cm2hmr8afy4kldpxz3fka4jguq0a3mq6x0",
+    "slip39.recover_1234.mnemonic_sha256": "c557eec878dfd852ba3f88087c4f350f09c55537ab5e549c3cd14320ec3cef38",
+    "slip39.recover_3456.mnemonic_sha256": "c557eec878dfd852ba3f88087c4f350f09c55537ab5e549c3cd14320ec3cef38",
+    "spki.akash_address": "akash1dc66jys4v4ckt0sxq63ksps34ylra5n9m2qw85",
+    "ssss.combine_1234.recovered_sha256": "85418ede88089aae6200f22654f273e67758b242abbd04b2201f0f2e7c62f4a3",
+    "ssss.combine_3456.recovered_sha256": "85418ede88089aae6200f22654f273e67758b242abbd04b2201f0f2e7c62f4a3"
+  },
+  "semantic": {
+    "age.fresh_encryption_decrypts": true,
+    "code.bip39-slip39-backup.py.installed_matches_checkout": true,
+    "code.derive-akash-address.py.installed_matches_checkout": true,
+    "code.seed-to-pkcs12.py.installed_matches_checkout": true,
+    "qr.png_decodes_to_payload": true,
+    "slip39.fresh_split_recovers_from_shares_3_to_6": true,
+    "slip39.three_shares_are_refused": true,
+    "ssss.fresh_split_recovers_from_shares_3_to_6": true,
+    "ssss.three_shares_do_not_recover": true
+  }
+}

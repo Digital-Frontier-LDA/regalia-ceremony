@@ -1,0 +1,358 @@
+#!/usr/bin/env bash
+# run-tests.sh — run the ceremony hardware-emulator test suites NATIVELY (no Docker).
+#
+# This is the primary test path. It boots the emulator daemons (pcscd + vpcd + the SLE-4442
+# vpicc, SoftHSM2, cups-pdf) in the CURRENT Linux session and drives every ceremony route
+# + the full wizard + the go/no-go gate against them. Designed for:
+#   * the Debian Qubes vault-tools box (where the real ceremony runs), or
+#   * a native Debian/Ubuntu CI runner (e.g. GitHub `ubuntu-latest`, no container).
+#
+#   sudo qubes/emulator/run-tests.sh            # full suite (needs root)
+#   qubes/emulator/run-tests.sh --install-deps  # apt-install the stack first
+#   qubes/emulator/run-tests.sh --models-only   # only host-runnable suites
+#
+# On non-Linux (e.g. macOS) it runs ONLY the suites that need no Linux daemons (the SLE-4442
+# pure model, the DKEK model, the age round-trip) and clearly skips the daemon-backed ones.
+set -uo pipefail
+
+# PREFER THE CEREMONY VENV, exactly as qubes/scripts/hsm-staging-ci.sh does.
+#
+# The hash-pinned Python dependencies (pycvc, mnemonic, shamir_mnemonic) are installed into a venv,
+# not the system interpreter. Without this, `python3 tests/test_cvc_devaut_verify.py` died with
+# `ModuleNotFoundError: No module named 'cvc'` — a bare Traceback that set rc=1 and made the whole
+# host suite report FAILED, while every individual suite printed "0 failed". The real failure was
+# invisible: the summary said nothing was wrong and the runner disagreed.
+#
+# The staging battery had this preamble and this runner did not, so the same test passed there
+# (25 assertions) and crashed here. Falls through to the system python3 when the venv is absent, so
+# nothing breaks on a host that never made one.
+CEREMONY_VENV="${CEREMONY_VENV:-$HOME/.local/share/akash-hsm-venv}"
+[ -x "$CEREMONY_VENV/bin/python3" ] && PATH="$CEREMONY_VENV/bin:$PATH"
+
+HERE="$(cd "$(dirname "$0")" && pwd)"          # …/emulator
+QUBES="$(cd "$HERE/.." && pwd)"                # …/qubes
+export EMU_BIN="$HERE/bin"
+export CEREMONY_SCRIPTS="$QUBES/scripts"
+export EMU_RUN="${EMU_RUN:-/run/vault-emu}"
+export PATH="$EMU_BIN:$CEREMONY_SCRIPTS:$PATH"
+export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
+
+INSTALL=0; MODELS_ONLY=0
+for a in "$@"; do case "$a" in
+  --install-deps) INSTALL=1;;
+  --models-only)  MODELS_ONLY=1;;
+  -h|--help) sed -n '2,20p' "$0"; exit 0;;
+esac; done
+
+say(){ printf '\n\033[1;35m========== %s ==========\033[0m\n' "$1"; }
+rc=0
+
+APT_PKGS="age opensc pcscd libccid pcsc-tools yubikey-manager ssss qrencode zbar-tools \
+gnupg python3 python3-pip xxd softhsm2 opensc-pkcs11 vsmartcard-vpcd cups cups-client \
+printer-driver-cups-pdf xorriso python3-pyscard"
+
+if [ "$INSTALL" = 1 ]; then
+  say "installing dependencies (apt)"
+  if command -v apt-get >/dev/null 2>&1; then
+    sudo apt-get update && sudo apt-get install -y --no-install-recommends $APT_PKGS curl
+    pip3 install --break-system-packages --require-hashes -r "$QUBES/requirements.txt" 2>/dev/null \
+      || pip3 install --require-hashes -r "$QUBES/requirements.txt"
+    # sops isn't in Debian apt — install the same hash-pinned binary the vault image uses
+    # (preflight.sh checks for it). Pin matches salt/vault-tools.sls.
+    if ! command -v sops >/dev/null 2>&1; then
+      curl -fsSL -o /tmp/sops https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64
+      echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /tmp/sops" | sha256sum -c - \
+        && sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+    fi
+  else
+    echo "apt-get not found — install manually: $APT_PKGS"; exit 2
+  fi
+fi
+
+# ---------------------------------------------------------------------------------------
+say "host-runnable suites (no Linux daemons needed)"
+python3 "$HERE/tests/test_sle4442_model.py" || rc=1
+python3 "$HERE/tests/test_schsm_crypto.py" || rc=1
+python3 "$HERE/tests/test_derive_address.py" || rc=1
+python3 "$HERE/tests/test_slip39_mint.py" || rc=1
+python3 "$HERE/tests/test_metal_stamp.py" || rc=1
+python3 "$HERE/tests/test_recovery_procedure.py" || rc=1
+python3 "$HERE/tests/test_payload_qr.py" || rc=1
+python3 "$HERE/tests/test_equivalence_vector.py" || rc=1
+python3 "$HERE/tests/test_entropy_mix.py" || rc=1
+python3 "$HERE/tests/test_seed_to_pkcs12.py" || rc=1
+python3 "$HERE/tests/test_verify_hsm_control.py" || rc=1
+python3 "$HERE/tests/test_recovery_card.py" || rc=1
+python3 "$HERE/tests/test_cvc_devaut_verify.py" || rc=1
+python3 "$HERE/tests/test_drain_analyzer.py" || rc=1
+python3 "$HERE/tests/test_forensic_decode.py" || rc=1
+
+# The forensic ring invariant is a C-level property of the recorder, so it is compiled natively
+# against the SDK source rather than modelled in Python. Skipped, loudly, when the SDK is not
+# checked out beside this repo — a silent skip would let the invariant rot unnoticed.
+_FSDK="${PICOKEYS_SDK_DIR:-$HOME/code/pico-hsm/pico-keys-sdk}"
+if [ -f "$_FSDK/src/forensic.c" ]; then
+    if cc -O1 -DFORENSIC_CAUSAL -DENABLE_EMULATION -I"$_FSDK/src" \
+           -o /tmp/hsm_forensic_ring "$HERE/tests/test_forensic_ring.c" \
+           "$_FSDK/src/forensic.c" 2>/tmp/hsm_forensic_ring.cc.log; then
+        /tmp/hsm_forensic_ring | grep -v '^FORENSIC ' || rc=1
+    else
+        echo "  FAIL: test_forensic_ring.c did not compile — see /tmp/hsm_forensic_ring.cc.log"; rc=1
+    fi
+else
+    echo ">> skipping the forensic ring invariant: no pico-keys-sdk at $_FSDK"
+    echo "   (set PICOKEYS_SDK_DIR; this invariant is what keeps the recorder from"
+    echo "    applying backpressure to the race it measures)"
+fi
+
+say "FORENSIC SNAPSHOT ordering (pristine reads must precede the destructive probe)"
+"$HERE/tests/test-forensic-ordering.sh" || rc=1
+
+say "SECRET-LEAK suite (logs / files / argv / recombination — no secret ever exposed)"
+"$HERE/tests/test-secret-leak.sh" || rc=1
+
+say "CUPS spool purge (print_share must delete completed job data, not just cancel active jobs)"
+"$HERE/tests/test-cups-spool-purge.sh" || rc=1
+
+say "CUPS print-before-purge (spool must not be wiped before the paper is actually printed)"
+"$HERE/tests/test-cups-print-before-purge.sh" || rc=1
+
+say "CUPS print-before-purge with a failing sibling job (purge waits for drain even on failure)"
+"$HERE/tests/test-cups-print-sibling-fail.sh" || rc=1
+
+say "CEREMONY ssss reconstruct-verify + input guards (no unverified / truncated backups)"
+"$HERE/tests/test-ceremony-shamir-verify.sh" || rc=1
+
+say "PROVE-CEREMONY SLIP-39 proof (PROOF 3: the 4-of-6 SLIP-0039 backup really recovers)"
+"$HERE/tests/test-prove-ceremony-slip39.sh" || rc=1
+
+say "CEREMONY pick_printer USB-only gate (network device-uri must not print a plaintext share over the wire)"
+"$HERE/tests/test-ceremony-pick-printer-uri.sh" || rc=1
+
+say "PRINTER network-uri fail-closed gate (ANY non-local device-uri refused, not just a blocklist)"
+"$HERE/tests/test-printer-network-uri.sh" || rc=1
+
+say "CEREMONY HSM funding-key aborts + DKEK-backup RESTORE-VERIFY (no unverifiable born-in-HSM backup)"
+"$HERE/tests/test-hsm-funding-abort.sh" || rc=1
+
+say "CEREMONY HSM two-device clone (cross-device DKEK restore proof; never wipe a card that holds a key)"
+"$HERE/tests/test-hsm-two-device-clone.sh" || rc=1
+
+say "EMULATOR shim two-device model (a clone target must never answer with the primary card's key)"
+"$HERE/tests/test-emu-shim-two-device.sh" || rc=1
+
+say "YUBIKEY two-device identity isolation (a standby ceremony must not overwrite the primary)"
+"$HERE/tests/test-yubikey-two-device.sh" || rc=1
+
+say "CEREMONY two-YubiKey registration (running the real wizard step twice preserves both identities)"
+"$HERE/tests/test-ceremony-two-yubikey.sh" || rc=1
+
+say "CEREMONY Tier-0 payload step (encrypt + archival QR; never print an unproven or empty payload)"
+"$HERE/tests/test-payload-step.sh" || rc=1
+
+say "CEREMONY chip-card step (SLE-4442: never write to a near-locked card, never echo the share)"
+"$HERE/tests/test-chipcard-step.sh" || rc=1
+
+say "CEREMONY HSM import step (seed-derived key: the card must hold EXACTLY the seed's key)"
+"$HERE/tests/test-hsm-import-step.sh" || rc=1
+
+say "HSM IMPORT DRILL end-to-end (the one-shot hardware proof; every branch before the device arrives)"
+"$HERE/tests/test-hsm-import-drill.sh" || rc=1
+
+say "HSM RECOVERY DRILL evidence (an accepted wrong DKEK share keeps the tool output, hex elided)"
+"$HERE/tests/test-hsm-recovery-drill-evidence.sh" || rc=1
+
+say "DRILL REPRO LOOP classifier (labels a failing iteration from the drill FAIL lines, never from prose every run prints)"
+"$HERE/tests/test-repro-drill-loop-classifier.sh" || rc=1
+
+say "HSM AUTO-IMPORT (unattended createDKEKKeyDomain path: guards, secret hygiene, API regressions)"
+"$HERE/tests/test-hsm-auto-import.sh" || rc=1
+
+
+say "DAY 0 — the DKEK rule bites, and one device really serves every role (B3, E1)"
+"$HERE/tests/test-day0-dkek-rule-and-roles.sh" || rc=1
+
+say "DAY 1 — one address across two sites, per-device custody, PKA cold-standby failover (A3, A5, A6, A7)"
+"$HERE/tests/test-day1-fleet-pins-failover.sh" || rc=1
+
+say "DAY 2 — a card can die and be replaced with no loss (A1, A2, A4, B4, C1)"
+"$HERE/tests/test-day2-replaceability.sh" || rc=1
+
+say "FLEET DEVICE SELECTION — with two cards attached, a destructive write must never guess (A3, A5, A6)"
+"$HERE/tests/test-fleet-device-selection.sh" || rc=1
+
+say "PIN BINDING — the escrowed PIN must be the PIN the card answers to (PLAN.md 3.1)"
+"$HERE/tests/test-pin-binding-proof.sh" || rc=1
+
+say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine card must be caught (B3, B6, B7)"
+"$HERE/tests/test-commission-card.sh" || rc=1
+
+say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"
+"$HERE/tests/test-pka-threshold.sh" || rc=1
+
+say "DOCUMENT MAP — the entry point must resolve, and no document may be unreachable"
+"$HERE/tests/test-doc-map.sh" || rc=1
+
+say "STAGING CI ORCHESTRATOR — the hardware battery must fail closed, never green-skip (no hardware needed)"
+"$HERE/tests/test-hsm-staging-ci.sh" || rc=1
+
+say "STAGING BENCH LOCK — concurrent hardware jobs are serialized and stale locks fail closed"
+"$HERE/tests/test-hsm-bench-lock.sh" || rc=1
+
+say "STAGING RESTORE — the posture restorer must aim INITIALIZE DEVICE at a PROVEN card (no hardware needed)"
+"$HERE/tests/test-hsm-staging-restore.sh" || rc=1
+
+say "SCENARIOS TARGETING — an untargeted --initialize must be refused when two cards are attached"
+"$HERE/tests/test-hsm-scenarios-targeting.sh" || rc=1
+
+# THESE FOUR EXISTED AND WERE NEVER RUN. Nothing in this runner, and nothing in .github/workflows,
+# referenced them — so they asserted nothing, in CI or anywhere else. Two of them guard the air-gap
+# check, which their own headers call the single most important control of the whole ceremony. All
+# four pass today; they were orphans, not exclusions. test-suite-wiring.sh below now fails if any
+# test file goes unreferenced again, because "the test exists" and "the test runs" are different
+# claims and only the second one protects anything.
+say "CARD TARGETING — the reader/slot resolver must fail closed, and must not report failure on success"
+"$HERE/tests/test-hsm-reader-select.sh" || rc=1
+
+say "SWD ROLE GATE — flash tools must prove WHICH board and that it is staging, before programming"
+"$HERE/tests/test-hsm-swd-role-gate.sh" || rc=1
+
+say "PREFLIGHT AIR-GAP — a missing route tool must never read as 'air-gapped'"
+"$HERE/tests/test-preflight-airgap.sh" || rc=1
+
+say "PREFLIGHT LIVE INTERFACE — a routable address with no default route must FAIL, not WARN"
+"$HERE/tests/test-preflight-live-iface.sh" || rc=1
+
+say "FS SCAN — a dangling link must not crash or silently truncate the scan"
+python3 "$HERE/tests/test_scan_dangling_link.py" || rc=1
+
+say "SUITE WIRING — every test file in tests/ must actually be run by this runner"
+"$HERE/tests/test-suite-wiring.sh" || rc=1
+
+# A TOOL NOBODY RUNS IS A COMMENT. tools/hsm-lint-predicates.sh was written after the
+# `producer | grep -q` inversion cost a bench night, and then nothing invoked it — not this runner,
+# not a workflow. It also had a false positive (`||` read as a pipe) and a blind spot (it skipped
+# files that set no pipefail, i.e. the sourced libraries that INHERIT it), so the one line it
+# reported could never invert while the real defect sat in a file it never scanned. Wired here
+# because it needs no hardware and takes a second.
+# The wording below deliberately avoids writing the offending construction literally: the linter
+# matches text, and its own announcement containing the pattern made it flag this runner. Comment
+# lines are already excluded; a string literal is not a comment.
+say "SELF-INVERTING PREDICATES — no early-exiting consumer on a pipeline under pipefail"
+_LINT="$HERE/../../../tools/hsm-lint-predicates.sh"
+if [ -x "$_LINT" ]; then
+  # Run it once and KEEP the output. Running it twice — quietly, then again to show the failure —
+  # would scan a tree that could have changed between the two runs, and would report a result the
+  # reader never saw produced.
+  _lint_out="$("$_LINT" 2>&1)"; _lint_rc=$?
+  if [ "$_lint_rc" -ne 0 ]; then printf '%s\n' "$_lint_out" | tail -24; rc=1
+  else printf '%s\n' "$_lint_out" | tail -2; fi
+else
+  # NOT a silent pass: a missing linter means the check did not run.
+  printf '  \033[31mFAIL\033[0m the predicate linter is missing at %s — the check did not run\n' "$_LINT"; rc=1
+fi
+
+say "TRANSCRIPT REDACTOR — every uploaded surface is born redacted (#185)"
+"$HERE/tests/test-transcript-redact.sh" || rc=1
+
+say "KMS E2E ORCHESTRATOR — reuse existing Docker/Pico batteries; destructive mode needs interlocks"
+"$HERE/tests/test-kms-e2e-orchestrator.sh" || rc=1
+
+# NOTE: the group_vars-resolver and spend-guard-deploy-gate suites are NOT here. They test
+# `infra/ansible/*`, which belongs to the CONSUMER repo (example-service), and they live and run
+# there — 10 and 11 assertions respectively. Their copies here came across with the history
+# extraction and had no subject to test: one failed outright, the other reported a clean rc=0
+# while silently skipping every assertion. The second is the more dangerous of the two, and is
+# the same shape as the CI gate that skipped every staging deploy for four days.
+
+say "M-DISC offline-recovery wheels (clean-machine/Tails path is self-contained, no network)"
+"$HERE/tests/test-archive-offline-wheels.sh" || rc=1
+
+say "M-DISC no-plaintext-shares (the burn set must carry only encrypted/public artifacts)"
+"$HERE/tests/test-archive-no-plaintext-shares.sh" || rc=1
+
+say "M-DISC recovery-doc paths (the disc must be self-consistent with the runbook it carries)"
+"$HERE/tests/test-archive-recovery-doc-paths.sh" || rc=1
+
+say "M-DISC cross-drive verify (the printed verify command must checksum the burned files)"
+"$HERE/tests/test-optical-cross-drive-verify.sh" || rc=1
+
+say "OPTICAL fault injection (optical-verify --fault must go red on a corrupted burn)"
+"$HERE/tests/test-optical-fault-injection.sh" || rc=1
+
+say "GO/NO-GO false-GO guard (a typo'd --need device must not skip a check)"
+"$HERE/tests/test-go-nogo-guard.sh" || rc=1
+
+say "GO/NO-GO HSM-token guard (--need hsm must require the SmartCard-HSM, not any PKCS#11 token)"
+"$HERE/tests/test-go-nogo-hsm-token.sh" || rc=1
+
+say "GO/NO-GO SLE-4442 counter guard (near-lock STOP must survive a real per-session reader)"
+"$HERE/tests/test-go-nogo-sle4442-counter.sh" || rc=1
+
+say "GO/NO-GO HSM PIN-retry guard (--need hsm must STOP a near-locked HSM before keygen bricks it)"
+"$HERE/tests/test-go-nogo-hsm-pin-retry.sh" || rc=1
+
+say "GO/NO-GO optical write-capability guard (--need drives must STOP a read-only DVD-ROM pair)"
+"$HERE/tests/test-go-nogo-drives-writer.sh" || rc=1
+
+say "GO/NO-GO preflight warn-surface (a pass-with-warnings must show the WARNs in the GO summary)"
+"$HERE/tests/test-go-nogo-preflight-warn-surface.sh" || rc=1
+
+say "PREFLIGHT runtime deps (BIP39 'mnemonic' + shamir_mnemonic must be importable, not just python3 on PATH)"
+"$HERE/tests/test-preflight-runtime-deps.sh" || rc=1
+
+say "PREFLIGHT dom0-orchestration (dom0 must REFUSE a vault with netvm/ballooning/dom0-swap; mock qvm-prefs)"
+"$HERE/tests/test-preflight-dom0.sh" || rc=1
+
+say "PREFLIGHT execution profiles (Qubes disposable/vault and Debian live; full negative matrix)"
+python3 "$HERE/tests/test_preflight_environment.py" || rc=1
+
+say "TEARDOWN residue proof (workdir removal, mount inventory, retained-artifact canary)"
+python3 "$HERE/tests/test_ceremony_teardown.py" || rc=1
+
+say "OFFLINE BUNDLE metadata, complete hash coverage, and centralized release signature verification"
+python3 "$HERE/../../debian/offline-bundle/test_bundle.py" || rc=1
+
+IS_LINUX=0; [ "$(uname -s)" = "Linux" ] && IS_LINUX=1
+if [ "$MODELS_ONLY" = 1 ] || [ "$IS_LINUX" = 0 ]; then
+  [ "$IS_LINUX" = 0 ] && echo ">> non-Linux host: skipping daemon-backed suites (run on the Debian box / CI for those)."
+  # still exercise the pure-logic model routes that work anywhere
+  say "DKEK model + age round-trip (host)"
+  W="$(mktemp -d)"; export EMU_SCHSM_STATE="$W/s" EMU_AGE_IDENTITY_DIR="$W/age"
+  if out="$(sc-hsm-tool --create-dkek-share "$W/d.pbe" --pwd-shares-threshold 4 --pwd-shares-total 6 2>&1)" \
+     && grep -qE '^Share ID +: 6$' <<< "$out"; then echo "  PASS DKEK share + 6 password shares"; else echo "  FAIL DKEK share"; rc=1; fi
+  rm -rf "$W"
+  [ "$rc" = 0 ] && echo "OK (host suites)" || echo "host suites FAILED"
+  exit "$rc"
+fi
+
+# ---------------------------------------------------------------------------------------
+if [ "$(id -u)" != 0 ]; then
+  echo ">> daemon-backed suites need root (pcscd/cups/mknod). Re-run with sudo, or pass --models-only."
+  exit 1
+fi
+
+# The ceremony preflight (run by the dress-rehearsal + go/no-go suites) fails closed if
+# swap is active — correct for a real vault qube, but CI runners/dev boxes have swap. In
+# this TEST context turn it off so preflight genuinely passes (faithful, not faked).
+swapoff -a 2>/dev/null || true
+
+say "booting emulator daemons natively (pcscd + vpcd + SLE-4442 + SoftHSM2 + cups-pdf)"
+# shellcheck disable=SC1090
+source "$EMU_BIN/emu-boot.sh"
+boot_all
+trap 'stop_all' EXIT
+
+say "ROUTE COVERAGE — every hardware route vs the emulators"
+"$HERE/tests/route-coverage.sh" || rc=1
+
+say "GO/NO-GO — the day-of hardware gate"
+"$HERE/tests/test-go-nogo.sh" || rc=1
+
+say "DRESS REHEARSAL — drive the real ceremony.sh wizard end-to-end"
+"$HERE/tests/dress-rehearsal.sh" || rc=1
+
+say "RESULT"
+[ "$rc" = 0 ] && echo "ALL EMULATOR TEST SUITES PASSED (native, no Docker)" \
+              || echo "SOME SUITES FAILED"
+exit "$rc"

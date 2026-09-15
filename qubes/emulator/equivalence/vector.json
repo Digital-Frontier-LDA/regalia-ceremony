@@ -1,0 +1,25 @@
+{
+  "_notice": "TEST VECTOR, NEVER CUSTODY MATERIAL. Public inputs for the cross-profile equivalence vector (#36): run-vector.py documents each. Never hold, protect or recover a real value with anything here, and never fund an address derived from it.",
+  "bip39_mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
+  "secp256k1_spki_der_hex": "3056301006072a8648ce3d020106052b8104000a034200047f41ffa6c0c377ce7660dfd2716ab96f18f9dbd7de5a6d360b3e89efbbae906cd5188e7d696b936777d5383256af1246980098dd9a16826a4f4984a136fbeab6",
+  "slip39_shares": [
+    "costume survive academic acquire armed cylinder piece husband testify timber admit license index best desktop order beard plot glen either",
+    "costume survive academic aide campus ruler involve corner wisdom username favorite hairy lecture admit random machine cinema expect angry river",
+    "costume survive academic ambition beard stilt script wisdom robin adequate spit tactics anxiety dish source prize coastal counter away window",
+    "costume survive academic arena burning debris painting window wolf smart lift dictate exotic flip rapids empty luck firefly gesture slap",
+    "costume survive academic beam briefing health news dwarf thunder game texture axis curious unkind adjust grin museum insect equation advance",
+    "costume survive academic black axle merchant vanish firm verdict plunge advance vocal testify satoshi human terminal arena ambition frozen mama"
+  ],
+  "ssss_secret": "regalia-equivalence-test-vector-ssss-secret",
+  "ssss_shares": [
+    "1-30ec8d9febd948f32be6286798642ab802277a0f161d905a4bdafdd01650274b91c8d17a10eaefff04dd22",
+    "2-01f44f228ebae7db50cb9f86291f4f158964d66bdfc3f9263a73a72f2844807a7885ab434f24dc707234ab",
+    "3-9002f889cf5da844d49dab19728e2827fcce83170d180a742b35effb33aa4b817cd71098e784dd2ca4cfa1",
+    "4-1d2eddd6fed8d7e9cc465928feb81dbbbdd25b08f5790e0a76f95c43f331467c3714730aeecc19fdc88736",
+    "5-e9ec74eb3f01ae1e08a9a514760e31e97d60661d141175bcac4e2b9124bef40faffe22894cf35d1bfdd29a",
+    "6-129c8b7b5a1e6de6f2f783b2613bc2859c131aabbaa80d094a050f638268a02f7fc28c000603e5e14c665f"
+  ],
+  "age_identity_label": "regalia-equivalence-test-vector-age-identity",
+  "age_ciphertext_armored": "-----BEGIN AGE ENCRYPTED FILE-----\nYWdlLWVuY3J5cHRpb24ub3JnL3YxCi0+IFgyNTUxOSBvbm9GanFZV1FzQTdzSDBY\nY3RUK3dLMEs2V1JUVVdLa0U3Y0ZKaFdQNlRZCk5jTlV0K3M4VjdiblJ0ejlWZFpT\nVUY0STJZWTMzVWtyMVZwZkxza1A1eFkKLS0tIFNmaGZwbm52akt5eVYzUk9xTFRB\nTTloL21pUHhqQjFvOVBYUGtzcm8zQlkKSMvDjck6CXLjh68gUONv12VuDEmVfyV8\niNJUy6Mbb7gCILOybpeuEn2JgUb5PokXvq94tJk0rQOo4ylKc2cZ4wgaKa4=\n-----END AGE ENCRYPTED FILE-----\n",
+  "qr_payload": "regalia-equivalence-test-vector-qr-payload"
+}

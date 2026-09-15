@@ -1,0 +1,16 @@
+# Secret scanning for the ceremony tooling.
+#
+# Policy: allowlists describe CONTENT only — NO ALLOWLIST MAY NAME A PATH. A path allowlist blinds
+# a whole file; a content pattern narrow enough to name a benign construct cannot. Age keys that
+# appear in this repository are EXAMPLE placeholders, pinned by value below.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Example/placeholder age secret keys used in ceremony tests and docs — never real material"
+regexTarget = "line"
+regexes = [
+    '''AGE-SECRET-KEY-1EXAMPLE[0-9A-Za-z]*''',
+    '''AGE-SECRET-KEY-1\.\.\.''',
+]

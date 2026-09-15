@@ -1,0 +1,44 @@
+================================================================
+  SEALED CUSTODIAN-CONTACT SHEET   (one copy sealed in EVERY case)
+  CONFIDENTIAL — this lists who holds the shares. Keep sealed.
+================================================================
+This sheet is how a recoverer finds the other custodians (you chose to
+seal a copy in each case). It is opsec-sensitive: anyone with it knows
+whom to approach. The 4-of-6 threshold is the protection — no single
+custodian (or this sheet alone) can move funds.
+
+WALLET / OWNER:        [OWNER NAME / COMPANY]
+SCHEME:                4-of-6  (need any 4 of the 6 cases)
+RECORDED FUNDING ADDR: [akash1... — must match what recovery derives]
+
+AUTHORIZATION / TRIGGER (when a break-glass is permitted):
+    [e.g. "death or medical incapacity of the owner, confirmed by the
+     executor; or written instruction from the owner"]            <-- fill in
+
+EXECUTOR (start here; confirms authorization):
+    Name:     [____]
+    Reach:    [phone / email / lawyer firm + matter ref]
+    Backup:   [second executor]
+
+TECHNICAL HELPER (runs the offline recovery; see RECOVERY-TECHNICAL.md):
+    Name:     [____]
+    Reach:    [____]
+    Fallback: [reputable crypto-recovery firm]
+
+SAFE DESTINATION for swept funds:
+    [akash1... cold address, or "executor will provide at recovery time"]
+
+THE SIX CUSTODIANS / CASES (need any 4):
+    Case      Holo serial    Custodian        How to reach        Location
+    DF-BG-01  HOLO-000001    [name]           [phone/email]       [city / box]
+    DF-BG-02  HOLO-000002    [name]           [____]              [____]
+    DF-BG-03  HOLO-000003    [name]           [____]              [____]
+    DF-BG-04  HOLO-000004    [name]           [____]              [____]
+    DF-BG-05  HOLO-000005    [name]           [____]              [____]
+    DF-BG-06  HOLO-000006    [name]           [____]              [____]
+
+NOTES
+  - Verify each case's holo serial against this list before opening it;
+    a wrong/broken seal ⇒ assume tampering, recover then rotate.
+  - Keep this sheet sealed inside the case; do not photograph it.
+================================================================

@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# pkcs11-tool shim — transparently routes the ceremony's unmodified pkcs11-tool calls to
+# the SoftHSM2 token (our Nitrokey HSM 2 stand-in) instead of a physical OpenSC card.
+#
+# It injects `--module $EMU_PKCS11_MODULE` when the caller didn't pick a module, and an
+# off-argv `--pin env:EMU_HSM_PIN` for login operations during automated tests (when
+# EMU_HSM_PIN is set and no --pin was given) so the PIN value stays out of the child's
+# command line, then forwards to the real OpenSC pkcs11-tool.
+#
+# SoftHSM2 runs REAL crypto: secp256k1 keygen, ECDSA signing, and pubkey DER export all
+# behave as on the card (the one documented difference is ECDSA's random k, so a given
+# message's signature isn't byte-identical run to run — verification is what matters).
+#
+# TWO-DEVICE MODEL: SoftHSM2 is one shared token, but the ceremony drives two cards (primary +
+# clone target). Each card is modelled by its own $EMU_SCHSM_STATE directory, and when that
+# directory exists its `objects` registry — not the shared token — decides what the card holds.
+# Pubkey reads for a restored key are pinned to the key-reference sc-hsm-tool actually unwrapped
+# into, so a clone target can never answer with the primary card's key.
+set -euo pipefail
+
+REAL=""
+# EMU_PKCS11_REAL lets the test harness point at a recorder/stub in place of the real
+# OpenSC binary (mirrors sc-hsm-tool's EMU_SCHSM_REAL); ignored in normal operation.
+for cand in "${EMU_PKCS11_REAL:-}" /usr/bin/pkcs11-tool /usr/local/bin/pkcs11-tool; do
+  [ -n "$cand" ] && [ -x "$cand" ] && { REAL="$cand"; break; }
+done
+[ -n "$REAL" ] || { echo "pkcs11-tool: real OpenSC binary not found" >&2; exit 127; }
+
+args=("$@")
+
+have_module=0; have_pin=0; have_login=0
+for a in "$@"; do
+  case "$a" in
+    --module) have_module=1 ;;
+    --pin) have_pin=1 ;;
+    --login|-l) have_login=1 ;;
+  esac
+done
+
+inject=()
+if [ "$have_module" -eq 0 ] && [ -n "${EMU_PKCS11_MODULE:-}" ]; then
+  inject+=(--module "$EMU_PKCS11_MODULE")
+fi
+if [ "$have_login" -eq 1 ] && [ "$have_pin" -eq 0 ] && [ -n "${EMU_HSM_PIN:-}" ]; then
+  # Pass the PIN off-argv: OpenSC pkcs11-tool resolves a `env:VAR` PIN value from the
+  # environment, so only the literal reference `env:EMU_HSM_PIN` lands on the child's
+  # command line — never the PIN itself (ps / /proc/<pid>/cmdline stay clean).
+  export EMU_HSM_PIN
+  inject+=(--pin "env:EMU_HSM_PIN")
+fi
+
+# Detect a pubkey export so we can normalise it to SubjectPublicKeyInfo afterwards: the
+# real Nitrokey HSM 2 exports SPKI DER, but SoftHSM2 may emit a bare CKA_EC_POINT. The
+# ceremony derives the address via the --der (SPKI) path ONLY, so emulating the card's
+# SPKI output is what makes the real wizard path work unchanged.
+is_pubkey=0; out_file=""; obj_id=""; keygen_label=""; is_list=0; is_keygen=0; prev=""
+for a in "$@"; do
+  case "$a" in
+    --read-object)  is_pubkey_cmd=1 ;;
+    --list-objects) is_list=1 ;;
+    --keypairgen)   is_keygen=1 ;;
+    pubkey)         want_pubkey=1 ;;
+  esac
+  [ "$prev" = "-o" ] && out_file="$a"
+  [ "$prev" = "--id" ] && obj_id="$a"
+  [ "$prev" = "--label" ] && keygen_label="$a"
+  prev="$a"
+done
+[ "${is_pubkey_cmd:-0}" = 1 ] && [ "${want_pubkey:-0}" = 1 ] && [ -n "$out_file" ] && is_pubkey=1
+
+STATE="${EMU_SCHSM_STATE:-/run/vault-emu/schsm}"
+norm_id(){ local i="${1#"${1%%[!0]*}"}"; printf '%s' "${i:-0}"; }   # "02" -> "2", "01" -> "1"
+
+# PER-DEVICE OBJECT MODEL. SoftHSM2 is ONE shared token, but the ceremony now drives TWO cards
+# (primary + clone target), each modelled by its own $EMU_SCHSM_STATE directory. Enumerating the
+# shared token for every "card" would make a blank clone target report the PRIMARY's funding key
+# — the ceremony's blank-card guard would then refuse a genuinely blank device, and worse, a
+# clone-target pubkey read could return the primary's key and pass a byte-compare that proves
+# nothing. So: when a device's state dir EXISTS it is a modelled card and its objects registry is
+# authoritative (an empty registry means a blank card). With no state dir we are not modelling a
+# device at all and fall through to the real token, preserving the pre-two-device behaviour.
+if [ "$is_list" = 1 ] && [ "${want_pubkey:-0}" = 1 ] && [ -d "$STATE" ]; then
+  if [ -s "$STATE/objects" ]; then
+    while IFS=: read -r ref lbl; do
+      [ -n "$ref" ] || continue
+      printf 'Public Key Object; EC\n  label:      %s\n  ID:         %s\n' "$lbl" "$ref"
+    done < "$STATE/objects"
+  fi
+  exit 0
+fi
+
+# Restore-verify: the ceremony unwraps the DKEK backup into a scratch slot (key-reference 2) on a
+# single card, or into key-reference 1 on a CLONE TARGET. sc-hsm-tool records which reference took
+# the restore, so serve the reconstructed pubkey for exactly that slot — never by a hardcoded id,
+# which on a clone target would let the read fall through to the shared SoftHSM token and hand back
+# the PRIMARY card's key. A restored-pub.der only exists after a successful --unwrap-key, so a
+# corrupt/unrestorable backup correctly yields a failed read here.
+if [ "$is_pubkey" = 1 ] && [ -s "$STATE/restored.keyref" ]; then
+  if [ "$(norm_id "$obj_id")" = "$(norm_id "$(cat "$STATE/restored.keyref")")" ]; then
+    if [ -s "$STATE/restored-pub.der" ]; then cp "$STATE/restored-pub.der" "$out_file"; exit 0; fi
+    exit 1
+  fi
+fi
+# A modelled card can only export an object it actually holds; without a registry entry the read
+# must FAIL rather than fall through to the shared token and borrow another card's key.
+if [ "$is_pubkey" = 1 ] && [ -d "$STATE" ] && [ -n "$obj_id" ]; then
+  if ! grep -q "^$(norm_id "$obj_id"):" "$STATE/objects" 2>/dev/null; then exit 1; fi
+fi
+
+if "$REAL" "${inject[@]}" "${args[@]}"; then status=0; else status=$?; fi
+
+# Register a freshly generated keypair against THIS modelled device (see the per-device object
+# model above) so a later --list-objects reports it and the ceremony's blank-card guard can
+# refuse to --initialize over it. Without this a re-run would enumerate as blank and the guard
+# would wave through a wipe of a non-exportable key.
+if [ "$is_keygen" = 1 ] && [ "$status" = 0 ] && [ -d "$STATE" ]; then
+  entry="$(norm_id "${obj_id:-1}"):${keygen_label:-akash-funding}"
+  grep -qxF "$entry" "$STATE/objects" 2>/dev/null || printf '%s\n' "$entry" >> "$STATE/objects"
+fi
+
+if [ "$is_pubkey" = 1 ] && [ "$status" = 0 ] && [ -s "$out_file" ]; then
+  python3 - "$out_file" <<'PY' 2>/dev/null || true
+import sys
+p = sys.argv[1]
+der = open(p, "rb").read()
+EC_PUB = bytes.fromhex("06072a8648ce3d0201")          # id-ecPublicKey
+SECP256K1 = bytes.fromhex("06052b8104000a")           # secp256k1
+# already a SubjectPublicKeyInfo with the EC OID? leave it alone.
+if der[:1] == b"\x30" and EC_PUB in der and SECP256K1 in der:
+    sys.exit(0)
+# else extract the raw EC point (strip an OCTET STRING wrapper if present) ...
+def tlv(b, i):
+    t = b[i]; l = b[i+1]; i += 2
+    if l & 0x80:
+        n = l & 0x7f; l = int.from_bytes(b[i:i+n], "big"); i += n
+    return t, b[i:i+l]
+pt = der
+try:
+    t, v = tlv(der, 0)
+    if t == 0x04:
+        pt = v
+except Exception:
+    pass
+if len(pt) >= 65 and pt[0] == 0x04:
+    pt = pt[:65]
+elif len(pt) >= 33 and pt[0] in (2, 3):
+    pt = pt[:33]
+else:
+    sys.exit(0)   # unknown shape; leave original
+# ... and wrap it as the canonical secp256k1 SubjectPublicKeyInfo the real card emits.
+bitstr = b"\x03" + bytes([len(pt) + 1]) + b"\x00" + pt
+algid = b"\x30\x10" + EC_PUB + SECP256K1
+spki_body = algid + bitstr
+spki = b"\x30" + bytes([len(spki_body)]) + spki_body
+open(p, "wb").write(spki)
+PY
+fi
+exit "$status"

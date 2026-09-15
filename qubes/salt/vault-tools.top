@@ -1,0 +1,5 @@
+# Qubes Salt top file — apply with:
+#   sudo qubesctl --skip-dom0 --targets=vault-tools state.apply vault-tools
+base:
+  vault-tools:
+    - vault-tools

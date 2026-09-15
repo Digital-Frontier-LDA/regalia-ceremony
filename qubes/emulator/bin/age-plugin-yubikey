@@ -1,0 +1,68 @@
+#!/usr/bin/env bash
+# age-plugin-yubikey shim — software stand-in for the YubiKey-backed age identity.
+#
+# The real plugin mints an age identity ON a YubiKey (PIV) and prints an age1yubikey1…
+# recipient that needs a physical touch to decrypt. With no token present we mint a REAL
+# native age identity instead, store it, and print its real age1… recipient. The route is
+# then fully exercised for real: the recipient encrypts, and `age`/`sops` decrypt with the
+# stored identity — proving the generate -> recipient -> encrypt -> decrypt flow end to end.
+#
+# Difference from hardware: a native key decrypts without a touch (there is no PIV applet
+# to gate it). Everything else — recipient format usable in .sops.yaml, real round-trip —
+# is faithful.
+#
+# Supported: --generate (mint+store+print recipient), --identity/--list (print stored),
+#            --list-all. Unknown flags are accepted and ignored so the wizard's exact
+#            invocation works unchanged.
+set -euo pipefail
+
+IDENT_DIR="${EMU_AGE_IDENTITY_DIR:-/run/vault-emu/age}"
+# A rehearsal may model more than one physical YubiKey. Keep the historical
+# single-device filename when no serial is supplied, but never let a second
+# device overwrite the first device's identity.
+serial="${EMU_YUBIKEY_SERIAL:-}"
+if [ -n "$serial" ]; then
+  case "$serial" in
+    *[!0-9]*) echo "invalid EMU_YUBIKEY_SERIAL" >&2; exit 2 ;;
+  esac
+  IDENT_FILE="$IDENT_DIR/ops-identity-$serial.txt"
+else
+  IDENT_FILE="$IDENT_DIR/ops-identity.txt"
+fi
+mkdir -p "$IDENT_DIR"; chmod 700 "$IDENT_DIR"
+
+real_age_keygen() {
+  command -v age-keygen >/dev/null 2>&1 || { echo "age-keygen not installed" >&2; exit 127; }
+}
+
+case "${1:-}" in
+  --generate|-g|"")
+    if [ "${CEREMONY_ASSERT_UNATTENDED:-0}" = 1 ]; then
+      case "$*" in
+        *"--pin-policy once"*"--touch-policy never"*) ;;
+        *) echo "unattended ceremony requires --pin-policy once --touch-policy never" >&2; exit 42;;
+      esac
+    fi
+    real_age_keygen
+    age-keygen -o "$IDENT_FILE" 2>/dev/null
+    chmod 600 "$IDENT_FILE"
+    recipient="$(age-keygen -y "$IDENT_FILE")"
+    echo "$recipient" > "$IDENT_DIR/ops-recipient.txt"
+    # mimic the real plugin's human output, then print the recipient on its own line
+    # (the wizard greps for an age1… recipient).
+    echo "[EMULATED YubiKey] Generated software 'ops' age identity (touch policy: ${CEREMONY_YUBI_TOUCH_POLICY:-never} — simulated)" >&2
+    echo "Recipient: $recipient"
+    echo "$recipient"
+    ;;
+  --identity|--list|--list-all)
+    if [ -s "$IDENT_FILE" ]; then
+      cat "$IDENT_FILE"
+    else
+      echo "no emulated identity yet — run --generate first" >&2; exit 1
+    fi
+    ;;
+  *)
+    # accept-and-ignore unknown subcommands so the exact ceremony call still works
+    echo "[EMULATED YubiKey] age-plugin-yubikey $* (no-op in emulator)" >&2
+    ;;
+esac

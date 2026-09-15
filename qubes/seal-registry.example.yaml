@@ -1,0 +1,118 @@
+# Seal / tamper-evidence registry for the break-glass DVD cases.
+#
+# Each sealed DVD case = 1x M-DISC (SOPS ciphertext, DKEK .pbe, wrapped HSM key,
+# encrypted backups) + 1x recovery instruction card, closed with a NUMBERED
+# HOLOGRAPHIC tamper sticker. This registry binds the sticker serial to the case and
+# to a hash of its contents, so you can DETECT tampering (broken/!=serial seal, swapped
+# media, swapped card) and route a recovery (which 4 of 6 shares you need).
+#
+# ── WHAT IS SECRET vs NOT ────────────────────────────────────────────────────
+# NON-SECRET — record openly; a copy can live on each M-DISC and with each custodian:
+#   case_id, holo_serial, scheme, contents (share labels), media_sha256, sealed_date,
+#   witnesses. In a 4-of-6 every share is symmetric (any 4 recover), so recording share
+#   indices reveals no "critical" target and does NOT weaken the scheme. The serial
+#   itself is just an anti-swap label — not a secret.
+#
+# OPSEC-SENSITIVE — DO NOT commit in clear. Keep ONLY in seal-custody.sops.yaml (SOPS)
+# and an off-band copy held by the ceremony lead:
+#   the binding  holo_serial -> custodian identity -> physical location / contact.
+#   That map tells an attacker WHOM to coerce and WHERE to go; it is the crown-jewel
+#   inventory and must never sit next to the integrity data in clear.
+#
+# AVAILABILITY NOTE: do NOT keep the only copy of this registry inside the SOPS vault
+# you would be trying to recover (chicken-and-egg). Print it / put a copy on each
+# M-DISC so it is readable during a breakglass WITHOUT first decrypting anything.
+#
+# This *.example file is the SCHEMA with placeholders. The non-secret registry may be
+# committed as seal-registry.yaml; the custody map goes in seal-custody.sops.yaml.
+
+scheme: "shamir 4-of-6"          # need 4 of 6 cases/shares to recover
+generated: "YYYY-MM-DD"
+# sha256 over the full set, recomputed at each audit — detects any registry edit
+registry_sha256: "<sha256 of this file's `seals:` block, recorded off-band>"
+
+# Reserve a block of spare holographic serials up front (e.g. HOLO-0001xx) for RE-SEALING
+# after an emergency open — so a fresh, pre-known serial is always available.
+reserved_reseal_serials: "HOLO-000101 .. HOLO-000120"
+
+# ── PLANNED SEALS ────────────────────────────────────────────────────────────
+# Chosen in ADVANCE and STATIC in normal operation. A case's CURRENT valid serial is
+# its planned `holo_serial` here UNLESS the case appears in `openings:` below — then the
+# latest opening's `new_holo_serial` is authoritative. Verify whichever applies.
+#
+# CONTENTS: the ceremony plan (kept private) splits EACH seed (funding AND derivation root) 4-of-6, plus the
+# breakglass age key (ssss 4-of-6) — so every case carries one share of EACH secret. If the
+# optional born-in-HSM funding path was used, the funding seed has NO SLIP-39 shares; its
+# share material is the DKEK password share instead (RECOVERY-TECHNICAL.md §3B). Record which
+# form applies; the funding SLIP-39 line below shows the default (software-seed) form.
+seals:
+  - case_id: DF-BG-01
+    holo_serial: "HOLO-000001"   # exact number printed on the holographic sticker
+    contents: "breakglass age key = ssss share 1/6; derivation root = SLIP-39 share 1/6; funding seed = SLIP-39 share 1/6 (or DKEK password share 1/6 if the born-in-HSM funding path was used)"
+    media_sha256: "<sha256 of this case's M-DISC manifest.sha256>"
+    sealed_date: "YYYY-MM-DD"
+    witnesses: ["op-A", "op-B"]  # two-person sealing ceremony
+    seal_checks: []              # append {date, by, intact: true/false} at each audit
+    metal_plate: false           # set true/serial if a stamped metal backup of this share exists
+  - case_id: DF-BG-02
+    holo_serial: "HOLO-000002"
+    contents: "breakglass age key = ssss share 2/6; derivation root = SLIP-39 share 2/6; funding seed = SLIP-39 share 2/6 (or DKEK password share 2/6 if the born-in-HSM funding path was used)"
+    media_sha256: "<...>"
+    sealed_date: "YYYY-MM-DD"
+    witnesses: ["op-A", "op-B"]
+    seal_checks: []
+    metal_plate: false
+  - case_id: DF-BG-03
+    holo_serial: "HOLO-000003"
+    contents: "breakglass age key = ssss share 3/6; derivation root = SLIP-39 share 3/6; funding seed = SLIP-39 share 3/6 (or DKEK password share 3/6 if the born-in-HSM funding path was used)"
+    media_sha256: "<...>"
+    sealed_date: "YYYY-MM-DD"
+    witnesses: ["op-A", "op-B"]
+    seal_checks: []
+    metal_plate: false
+  - case_id: DF-BG-04
+    holo_serial: "HOLO-000004"
+    contents: "breakglass age key = ssss share 4/6; derivation root = SLIP-39 share 4/6; funding seed = SLIP-39 share 4/6 (or DKEK password share 4/6 if the born-in-HSM funding path was used)"
+    media_sha256: "<...>"
+    sealed_date: "YYYY-MM-DD"
+    witnesses: ["op-A", "op-B"]
+    seal_checks: []
+    metal_plate: false
+  - case_id: DF-BG-05
+    holo_serial: "HOLO-000005"
+    contents: "breakglass age key = ssss share 5/6; derivation root = SLIP-39 share 5/6; funding seed = SLIP-39 share 5/6 (or DKEK password share 5/6 if the born-in-HSM funding path was used)"
+    media_sha256: "<...>"
+    sealed_date: "YYYY-MM-DD"
+    witnesses: ["op-A", "op-B"]
+    seal_checks: []
+    metal_plate: false
+  - case_id: DF-BG-06
+    holo_serial: "HOLO-000006"
+    contents: "breakglass age key = ssss share 6/6; derivation root = SLIP-39 share 6/6; funding seed = SLIP-39 share 6/6 (or DKEK password share 6/6 if the born-in-HSM funding path was used)"
+    media_sha256: "<...>"
+    sealed_date: "YYYY-MM-DD"
+    witnesses: ["op-A", "op-B"]
+    seal_checks: []
+    metal_plate: false
+
+# ── OPENINGS — the "additional list" (append-only) ───────────────────────────
+# Empty until a case is opened for an emergency. Opening BREAKS the seal and EXPOSES
+# the share inside, so it is a recovery event: re-seal with a fresh (reserved) hologram
+# and ROTATE the exposed secret. Once a case has an entry here, its current valid serial
+# is the latest `new_holo_serial` (NOT the planned one). Never delete entries.
+openings: []
+#  - case_id: DF-BG-03
+#    opened_date: "YYYY-MM-DD"
+#    opened_by: ["op-A", "op-B"]       # two-person open
+#    reason: "breakglass recovery | scheduled audit | suspected tamper"
+#    prev_holo_serial: "HOLO-000003"   # the seal that was broken (or 'found broken')
+#    new_holo_serial:  "HOLO-000101"   # fresh sticker applied on re-seal (from the reserve)
+#    new_media_sha256: "<manifest sha256 if contents were re-burned>"
+#    rotated: true                     # were the exposed shares/keys rotated after this open?
+#    witnesses: ["op-A", "op-B"]
+
+# ── seal-custody.sops.yaml (SECRET — keep in SOPS, NOT here) ──────────────────
+#   custody:
+#     HOLO-000001: { custodian: "<name>", location: "<safe-deposit / box ref>", contact: "<...>" }
+#     HOLO-000002: { custodian: "<name>", location: "<...>", contact: "<...>" }
+#     ...
