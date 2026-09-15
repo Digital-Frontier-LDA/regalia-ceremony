@@ -42,7 +42,7 @@ RECIP="$(grep 'public key:' "$KEYDIR/bg.key" | awk '{print $4}')"
 
 filled_payload() {
   cat > "$WORK/payload.txt" <<'EOF'
-# AKASH CONSOLE — TIER-0 RECOVERY ROOTS
+# EXAMPLE SERVICE — TIER-0 RECOVERY ROOTS
 derivation_wallet_mnemonic_v2: abandon abandon abandon abandon abandon about
 funding_wallet_mnemonic_v2: legal winner thank year wave sausage worth yellow
 API_KEY_HASH_SECRET: NOT-A-REAL-SECRET-test-fixture-only
@@ -122,7 +122,7 @@ rm -f "$WORK/payload.txt"
 unset hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin hsm_c_user_pin hsm_c_so_pin
 unset yubikey_piv_pin yubikey_piv_puk yubikey_mgmt_key
 cat > "$WORK/payload.txt" <<'EOF'
-# AKASH CONSOLE — TIER-0 RECOVERY ROOTS
+# EXAMPLE SERVICE — TIER-0 RECOVERY ROOTS
 derivation_wallet_mnemonic_v2:
 funding_wallet_mnemonic_v2:
 ops_age_key:
