@@ -98,7 +98,7 @@ hdr "A6: a PKA session is PER DEVICE — authenticating at SiteA enables nothing
 dev_auth "$LIS" alice; dev_auth "$LIS" bob
 sign "$LIS" && P "a 2-of-3 quorum at SiteA lets SiteA sign" || F "setup failed: SiteA quorum did not enable signing"
 if sign "$POR"; then
-  F "LISBON'S SESSION ENABLED PORTO — custody would be fleet-wide, not per-device"
+  F "SITEA'S SESSION ENABLED SITEB — custody would be fleet-wide, not per-device"
 else
   P "SiteB still cannot sign: the session lives on the device, not in the fleet"
 fi
@@ -110,7 +110,7 @@ hdr "A6: failed presentations burn a LOCAL budget — probing one site never deg
 dev_auth "$LIS" mallory >/dev/null 2>&1
 dev_auth "$LIS" mallory >/dev/null 2>&1
 dev_auth "$LIS" nobody  >/dev/null 2>&1
-[ "$(fails "$LIS")" = "3" ] && P "three rejected presentations counted against LISBON" \
+[ "$(fails "$LIS")" = "3" ] && P "three rejected presentations counted against SITEA" \
                             || F "failed-attempt budget not counted (got $(fails "$LIS"))"
 [ "$(fails "$POR")" = "0" ] \
   && P "…and SiteB's budget is UNTOUCHED — the budgets are independent" \

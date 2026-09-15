@@ -44,8 +44,8 @@ sudo qubes/emulator/run-tests.sh
 qubes/emulator/run-tests.sh --models-only
 ```
 
-CI runs exactly this on a native `ubuntu-latest` runner — see
-[`.github/workflows/ceremony-emulator.yml`](../../../.github/workflows/ceremony-emulator.yml).
+CI runs exactly this on a native `ubuntu-latest` runner (the workflow definition lives in the
+operators' private repository).
 
 What it runs:
 - **`tests/route-coverage.sh`** — every hardware route vs the emulators (+ a coverage matrix).

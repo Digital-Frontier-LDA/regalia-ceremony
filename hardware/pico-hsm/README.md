@@ -52,7 +52,8 @@ as a build option, then dropped in favour of the rescue APDU, which needs no fir
 
 ## Status: not upstreamed
 
-The disposable staging inventory is [`tools/hsm-staging-registry.json`](../../tools/hsm-staging-registry.json).
+The disposable staging inventory is a default-deny `hsm-staging-registry.json` (kept in the
+operators' private repository) that lists which token serials may be used destructively.
 It is the source of truth for both PicoHSM2 token serials, their RP2350 board IDs, and the
 Raspberry Pi Debug Probe serial wired to each board. A unit may be marked `disconnected` while
 remaining in the inventory; absence from USB must never cause its identity or probe binding to be

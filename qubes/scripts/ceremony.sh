@@ -1074,7 +1074,7 @@ step_payload() {
     # accident is the failure mode this whole step prevents. The operator edits only the four
     # recovery-root lines.
     cat > "$plain" <<TPL
-# AKASH CONSOLE — TIER-0 RECOVERY ROOTS
+# EXAMPLE SERVICE — TIER-0 RECOVERY ROOTS
 # Fill in the four values below. Delete any line you are not using. NEVER add the breakglass
 # age SECRET key (it is what decrypts this file) or any credential that rotates.
 # The HSM PIN fields below are pre-populated from step 0; do NOT edit them.

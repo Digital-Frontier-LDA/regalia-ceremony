@@ -10,7 +10,7 @@ a test tweak.
 ```sh
 export PATH="$HOME/.local/share/regalia-ceremony-venv/bin:$PATH"   # pycvc etc. (see below)
 export HSM_CI_SERIAL=ESP2202E14A                                    # this device's serial
-bash ceremony/qubes/scripts/hsm-staging-ci.sh --tier gate
+bash qubes/scripts/hsm-staging-ci.sh --tier gate
 ```
 
 ## Identity values for this card (pin these)
@@ -37,7 +37,7 @@ externally-managed, with a root-owned `site-packages` — the install dies with
 
 ```sh
 python3 -m venv ~/.local/share/regalia-ceremony-venv
-~/.local/share/regalia-ceremony-venv/bin/pip install --require-hashes -r ceremony/qubes/requirements.txt
+~/.local/share/regalia-ceremony-venv/bin/pip install --require-hashes -r qubes/requirements.txt
 ```
 
 The orchestrator invokes bare `python3`, so putting that venv first on `PATH` is sufficient — no
@@ -63,7 +63,7 @@ EF 2F02 940 → 443 bytes; `hw_devaut` FAIL → PASS.
 
 ```sh
 cd ~/tools/scsh-3.18.77 && HSM_SO_PIN=… HSM_USER_PIN=… HSM_RRC_MODE=off \
-  ./scriptrunner .../ceremony/qubes/scripts/hsm-init-hardened.js
+  ./scriptrunner .../qubes/scripts/hsm-init-hardened.js
 ```
 
 After this the `Config options: User PIN reset with SO-PIN enabled` line is **absent** — the D3
