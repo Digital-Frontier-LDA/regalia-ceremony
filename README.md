@@ -53,9 +53,12 @@ Individual checks live under `qubes/emulator/tests/` and can be run directly.
   information an attacker would want. Define your own before running a real ceremony.
 - **Report vulnerabilities** privately via GitHub Security Advisories.
 
-## Design records
+## Design
 
-Some scripts and docs cite internal design/requirements records that are part of the operators'
+The design philosophy — what the ceremony protects and why, phase by phase (ceremony → day-0 →
+day-1 → day-2) — is in [`PRINCIPLES.md`](PRINCIPLES.md).
+
+Some scripts and docs also cite internal design/requirements records that are part of the operators'
 private repository and not included here. The in-repo runbooks (`qubes/README.md`,
 `qubes/recovery/RECOVERY-TECHNICAL.md`) are self-contained for understanding the tooling.
 
