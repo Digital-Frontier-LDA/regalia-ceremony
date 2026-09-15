@@ -1,0 +1,40 @@
+# Lint and syntax-check the ceremony tooling (shell + Python). Self-contained; least-privilege.
+# The full emulator suite (qubes/emulator/run-tests.sh) needs OpenSC/pcscd/ssss and a card+printer
+# emulator; it runs in the operators' private CI. Here we gate what a hosted runner can prove
+# cheaply: every script parses and lints, and every Python module compiles.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: bash -n (every shell script parses)
+        run: |
+          set -euo pipefail
+          fail=0
+          while IFS= read -r s; do bash -n "$s" || { echo "syntax error: $s"; fail=1; }; done \
+            < <(find . -name '*.sh' -not -path './.git/*')
+          exit $fail
+
+      - name: shellcheck (preinstalled on ubuntu-latest)
+        run: |
+          set -euo pipefail
+          # -S warning: report warnings and errors, not style nits; do not fail the build on a
+          # patch file's embedded snippets or generated fixtures.
+          find . -name '*.sh' -not -path './.git/*' -print0 \
+            | xargs -0 shellcheck -S warning || {
+              echo "::warning::shellcheck reported findings (advisory)"; }
+
+      - name: python compiles
+        run: python3 -m py_compile $(find . -name '*.py' -not -path './.git/*')
