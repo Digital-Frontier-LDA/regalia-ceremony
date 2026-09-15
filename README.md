@@ -5,9 +5,17 @@ vault image, the ceremony scripts that run inside it, an **emulator test harness
 exercises every ceremony branch without hardware, and an **offline Debian bundle** builder for
 installing the tools on an air-gapped machine.
 
-It is the operational companion to [Regalia KMS](../regalia-kms) — this repository is about
-*creating and recovering* the keys (SLIP-0039 / DKEK Shamir shares, Nitrokey HSM 2 funding keys,
-YubiKey PIV identities); the KMS repository is about *serving* them.
+It is the operational companion to [Regalia KMS](https://github.com/Digital-Frontier-LDA/regalia-kms) —
+this repository is about *creating and recovering* the keys (SLIP-0039 / DKEK Shamir shares,
+Nitrokey HSM 2 funding keys, YubiKey PIV identities); the KMS repository is about *serving* them.
+
+It also carries the **Pico HSM** staging-hardware work: a Raspberry Pi Pico (RP2350) running
+[Pico-HSM](https://github.com/polhenarejos/pico-hsm) as a low-cost open-hardware SmartCard-HSM for
+development and rehearsal — firmware fixes, upstream bug reports, a reset tool, and the emulator/drill
+harness that exercises it. The Pico is a fully capable SmartCard-HSM and *could* hold production keys;
+Regalia deliberately **chooses** not to (policy D1), reserving production for the Nitrokey HSM 2's
+audited NXP firmware rather than an open-firmware reimplementation. So a Pico never informs a
+production decision here — by policy, not by limitation.
 
 > **Status: reference tooling.** These procedures are published so the approach can be reviewed and
 > reused. They describe an air-gapped, multi-custodian ceremony; adapt the custody model, hardware,
@@ -19,6 +27,7 @@ YubiKey PIV identities); the KMS repository is about *serving* them.
 |---|---|
 | `qubes/` | The air-gapped Qubes vault: TemplateVM build (`salt/`), ceremony scripts (`scripts/`), recovery runbook (`recovery/`), and the emulator test harness (`emulator/`) |
 | `qubes/emulator/` | A software emulator + ~65 tests that drive the ceremony end-to-end (Shamir split/verify, HSM import/clone, CUPS print-and-purge, two-device failover) with no hardware |
+| `hardware/pico-hsm/` | **Pico HSM (RP2350) staging hardware:** firmware patches, upstream bug reports (device-auth deadlock, watchdog scope), and a reset tool — see [`hardware/pico-hsm/README.md`](hardware/pico-hsm/README.md) |
 | `debian/offline-bundle/` | Builds and verifies a signed, offline apt/wheel bundle so the tools install on an air-gapped host |
 
 ## Running the emulator tests

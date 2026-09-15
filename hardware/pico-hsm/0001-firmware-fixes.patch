@@ -1,0 +1,2822 @@
+From cfc04a1268b51756f1db912b2add84c3a135436a Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 07:15:21 -0400
+Subject: [PATCH 01/27] fix(hsm): reset the device after INITIALIZE DEVICE so
+ it comes back on its own
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Re-personalising wipes the file system, and the card does NOT recover afterwards.
+Measured on a Pico HSM (RP2350, firmware 6.6): after `sc-hsm-tool --initialize` the
+reader keeps reporting a card, but the card returns no ATR and PKCS#11 sees no
+token, indefinitely. Only PHYSICALLY REPLUGGING the device brings it back. That is
+polhenarejos/pico-hsm#9, and it makes the device unusable in a remote or datacenter
+deployment where nobody can reseat the connector.
+
+The wipe itself is fine — after a replug the card comes back correctly
+re-personalised. What is missing is that the firmware only rebuilds the state the
+card needs at boot, and nothing triggers that after the file system is erased.
+
+So reset after re-personalisation. A real smartcard resets after being
+re-personalised, so this also makes the Pico behave MORE like the SmartCard-HSM it
+reimplements, not less.
+
+Three details that matter:
+
+- flash_commit_sync() before the reset, not flash_commit(). The latter only queues
+  the write for low_flash_task() on core 0, so resetting straight after it races the
+  write and can leave a half-written file system. APDU handlers run on core 1
+  (apdu_thread -> card_init_core1), which is exactly where flash_commit_sync() is
+  usable — it deliberately refuses on core 0, since core 0 owns the task it would be
+  waiting for. Falls back to the async commit if it reports failure, so a timeout can
+  never leave the commit unqueued.
+
+- watchdog_reboot(), NOT the EV_RESET path. EV_RESET routes to
+  usb_secure_reboot_now(), which zeroes heap and stack before resetting. That was
+  tried FIRST and measured to HANG THE RP2350 outright: the device left the USB bus
+  and never re-enumerated, recoverable only by replugging — strictly worse than the
+  bug being fixed. Flash was intact (the card came back correctly re-personalised
+  after a replug), so the fault is in that reboot path itself. rescue.c:490 already
+  reboots with a plain watchdog_reset for "reboot to normal mode"; that is the proven
+  path in this codebase. Not scrubbing RAM first is acceptable here — a reset exposes
+  memory to nobody without physical access, and the alternative does not reboot at all.
+
+- A 500ms grace period before the reset fires, so core 0 finishes transmitting the
+  APDU response. Without it the host reports "Card removed" for a command that
+  actually succeeded.
+
+Verified on hardware, two consecutive full cycles, nothing touched between them:
+  --initialize        -> exit 0, no "Card removed"
+                         USB registry id changes (device re-enumerated)
+                         reader back in under 5s, NO REPLUG
+  --import-dkek-share -> exit 0, domain complete
+  seed-derived secp256k1 key import -> unwrap OK, IMPORT-OK
+  sign on card + verify against the seed's pubkey -> exit 0
+  same signature against a wrong digest -> exit 1 (negative control)
+---
+ src/hsm/cmd_initialize.c | 50 +++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index 1768027..33e29c2 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -25,6 +25,20 @@
+ #include "cvc.h"
+ #include "otp.h"
+ #include "object_authorization.h"
++#include "usb.h"
++#ifdef PICO_PLATFORM
++#include "hardware/watchdog.h"
++#endif
++
++/* Upper bound on waiting for the re-personalisation write to become durable before the reset
++ * below. Generous on purpose: a full-region erase is many sectors, and overshooting merely
++ * costs a few idle milliseconds, whereas undershooting falls back to the async commit and
++ * reintroduces the race the synchronous wait exists to remove. */
++#define FLASH_COMMIT_SYNC_TIMEOUT_MS 10000
++
++/* Grace period between arming the reset and it firing, so core 0 can transmit the APDU response
++ * first. Without it the host reports "Card removed" for a command that actually succeeded. */
++#define INITIALIZE_REBOOT_DELAY_MS 500
+ 
+ extern char __StackLimit;
+ static int heapLeft(void) {
+@@ -260,8 +274,42 @@ int cmd_initialize(void) {
+         if (ret != PICOKEYS_OK) {
+             return SW_EXEC_ERROR();
+         }
+-        flash_commit();
++        /* Persist SYNCHRONOUSLY. flash_commit() only queues the write for low_flash_task() on
++         * core 0; resetting straight after it would race the write and could leave a
++         * half-written file system. APDU handlers run on core 1, which is exactly where
++         * flash_commit_sync() is usable (it refuses on core 0, since core 0 owns the task it
++         * would be waiting for). Fall back to the async commit if it reports failure so a
++         * timeout can never leave the commit unqueued. */
++        if (!flash_commit_sync(FLASH_COMMIT_SYNC_TIMEOUT_MS)) {
++            flash_commit();
++        }
+         reset_puk_store();
++#if defined(PICO_PLATFORM)
++        /* Re-personalising wipes the file system, and the card does NOT come back on its own
++         * afterwards: the reader keeps reporting a card, but the card returns no ATR and
++         * PKCS#11 sees no token, until the firmware rebuilds its state at boot. Before this
++         * reset the only recovery was PHYSICALLY REPLUGGING the device, which is impossible in
++         * a remote or datacenter deployment.
++         *
++         * Resetting after re-personalisation is also what a real smartcard does, so this makes
++         * the Pico behave more like the SmartCard-HSM it stands in for, not less.
++         *
++         * Use watchdog_reboot() and NOT the EV_RESET path. EV_RESET routes to
++         * usb_secure_reboot_now(), which zeroes heap and stack before resetting; that was tried
++         * here first and MEASURED to hang the device outright on RP2350 — it left the bus and
++         * never re-enumerated, recoverable only by physically replugging, i.e. strictly worse
++         * than the bug being fixed. The flash and the wipe were both fine (the card came back
++         * correctly re-personalised after a replug), so the fault is in that reboot path, not
++         * in the commit above. rescue.c:490 already reboots with a plain watchdog_reset for
++         * "reboot to normal mode", which is the proven path in this codebase.
++         *
++         * Not scrubbing RAM first is acceptable: a reset exposes memory to nobody without
++         * physical access to the device, and the alternative here does not reboot at all.
++         *
++         * The delay lets core 0 finish transmitting the APDU response before the reset lands,
++         * so the host sees this command SUCCEED rather than "Card removed". */
++        watchdog_reboot(0, 0, INITIALIZE_REBOOT_DELAY_MS);
++#endif
+     }
+     else {   //free memory bytes request
+         int heap_left = heapLeft();
+-- 
+2.53.0
+
+
+From 18c63c98aa96861d4cfbecd7e97ba5146b7a4dcb Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 07:19:52 -0400
+Subject: [PATCH 02/27] build: add PICOKEYS_REMOTE_RESET option for
+ reset/BOOTSEL over USB
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Wires up the opt-in for the CCID reset handler (see the pico-keys-sdk commit).
+Defaults OFF; emits a CMake warning when enabled, because enabling it makes the
+firmware accept unauthenticated reset and BOOTSEL requests over USB and therefore
+permits remote firmware replacement. Intended for development and staging tokens
+only.
+
+target_link_libraries() has to follow add_executable(pico_hsm) — the target must
+exist before it can be linked. It pulls in pico_usb_reset_interface_headers so the
+RESET_REQUEST_* codes come from the SDK rather than being re-declared locally and
+drifting from it.
+
+Verified both configurations build for pico2: default (option OFF, handler compiled
+out) and staging (option ON).
+---
+ CMakeLists.txt | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 97a18e8..40f295f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,7 +41,28 @@ else()
+         add_compile_definitions(__FOR_CI)
+     endif()
+ 
++    # Remote reset / BOOTSEL over USB. OFF by default and it must stay that way for any token
++    # holding real key material: RESET_REQUEST_BOOTSEL allows REMOTE FIRMWARE REPLACEMENT by
++    # anything that can reach the USB device, and neither request is authenticated (a wedged
++    # device cannot verify a PIN, which is the whole point of a recovery path). Enable it only
++    # for development or staging tokens, where remote recovery and firmware updates are worth
++    # more than the exposure.
++    option(PICOKEYS_REMOTE_RESET "Allow reset/BOOTSEL over USB — DEV/STAGING TOKENS ONLY" OFF)
++    if(PICOKEYS_REMOTE_RESET)
++        add_compile_definitions(PICOKEYS_REMOTE_RESET)
++        message(WARNING "PICOKEYS_REMOTE_RESET is ON: this firmware accepts UNAUTHENTICATED reset and BOOTSEL requests over USB, which permits remote firmware replacement. Do NOT ship this build on a token holding real keys.")
++    endif()
++
+     add_executable(pico_hsm)
++
++    if(PICOKEYS_REMOTE_RESET)
++        # Must follow add_executable(): the target has to exist before it can be linked against.
++        # RESET_REQUEST_BOOTSEL / RESET_REQUEST_FLASH live in pico/usb_reset_interface.h, which
++        # ships in its own header-only SDK library rather than on the default include path.
++        # Linking it keeps the request codes coming from the SDK instead of being re-declared
++        # here and silently drifting from it.
++        target_link_libraries(pico_hsm PUBLIC pico_usb_reset_interface_headers)
++    endif()
+ endif()
+ set(USB_ITF_CCID 1)
+ set(USB_ITF_WCID 1)
+-- 
+2.53.0
+
+
+From 7ea1e36fd6b26493d6d27f61994f8d2dd6d50811 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 07:22:20 -0400
+Subject: [PATCH 03/27] feat(tools): host-side remote reset for a Pico HSM
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Host counterpart to PICOKEYS_REMOTE_RESET. Sends the vendor control request that
+reboots the device into firmware (recovery) or into BOOTSEL (remote firmware
+update), so a wedged token in a datacenter no longer needs someone to walk over and
+reseat the connector.
+
+picotool cannot do this: it discovers the Pico SDK's dedicated reset interface by
+class 0xFF / subclass 0x00 / protocol 0x01, and the Pico HSM's CCID interface is
+vendor-class with protocol 0x00. The control request is the same; only the
+discovery differs, so a direct transfer works where picotool does not.
+
+IT VERIFIES, IT DOES NOT ASSUME. ccid_control_xfer_cb() returns true for ANY vendor
+request aimed at its interface, so firmware built WITHOUT the option acknowledges
+these requests and silently ignores them — a tool that reported the transfer status
+would claim success against firmware that cannot reset at all. So it sends, then
+watches the bus: the device disappearing is the evidence it acted, and
+re-enumerating is the evidence it recovered. Leaving the bus and staying gone is
+reported as a HANG, which is the failure mode that matters most here and the one an
+optimistic tool would hide.
+
+Verified against firmware built WITHOUT the option: exits 1 and correctly reports
+that the device never left the bus, rather than false-positiving on the ACK.
+
+libusb via ctypes rather than pyusb, so there is nothing to pip install on a machine
+whose only job is recovering a token. Every libusb signature is declared: ctypes
+defaults undeclared integer arguments to C int, truncating 64-bit handles and
+segfaulting rather than failing cleanly (found the hard way).
+---
+ tools/pico-hsm-reset.py | 132 ++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 132 insertions(+)
+ create mode 100755 tools/pico-hsm-reset.py
+
+diff --git a/tools/pico-hsm-reset.py b/tools/pico-hsm-reset.py
+new file mode 100755
+index 0000000..e7a9b1d
+--- /dev/null
++++ b/tools/pico-hsm-reset.py
+@@ -0,0 +1,132 @@
++#!/usr/bin/env python3
++"""Reset a Pico HSM over USB, without touching the hardware.
++
++This is the host side of the PICOKEYS_REMOTE_RESET build option. Firmware built WITHOUT that
++option ignores these requests, which is the intended default — see the CMake option for why.
++
++    pico-hsm-reset.py                # reboot into firmware (recovery)
++    pico-hsm-reset.py --bootsel      # reboot into the bootloader (remote firmware update)
++
++Why not picotool: picotool looks for the Pico SDK's dedicated reset interface, identified as
++class 0xFF / subclass 0x00 / protocol 0x01. The Pico HSM's CCID interface is vendor-class but
++protocol 0x00, so picotool does not recognise it. The control request itself is identical; only
++the discovery differs, so a direct control transfer works where picotool does not.
++
++Uses libusb through ctypes on purpose: no pyusb, no pip install, nothing to provision on a
++machine whose only job is to recover a wedged token.
++"""
++import ctypes
++import ctypes.util
++import sys
++import time
++
++VID, PID = 0x2E8A, 0x10FD
++
++# From pico/usb_reset_interface.h. Kept in sync with the firmware, which links the SDK header.
++RESET_REQUEST_BOOTSEL = 0x01
++RESET_REQUEST_FLASH = 0x02
++
++# host->device (0) | vendor (2<<5) | recipient=interface (1)
++BMREQUEST_VENDOR_INTERFACE_OUT = 0x41
++
++
++def _load_libusb():
++    for cand in ("/opt/homebrew/lib/libusb-1.0.dylib", "/usr/local/lib/libusb-1.0.dylib"):
++        try:
++            return ctypes.CDLL(cand)
++        except OSError:
++            pass
++    found = ctypes.util.find_library("usb-1.0")
++    if not found:
++        sys.exit("libusb not found. brew install libusb")
++    return ctypes.CDLL(found)
++
++
++def main() -> int:
++    bootsel = "--bootsel" in sys.argv
++    request = RESET_REQUEST_BOOTSEL if bootsel else RESET_REQUEST_FLASH
++    what = "BOOTSEL (bootloader)" if bootsel else "flash (firmware)"
++
++    lib = _load_libusb()
++    # EVERY signature must be declared. ctypes defaults undeclared integer arguments to C int,
++    # which truncates a 64-bit device handle to 32 bits and segfaults on the next call — it does
++    # not fail cleanly, it crashes. Omitting these is the single easiest way to get this wrong.
++    lib.libusb_init.argtypes = [ctypes.c_void_p]
++    lib.libusb_exit.argtypes = [ctypes.c_void_p]
++    lib.libusb_open_device_with_vid_pid.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16]
++    lib.libusb_open_device_with_vid_pid.restype = ctypes.c_void_p
++    lib.libusb_close.argtypes = [ctypes.c_void_p]
++    lib.libusb_control_transfer.argtypes = [
++        ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint16,
++        ctypes.c_uint16, ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint,
++    ]
++    lib.libusb_control_transfer.restype = ctypes.c_int
++
++    if lib.libusb_init(None) < 0:
++        sys.exit("libusb_init failed")
++
++    handle = lib.libusb_open_device_with_vid_pid(None, VID, PID)
++    if not handle:
++        lib.libusb_exit(None)
++        sys.exit(f"no Pico HSM found at {VID:04x}:{PID:04x} (is it plugged in?)")
++
++    # The firmware only acts when wIndex matches ITS interface number, and that number shifts
++    # with the build (HID/CCID/WCID/LWIP interfaces are conditional). Rather than hardcode it,
++    # try each: the wrong index is a no-op the device simply ignores, so sweeping is harmless.
++    #
++    # NOTE: a successful control transfer proves NOTHING on its own. ccid_control_xfer_cb()
++    # returns true for ANY vendor request aimed at its interface, so firmware built without
++    # PICOKEYS_REMOTE_RESET acknowledges these requests and silently does nothing. The ACK is
++    # not the result; the device going away and coming back is. So send, then verify.
++    for itf in range(4):
++        lib.libusb_control_transfer(
++            handle, BMREQUEST_VENDOR_INTERFACE_OUT, request, 0, itf, None, 0, 1000
++        )
++    lib.libusb_close(handle)
++    print(f"reset request {request:#04x} sent; verifying the device actually resets...")
++
++    # A reset makes the device drop off the bus. Watch for the disappearance — that, and not the
++    # transfer status, is the evidence the firmware acted on the request.
++    went_away = False
++    for _ in range(30):
++        time.sleep(0.5)
++        h = lib.libusb_open_device_with_vid_pid(None, VID, PID)
++        if not h:
++            went_away = True
++            break
++        lib.libusb_close(h)
++
++    if not went_away:
++        lib.libusb_exit(None)
++        print(
++            "device never left the bus, so it did NOT reset. Most likely this firmware was built\n"
++            "WITHOUT -DPICOKEYS_REMOTE_RESET=ON, in which case the handler is compiled out by\n"
++            "design and the request was acknowledged but ignored.",
++            file=sys.stderr,
++        )
++        return 1
++
++    if bootsel:
++        lib.libusb_exit(None)
++        print("device left the bus -> now in BOOTSEL. Copy a .uf2 to the mounted drive.")
++        return 0
++
++    # A firmware reset should re-enumerate on its own. Anything that leaves the bus and stays
++    # gone is a hang, not a reset, and is the failure this tool most needs to surface.
++    for _ in range(60):
++        time.sleep(0.5)
++        h = lib.libusb_open_device_with_vid_pid(None, VID, PID)
++        if h:
++            lib.libusb_close(h)
++            lib.libusb_exit(None)
++            print(f"device re-enumerated -> reset to {what} CONFIRMED")
++            return 0
++
++    lib.libusb_exit(None)
++    print("device left the bus and did NOT come back within 30s — that is a hang, not a reset.",
++          file=sys.stderr)
++    return 1
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.53.0
+
+
+From 50f480d5aaf5e8551a9cd3c8fede305d29583c6b Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 07:48:18 -0400
+Subject: [PATCH 04/27] revert(build): drop PICOKEYS_REMOTE_RESET; reboot
+ remotely via the rescue APDU instead
+
+Removes the CMake option added in 18c63c9 and retargets the host tool, because the
+capability it was built to provide ALREADY EXISTS in stock firmware and is reachable
+through a better channel.
+
+The rescue app is compiled into pico-keys-sdk unconditionally and exposes a reboot
+command:
+
+    SELECT rescue app   00 A4 04 00 08 A0 58 3F C1 9B 7E 4F 21
+    reboot normal mode  80 1F 00 00        (CLA 0x80; 0x00 is rejected with 6E00)
+
+Verified on hardware: SW=9000 and the USB registry id changes, i.e. the device
+really re-enumerates. No firmware modification of any kind is required.
+
+WHY THE REVERT, not just a second option. Comparing the two on every axis that
+matters, the USB control route loses:
+
+  - Reachability: it binds to itf_num, the CCID interface, which the OS's own CCID
+    class driver owns. libusb cannot claim it (LIBUSB_ERROR_ACCESS) and requests to
+    any other interface are stalled. It cannot work on macOS at all. APDUs travel
+    the PCSC path every other command already uses, on every platform.
+  - Safety: the rescue app gates BOOTSEL behind rescue_require_user_presence(), a
+    physical button press. The reverted option gated nothing, so it added an
+    UNAUTHENTICATED remote-firmware-replacement path to obtain a capability that
+    already existed with a proper gate.
+  - Verifiability: ccid_control_xfer_cb() returns true for ANY vendor request on its
+    interface, so its status word proves nothing. rescue_process_apdu() answers 6E00
+    for a wrong CLA and 6D00 for an unknown INS, so its 9000 is real evidence.
+
+Strictly worse in every dimension, so it goes. The lesson worth recording: look for
+an existing mechanism before adding one. rescue.c:490 was read and cited as
+precedent for the watchdog_reboot() call during this work, without registering that
+it was a complete, reachable feature rather than a code pattern to copy.
+
+The reverted approach did leave one genuine finding behind, kept in the tooling
+notes: the rescue app's own BOOTSEL path (P1=0x01) routes through EV_RESET ->
+usb_secure_reboot_now(), which was measured to HANG an RP2350 outright. So remote
+BOOTSEL is broken upstream for the same reason the first reset attempt was.
+---
+ CMakeLists.txt          |  21 -----
+ tools/pico-hsm-reset.py | 181 ++++++++++++++++------------------------
+ 2 files changed, 72 insertions(+), 130 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 40f295f..97a18e8 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -41,28 +41,7 @@ else()
+         add_compile_definitions(__FOR_CI)
+     endif()
+ 
+-    # Remote reset / BOOTSEL over USB. OFF by default and it must stay that way for any token
+-    # holding real key material: RESET_REQUEST_BOOTSEL allows REMOTE FIRMWARE REPLACEMENT by
+-    # anything that can reach the USB device, and neither request is authenticated (a wedged
+-    # device cannot verify a PIN, which is the whole point of a recovery path). Enable it only
+-    # for development or staging tokens, where remote recovery and firmware updates are worth
+-    # more than the exposure.
+-    option(PICOKEYS_REMOTE_RESET "Allow reset/BOOTSEL over USB — DEV/STAGING TOKENS ONLY" OFF)
+-    if(PICOKEYS_REMOTE_RESET)
+-        add_compile_definitions(PICOKEYS_REMOTE_RESET)
+-        message(WARNING "PICOKEYS_REMOTE_RESET is ON: this firmware accepts UNAUTHENTICATED reset and BOOTSEL requests over USB, which permits remote firmware replacement. Do NOT ship this build on a token holding real keys.")
+-    endif()
+-
+     add_executable(pico_hsm)
+-
+-    if(PICOKEYS_REMOTE_RESET)
+-        # Must follow add_executable(): the target has to exist before it can be linked against.
+-        # RESET_REQUEST_BOOTSEL / RESET_REQUEST_FLASH live in pico/usb_reset_interface.h, which
+-        # ships in its own header-only SDK library rather than on the default include path.
+-        # Linking it keeps the request codes coming from the SDK instead of being re-declared
+-        # here and silently drifting from it.
+-        target_link_libraries(pico_hsm PUBLIC pico_usb_reset_interface_headers)
+-    endif()
+ endif()
+ set(USB_ITF_CCID 1)
+ set(USB_ITF_WCID 1)
+diff --git a/tools/pico-hsm-reset.py b/tools/pico-hsm-reset.py
+index e7a9b1d..09b4de0 100755
+--- a/tools/pico-hsm-reset.py
++++ b/tools/pico-hsm-reset.py
+@@ -1,130 +1,93 @@
+ #!/usr/bin/env python3
+-"""Reset a Pico HSM over USB, without touching the hardware.
++"""Reboot a Pico HSM remotely, over the normal smartcard channel.
+ 
+-This is the host side of the PICOKEYS_REMOTE_RESET build option. Firmware built WITHOUT that
+-option ignores these requests, which is the intended default — see the CMake option for why.
++    pico-hsm-reset.py          # reboot into firmware (recovery)
+ 
+-    pico-hsm-reset.py                # reboot into firmware (recovery)
+-    pico-hsm-reset.py --bootsel      # reboot into the bootloader (remote firmware update)
++This needs NO firmware modification. The rescue app is compiled into stock pico-keys-sdk and
++already exposes a reboot command; this just sends it and confirms it took effect.
+ 
+-Why not picotool: picotool looks for the Pico SDK's dedicated reset interface, identified as
+-class 0xFF / subclass 0x00 / protocol 0x01. The Pico HSM's CCID interface is vendor-class but
+-protocol 0x00, so picotool does not recognise it. The control request itself is identical; only
+-the discovery differs, so a direct control transfer works where picotool does not.
++    SELECT rescue app   00 A4 04 00 08 A0 58 3F C1 9B 7E 4F 21
++    reboot normal mode  80 1F 00 00        (CLA is 0x80, not 0x00 — rescue rejects 0x00 with 6E00)
+ 
+-Uses libusb through ctypes on purpose: no pyusb, no pip install, nothing to provision on a
+-machine whose only job is to recover a wedged token.
++WHY APDUs AND NOT A USB CONTROL REQUEST. ccid.c has a (commented-out) vendor control handler for
++RESET_REQUEST_FLASH, and enabling it looks like the obvious route. It is a dead end on macOS: the
++handler binds to itf_num, which is the CCID interface, and the OS's own CCID class driver owns
++that interface — libusb gets LIBUSB_ERROR_ACCESS and cannot claim it, while requests aimed at any
++other interface are stalled by the device. APDUs travel the PCSC path that already works for
++every other command, on every platform, without disturbing the smartcard stack.
++
++BOOTSEL is deliberately NOT offered here. The rescue app gates P1=0x01 behind
++rescue_require_user_presence() — a physical button press — so remote firmware replacement is
++blocked by design. That gate is correct and worth keeping; do not route around it.
+ """
+-import ctypes
+-import ctypes.util
++import re
++import shutil
++import subprocess
+ import sys
+ import time
+ 
+-VID, PID = 0x2E8A, 0x10FD
+-
+-# From pico/usb_reset_interface.h. Kept in sync with the firmware, which links the SDK header.
+-RESET_REQUEST_BOOTSEL = 0x01
+-RESET_REQUEST_FLASH = 0x02
+-
+-# host->device (0) | vendor (2<<5) | recipient=interface (1)
+-BMREQUEST_VENDOR_INTERFACE_OUT = 0x41
++RESCUE_AID = "A0:58:3F:C1:9B:7E:4F:21"
++SELECT_RESCUE = f"00:A4:04:00:08:{RESCUE_AID}"
++REBOOT_NORMAL = "80:1F:00:00"
+ 
+ 
+-def _load_libusb():
+-    for cand in ("/opt/homebrew/lib/libusb-1.0.dylib", "/usr/local/lib/libusb-1.0.dylib"):
+-        try:
+-            return ctypes.CDLL(cand)
+-        except OSError:
+-            pass
+-    found = ctypes.util.find_library("usb-1.0")
+-    if not found:
+-        sys.exit("libusb not found. brew install libusb")
+-    return ctypes.CDLL(found)
++def reader_present() -> bool:
++    try:
++        out = subprocess.run(
++            ["opensc-tool", "--list-readers"], capture_output=True, text=True, timeout=20
++        ).stdout
++    except (subprocess.TimeoutExpired, OSError):
++        return False
++    return "Pico" in out
+ 
+ 
+ def main() -> int:
+-    bootsel = "--bootsel" in sys.argv
+-    request = RESET_REQUEST_BOOTSEL if bootsel else RESET_REQUEST_FLASH
+-    what = "BOOTSEL (bootloader)" if bootsel else "flash (firmware)"
+-
+-    lib = _load_libusb()
+-    # EVERY signature must be declared. ctypes defaults undeclared integer arguments to C int,
+-    # which truncates a 64-bit device handle to 32 bits and segfaults on the next call — it does
+-    # not fail cleanly, it crashes. Omitting these is the single easiest way to get this wrong.
+-    lib.libusb_init.argtypes = [ctypes.c_void_p]
+-    lib.libusb_exit.argtypes = [ctypes.c_void_p]
+-    lib.libusb_open_device_with_vid_pid.argtypes = [ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint16]
+-    lib.libusb_open_device_with_vid_pid.restype = ctypes.c_void_p
+-    lib.libusb_close.argtypes = [ctypes.c_void_p]
+-    lib.libusb_control_transfer.argtypes = [
+-        ctypes.c_void_p, ctypes.c_uint8, ctypes.c_uint8, ctypes.c_uint16,
+-        ctypes.c_uint16, ctypes.c_void_p, ctypes.c_uint16, ctypes.c_uint,
+-    ]
+-    lib.libusb_control_transfer.restype = ctypes.c_int
+-
+-    if lib.libusb_init(None) < 0:
+-        sys.exit("libusb_init failed")
+-
+-    handle = lib.libusb_open_device_with_vid_pid(None, VID, PID)
+-    if not handle:
+-        lib.libusb_exit(None)
+-        sys.exit(f"no Pico HSM found at {VID:04x}:{PID:04x} (is it plugged in?)")
+-
+-    # The firmware only acts when wIndex matches ITS interface number, and that number shifts
+-    # with the build (HID/CCID/WCID/LWIP interfaces are conditional). Rather than hardcode it,
+-    # try each: the wrong index is a no-op the device simply ignores, so sweeping is harmless.
+-    #
+-    # NOTE: a successful control transfer proves NOTHING on its own. ccid_control_xfer_cb()
+-    # returns true for ANY vendor request aimed at its interface, so firmware built without
+-    # PICOKEYS_REMOTE_RESET acknowledges these requests and silently does nothing. The ACK is
+-    # not the result; the device going away and coming back is. So send, then verify.
+-    for itf in range(4):
+-        lib.libusb_control_transfer(
+-            handle, BMREQUEST_VENDOR_INTERFACE_OUT, request, 0, itf, None, 0, 1000
+-        )
+-    lib.libusb_close(handle)
+-    print(f"reset request {request:#04x} sent; verifying the device actually resets...")
+-
+-    # A reset makes the device drop off the bus. Watch for the disappearance — that, and not the
+-    # transfer status, is the evidence the firmware acted on the request.
+-    went_away = False
+-    for _ in range(30):
+-        time.sleep(0.5)
+-        h = lib.libusb_open_device_with_vid_pid(None, VID, PID)
+-        if not h:
+-            went_away = True
+-            break
+-        lib.libusb_close(h)
+-
+-    if not went_away:
+-        lib.libusb_exit(None)
+-        print(
+-            "device never left the bus, so it did NOT reset. Most likely this firmware was built\n"
+-            "WITHOUT -DPICOKEYS_REMOTE_RESET=ON, in which case the handler is compiled out by\n"
+-            "design and the request was acknowledged but ignored.",
+-            file=sys.stderr,
+-        )
+-        return 1
++    if not shutil.which("opensc-tool"):
++        sys.exit("opensc-tool not found (brew install opensc / apt install opensc)")
+ 
+-    if bootsel:
+-        lib.libusb_exit(None)
+-        print("device left the bus -> now in BOOTSEL. Copy a .uf2 to the mounted drive.")
+-        return 0
++    if not reader_present():
++        sys.exit("no Pico HSM reader found — is it plugged in?")
+ 
+-    # A firmware reset should re-enumerate on its own. Anything that leaves the bus and stays
+-    # gone is a hang, not a reset, and is the failure this tool most needs to surface.
+-    for _ in range(60):
+-        time.sleep(0.5)
+-        h = lib.libusb_open_device_with_vid_pid(None, VID, PID)
+-        if h:
+-            lib.libusb_close(h)
+-            lib.libusb_exit(None)
+-            print(f"device re-enumerated -> reset to {what} CONFIRMED")
++    print("sending reboot APDU to the rescue app...")
++    try:
++        res = subprocess.run(
++            ["opensc-tool", "-s", SELECT_RESCUE, "-s", REBOOT_NORMAL],
++            capture_output=True, text=True, timeout=60,
++        )
++    except subprocess.TimeoutExpired:
++        sys.exit("opensc-tool timed out talking to the card")
++
++    # Two status words come back, one per APDU. The device may reboot before the second reply is
++    # transmitted, so a MISSING second SW is normal and not an error — the bus check below is
++    # what decides. Only an explicit non-9000 is worth failing on early.
++    sws = re.findall(r"SW1=0x([0-9A-Fa-f]{2}), SW2=0x([0-9A-Fa-f]{2})", res.stdout)
++    if sws and sws[0] != ("90", "00"):
++        sys.exit(f"SELECT of the rescue app failed (SW={sws[0][0]}{sws[0][1]}) — is this pico-hsm?")
++    if len(sws) > 1 and sws[1] != ("90", "00"):
++        sw = f"{sws[1][0]}{sws[1][1]}".upper()
++        hint = "  (6E00 = wrong CLA; 6D00 = INS unsupported, rescue app may be absent)"
++        sys.exit(f"reboot command rejected (SW={sw}){hint}")
++
++    # SW=9000 IS meaningful here, unlike the USB control-request route. rescue_process_apdu()
++    # answers 6E00 for a wrong CLA and 6D00 for an unknown INS, so 9000 can only be produced by
++    # cmd_reboot_bootsel() having run and armed the watchdog. (Contrast ccid_control_xfer_cb(),
++    # which returns true for ANY vendor request on its interface — there the status word proves
++    # nothing, which is why this tool used to verify against the bus instead.)
++    print("reboot armed (SW=9000). Confirming the device comes back...")
++
++    # Observing the device LEAVE the bus is unreliable and deliberately not required: the reboot
++    # completes in roughly a second, and a presence check costs about that much, so the gap is
++    # routinely missed. Racing it produced false "did not reboot" reports. What matters
++    # operationally is the device being usable again, so wait for that instead.
++    deadline = time.time() + 30
++    time.sleep(2)
++    while time.time() < deadline:
++        if reader_present():
++            print("device is responding — reboot complete")
+             return 0
++        time.sleep(0.5)
+ 
+-    lib.libusb_exit(None)
+-    print("device left the bus and did NOT come back within 30s — that is a hang, not a reset.",
+-          file=sys.stderr)
++    print("device did not come back within 30s — that is a hang, not a reboot.", file=sys.stderr)
+     return 1
+ 
+ 
+-- 
+2.53.0
+
+
+From 0fe3fdf8d4badbefc89f2202577919e7969dc520 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 08:14:00 -0400
+Subject: [PATCH 05/27] test(tools): cycle-test harness + UART instrumentation
+ for the reset path
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The reset after INITIALIZE DEVICE measured 7/7 on a warm device but 1/1 HUNG on the
+first initialize after a firmware flash. One failure is a hypothesis, not a pattern,
+and settling it needs repetition with instrumentation that does not lie. Both were
+missing.
+
+hsm-cycle-test.sh runs N provisioning cycles and reports a pass/hang count with
+recovery times. Its measurement choices are all corrections of mistakes made while
+debugging this by hand:
+
+  - Presence comes from the USB layer, not `opensc-tool --list-readers`. That call
+    costs ~1s while the reset completes in ~1s, so polling with it MISSES the gap
+    and reports a successful reset as "never rebooted". That false negative cost an
+    entire debugging round.
+  - A reboot is detected by the device IDENTITY CHANGING, not by observing an
+    absence. Racing a ~1s window produces false negatives; a new identity is durable
+    evidence either way.
+  - Exit codes are read directly, never through a pipe, because `cmd | tail` yields
+    tail's status and silently converts a failure into a pass. That happened twice.
+  - Re-enumerating is necessary but NOT sufficient: the card must then actually
+    answer, so a partial failure is distinguished from a clean recovery.
+
+Sampling with it immediately improved the number: recovery is ~1s, not the ~3s the
+hand-rolled loops reported, because they polled at 3s and could not resolve better.
+Warm-device total is now 10/10.
+
+The firmware instrumentation logs progress through the commit/reset path over UART.
+UART specifically, because it is the ONLY channel that survives the failure being
+chased: when the reset hangs the device leaves the USB bus, so anything logging over
+USB goes dark exactly when it is needed. PICO_STDIO_UART is on by default and
+PICO_STDIO_USB is not, so this needs no build change — only a 3.3V serial adapter on
+GPIO0/GND at 115200. The firmware has been printing diagnostics all along
+(low_flash.c alone emits flash-lockout timeouts) with nobody listening.
+
+The lines are placed to localise the hang rather than just prove it happened: if
+"arming watchdog reset" appears and the device never returns, the watchdog was armed
+and the fault is in reset/re-enumeration; if it never appears, the hang is earlier,
+in the commit or the wipe, and the preceding lines say which.
+
+Harness verified against real hardware: 3 cycles, 3 recovered, exit 0.
+---
+ src/hsm/cmd_initialize.c |  28 +++++++-
+ tools/hsm-cycle-test.sh  | 149 +++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 175 insertions(+), 2 deletions(-)
+ create mode 100755 tools/hsm-cycle-test.sh
+
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index 33e29c2..395214b 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -26,6 +26,7 @@
+ #include "otp.h"
+ #include "object_authorization.h"
+ #include "usb.h"
++#include <stdio.h>
+ #ifdef PICO_PLATFORM
+ #include "hardware/watchdog.h"
+ #endif
+@@ -280,10 +281,20 @@ int cmd_initialize(void) {
+          * flash_commit_sync() is usable (it refuses on core 0, since core 0 owns the task it
+          * would be waiting for). Fall back to the async commit if it reports failure so a
+          * timeout can never leave the commit unqueued. */
+-        if (!flash_commit_sync(FLASH_COMMIT_SYNC_TIMEOUT_MS)) {
++        /* These printf()s go to the UART (PICO_STDIO_UART is on by default; PICO_STDIO_USB is
++         * not), which is the ONLY channel that survives the failure being chased here: when the
++         * reset below hangs, the device leaves the USB bus, so anything logging over USB goes
++         * dark at exactly the moment it is needed. A serial adapter on GPIO0/GND at 115200
++         * turns "it hung, unclear where" into a line number. */
++        printf("INIT: wipe done, committing flash synchronously\n");
++        bool committed = flash_commit_sync(FLASH_COMMIT_SYNC_TIMEOUT_MS);
++        if (!committed) {
++            printf("INIT: WARN sync commit reported failure, falling back to async\n");
+             flash_commit();
+         }
++        printf("INIT: flash committed (sync=%d)\n", (int) committed);
+         reset_puk_store();
++        printf("INIT: puk store reset\n");
+ #if defined(PICO_PLATFORM)
+         /* Re-personalising wipes the file system, and the card does NOT come back on its own
+          * afterwards: the reader keeps reporting a card, but the card returns no ATR and
+@@ -307,8 +318,21 @@ int cmd_initialize(void) {
+          * physical access to the device, and the alternative here does not reboot at all.
+          *
+          * The delay lets core 0 finish transmitting the APDU response before the reset lands,
+-         * so the host sees this command SUCCEED rather than "Card removed". */
++         * so the host sees this command SUCCEED rather than "Card removed".
++         *
++         * MEASURED RELIABILITY: 7/7 on a warm device, all recovering in ~3s. The single observed
++         * failure was the FIRST initialize after a firmware flash, which hung and needed a
++         * physical replug. One data point is a hypothesis, not a pattern — hsm-cycle-test.sh
++         * exists to settle it. Until it is settled, provisioning should reboot the device (via
++         * the rescue app: SELECT AID then 80 1F 00 00) after flashing and BEFORE the first
++         * initialize, which avoids the cold path entirely. */
++        printf("INIT: arming watchdog reset in %d ms\n", (int) INITIALIZE_REBOOT_DELAY_MS);
+         watchdog_reboot(0, 0, INITIALIZE_REBOOT_DELAY_MS);
++        /* If the UART shows this line and the device never comes back, the watchdog was armed
++         * and the fault is in the reset/re-enumeration itself. If it never appears, the hang is
++         * EARLIER — in the commit or the wipe — and the lines above localise it. That
++         * distinction is the whole reason these logs exist. */
++        printf("INIT: watchdog armed, returning SW_OK\n");
+ #endif
+     }
+     else {   //free memory bytes request
+diff --git a/tools/hsm-cycle-test.sh b/tools/hsm-cycle-test.sh
+new file mode 100755
+index 0000000..b221238
+--- /dev/null
++++ b/tools/hsm-cycle-test.sh
+@@ -0,0 +1,149 @@
++#!/usr/bin/env bash
++# hsm-cycle-test.sh — measure how reliably a Pico HSM survives re-provisioning.
++#
++#   ./hsm-cycle-test.sh --cycles 10
++#   ./hsm-cycle-test.sh --cycles 5 --uart /dev/tty.usbserial-0001    # capture firmware logs
++#   ./hsm-cycle-test.sh --cycles 3 --full                            # whole chain, not just reset
++#
++# WHY THIS EXISTS. `sc-hsm-tool --initialize` re-personalises the device, and the firmware resets
++# itself afterwards so the card can rebuild state (without that reset the card never comes back
++# and only a PHYSICAL REPLUG recovers it). That reset was measured at 7/7 on a warm device and
++# 1/1 HUNG on the first initialize after a firmware flash — a real difference on a tiny sample.
++# Settling that needs repetition with consistent instrumentation, which is what this is.
++#
++# INSTRUMENTATION NOTES, all learned by getting them wrong first:
++#   - Presence is read from the USB layer, NOT from `opensc-tool --list-readers`. That call costs
++#     ~1s, and the reset completes in ~1-3s, so polling with it MISSES the gap and reports a
++#     successful reset as "never rebooted".
++#   - A reboot is detected by the device IDENTITY CHANGING, not by observing an absence. Racing a
++#     ~1s absence window produces false negatives; a new identity is durable evidence.
++#   - Exit codes are read directly, never through a pipe. `cmd | tail` yields tail's status, which
++#     silently turns a failure into a pass.
++set -u
++
++CYCLES=5
++UART=""
++FULL=0
++SO_PIN="${HSM_SO_PIN:-3537363231383830}"
++USER_PIN="${HSM_USER_PIN:-648219}"
++STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
++VIDPID="2e8a:10fd"
++
++while [ $# -gt 0 ]; do
++    case "$1" in
++        --cycles) CYCLES="$2"; shift 2;;
++        --uart)   UART="$2"; shift 2;;
++        --full)   FULL=1; shift;;
++        -h|--help) sed -n '2,30p' "$0"; exit 0;;
++        *) echo "unknown arg: $1" >&2; exit 2;;
++    esac
++done
++
++# Device identity, cheaply, on whichever platform. It only has to CHANGE across a re-enumeration;
++# its actual value is meaningless. On Linux the bus/device number is reassigned on reconnect; on
++# macOS the IORegistry entry id is.
++device_id() {
++    case "$(uname -s)" in
++        Darwin) ioreg -p IOUSB -w0 2>/dev/null | grep -i "pico" | grep -oE "id 0x[0-9a-f]+" | head -1;;
++        Linux)  lsusb -d "$VIDPID" 2>/dev/null | head -1 | awk '{print $2"/"$4}';;
++        *)      echo "unsupported platform: $(uname -s)" >&2; exit 2;;
++    esac
++}
++
++card_responds() {
++    perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool >/dev/null 2>&1
++}
++
++# Wait for a NEW identity, i.e. the device re-enumerated. Returns 0 with SECS set, else 1.
++SECS=0
++wait_for_new_id() {
++    local before="$1" limit="${2:-45}" waited=0 now
++    while [ "$waited" -lt "$limit" ]; do
++        sleep 1; waited=$((waited + 1))
++        now="$(device_id)"
++        if [ -n "$now" ] && [ "$now" != "$before" ]; then SECS=$waited; return 0; fi
++    done
++    SECS=$waited; return 1
++}
++
++start_uart_capture() {
++    [ -n "$UART" ] || return 0
++    [ -e "$UART" ] || { echo "  ! UART $UART not present, continuing without logs" >&2; UART=""; return 0; }
++    # Raw read in the background. cat is enough: we only ever want to see what the firmware said,
++    # never to write to it.
++    ( stty -f "$UART" 115200 raw 2>/dev/null || stty -F "$UART" 115200 raw 2>/dev/null ) || true
++    cat "$UART" > "$LOGDIR/uart-cycle-$1.log" 2>/dev/null &
++    UART_PID=$!
++}
++
++stop_uart_capture() {
++    [ -n "${UART_PID:-}" ] || return 0
++    kill "$UART_PID" 2>/dev/null; wait "$UART_PID" 2>/dev/null
++    UART_PID=""
++}
++
++LOGDIR="$(mktemp -d)"
++echo "logs: $LOGDIR"
++[ -n "$UART" ] && echo "uart: $UART (115200)"
++echo "cycles: $CYCLES  mode: $([ "$FULL" = 1 ] && echo full-chain || echo reset-only)"
++echo
++
++if [ -z "$(device_id)" ]; then
++    echo "no Pico HSM on the bus ($VIDPID) — plug it in first" >&2
++    exit 1
++fi
++
++pass=0; fail=0; times=""
++for n in $(seq 1 "$CYCLES"); do
++    printf 'cycle %s/%s: ' "$n" "$CYCLES"
++    start_uart_capture "$n"
++    before="$(device_id)"
++
++    perl -e 'alarm 180; exec @ARGV' -- sc-hsm-tool --initialize \
++        --so-pin "$SO_PIN" --pin "$USER_PIN" --dkek-shares 1 --label "cycle$n" \
++        < /dev/null > "$LOGDIR/init-$n.log" 2>&1
++    init_rc=$?
++
++    if wait_for_new_id "$before" 45; then
++        # Re-enumerating is necessary but not sufficient — the card must actually answer.
++        settled=0
++        for _ in $(seq 1 15); do
++            sleep 1
++            if card_responds; then settled=1; break; fi
++        done
++        if [ "$settled" = 1 ]; then
++            pass=$((pass + 1)); times="$times $SECS"
++            echo "RECOVERED in ${SECS}s (init rc=$init_rc)"
++        else
++            fail=$((fail + 1))
++            echo "REBOOTED but card never answered — partial failure"
++        fi
++    else
++        fail=$((fail + 1))
++        echo "HUNG — no re-enumeration in ${SECS}s. NEEDS A PHYSICAL REPLUG; stopping."
++        stop_uart_capture
++        [ -n "$UART" ] && echo "  firmware log: $LOGDIR/uart-cycle-$n.log"
++        break
++    fi
++    stop_uart_capture
++
++    if [ "$FULL" = 1 ]; then
++        if [ -f "$STAGING/dkek.pbe" ] && [ -f "$STAGING/dkek.pw" ]; then
++            DKEK_PW="$(cat "$STAGING/dkek.pw")" perl -e 'alarm 120; exec @ARGV' -- \
++                sc-hsm-tool --import-dkek-share "$STAGING/dkek.pbe" \
++                --password env:DKEK_PW --so-pin "$SO_PIN" < /dev/null \
++                > "$LOGDIR/dkek-$n.log" 2>&1
++            echo "  dkek import rc=$?"
++        else
++            echo "  ! no DKEK share in $STAGING — skipping full chain"
++        fi
++    fi
++done
++
++echo
++echo "==================================================="
++echo " passed: $pass    hung: $fail    of $((pass + fail)) attempted"
++[ -n "$times" ] && echo " recovery times:$times (seconds)"
++echo " logs: $LOGDIR"
++echo "==================================================="
++[ "$fail" -eq 0 ] || exit 1
+-- 
+2.53.0
+
+
+From 2f0ae62f87798183016c80f4b5e068826d2c19b0 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 09:00:20 -0400
+Subject: [PATCH 06/27] docs(hsm): the cold-boot hang was a wrong PICO_BOARD,
+ not a firmware defect
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+An earlier round measured the reset after INITIALIZE DEVICE at 7/7 on a warm device
+but 1/1 HUNG on the first initialize after a firmware flash, and that was nearly
+written up as a genuine cold-boot defect with a documented workaround.
+
+It was not a defect. The firmware had been built with -DPICO_BOARD=pico2 — RP2350A
+with a 4MB flash map — on a Waveshare RP2350-PiZero, which is RP2350B with 16MB and
+a different default UART (see waveshare_rp2350_pizero.h, present in the SDK the
+whole time). Rebuilding against the correct board definition made the cold path pass
+on the first attempt and on every attempt since: 9/9 recovering in 1-2s via
+hsm-cycle-test.sh, cold path included.
+
+The lesson, recorded because it cost three rounds of hardware debugging: a generic
+PICO_BOARD target that BOOTS is not evidence that it is correct. The device
+enumerated, answered APDUs, imported keys, signed, and verified — everything worked
+well enough to hide the mismatch until one flash-heavy path started failing
+intermittently. Verify what the hardware IS before reasoning about how it behaves.
+
+Build this board with:
+    cmake .. -DPICO_BOARD=waveshare_rp2350_pizero
+---
+ src/hsm/cmd_initialize.c | 18 ++++++++++++------
+ 1 file changed, 12 insertions(+), 6 deletions(-)
+
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index 395214b..ca82291 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -320,12 +320,18 @@ int cmd_initialize(void) {
+          * The delay lets core 0 finish transmitting the APDU response before the reset lands,
+          * so the host sees this command SUCCEED rather than "Card removed".
+          *
+-         * MEASURED RELIABILITY: 7/7 on a warm device, all recovering in ~3s. The single observed
+-         * failure was the FIRST initialize after a firmware flash, which hung and needed a
+-         * physical replug. One data point is a hypothesis, not a pattern — hsm-cycle-test.sh
+-         * exists to settle it. Until it is settled, provisioning should reboot the device (via
+-         * the rescue app: SELECT AID then 80 1F 00 00) after flashing and BEFORE the first
+-         * initialize, which avoids the cold path entirely. */
++         * MEASURED RELIABILITY: 9/9 recovering in 1-2s (hsm-cycle-test.sh), INCLUDING the first
++         * initialize after a firmware flash.
++         *
++         * An earlier round measured 7/7 warm but 1/1 HUNG on that first-after-flash case, and it
++         * was very nearly written up as a real cold-boot defect. It was not. The firmware had
++         * been built with -DPICO_BOARD=pico2, i.e. for RP2350A with a 4MB flash map, on a board
++         * that is RP2350B with 16MB (see waveshare_rp2350_pizero.h). Rebuilding against the
++         * correct board definition made the cold path pass first try and every try after.
++         *
++         * BUILD FOR THE ACTUAL BOARD. A generic -DPICO_BOARD target that merely boots is not
++         * evidence it is correct: everything worked well enough to mask the mismatch until one
++         * flash-heavy path failed intermittently. */
+         printf("INIT: arming watchdog reset in %d ms\n", (int) INITIALIZE_REBOOT_DELAY_MS);
+         watchdog_reboot(0, 0, INITIALIZE_REBOOT_DELAY_MS);
+         /* If the UART shows this line and the device never comes back, the watchdog was armed
+-- 
+2.53.0
+
+
+From 301557fa36e239af2fe01caab85eb2abeb8ea16b Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 09:33:36 -0400
+Subject: [PATCH 07/27] fix(hsm): size the commit timeout from the hardware,
+ never reset on an unconfirmed commit
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two defects in the reset-after-INITIALIZE path, both mine.
+
+1. The commit timeout was 10s. The data region is FLASH_SIZE/2, so on this 16MB
+   board that is 8MB = ~2048 sectors of 4KB, and a sector erase costs ~30-45ms on
+   RP2350 — a large wipe legitimately runs 60-90 SECONDS. 10s was not a tight bound,
+   it was far below the NORMAL case, so the sync reported failure on erases that
+   were proceeding perfectly. Raised to 180s. Overshooting costs nothing (the wait
+   returns as soon as the queue drains) while undershooting hangs the device, so the
+   consequences are asymmetric and the bound should be generous.
+
+2. On an unconfirmed commit it fell back to an ASYNC commit and then reset ANYWAY —
+   the worst ordering available, since "unconfirmed" most likely means the erase is
+   still in flight and the reset lands inside it. Now it reports SW_EXEC_ERROR and
+   stays alive. An operator who gets an error and retries is strictly better off than
+   one holding a device that needs someone to walk into the datacenter.
+
+MEASURED, and this is an improvement rather than a fix: full-chain cycles went from
+2/3 to 14/15. The residual ~7% still hangs with the device leaving the USB bus, and
+since the firmware now declines to reset whenever the commit is unconfirmed, that
+residual is NOT the commit race — it is the reset itself. Cause unknown. Two
+successive theories (wrong PICO_BOARD, then the commit race) each produced a real
+improvement and neither was the whole story, so the next step is SWD and a backtrace
+rather than a third theory.
+
+The harness gained a distinction this run exposed: "no re-enumeration" has two
+opposite causes. The firmware declining to reset also produces no new device
+identity, but leaves the device ALIVE — reporting that as a hang would score the
+safety mechanism as a failure. It now separates them by whether the device is still
+on the bus.
+---
+ src/hsm/cmd_initialize.c | 59 ++++++++++++++++++---------
+ tools/hsm-cycle-test.sh  | 86 +++++++++++++++++++++++++++++++++++-----
+ 2 files changed, 116 insertions(+), 29 deletions(-)
+
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index ca82291..c0c92b6 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -32,10 +32,18 @@
+ #endif
+ 
+ /* Upper bound on waiting for the re-personalisation write to become durable before the reset
+- * below. Generous on purpose: a full-region erase is many sectors, and overshooting merely
+- * costs a few idle milliseconds, whereas undershooting falls back to the async commit and
+- * reintroduces the race the synchronous wait exists to remove. */
+-#define FLASH_COMMIT_SYNC_TIMEOUT_MS 10000
++ * below.
++ *
++ * SIZE THIS FROM THE HARDWARE, NOT FROM INTUITION. The data region is FLASH_SIZE/2, so on a 16MB
++ * board that is 8MB = ~2048 sectors of 4KB, and a sector erase costs roughly 30-45ms on RP2350.
++ * A large wipe can therefore run 60-90 SECONDS. The first version of this used 10s, which is not
++ * a tight bound — it is far below the worst case, so the sync routinely "timed out" on a wipe
++ * that was proceeding perfectly normally.
++ *
++ * Overshooting costs nothing: the wait returns as soon as the queue drains, so the timeout is
++ * only ever reached when something is genuinely wrong. Undershooting caused the reset to fire
++ * into an in-flight erase and hang the device. Asymmetric consequences, so be generous. */
++#define FLASH_COMMIT_SYNC_TIMEOUT_MS 180000
+ 
+ /* Grace period between arming the reset and it firing, so core 0 can transmit the APDU response
+  * first. Without it the host reports "Card removed" for a command that actually succeeded. */
+@@ -275,26 +283,39 @@ int cmd_initialize(void) {
+         if (ret != PICOKEYS_OK) {
+             return SW_EXEC_ERROR();
+         }
+-        /* Persist SYNCHRONOUSLY. flash_commit() only queues the write for low_flash_task() on
+-         * core 0; resetting straight after it would race the write and could leave a
+-         * half-written file system. APDU handlers run on core 1, which is exactly where
+-         * flash_commit_sync() is usable (it refuses on core 0, since core 0 owns the task it
+-         * would be waiting for). Fall back to the async commit if it reports failure so a
+-         * timeout can never leave the commit unqueued. */
+-        /* These printf()s go to the UART (PICO_STDIO_UART is on by default; PICO_STDIO_USB is
+-         * not), which is the ONLY channel that survives the failure being chased here: when the
+-         * reset below hangs, the device leaves the USB bus, so anything logging over USB goes
+-         * dark at exactly the moment it is needed. A serial adapter on GPIO0/GND at 115200
+-         * turns "it hung, unclear where" into a line number. */
++        /* Persist SYNCHRONOUSLY. flash_commit() only QUEUES the write for low_flash_task() on
++         * core 0; resetting straight after it would race the write. APDU handlers run on core 1,
++         * which is exactly where flash_commit_sync() is usable (it refuses on core 0, since core
++         * 0 owns the task it would be waiting for).
++         *
++         * These printf()s go to the UART (PICO_STDIO_UART is on by default, PICO_STDIO_USB is
++         * not), the only channel that survives this failure: when the reset below hangs the
++         * device leaves the USB bus, so USB-side logging goes dark exactly when it is needed. */
+         printf("INIT: wipe done, committing flash synchronously\n");
+         bool committed = flash_commit_sync(FLASH_COMMIT_SYNC_TIMEOUT_MS);
++        printf("INIT: flash commit sync=%d\n", (int) committed);
++        reset_puk_store();
++        printf("INIT: puk store reset\n");
++
++        /* DO NOT RESET ON AN UNCONFIRMED COMMIT.
++         *
++         * The earlier version fell back to an ASYNC flash_commit() here and then reset anyway,
++         * which is the worst possible ordering: an unconfirmed commit means the erase is very
++         * likely still in flight, and the reset then lands mid-erase. Measured: cycles that wipe
++         * a nearly-empty card pass 9/9, while cycles that wipe a card holding an imported key
++         * plus a populated DKEK domain — far more flash to erase — hung 1 in 3. More to erase
++         * means a longer erase, means a greater chance the sync times out and the reset fires
++         * into it. The device then leaves the USB bus and needs a PHYSICAL REPLUG.
++         *
++         * So: report the failure and stay alive instead. An operator who gets an error and can
++         * retry is in a strictly better position than one holding a device that needs someone to
++         * walk into the datacenter. The wipe itself has already succeeded at this point, so the
++         * retry is cheap; only the reset is being declined. */
+         if (!committed) {
+-            printf("INIT: WARN sync commit reported failure, falling back to async\n");
++            printf("INIT: commit UNCONFIRMED — refusing to reset (would land mid-erase)\n");
+             flash_commit();
++            return SW_EXEC_ERROR();
+         }
+-        printf("INIT: flash committed (sync=%d)\n", (int) committed);
+-        reset_puk_store();
+-        printf("INIT: puk store reset\n");
+ #if defined(PICO_PLATFORM)
+         /* Re-personalising wipes the file system, and the card does NOT come back on its own
+          * afterwards: the reader keeps reporting a card, but the card returns no ATR and
+diff --git a/tools/hsm-cycle-test.sh b/tools/hsm-cycle-test.sh
+index b221238..ccc3934 100755
+--- a/tools/hsm-cycle-test.sh
++++ b/tools/hsm-cycle-test.sh
+@@ -28,6 +28,9 @@ SO_PIN="${HSM_SO_PIN:-3537363231383830}"
+ USER_PIN="${HSM_USER_PIN:-648219}"
+ STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
+ VIDPID="2e8a:10fd"
++AUTO_IMPORT="${HSM_AUTO_IMPORT:-$HOME/code/example-service-hsmfix/infra/ceremony/qubes/scripts/hsm-auto-import.sh}"
++VERIFY="${HSM_VERIFY:-$HOME/code/example-service-hsmfix/infra/ceremony/qubes/scripts/verify-hsm-control.py}"
++P11MOD="${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}"
+ 
+ while [ $# -gt 0 ]; do
+     case "$1" in
+@@ -93,7 +96,7 @@ if [ -z "$(device_id)" ]; then
+     exit 1
+ fi
+ 
+-pass=0; fail=0; times=""
++pass=0; fail=0; declined=0; times=""; chain_pass=0; chain_fail=0
+ for n in $(seq 1 "$CYCLES"); do
+     printf 'cycle %s/%s: ' "$n" "$CYCLES"
+     start_uart_capture "$n"
+@@ -119,31 +122,94 @@ for n in $(seq 1 "$CYCLES"); do
+             echo "REBOOTED but card never answered — partial failure"
+         fi
+     else
+-        fail=$((fail + 1))
+-        echo "HUNG — no re-enumeration in ${SECS}s. NEEDS A PHYSICAL REPLUG; stopping."
++        # "No re-enumeration" has TWO causes and they are opposites. The firmware declines to
++        # reset when the flash commit is unconfirmed (returning SW_EXEC_ERROR and staying alive
++        # on purpose, since an operator who can retry beats a device needing a datacenter visit).
++        # That also produces no new identity — but the device is FINE. Calling it a hang would
++        # report the safety mechanism working as a failure, so distinguish them by whether the
++        # device is still on the bus.
+         stop_uart_capture
+-        [ -n "$UART" ] && echo "  firmware log: $LOGDIR/uart-cycle-$n.log"
++        if [ -n "$(device_id)" ]; then
++            echo "DECLINED to reset but device is ALIVE (init rc=$init_rc) — commit was"
++            echo "         unconfirmed and the firmware correctly refused to reset. Retryable."
++            declined=$((declined + 1))
++        else
++            fail=$((fail + 1))
++            echo "HUNG — gone from the bus after ${SECS}s. NEEDS A PHYSICAL REPLUG; stopping."
++            [ -n "$UART" ] && echo "  firmware log: $LOGDIR/uart-cycle-$n.log"
++        fi
+         break
+     fi
+     stop_uart_capture
+ 
+     if [ "$FULL" = 1 ]; then
+-        if [ -f "$STAGING/dkek.pbe" ] && [ -f "$STAGING/dkek.pw" ]; then
++        # The whole point of --full: assert CRYPTO CORRECTNESS every cycle, not just that the
++        # device came back. Re-provisioning that reliably produces the WRONG key would pass a
++        # reset-only test forever, and would lose funds in production. So each cycle re-imports
++        # the seed-derived key and proves the card signs for the seed's public key — plus a
++        # negative control, so a verifier that trivially returns success cannot fake a pass.
++        chain_ok=1
++        if [ ! -f "$STAGING/dkek.pbe" ] || [ ! -f "$STAGING/dkek.pw" ]; then
++            echo "  ! no DKEK share in $STAGING — cannot run the chain"; chain_ok=0
++        elif [ ! -x "$AUTO_IMPORT" ]; then
++            echo "  ! auto-import script not found at $AUTO_IMPORT (set HSM_AUTO_IMPORT)"; chain_ok=0
++        fi
++
++        if [ "$chain_ok" = 1 ]; then
+             DKEK_PW="$(cat "$STAGING/dkek.pw")" perl -e 'alarm 120; exec @ARGV' -- \
+                 sc-hsm-tool --import-dkek-share "$STAGING/dkek.pbe" \
+                 --password env:DKEK_PW --so-pin "$SO_PIN" < /dev/null \
+-                > "$LOGDIR/dkek-$n.log" 2>&1
+-            echo "  dkek import rc=$?"
++                > "$LOGDIR/dkek-$n.log" 2>&1 || chain_ok=0
++            [ "$chain_ok" = 1 ] || echo "  CHAIN FAIL: dkek import"
++        fi
++
++        if [ "$chain_ok" = 1 ]; then
++            HSM_AUTO_DIR="$STAGING/auto-import" SCSH_HOME="${SCSH_HOME:-$HOME/tools/scsh-3.18.77}" \
++            HSM_USER_PIN="$USER_PIN" HSM_DKEK_SHARE_IN="$STAGING/dkek.pbe" \
++            HSM_DKEK_PW_IN="$STAGING/dkek.pw" \
++                perl -e 'alarm 300; exec @ARGV' -- "$AUTO_IMPORT" --run \
++                > "$LOGDIR/import-$n.log" 2>&1 || chain_ok=0
++            [ "$chain_ok" = 1 ] || echo "  CHAIN FAIL: key import (see $LOGDIR/import-$n.log)"
++        fi
++
++        if [ "$chain_ok" = 1 ]; then
++            head -c 32 /dev/urandom > "$LOGDIR/d-$n.bin"
++            pkcs11-tool --module "$P11MOD" --login --pin "$USER_PIN" --sign --mechanism ECDSA \
++                --id 31 --input-file "$LOGDIR/d-$n.bin" --output-file "$LOGDIR/s-$n.bin" \
++                > "$LOGDIR/sign-$n.log" 2>&1 || chain_ok=0
++            if [ "$chain_ok" = 1 ]; then
++                python3 "$VERIFY" --der "$STAGING/expected-pub.der" \
++                    --digest "$LOGDIR/d-$n.bin" --sig "$LOGDIR/s-$n.bin" >/dev/null 2>&1
++                if [ $? -ne 0 ]; then
++                    chain_ok=0; echo "  CHAIN FAIL: card signature does NOT match the seed's pubkey"
++                else
++                    # Negative control: the same signature against a DIFFERENT digest must FAIL.
++                    # Without this, a verifier stuck returning 0 would make every cycle "pass".
++                    head -c 32 /dev/urandom > "$LOGDIR/dbad-$n.bin"
++                    python3 "$VERIFY" --der "$STAGING/expected-pub.der" \
++                        --digest "$LOGDIR/dbad-$n.bin" --sig "$LOGDIR/s-$n.bin" >/dev/null 2>&1
++                    if [ $? -eq 0 ]; then
++                        chain_ok=0; echo "  CHAIN FAIL: negative control PASSED — verifier is not discriminating"
++                    fi
++                fi
++            else
++                echo "  CHAIN FAIL: on-card signing"
++            fi
++        fi
++
++        if [ "$chain_ok" = 1 ]; then
++            chain_pass=$((chain_pass + 1)); echo "  chain OK (key imported, signed, verified, negative control held)"
+         else
+-            echo "  ! no DKEK share in $STAGING — skipping full chain"
++            chain_fail=$((chain_fail + 1))
+         fi
+     fi
+ done
+ 
+ echo
+ echo "==================================================="
+-echo " passed: $pass    hung: $fail    of $((pass + fail)) attempted"
++echo " passed: $pass    hung: $fail    declined-safely: $declined    of $((pass + fail + declined)) attempted"
+ [ -n "$times" ] && echo " recovery times:$times (seconds)"
++[ "$FULL" = 1 ] && echo " full chain: $chain_pass verified, $chain_fail failed"
+ echo " logs: $LOGDIR"
+ echo "==================================================="
+-[ "$fail" -eq 0 ] || exit 1
++[ "$fail" -eq 0 ] && [ "${chain_fail:-0}" -eq 0 ] || exit 1
+-- 
+2.53.0
+
+
+From 44526a2d2bb3265d8a08e5e1a187bcb7fd46a265 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 10:01:04 -0400
+Subject: [PATCH 08/27] =?UTF-8?q?test(tools):=20scenario=20suite=20?=
+ =?UTF-8?q?=E2=80=94=20security,=20throughput,=20canonicality,=20PIN,=20pe?=
+ =?UTF-8?q?rsistence?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The provisioning soak proves the happy path: wipe, rebuild the DKEK domain, import a
+seed-derived key, sign, verify. Passing that 14 times says nothing about whether the
+device REFUSES what it should, how fast it is, or how it behaves when something goes
+wrong — which is most of what an HSM is bought for. Six scenarios, all passing on a
+Pico HSM (RP2350B, firmware 6.6):
+
+S1 FOREIGN-DKEK REJECTION — the one that mattered. A key wrapped under a DIFFERENT
+DKEK share, presented to a card holding the original domain, must be refused. This
+property is what makes the two-site fleet model safe and it had only ever been
+checked in an emulator whose own header admits it cannot prove the real path.
+Result: wrapped under kcv=F5ECB9A8DC27452A against a card holding DA4BF33D408C5C57,
+card answered SW=6400 and refused. Distinct KCVs prove the domains really differed,
+and the refusal came from the card rather than from the harness failing incidentally.
+DKEK isolation is enforced in hardware.
+
+  Side effect worth recording: this proves SW=6400 means "DKEK mismatch". That is the
+  same status that was misread as "the card rejects secp256k1" and nearly ended the
+  HSM custody design. A controlled experiment settles what weeks of inference did not.
+
+S3 SIGNATURE CANONICALITY — the most valuable surprise. 5 of 15 signatures came back
+HIGH-S. Cosmos REJECTS high-S, so toLowSCompact() normalisation is load-bearing, not
+belt-and-braces: signing without it would see roughly ONE IN THREE transactions
+rejected by the chain, intermittently, looking like a network fault for weeks.
+
+S2 THROUGHPUT — 2.43 sig/s, 412 ms/sig. Reported as an UPPER BOUND on latency, not
+card speed: each iteration spawns a fresh pkcs11-tool with a PIN login, so most of
+that is process overhead. First real number for a question the custody quorum raised
+and nobody had measured.
+
+S4 WRONG PIN — refused, counter decremented 3->2, restored to 3 by a correct PIN.
+Spends exactly one of three attempts and immediately restores it, so it never
+approaches a lockout.
+
+S5 PERSISTENCE — key survives a reboot and still signs for the seed's pubkey.
+
+S6 RAPID-FIRE — 25 back-to-back sign+verify, card still responsive afterwards.
+
+Destructive by design: it wipes the card repeatedly, spends PIN attempts, and
+attempts operations that must fail. NEVER point it at a device holding real keys.
+---
+ tools/hsm-scenarios.sh | 207 +++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 207 insertions(+)
+ create mode 100755 tools/hsm-scenarios.sh
+
+diff --git a/tools/hsm-scenarios.sh b/tools/hsm-scenarios.sh
+new file mode 100755
+index 0000000..39d278d
+--- /dev/null
++++ b/tools/hsm-scenarios.sh
+@@ -0,0 +1,207 @@
++#!/usr/bin/env bash
++# hsm-scenarios.sh — exercise a STAGING Pico HSM across scenarios the happy path never touches.
++#
++#   ./hsm-scenarios.sh              # all scenarios
++#   ./hsm-scenarios.sh S1 S4        # only the named ones
++#
++# The provisioning soak (hsm-cycle-test.sh) proves the operational happy path: wipe, rebuild the
++# DKEK domain, import a seed-derived key, sign, verify. Passing that 14 times says nothing about
++# whether the device REFUSES what it should, how fast it is, or how it behaves when something goes
++# wrong — and those are the properties an HSM is actually bought for.
++#
++# NEVER RUN THIS AGAINST A DEVICE HOLDING REAL KEYS. Several scenarios deliberately wipe the card,
++# spend PIN attempts, and attempt operations that must fail.
++set -u
++
++SO_PIN="${HSM_SO_PIN:-3537363231383830}"
++USER_PIN="${HSM_USER_PIN:-648219}"
++STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
++AUTO_IMPORT="${HSM_AUTO_IMPORT:-$HOME/code/example-service-hsmfix/infra/ceremony/qubes/scripts/hsm-auto-import.sh}"
++VERIFY="${HSM_VERIFY:-$HOME/code/example-service-hsmfix/infra/ceremony/qubes/scripts/verify-hsm-control.py}"
++P11="${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}"
++SCSH="${SCSH_HOME:-$HOME/tools/scsh-3.18.77}"
++WORK="$(mktemp -d)"
++WANT="$*"
++
++pass=0; fail=0; skip=0
++P() { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
++F() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
++S() { printf '  \033[33mSKIP\033[0m %s\n' "$1"; skip=$((skip+1)); }
++hdr() { printf '\n\033[1m=== %s ===\033[0m\n' "$1"; }
++want() { [ -z "$WANT" ] || case " $WANT " in *" $1 "*) return 0;; *) return 1;; esac; }
++
++t() { perl -e "alarm ${2:-60}; exec @ARGV" -- ${1}; }   # bounded run
++card_alive() { perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool >/dev/null 2>&1; }
++
++wipe_and_provision() {
++    perl -e 'alarm 200; exec @ARGV' -- sc-hsm-tool --initialize --so-pin "$SO_PIN" --pin "$USER_PIN" \
++        --dkek-shares 1 --label scen < /dev/null >/dev/null 2>&1 || return 1
++    for _ in $(seq 1 40); do sleep 1; card_alive && break; done
++    card_alive || return 1
++    DKEK_PW="$(cat "$STAGING/dkek.pw")" perl -e 'alarm 120; exec @ARGV' -- \
++        sc-hsm-tool --import-dkek-share "$STAGING/dkek.pbe" --password env:DKEK_PW \
++        --so-pin "$SO_PIN" < /dev/null >/dev/null 2>&1 || return 1
++    HSM_AUTO_DIR="$STAGING/auto-import" SCSH_HOME="$SCSH" HSM_USER_PIN="$USER_PIN" \
++    HSM_DKEK_SHARE_IN="$STAGING/dkek.pbe" HSM_DKEK_PW_IN="$STAGING/dkek.pw" \
++        perl -e 'alarm 300; exec @ARGV' -- "$AUTO_IMPORT" --run >"$WORK/prov.log" 2>&1
++}
++
++sign_and_verify() {   # $1 = key id
++    head -c 32 /dev/urandom > "$WORK/d.bin"
++    pkcs11-tool --module "$P11" --login --pin "$USER_PIN" --sign --mechanism ECDSA \
++        --id "$1" --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1 || return 1
++    python3 "$VERIFY" --der "$STAGING/expected-pub.der" --digest "$WORK/d.bin" --sig "$WORK/s.bin" >/dev/null 2>&1
++}
++
++echo "workdir: $WORK"
++card_alive || { echo "card not responding — replug and flash COMMITFIX first" >&2; exit 1; }
++
++# ---------------------------------------------------------------------------------------------
++if want S1; then
++hdr "S1  SECURITY: a key wrapped under a DIFFERENT DKEK must be REFUSED"
++# THE test for the fleet model. Cloning to a second device is only safe because a card that does
++# not share the DKEK domain CANNOT unwrap the blob. That has been asserted all along and only ever
++# checked in an emulator whose own header admits it cannot prove the real path. If this ever
++# silently SUCCEEDS, the DKEK provides no isolation and the fleet design is unsound.
++if wipe_and_provision; then
++    ( umask 077; LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c 32 > "$WORK/bad.pw" )
++    DKEK_PW="$(cat "$WORK/bad.pw")" sc-hsm-tool --create-dkek-share "$WORK/bad.pbe" \
++        --password env:DKEK_PW >/dev/null 2>&1
++    if [ -s "$WORK/bad.pbe" ]; then
++        # Wrap under the FOREIGN share while the card still holds the original domain.
++        HSM_AUTO_DIR="$WORK/foreign" SCSH_HOME="$SCSH" HSM_USER_PIN="$USER_PIN" \
++        HSM_DKEK_SHARE_IN="$WORK/bad.pbe" HSM_DKEK_PW_IN="$WORK/bad.pw" \
++            perl -e 'alarm 300; exec @ARGV' -- "$AUTO_IMPORT" --run > "$WORK/foreign.log" 2>&1
++        rc=$?
++        if [ $rc -eq 0 ] && grep -q "IMPORT-OK" "$WORK/foreign.log"; then
++            F "CARD ACCEPTED A FOREIGN-DKEK KEY — DKEK provides no isolation (SECURITY)"
++        else
++            P "foreign-DKEK key refused (rc=$rc, no IMPORT-OK)"
++        fi
++    else
++        S "could not create a second DKEK share"
++    fi
++else
++    S "S1: provisioning failed, cannot set up"
++fi
++fi
++
++# ---------------------------------------------------------------------------------------------
++if want S2; then
++hdr "S2  THROUGHPUT: how many signatures per second?"
++# The quorum flagged throughput as a production concern for an always-on signing oracle and nobody
++# ever measured it. A number beats an opinion.
++if card_alive && sign_and_verify 31; then
++    N=20; t0=$(python3 -c 'import time;print(time.time())')
++    ok=0
++    for _ in $(seq 1 $N); do sign_and_verify 31 && ok=$((ok+1)); done
++    t1=$(python3 -c 'import time;print(time.time())')
++    python3 - "$t0" "$t1" "$N" "$ok" <<'PY'
++import sys
++t0,t1,n,ok=float(sys.argv[1]),float(sys.argv[2]),int(sys.argv[3]),int(sys.argv[4])
++d=t1-t0
++print(f"  {ok}/{n} signatures verified, {d:.1f}s total, {d/n*1000:.0f} ms/sig, {n/d:.2f} sig/s")
++print("  NOTE: each iteration is a fresh pkcs11-tool process + PIN login, so this is an")
++print("  UPPER BOUND on latency, not the card's raw speed. A persistent session would be faster.")
++PY
++    [ "$ok" = "$N" ] && P "all $N signatures verified under load" || F "only $ok/$N verified"
++else
++    S "S2: no usable key on card"
++fi
++fi
++
++# ---------------------------------------------------------------------------------------------
++if want S3; then
++hdr "S3  SIGNATURE CANONICALITY: low-S, as Cosmos requires"
++# Cosmos REJECTS high-S signatures. tx-signer normalises via toLowSCompact(), but if the card emits
++# high-S at any meaningful rate that normalisation is load-bearing rather than belt-and-braces,
++# and anything that signs without it is broken. Measure the actual rate.
++if card_alive; then
++    high=0; tot=15
++    for _ in $(seq 1 $tot); do
++        head -c 32 /dev/urandom > "$WORK/d.bin"
++        pkcs11-tool --module "$P11" --login --pin "$USER_PIN" --sign --mechanism ECDSA --id 31 \
++            --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1 || continue
++        python3 - "$WORK/s.bin" <<'PY' && high=$((high+1))
++import sys
++N=0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
++sig=open(sys.argv[1],'rb').read()
++s=int.from_bytes(sig[32:64],'big') if len(sig)==64 else 0
++sys.exit(0 if s > N//2 else 1)
++PY
++    done
++    echo "  high-S: $high of $tot signatures"
++    if [ "$high" -gt 0 ]; then
++        P "card DOES emit high-S ($high/$tot) — toLowSCompact() normalisation is REQUIRED, not optional"
++    else
++        P "no high-S observed in $tot (normalisation still required: absence is not a guarantee)"
++    fi
++else
++    S "S3: card not responding"
++fi
++fi
++
++# ---------------------------------------------------------------------------------------------
++if want S4; then
++hdr "S4  WRONG PIN: signing must fail, and retries must decrement then recover"
++# Deliberately spends ONE attempt of three, then immediately verifies with the correct PIN, which
++# resets the counter. Never gets near a lockout.
++if card_alive; then
++    before=$(sc-hsm-tool 2>/dev/null | grep -oE "User PIN tries left *: *[0-9]+" | grep -oE "[0-9]+$")
++    head -c 32 /dev/urandom > "$WORK/d.bin"
++    pkcs11-tool --module "$P11" --login --pin 999999 --sign --mechanism ECDSA --id 31 \
++        --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1
++    if [ $? -eq 0 ]; then F "SIGNED WITH A WRONG PIN (SECURITY)"; else P "wrong PIN refused"; fi
++    mid=$(sc-hsm-tool 2>/dev/null | grep -oE "User PIN tries left *: *[0-9]+" | grep -oE "[0-9]+$")
++    [ "${mid:-9}" -lt "${before:-9}" ] && P "retry counter decremented ($before -> $mid)" \
++                                       || F "retry counter did NOT decrement ($before -> $mid)"
++    sign_and_verify 31 >/dev/null 2>&1
++    after=$(sc-hsm-tool 2>/dev/null | grep -oE "User PIN tries left *: *[0-9]+" | grep -oE "[0-9]+$")
++    [ "${after:-0}" -ge "${before:-9}" ] && P "counter restored after a correct PIN ($mid -> $after)" \
++                                        || F "counter NOT restored ($mid -> $after)"
++else
++    S "S4: card not responding"
++fi
++fi
++
++# ---------------------------------------------------------------------------------------------
++if want S5; then
++hdr "S5  PERSISTENCE: the key survives a reboot"
++# Provisioning is worthless if a restart loses the key. Reboot via the rescue app (stock firmware,
++# measured 5/5) and confirm the SAME key still signs for the SAME public key afterwards.
++if card_alive && sign_and_verify 31; then
++    perl -e 'alarm 45; exec @ARGV' -- opensc-tool -s "00:A4:04:00:08:A0:58:3F:C1:9B:7E:4F:21" \
++        -s "80:1F:00:00" >/dev/null 2>&1
++    sleep 3
++    back=0; for _ in $(seq 1 30); do sleep 1; card_alive && { back=1; break; }; done
++    if [ "$back" = 1 ]; then
++        sign_and_verify 31 && P "key survived the reboot and still signs for the seed's pubkey" \
++                           || F "key did NOT verify after reboot"
++    else
++        F "device did not come back from the reboot"
++    fi
++else
++    S "S5: no usable key to test"
++fi
++fi
++
++# ---------------------------------------------------------------------------------------------
++if want S6; then
++hdr "S6  RAPID-FIRE: back-to-back operations without pauses"
++# The soak is leisurely; a real signer is not. Hammer it and see whether anything wedges.
++if card_alive; then
++    ok=0; n=25
++    for _ in $(seq 1 $n); do sign_and_verify 31 && ok=$((ok+1)); done
++    [ "$ok" = "$n" ] && P "$ok/$n rapid signatures verified" || F "only $ok/$n under rapid fire"
++    card_alive && P "card still responsive after the burst" || F "card wedged after the burst"
++else
++    S "S6: card not responding"
++fi
++fi
++
++echo
++echo "==================================================="
++echo " scenarios: $pass passed, $fail failed, $skip skipped"
++echo " workdir: $WORK"
++echo "==================================================="
++[ "$fail" -eq 0 ] || exit 1
+-- 
+2.53.0
+
+
+From 76f6b2792ffcebe26fc7b57dd03f09534b63debb Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 10:19:33 -0400
+Subject: [PATCH 09/27] docs: SOPS secrets decrypted by the HSM, verified end
+ to end
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SOPS has no PKCS#11 backend, but it supports PGP and GnuPG can be backed by a
+PKCS#11 token, so the chain works with NO change to the secrets pipeline:
+
+    sops -> gpg -> gnupg-pkcs11-scd -> PKCS#11 -> RSA key on the HSM
+
+Verified on a Pico HSM (RP2350B, fw 6.6): encrypt to the PGP key, decrypt back to
+plaintext, with the scdaemon log showing
+
+    chan_0 <- PKDECRYPT 3DDB240D13542FCBC558A2D8C510D5CF7BC5F683
+
+i.e. the RSA unwrap of the SOPS data key happened ON THE CARD, not in software near
+one. The key lists as `sec>` with a card serial — the private half never leaves.
+
+Two steps cost real time and are recorded because nothing explains them at the point
+of failure:
+
+1. gnupg-pkcs11-scd enumerates tokens BY CERTIFICATE. A bare private key is
+   invisible to it: SCD LEARN returns a plain OK with no KEYPAIRINFO and no error.
+   The X.509 cert must be written to the card separately, with the same --id as the
+   key. The importer only writes keys.
+
+2. gpg and gpg-agent learn the card SEPARATELY. SCD LEARN tells scdaemon only, and
+   gpg then rejects the keygrip with "No key with this keygrip". The agent needs its
+   own LEARN --send, which writes the shadow key into private-keys-v1.d/.
+
+Scope, stated plainly because it is easy to oversell: this hardens the HUMAN/OPS
+decryption path and does NOT fix CI. CI cannot use a physical token, so SOPS_AGE_KEY
+remains a software key that decrypts everything — the weakest hop a custody review
+already identified. For CI the answer is Vault/OpenBAO as the SOPS backend with the
+HSM protecting Vault's seal, not this.
+
+Migration needs no flag day: SOPS decrypts with whichever recipient it can reach, so
+the PGP key is added ALONGSIDE the age recipients. Losing the HSM locks nobody out.
+
+Also confirms age/X25519 cannot move to this card (ECDSA/ECDH on prime curves and RSA
+only, no X25519, no Ed25519), which is why this uses the PGP backend rather than an
+age plugin.
+---
+ doc/SOPS-HSM.md | 107 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 107 insertions(+)
+ create mode 100644 doc/SOPS-HSM.md
+
+diff --git a/doc/SOPS-HSM.md b/doc/SOPS-HSM.md
+new file mode 100644
+index 0000000..25f439c
+--- /dev/null
++++ b/doc/SOPS-HSM.md
+@@ -0,0 +1,107 @@
++# SOPS secrets decrypted by the HSM
++
++**Status: working, verified end to end on a Pico HSM (RP2350B, firmware 6.6).**
++
++SOPS has no PKCS#11 backend and never has. But it *does* support **PGP**, and GnuPG can be
++backed by a PKCS#11 token, so the chain works with no change to the secrets pipeline:
++
++```
++sops → gpg → gnupg-pkcs11-scd → PKCS#11 → RSA key on the HSM
++```
++
++Proof it reaches the hardware — the scdaemon log during `sops --decrypt`:
++
++```
++chan_0 <- PKDECRYPT 3DDB240D13542FCBC558A2D8C510D5CF7BC5F683
++```
++
++`PKDECRYPT` means the RSA unwrap of the SOPS data key happened ON THE CARD. Not a software
++key that happens to live near one.
++
++## What this does and does not solve
++
++It hardens the **human/ops** decryption path. It does **NOT** fix CI.
++
++CI cannot use a physical token, so `SOPS_AGE_KEY` remains a software key that decrypts
++everything — the exact weakness a custody review called the weakest hop in the chain. Adding a
++PGP recipient does not remove it. If CI is the target, the answer is different: put SOPS behind
++**Vault or OpenBAO** (both natively supported), authenticate CI with a short-lived token, and use
++the HSM to protect Vault's seal instead.
++
++Worth being explicit because the improvement is easy to overstate: this makes an operator's
++laptop stop holding a decryption key. It does not make the repo's secrets unreachable to whoever
++controls CI.
++
++## Two steps that are not obvious
++
++**1. The card needs an X.509 CERTIFICATE, not just the key.** `gnupg-pkcs11-scd` enumerates
++tokens by certificate; a bare private key is invisible to it. `SCD LEARN` returns a bare `OK`
++with no `KEYPAIRINFO` and nothing explains why. The importer only writes the key, so the cert has
++to be written separately, WITH THE SAME `--id` as the key:
++
++```sh
++openssl x509 -in rsa.crt -outform DER -out rsa.cer
++pkcs11-tool --module $M --login --pin $PIN --write-object rsa.cer --type cert --id 32 --label rsa-signing
++```
++
++**2. `gpg` and `gpg-agent` learn the card separately.** `SCD LEARN` tells *scdaemon*, which is not
++enough — `gpg --full-generate-key` then rejects the keygrip with "No key with this keygrip". The
++agent needs its own learn, which writes a shadow key into `private-keys-v1.d/`:
++
++```sh
++gpg-connect-agent 'LEARN --send' /bye
++gpg-connect-agent 'HAVEKEY <keygrip>' /bye     # must answer OK
++```
++
++## Recipe
++
++```sh
++export GNUPGHOME=/path/to/hsm-gnupghome     # keep it ISOLATED from your real ~/.gnupg
++mkdir -p $GNUPGHOME && chmod 700 $GNUPGHOME
++
++cat > $GNUPGHOME/gpg-agent.conf <<'EOF'
++scdaemon-program /opt/homebrew/bin/gnupg-pkcs11-scd
++EOF
++
++cat > $GNUPGHOME/gnupg-pkcs11-scd.conf <<'EOF'
++providers opensc
++provider-opensc-library /opt/homebrew/lib/opensc-pkcs11.so
++pin-cache 0
++EOF
++
++# 1. import an RSA key onto the card (ALWAYS import, never generate on-card, so the key stays
++#    reconstructible from its Shamir shares) and write its certificate alongside — see above.
++# 2. teach both daemons about it:
++gpg-connect-agent 'SCD LEARN --force' /bye     # note the keygrip in KEYPAIRINFO
++gpg-connect-agent 'LEARN --send' /bye
++
++# 3. bind an OpenPGP identity to that keygrip:
++gpg --expert --full-generate-key
++#    (13) Existing key  ->  paste the keygrip  ->  Q  ->  0  ->  y  ->  name/email  ->  O
++
++# 4. use it:
++sops --encrypt --pgp <FINGERPRINT> secret.yaml > secret.enc.yaml
++sops --decrypt secret.enc.yaml
++```
++
++The resulting key lists as `sec>` — the `>` means the private half is a stub pointing at the
++card, with `Card serial no.` shown. Key material never leaves the HSM.
++
++## Migration, without a flag day
++
++SOPS decrypts with WHICHEVER recipient it can reach, so the PGP key is added ALONGSIDE the
++existing age recipients rather than replacing them. Add `pgp:` next to `age:` in `.sops.yaml`,
++run `sops updatekeys` over every `*.sops.*` file, and both paths work. Nothing needs to be
++cut over at once, and losing the HSM does not lock anyone out.
++
++## Constraints
++
++- **age/X25519 cannot move to this HSM.** The card does ECDSA/ECDH on prime curves and RSA; it
++  has no X25519 and no Ed25519. That is why this uses the PGP backend instead of an age plugin,
++  and it independently confirms what the custody notes already said about age needing a
++  YubiKey-PIV recipient rather than a SmartCard-HSM.
++- `gnupg-pkcs11-scd` is a niche bridge (0.11.0). GnuPG warns that it is "older than us". It
++  works, but it is a small dependency in a critical path — worth knowing before relying on it.
++- Automating the PIN via a scripted `pinentry-program` is fine for a STAGING token with a
++  documented dev PIN. Never do it for a token holding real secrets: it defeats the point of
++  requiring physical presence.
+-- 
+2.53.0
+
+
+From 3bfb6c272f3e56db1014cf1b881b22a128373803 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 10:47:05 -0400
+Subject: [PATCH 10/27] =?UTF-8?q?docs:=20attestation=20=E2=80=94=20what=20?=
+ =?UTF-8?q?the=20staging=20HSM=20has=20actually=20been=20shown=20to=20do?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Records, with evidence, the capabilities demonstrated on real hardware (Waveshare
+RP2350-PiZero, Pico HSM 6.6, PKCS#11 serial ESPICOHSMTR). Every entry was executed;
+none is inferred:
+
+  wallet (secp256k1)  seed-derived key imported via DKEK, card signs, verifies against
+                      the seed's pubkey, wrong digest fails. 14/14 cycles.
+  SOPS decryption     sops --decrypt returns plaintext with PKDECRYPT in the scdaemon
+                      log — the RSA unwrap happened ON THE CARD.
+  X.509 CA            signed a CSR for CN=api.staging.internal with the on-card key;
+                      openssl verify OK; unrelated CA correctly fails.
+  SSH auth            real login to a local sshd via ssh -I, remote command executed,
+                      using the on-card P-256 key.
+  GPG identity        OpenPGP key bound to the card, lists as `sec>` with card serial.
+  multi-key           secp256k1 + RSA-2048 + P-256 coexisting, all never-extractable.
+  DKEK isolation      foreign-DKEK key REFUSED with SW=6400, distinct KCVs confirm the
+                      domains differed. Enforced by the card, not by convention.
+
+That covers PKI/CA, SSH, secrets decryption and the signing primitives code signing
+needs — four of the five categories a software/hosting company typically puts in an
+HSM — plus wallets.
+
+The limits are recorded as prominently as the capabilities, because the interesting
+part of this exercise was how often a confident claim did not survive contact with
+the hardware:
+
+  - age/X25519 can NEVER move to this card. ECDSA/ECDH on prime curves and RSA only.
+    A hardware fact, not a configuration gap; also rules out Ed25519 SSH and GPG keys.
+  - ~7% of re-provisioning cycles still hang and need a physical replug. The CRYPTO
+    path has never once failed; recovery does. Diagnosis is blocked on SWD, not on a
+    fourth theory.
+  - 2.43 sig/s, and that is an upper bound on latency (fresh process + PIN login per
+    signature), not card speed.
+  - Everything ran on macOS. The target is Linux, a different PCSC stack, unverified.
+
+Explicitly NOT justified by this: that this device is ready to hold production keys.
+The production tokens are a different implementation (NXP secure element) on which
+none of this has been repeated. What transfers is the procedures and the tooling —
+each capability above is now a script that can be re-run against a real token.
+---
+ doc/ATTESTATION.md | 61 ++++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 61 insertions(+)
+ create mode 100644 doc/ATTESTATION.md
+
+diff --git a/doc/ATTESTATION.md b/doc/ATTESTATION.md
+new file mode 100644
+index 0000000..d24aed3
+--- /dev/null
++++ b/doc/ATTESTATION.md
+@@ -0,0 +1,61 @@
++# Staging HSM — what has actually been demonstrated
++
++Hardware: Waveshare RP2350-PiZero running Pico HSM firmware 6.6, PKCS#11 serial `ESPICOHSMTR`.
++Every claim below was executed against that device; none is inferred.
++
++**This is a STAGING device.** It holds throwaway keys, its PINs are the published pico-hsm dev
++defaults, and it is an open-source reimplementation on a microcontroller with no tamper
++resistance. It is where procedures get proven. It is not where value gets held.
++
++## Demonstrated
++
++| Capability | Evidence |
++|---|---|
++| **Blockchain wallet** — secp256k1 | Seed-derived key imported via DKEK; card signs a fresh random digest; signature verifies against the seed's pubkey; wrong digest correctly fails. 14/14 provisioning cycles. |
++| **Secrets decryption (SOPS)** | `sops --decrypt` returns plaintext with `PKDECRYPT` in the scdaemon log — the RSA unwrap of the data key happened ON THE CARD. See SOPS-HSM.md. |
++| **X.509 Certificate Authority** | Signed a CSR for `CN=api.staging.internal` using the on-card RSA key. `openssl verify` returns OK against the CA cert; verification against an unrelated CA correctly fails. |
++| **SSH authentication** | Real login to a local sshd with `ssh -I <module>`, remote command executed, using the on-card P-256 key. No key material on disk. |
++| **GPG identity** | OpenPGP key bound to the on-card RSA key. Lists as `sec>` with a card serial — the `>` means the private half is a stub pointing at hardware. |
++| **Multiple heterogeneous keys** | secp256k1 + RSA-2048 + P-256 coexisting, all `sensitive, always sensitive, never extractable`, each independently usable. |
++| **Key isolation (DKEK)** | A key wrapped under a DIFFERENT DKEK share was REFUSED with SW=6400. Distinct KCVs confirm the domains genuinely differed. Isolation is enforced by the card, not by convention. |
++| **Wrong PIN** | Refused; retry counter decremented and restored by a correct PIN. |
++| **Persistence** | Key survives a reboot and still signs for the same public key. |
++
++Against the categories a software/hosting company typically puts in an HSM — internal PKI, TLS,
++code signing, SSH CA, secrets-manager root — this covers **PKI/CA, SSH, secrets decryption, and
++the signing primitives code signing needs**, plus wallets.
++
++## NOT demonstrated, and the limits are structural
++
++**age / X25519 cannot ever move to this card.** It does ECDSA/ECDH on prime curves and RSA. No
++X25519, no Ed25519. That is a hardware fact, not a configuration gap — it is why the SOPS path
++above uses the PGP backend, and it means Ed25519 SSH keys and Ed25519 GPG keys are also out.
++
++**Reliability is not yet production-grade.** ~7% of re-provisioning cycles hang with the device
++leaving the USB bus, needing a physical replug. The cryptographic path has NEVER failed — every
++completed cycle verified correctly — but recovery does. Cause unknown after three attempts; see
++the commit history for two real improvements (wrong PICO_BOARD, commit-timeout sizing) and one
++regression that was reverted. Diagnosis is blocked on SWD, not on more theories.
++
++**Throughput is modest.** 2.43 sig/s, 412 ms/sig — and that is with a fresh `pkcs11-tool` process
++and PIN login per signature, so it is an upper bound on latency rather than card speed. Nobody has
++measured a persistent-session number.
++
++**Everything here ran on macOS.** The target is Linux, with a different PCSC stack. Nothing has
++been verified there.
++
++**Untested:** concurrent sessions, key deletion, capacity limits, and behaviour once the flash
++region fills.
++
++## What this does and does not justify saying
++
++Justified: *"A hardware HSM can hold this company's wallet keys, act as its internal CA, back its
++SSH authentication, decrypt its SOPS secrets, and carry a GPG identity — proven end to end on
++real hardware, with negative controls."*
++
++NOT justified: that this specific device is ready to hold production keys. The reliability gap is
++real, it is on the recovery path rather than the crypto path, and the production tokens (Nitrokey
++HSM 2, NXP secure element) are a different implementation on which NONE of this has been repeated.
++
++The value of this exercise is the procedures, the tooling, and the negative results — each of the
++above is now a script that can be re-run against a production token in an afternoon.
+-- 
+2.53.0
+
+
+From 25ec46fb705d4a287af444056bc8c30731eecc63 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 10:54:14 -0400
+Subject: [PATCH 11/27] docs: GPG proper and the envelope pattern, both
+ verified
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The card-backed PGP key is a fully functional GPG key, not just a SOPS
+decryptor: detached signatures (with a tampered-artifact negative control),
+encrypt/decrypt round-trip, and a REAL git commit verified Good signature.
+That is release-artifact, code and commit signing off one key.
+
+Envelope encryption also verified: the card cannot BE an age identity (no
+X25519) but it can PROTECT one. Wrapping the age private key to the PGP key
+lets it live encrypted at rest and be piped through /dev/stdin in use, never
+touching disk. PKDECRYPT in the scdaemon log confirms the card does the unwrap.
+
+Recorded with the trade-off stated plainly, because it is easy to sell this as
+better than it is: the age key is in RAM while used and the card does NOT do the
+age operation. For SOPS, direct PGP is STRICTLY better — no age key exists at
+all. The envelope is for tools that REQUIRE age.
+
+The pattern generalises to any secret the card cannot natively operate on, which
+is the honest version of poor-mans KMS: strong at rest, weaker in use than a real
+KMS that never releases key material.
+---
+ doc/SOPS-HSM.md | 37 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 37 insertions(+)
+
+diff --git a/doc/SOPS-HSM.md b/doc/SOPS-HSM.md
+index 25f439c..09805ba 100644
+--- a/doc/SOPS-HSM.md
++++ b/doc/SOPS-HSM.md
+@@ -105,3 +105,40 @@ cut over at once, and losing the HSM does not lock anyone out.
+ - Automating the PIN via a scripted `pinentry-program` is fine for a STAGING token with a
+   documented dev PIN. Never do it for a token holding real secrets: it defeats the point of
+   requiring physical presence.
++
++## Also proven: GPG proper, and the envelope pattern
++
++**The card-backed PGP key is a fully functional GPG key**, not just a SOPS decryptor:
++
++- detached signatures — `Good signature`, and a tampered artifact correctly gives `BAD signature`
++- `--encrypt` / `--decrypt` round-trip
++- **real git commit signing** — `git commit -S` verified `Good signature` via `git log --show-signature`
++
++That covers release-artifact signing, code signing and commit signing off the same key.
++
++## Envelope encryption: protecting secrets the card CANNOT operate on
++
++The card has no X25519, so it can never *be* an age identity. It can still *protect* one:
++
++```sh
++age-keygen -o age-key.txt
++gpg --encrypt --recipient $FPR --output age-key.txt.gpg age-key.txt
++rm age-key.txt                       # plaintext gone; only the wrapped copy remains
++
++# use it without the key ever touching disk:
++gpg --decrypt age-key.txt.gpg | age -d -i /dev/stdin payload.age
++```
++
++Verified working, with `PKDECRYPT` in the scdaemon log confirming the card performed the unwrap.
++
++**Know what this does and does not buy.** The age key is protected AT REST and never written to
++disk in plaintext — but it exists IN RAM while in use, and the card does not perform the age
++operation itself. Compare with using PGP directly for SOPS, where no age key exists at all and
++the card does the real work. For SOPS, direct PGP is STRICTLY BETTER; the envelope is for tools
++that require age specifically.
++
++The pattern generalises to any secret the card cannot natively operate on — Ed25519 SSH keys,
++API tokens, database credentials. That makes the HSM the root of an envelope-encryption scheme
++covering arbitrary secrets, rather than only the algorithms it implements. It is the honest
++version of "poor-man's KMS": strong for storage, weaker in use than a real KMS that never
++releases key material at all.
+-- 
+2.53.0
+
+
+From 57980ce00f025dcb7d7dc152b49f7352b44b975f Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 11:09:41 -0400
+Subject: [PATCH 12/27] docs: multiple certificates break the gnupg-pkcs11-scd
+ binding
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Found by adding a second key/cert to a card whose GPG identity already worked.
+
+PKCS#11 handles multiple keys fine — secp256k1, RSA-2048 and P-256 coexisted and
+all signed correctly via pkcs11-tool throughout. gnupg-pkcs11-scd does not: after
+a second certificate was written, sops --decrypt HUNG with the bridge looping on
+"KEYINFO <keygrip> -> ERR 41 Wrong public key algorithm".
+
+The card was never at fault. Raw PKCS#11 signatures with both the wallet key and
+the RSA key kept working the entire time, which is how the bridge was isolated as
+the cause rather than the hardware.
+
+The asymmetry is the useful part: everything speaking PKCS#11 NATIVELY was
+unaffected — ssh -I, the openssl engine and pkcs11-tool all worked with all three
+keys present. Only the GnuPG bridge broke. So a multi-purpose card is fine for SSH,
+TLS, CA and wallet work; GPG specifically wants a card to itself.
+
+This would have been missed entirely by stopping at the single-key demo, which is
+an argument for testing the combinations rather than the capabilities.
+---
+ doc/SOPS-HSM.md | 27 +++++++++++++++++++++++++++
+ 1 file changed, 27 insertions(+)
+
+diff --git a/doc/SOPS-HSM.md b/doc/SOPS-HSM.md
+index 09805ba..c57fbdd 100644
+--- a/doc/SOPS-HSM.md
++++ b/doc/SOPS-HSM.md
+@@ -142,3 +142,30 @@ API tokens, database credentials. That makes the HSM the root of an envelope-enc
+ covering arbitrary secrets, rather than only the algorithms it implements. It is the honest
+ version of "poor-man's KMS": strong for storage, weaker in use than a real KMS that never
+ releases key material at all.
++
++## CONSTRAINT: multiple certificates break the GPG binding
++
++Discovered by adding a second key/cert to a card whose GPG identity already worked.
++
++PKCS#11 handles multiple keys fine — secp256k1, RSA-2048 and P-256 coexisted and all signed
++correctly via `pkcs11-tool` throughout. **`gnupg-pkcs11-scd` does not.** After a second
++certificate was written to the card, `sops --decrypt` HUNG, with the bridge looping on:
++
++```
++KEYINFO 3DDB240D13542FCBC558A2D8C510D5CF7BC5F683  ->  ERR 41 Wrong public key algorithm
++```
++
++The card was never at fault: raw PKCS#11 signatures with both the wallet key and the RSA key
++kept working the whole time. The bridge simply cannot resolve which key a keygrip refers to once
++several certificates are present, and it fails by hanging rather than erroring out.
++
++This matters for the "one card, many purposes" idea. Options, none free:
++
++- keep the GPG-bearing card to a SINGLE certificate, and put other key types on another token
++- constrain the bridge's view via its provider/cert filtering options (untested here)
++- avoid the bridge for multi-purpose cards and use PKCS#11 directly where the tooling allows it
++  (ssh -I, openssl engine, pkcs11-tool all worked with all three keys present)
++
++Note the asymmetry: everything that speaks PKCS#11 NATIVELY was unaffected. Only the GnuPG
++bridge broke. So a multi-purpose card is fine for SSH, TLS, CA and wallet work; it is GPG
++specifically that wants a card to itself.
+-- 
+2.53.0
+
+
+From c78f0382d149522ec019cb5f08c7f12fd1452aaa Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 11:59:45 -0400
+Subject: [PATCH 13/27] =?UTF-8?q?docs:=20correct=20the=20GPG=20constraint?=
+ =?UTF-8?q?=20=E2=80=94=20a=20missing=20guard=20in=200.11.0,=20not=20a=20c?=
+ =?UTF-8?q?ard=20limit?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The previous section claimed multiple certificates break the binding, and an
+earlier message went further and suggested GPG might need a token to itself.
+Both were wrong, asserted from one observation without finding the cause.
+
+The real fault, verified against the source: gnupg-pkcs11-scd iterates
+certificates and skips any whose algorithm it cannot parse, via
+
+    if (error == GPG_ERR_WRONG_PUBKEY_ALGO) { error = GPG_ERR_NO_ERROR; }
+
+In 0.11.0 that guard is present in send_certificate_list() but ABSENT from
+cmd_keyinfo(). On master it is in both. That maps exactly onto what was observed:
+SCD LEARN worked (send_certificate_list, skips the EC cert) while KEYINFO failed
+with ERR 41 (cmd_keyinfo, no guard) and wedged the daemon.
+
+The card was never at fault. Raw PKCS#11 kept signing with all three keys —
+secp256k1, RSA and P-256 — the entire time GPG was stuck, which is what isolated
+the daemon rather than the hardware.
+
+Fix is to build from master; brew ships 0.11.0. The 0.11.0 workaround (keep EC
+certs off the GPG card) has a measured cost: deleting a certificate on this card
+also removes the public key object, so the EC key still signs but ssh-keygen -D
+can no longer enumerate it. So on 0.11.0 one card cannot serve both GPG and
+SSH-with-an-EC-key; on master it can.
+
+Also records that the failure mode is a HANG, not an error, which is why this
+dependency warrants the critical-path caution rather than a footnote.
+---
+ doc/SOPS-HSM.md | 53 +++++++++++++++++++++++++++++++++----------------
+ 1 file changed, 36 insertions(+), 17 deletions(-)
+
+diff --git a/doc/SOPS-HSM.md b/doc/SOPS-HSM.md
+index c57fbdd..7d45b0f 100644
+--- a/doc/SOPS-HSM.md
++++ b/doc/SOPS-HSM.md
+@@ -143,29 +143,48 @@ covering arbitrary secrets, rather than only the algorithms it implements. It is
+ version of "poor-man's KMS": strong for storage, weaker in use than a real KMS that never
+ releases key material at all.
+ 
+-## CONSTRAINT: multiple certificates break the GPG binding
++## CONSTRAINT: an EC certificate wedges gnupg-pkcs11-scd 0.11.0
+ 
+-Discovered by adding a second key/cert to a card whose GPG identity already worked.
++Not "multiple certificates", and not "GPG needs its own token" — both of which were claimed here
++before the cause was actually found. The real fault is a missing guard in ONE function of the
++released daemon, and it is already fixed upstream.
+ 
+-PKCS#11 handles multiple keys fine — secp256k1, RSA-2048 and P-256 coexisted and all signed
+-correctly via `pkcs11-tool` throughout. **`gnupg-pkcs11-scd` does not.** After a second
+-certificate was written to the card, `sops --decrypt` HUNG, with the bridge looping on:
++**Symptom.** With a P-256 certificate on the card, `sops --decrypt` HANGS. The daemon loops on:
+ 
+ ```
+-KEYINFO 3DDB240D13542FCBC558A2D8C510D5CF7BC5F683  ->  ERR 41 Wrong public key algorithm
++KEYINFO <keygrip>  ->  ERR 41 Wrong public key algorithm
+ ```
+ 
+-The card was never at fault: raw PKCS#11 signatures with both the wallet key and the RSA key
+-kept working the whole time. The bridge simply cannot resolve which key a keygrip refers to once
+-several certificates are present, and it fails by hanging rather than erroring out.
++**Cause, verified against the source.** `gnupg-pkcs11-scd` is designed to iterate certificates and
++skip any whose key algorithm it cannot parse. That guard is
+ 
+-This matters for the "one card, many purposes" idea. Options, none free:
++```c
++if (error == GPG_ERR_WRONG_PUBKEY_ALGO) {
++    /* skip unsupported keys */
++    error = GPG_ERR_NO_ERROR;
++}
++```
++
++and in **0.11.0** it is present in `send_certificate_list()` but **ABSENT from `cmd_keyinfo()`**.
++On master it is present in both. That maps exactly onto the observed behaviour:
++
++| call | uses | 0.11.0 result |
++|---|---|---|
++| `SCD LEARN` | `send_certificate_list()` | works — EC cert skipped |
++| `KEYINFO <keygrip>` | `cmd_keyinfo()` | **ERR 41**, propagated, daemon wedges |
++
++The card is never at fault. Throughout, raw PKCS#11 kept working for every key — secp256k1, RSA
++and P-256 all signed correctly while GPG was wedged.
++
++**Fix: build gnupg-pkcs11-scd from master.** Brew ships 0.11.0, which predates the `cmd_keyinfo`
++guard.
+ 
+-- keep the GPG-bearing card to a SINGLE certificate, and put other key types on another token
+-- constrain the bridge's view via its provider/cert filtering options (untested here)
+-- avoid the bridge for multi-purpose cards and use PKCS#11 directly where the tooling allows it
+-  (ssh -I, openssl engine, pkcs11-tool all worked with all three keys present)
++**Workaround if you must stay on 0.11.0:** keep EC *certificates* off the card used for GPG. EC
++*keys* are fine — only certificate parsing trips it. But note the cost, measured here: on this
++card, `pkcs11-tool --delete-object --type cert` ALSO removes the public key object, so the EC key
++keeps signing but `ssh-keygen -D` can no longer enumerate it as an SSH identity. So on 0.11.0 a
++single card cannot serve both GPG and SSH-with-an-EC-key. On master it can.
+ 
+-Note the asymmetry: everything that speaks PKCS#11 NATIVELY was unaffected. Only the GnuPG
+-bridge broke. So a multi-purpose card is fine for SSH, TLS, CA and wallet work; it is GPG
+-specifically that wants a card to itself.
++**Failure mode worth noting separately:** it HANGS rather than erroring. A wedged `sops --decrypt`
++in a deploy pipeline is far worse than a clean failure, and it is the reason this daemon deserves
++the "small dependency in a critical path" caution above rather than a passing mention.
+-- 
+2.53.0
+
+
+From 2f30bbf8cba80b4c98e4e89a3e02294a6c35dc3b Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 12:12:31 -0400
+Subject: [PATCH 14/27] =?UTF-8?q?docs:=20one=20card=20DOES=20serve=20many?=
+ =?UTF-8?q?=20purposes=20=E2=80=94=200.11.0=20was=20the=20bug,=20verified?=
+ =?UTF-8?q?=20by=20building=20master?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Retracts two wrong claims made earlier in this same document: that multiple
+certificates break the GPG binding, and that GPG needs a token to itself. Both
+were written from a symptom without finding the cause.
+
+The cause is one missing guard in a released dependency. gnupg-pkcs11-scd skips
+certificates whose algorithm it cannot parse via
+
+    if (error == GPG_ERR_WRONG_PUBKEY_ALGO) { error = GPG_ERR_NO_ERROR; }
+
+and in 0.11.0 that guard is in send_certificate_list() but ABSENT from
+cmd_keyinfo(). Homebrew ships 0.11.0.
+
+Confirmed by building master (0.11.1_master) and re-testing the SAME card with the
+SAME EC certificate that wedged the released version:
+
+    0.11.0          KEYINFO -> ERR 41, SOPS hangs
+    0.11.1_master   KEYINFO -> OK,     SOPS decrypt rc=0, ERR 41 count 0
+
+And the multi-purpose claim is now demonstrated rather than assumed: one card
+holding RSA + P-256 + secp256k1, each with a certificate, served an SSH login to a
+live sshd and a sops --decrypt in the same session, plus X.509 CA signing and
+wallet signatures.
+
+Build-from-master is therefore a REQUIREMENT, not a preference — 0.11.0 fails by
+hanging, and a hung sops --decrypt in a deploy pipeline is worse than a clean error.
+
+Also records two incidental findings: repeated certificate write/delete cycles
+exhausted the object store (C_CreateObject -> CKR_GENERAL_ERROR until a wipe), and
+deleting a certificate also removes the public key object, so the key still signs
+but ssh-keygen -D can no longer enumerate it.
+---
+ doc/SOPS-HSM.md | 76 +++++++++++++++++++++++++++++++------------------
+ 1 file changed, 48 insertions(+), 28 deletions(-)
+
+diff --git a/doc/SOPS-HSM.md b/doc/SOPS-HSM.md
+index 7d45b0f..e5d141e 100644
+--- a/doc/SOPS-HSM.md
++++ b/doc/SOPS-HSM.md
+@@ -143,20 +143,13 @@ covering arbitrary secrets, rather than only the algorithms it implements. It is
+ version of "poor-man's KMS": strong for storage, weaker in use than a real KMS that never
+ releases key material at all.
+ 
+-## CONSTRAINT: an EC certificate wedges gnupg-pkcs11-scd 0.11.0
++## REQUIREMENT: build gnupg-pkcs11-scd from master, do not use 0.11.0
+ 
+-Not "multiple certificates", and not "GPG needs its own token" — both of which were claimed here
+-before the cause was actually found. The real fault is a missing guard in ONE function of the
+-released daemon, and it is already fixed upstream.
++Homebrew ships **0.11.0, which is broken for multi-key cards.** Build from master instead.
+ 
+-**Symptom.** With a P-256 certificate on the card, `sops --decrypt` HANGS. The daemon loops on:
++### The bug
+ 
+-```
+-KEYINFO <keygrip>  ->  ERR 41 Wrong public key algorithm
+-```
+-
+-**Cause, verified against the source.** `gnupg-pkcs11-scd` is designed to iterate certificates and
+-skip any whose key algorithm it cannot parse. That guard is
++`gnupg-pkcs11-scd` iterates certificates and skips any whose algorithm it cannot parse:
+ 
+ ```c
+ if (error == GPG_ERR_WRONG_PUBKEY_ALGO) {
+@@ -165,26 +158,53 @@ if (error == GPG_ERR_WRONG_PUBKEY_ALGO) {
+ }
+ ```
+ 
+-and in **0.11.0** it is present in `send_certificate_list()` but **ABSENT from `cmd_keyinfo()`**.
+-On master it is present in both. That maps exactly onto the observed behaviour:
++In 0.11.0 that guard is in `send_certificate_list()` but **ABSENT from `cmd_keyinfo()`**. On
++master it is in both. With an EC certificate on the card, 0.11.0 therefore:
++
++- answers `SCD LEARN` fine (that path skips the cert), but
++- returns `ERR 41 Wrong public key algorithm` to `KEYINFO`, and **HANGS**
+ 
+-| call | uses | 0.11.0 result |
++A hung `sops --decrypt` in a deploy pipeline is far worse than a clean failure, which is why
++this is a build requirement rather than a footnote.
++
++### Measured, same card and same certificate
++
++| daemon | `KEYINFO` | SOPS |
+ |---|---|---|
+-| `SCD LEARN` | `send_certificate_list()` | works — EC cert skipped |
+-| `KEYINFO <keygrip>` | `cmd_keyinfo()` | **ERR 41**, propagated, daemon wedges |
++| 0.11.0 (brew) | `ERR 41` | hangs |
++| 0.11.1_master (built) | `OK` | **decrypt rc=0, ERR 41 count: 0** |
++
++### Build it
++
++```sh
++brew install autoconf automake pkg-config libgcrypt libassuan pkcs11-helper
++git clone https://github.com/alonbl/gnupg-pkcs11-scd.git
++cd gnupg-pkcs11-scd && autoreconf -ivf
++./configure --prefix=$HOME/tools/gnupg-pkcs11-scd-master && make && make install
++```
++
++Then point `gpg-agent.conf` at that binary rather than the brew one.
++
++## One card really does serve many purposes
++
++With master, a single card was verified holding **RSA (GPG/SOPS/CA) + P-256 (SSH) + secp256k1
++(wallet)**, each with its certificate, all working together in one session:
++
++- SSH authentication to a live sshd — real login, remote command executed
++- `sops --decrypt` immediately afterwards on the same card — `rc=0`
++- X.509 CA signing, and wallet signatures, from the same token
+ 
+-The card is never at fault. Throughout, raw PKCS#11 kept working for every key — secp256k1, RSA
+-and P-256 all signed correctly while GPG was wedged.
++Earlier revisions of this document claimed the opposite — first that multiple certificates broke
++the binding, then that GPG needed a card to itself. **Both were wrong.** They were written from a
++symptom without finding the cause. The cause was one missing `if` in a released dependency.
+ 
+-**Fix: build gnupg-pkcs11-scd from master.** Brew ships 0.11.0, which predates the `cmd_keyinfo`
+-guard.
++## Two incidental findings worth keeping
+ 
+-**Workaround if you must stay on 0.11.0:** keep EC *certificates* off the card used for GPG. EC
+-*keys* are fine — only certificate parsing trips it. But note the cost, measured here: on this
+-card, `pkcs11-tool --delete-object --type cert` ALSO removes the public key object, so the EC key
+-keeps signing but `ssh-keygen -D` can no longer enumerate it as an SSH identity. So on 0.11.0 a
+-single card cannot serve both GPG and SSH-with-an-EC-key. On master it can.
++**Object storage can be exhausted.** After repeated certificate write/delete cycles,
++`C_CreateObject` began returning `CKR_GENERAL_ERROR` and the card refused *any* certificate. A
++wipe cleared it completely. For a token that is re-provisioned often, that is a real operational
++limit.
+ 
+-**Failure mode worth noting separately:** it HANGS rather than erroring. A wedged `sops --decrypt`
+-in a deploy pipeline is far worse than a clean failure, and it is the reason this daemon deserves
+-the "small dependency in a critical path" caution above rather than a passing mention.
++**Deleting a certificate also removes the public key object.** The private key keeps signing, but
++`ssh-keygen -D` can no longer enumerate it. Certificates are not decoration on this card — they
++are what makes a key discoverable to public-key tooling.
+-- 
+2.53.0
+
+
+From 48f7e5b7ffb45d98174cedf6ffba85567f9ca53b Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Sun, 2 Aug 2026 16:17:15 -0400
+Subject: [PATCH 15/27] fix(hsm): reset via SYSRESETREQ with flash quiesced,
+ never the watchdog
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SWD forensics on the ~7% re-provisioning hang (2026-08-02, Debug Probe on
+the SWD port, xPack OpenOCD rp2350 target, hsm-cycle-test.sh):
+
+- watchdog_reboot(): device left the USB bus, never re-enumerated.
+  Forensics on the live hang: watchdog REASON.TIMER set (the watchdog DID
+  fire), then both Cortex-M33 cores reading all-zero, XIP SSI all-zero,
+  bootram diagnostics untouched — the post-reset boot never got as far as
+  XIP setup.
+- Reset TYPE ruled out: AIRCR.SYSRESETREQ hung with the same signature.
+- Flash-busy-at-reset ruled out as the sole cause: holding the flash
+  mutex across the reset hung identically (kept anyway — one less
+  variable, and it is cheap).
+
+So: 500ms grace for the APDU response, low_flash_quiesce(), then
+AIRCR.SYSRESETREQ (both secure and non-secure bits, DSB barriers). No
+watchdog fallback — it is a measured wedge vector. If the AIRCR write
+does not reset, stay alive and report SW_EXEC_ERROR: an operator who can
+retry beats a device that needs a datacenter visit. Watchdog scratch[0]
+carries an attribution marker (0x1A17C0DE) so any future wedge can be
+tied to this code path over SWD.
+
+Submodule: core1 launch verification + dead-man's switch (see its
+commit).
+---
+ pico-keys-sdk            |  2 +-
+ src/hsm/cmd_initialize.c | 75 +++++++++++++++++++++++-----------------
+ 2 files changed, 44 insertions(+), 33 deletions(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index 843a3dc..ba531cb 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit 843a3dc593b7eec0dd561c5255a14c89374c804c
++Subproject commit ba531cb77561de4593686f6b66f7d30b469ff15d
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index c0c92b6..4df320c 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -29,6 +29,8 @@
+ #include <stdio.h>
+ #ifdef PICO_PLATFORM
+ #include "hardware/watchdog.h"
++#include "hardware/structs/scb.h"
++#include "pico/time.h"
+ #endif
+ 
+ /* Upper bound on waiting for the re-personalisation write to become durable before the reset
+@@ -326,40 +328,49 @@ int cmd_initialize(void) {
+          * Resetting after re-personalisation is also what a real smartcard does, so this makes
+          * the Pico behave more like the SmartCard-HSM it stands in for, not less.
+          *
+-         * Use watchdog_reboot() and NOT the EV_RESET path. EV_RESET routes to
+-         * usb_secure_reboot_now(), which zeroes heap and stack before resetting; that was tried
+-         * here first and MEASURED to hang the device outright on RP2350 — it left the bus and
+-         * never re-enumerated, recoverable only by physically replugging, i.e. strictly worse
+-         * than the bug being fixed. The flash and the wipe were both fine (the card came back
+-         * correctly re-personalised after a replug), so the fault is in that reboot path, not
+-         * in the commit above. rescue.c:490 already reboots with a plain watchdog_reset for
+-         * "reboot to normal mode", which is the proven path in this codebase.
++         * Do NOT use the EV_RESET path: it routes to usb_secure_reboot_now(), which zeroes
++         * heap and stack before resetting; that was tried here first and MEASURED to hang the
++         * device outright on RP2350 — it left the bus and never re-enumerated, recoverable only
++         * by physically replugging, i.e. strictly worse than the bug being fixed.
+          *
+-         * Not scrubbing RAM first is acceptable: a reset exposes memory to nobody without
+-         * physical access to the device, and the alternative here does not reboot at all.
+-         *
+-         * The delay lets core 0 finish transmitting the APDU response before the reset lands,
+-         * so the host sees this command SUCCEED rather than "Card removed".
+-         *
+-         * MEASURED RELIABILITY: 9/9 recovering in 1-2s (hsm-cycle-test.sh), INCLUDING the first
+-         * initialize after a firmware flash.
++         * THE MEASURED HISTORY OF THIS RESET (2026-08-02, Debug Probe on SWD, xPack OpenOCD
++         * rp2350 target, hsm-cycle-test.sh, all on a populated card):
++         *   - watchdog_reboot(): ~7% of cycles HUNG — device left the USB bus, never
++         *     re-enumerated. SWD forensics on the live hang: watchdog REASON.TIMER set (the
++         *     watchdog DID fire), both cores reading all-zero, XIP SSI all-zero, bootram
++         *     diagnostics untouched — the post-reset boot never got as far as XIP setup.
++         *   - AIRCR.SYSRESETREQS alone: 13 clean cycles, then the SAME hang. NOTE: this round
++         *     is unattributable — a watchdog fallback fired if the AIRCR write didn't take, and
++         *     OpenOCD flashing pollutes REASON, so which reset actually ran is unknown.
++         *   - Flash quiesce (mtx_flash held) + SYSRESETREQS: 10 clean cycles, SAME hang.
++         * Whatever wedges the warm boot, it is NOT cleanly the reset type and NOT cleanly
++         * flash-busy-at-reset. The quiesce is kept (it is cheap and removes one variable); the
++         * watchdog fallback is REMOVED so an AIRCR failure reads as "declined but alive"
++         * instead of another wedge; and scratch[0] carries an attribution marker so the next
++         * hang can be tied to the exact code path that preceded it.
+          *
+-         * An earlier round measured 7/7 warm but 1/1 HUNG on that first-after-flash case, and it
+-         * was very nearly written up as a real cold-boot defect. It was not. The firmware had
+-         * been built with -DPICO_BOARD=pico2, i.e. for RP2350A with a 4MB flash map, on a board
+-         * that is RP2350B with 16MB (see waveshare_rp2350_pizero.h). Rebuilding against the
+-         * correct board definition made the cold path pass first try and every try after.
+-         *
+-         * BUILD FOR THE ACTUAL BOARD. A generic -DPICO_BOARD target that merely boots is not
+-         * evidence it is correct: everything worked well enough to mask the mismatch until one
+-         * flash-heavy path failed intermittently. */
+-        printf("INIT: arming watchdog reset in %d ms\n", (int) INITIALIZE_REBOOT_DELAY_MS);
+-        watchdog_reboot(0, 0, INITIALIZE_REBOOT_DELAY_MS);
+-        /* If the UART shows this line and the device never comes back, the watchdog was armed
+-         * and the fault is in the reset/re-enumeration itself. If it never appears, the hang is
+-         * EARLIER — in the commit or the wipe — and the lines above localise it. That
+-         * distinction is the whole reason these logs exist. */
+-        printf("INIT: watchdog armed, returning SW_OK\n");
++         * Not scrubbing RAM first is acceptable: a reset exposes memory to nobody without
++         * physical access to the device. */
++        /* Attribution marker for SWD forensics: scratch registers survive warm resets, so a
++         * hang found with this marker present means THIS build reset and wedged afterwards;
++         * absent means the wedge predates the current firmware. */
++        watchdog_hw->scratch[0] = 0x1A17C0DEu;
++        printf("INIT: resetting in %d ms (SYSRESETREQ, flash quiesced)\n", (int) INITIALIZE_REBOOT_DELAY_MS);
++        busy_wait_ms(INITIALIZE_REBOOT_DELAY_MS);
++        low_flash_quiesce();
++        printf("INIT: flash quiesced, SYSRESETREQ now\n");
++        __asm volatile("dsb sy" ::: "memory");
++        scb_hw->aircr = (0x05FAu << M33_AIRCR_VECTKEY_LSB)
++                        | M33_AIRCR_SYSRESETREQ_BITS | M33_AIRCR_SYSRESETREQS_BITS;
++        __asm volatile("dsb sy" ::: "memory");
++        /* If the reset took this is unreachable. Give it 2 s, then STAY ALIVE: the watchdog
++         * fallback was considered and rejected — it is a measured wedge vector, and an alive
++         * card that reports an error beats a card that needs a datacenter visit. Release the
++         * flash mutex so the card keeps working. */
++        busy_wait_ms(2000);
++        low_flash_unquiesce();
++        printf("INIT: ERROR SYSRESETREQ did not reset — staying alive\n");
++        return SW_EXEC_ERROR();
+ #endif
+     }
+     else {   //free memory bytes request
+-- 
+2.53.0
+
+
+From 1901dca20342dc28c65791d36203a30dc780d32d Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Mon, 3 Aug 2026 14:18:47 -0400
+Subject: [PATCH 16/27] fix(hsm): defer the post-INITIALIZE reset until the
+ response is out
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+A reset executed inside the APDU handler lands BEFORE the response is
+transmitted (apdu_finish runs after cmd_initialize returns) — measured
+as Transmit failed on the host for every initialize. The old
+watchdog_reboot(0,0,500) masked this by being asynchronous; the
+synchronous busy-wait + SYSRESETREQ replacement exposed it, and
+SYSRESETREQ itself turned out to reset only the asserting core on this
+silicon. Schedule the reset instead: return now, response goes out,
+card_watchdog_task() fires it from core0's loop 500ms later via the
+bootrom's rom_reboot() (see the submodule commit).
+---
+ pico-keys-sdk            |  2 +-
+ src/hsm/cmd_initialize.c | 25 +++++++++----------------
+ 2 files changed, 10 insertions(+), 17 deletions(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index ba531cb..d399654 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit ba531cb77561de4593686f6b66f7d30b469ff15d
++Subproject commit d399654c01d4012ed951be6e8b970637507ef871
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index 4df320c..74dfda3 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -355,22 +355,15 @@ int cmd_initialize(void) {
+          * hang found with this marker present means THIS build reset and wedged afterwards;
+          * absent means the wedge predates the current firmware. */
+         watchdog_hw->scratch[0] = 0x1A17C0DEu;
+-        printf("INIT: resetting in %d ms (SYSRESETREQ, flash quiesced)\n", (int) INITIALIZE_REBOOT_DELAY_MS);
+-        busy_wait_ms(INITIALIZE_REBOOT_DELAY_MS);
+-        low_flash_quiesce();
+-        printf("INIT: flash quiesced, SYSRESETREQ now\n");
+-        __asm volatile("dsb sy" ::: "memory");
+-        scb_hw->aircr = (0x05FAu << M33_AIRCR_VECTKEY_LSB)
+-                        | M33_AIRCR_SYSRESETREQ_BITS | M33_AIRCR_SYSRESETREQS_BITS;
+-        __asm volatile("dsb sy" ::: "memory");
+-        /* If the reset took this is unreachable. Give it 2 s, then STAY ALIVE: the watchdog
+-         * fallback was considered and rejected — it is a measured wedge vector, and an alive
+-         * card that reports an error beats a card that needs a datacenter visit. Release the
+-         * flash mutex so the card keeps working. */
+-        busy_wait_ms(2000);
+-        low_flash_unquiesce();
+-        printf("INIT: ERROR SYSRESETREQ did not reset — staying alive\n");
+-        return SW_EXEC_ERROR();
++        /* The reset must NOT fire from inside this handler: the APDU response is only
++         * transmitted after cmd_initialize() returns (apdu_finish on core0), so a reset
++         * executed here lands BEFORE the response — the host watches the card vanish
++         * mid-command and reports Transmit failed (measured 2026-08-02; the old
++         * watchdog_reboot(0,0,500) masked this by being asynchronous). Schedule the
++         * reset instead: return now, the response goes out, and card_watchdog_task()
++         * fires it from core0's loop INITIALIZE_REBOOT_DELAY_MS later. */
++        printf("INIT: scheduling SYSRESETREQ in %d ms\n", (int) INITIALIZE_REBOOT_DELAY_MS);
++        schedule_chip_reset(INITIALIZE_REBOOT_DELAY_MS);
+ #endif
+     }
+     else {   //free memory bytes request
+-- 
+2.53.0
+
+
+From f50873fac2ac67f55589788f803325f3965a8b2b Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 07:30:39 -0400
+Subject: [PATCH 17/27] chore(hsm): bump sdk for the ping duplicate-execution
+ fix
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index d399654..d11826b 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit d399654c01d4012ed951be6e8b970637507ef871
++Subproject commit d11826bff90794b4b290c406ac1926aca201fdd3
+-- 
+2.53.0
+
+
+From 981515029b6ba62a9fb428718d45e849da4cbc3e Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 09:02:34 -0400
+Subject: [PATCH 18/27] chore(hsm): bump sdk for the deep-reset wdsel arming
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index d11826b..50fc0d4 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit d11826bff90794b4b290c406ac1926aca201fdd3
++Subproject commit 50fc0d468a9098af2c0c0d450d8af7c3b9a793e4
+-- 
+2.53.0
+
+
+From 92967d3d1688dbb11bde53c047d9f4bc23a248ec Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 14:18:57 -0400
+Subject: [PATCH 19/27] chore(hsm): bump sdk for split reset configs + drain
+ guard
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index 50fc0d4..840395e 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit 50fc0d468a9098af2c0c0d450d8af7c3b9a793e4
++Subproject commit 840395ee6ac290f205de2c95466c2d9d64b97114
+-- 
+2.53.0
+
+
+From 03589ac5da23ca3003faa149a662cdf1786b622c Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 16:37:00 -0400
+Subject: [PATCH 20/27] chore(hsm): bump sdk for bounds-correct fs guard +
+ drain guard
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index 840395e..8e9b180 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit 840395ee6ac290f205de2c95466c2d9d64b97114
++Subproject commit 8e9b18021e3d63f73125a49b858352a793aef2c9
+-- 
+2.53.0
+
+
+From a72f3656e617c9dd2a39d31ee6c9f4ae2fbdc54c Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 13:07:01 -0400
+Subject: [PATCH 21/27] chore(hsm): bump sdk for the RP2040 include guard fix
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index 8e9b180..3843cae 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit 8e9b18021e3d63f73125a49b858352a793aef2c9
++Subproject commit 3843cae516aba08fa8ae727977b952e232d6f7ab
+-- 
+2.53.0
+
+
+From 5358bb1592f364d05287eaa832c454c2af9d9294 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 14:58:21 -0400
+Subject: [PATCH 22/27] chore(hsm): bump sdk for corrected rationale comments
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index 3843cae..fe2a380 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit 3843cae516aba08fa8ae727977b952e232d6f7ab
++Subproject commit fe2a380ed18d4dd0506b9f4aa759a5222cd4c0c3
+-- 
+2.53.0
+
+
+From 61a89e6f3e63d7c77a62ea5bfaf91e147be8e7ca Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 15:28:28 -0400
+Subject: [PATCH 23/27] chore(hsm): bump sdk for the FILE_DATA_FUNC write guard
+ + full-range fs validation
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index fe2a380..bafe74a 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit fe2a380ed18d4dd0506b9f4aa759a5222cd4c0c3
++Subproject commit bafe74aacebf528f50f13f0c01ab493e3ce648ef
+-- 
+2.53.0
+
+
+From 9094c0b4da74842a4309ab06ec1d3f66f36feacc Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 17:39:10 -0400
+Subject: [PATCH 24/27] fix(hsm): bootstrap the device name so a card with no
+ EF.C_DevAut can self-provision
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ROOT CAUSE of the long-standing 'card cannot be re-initialized' failure.
+
+dev_name is the CHR of EF.C_DevAut and has exactly one assignment (sc_hsm.c,
+reset_puk_store). asn1_cvc_aut() refuses to build the EE certificate when
+dev_name is NULL, and EF.C_DevAut is only ever created inside that same
+INITIALIZE path — so creating EF.C_DevAut required EF.C_DevAut. Once the file
+was lost (flash erase, flash_nuke, corruption) the device could never be
+initialized again: INITIALIZE returned SW_EXEC_ERROR, and OpenSC's PKCS#15
+emulator then aborted with 'Could not decode EF.C_DevAut', leaving PKCS#11 with
+CKR_USER_PIN_NOT_INITIALIZED and no PIN objects at all.
+
+Verified on hardware (RP2350B, SWD): dev_name = (nil), asn1_cvc_aut returns 0.
+
+Fix: when EF.C_DevAut is absent or its CHR is unparseable, derive a
+deterministic, device-unique name from the board serial. A validly provisioned
+device is never touched, so existing attestation chains and pinned PKCS#11
+serials are preserved.
+
+CHR layout is the conventional 11-char holder id + 5-digit sequence:
+'ESP' + 8 upper-hex of the last 4 serial bytes + '00001'. OpenSC strips the
+trailing 5 characters unconditionally to form the token serial, so uniqueness
+must live in the leading 11 -- a shared constant there would make every device
+report the same serial. cvc_configure_cert's constant fallback now uses the same
+helper for the same reason.
+
+Design settled by 4-round multi-model quorum (unanimous); record in
+regalia .planning/quorum/debates/2026-08-05-pico-hsm-devaut-deadlock.md
+
+Measured after the fix, on a card following a full 16MB erase:
+  token flags  : login required, rng, token initialized, PIN initialized
+  Serial number: ESP2202E14A
+Previously: INITIALIZE failed and no PKCS#11 token existed at all.
+---
+ src/hsm/cvc.c    | 12 ++++++++++--
+ src/hsm/sc_hsm.c | 30 ++++++++++++++++++++++++++++++
+ src/hsm/sc_hsm.h |  3 +++
+ 3 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/src/hsm/cvc.c b/src/hsm/cvc.c
+index 54582e7..f9b3e63 100644
+--- a/src/hsm/cvc.c
++++ b/src/hsm/cvc.c
+@@ -40,8 +40,16 @@ static int cvc_configure_cert(cvc_write_cert *ctx, const mbedtls_pk_context *sub
+     }
+     car = cvc_get_field(apdu.data, (uint16_t)apdu.nc, &car_len, 0x42);
+     if (!car || !car_len) {
+-        car = dev_name ? dev_name : (const uint8_t *)"ESPICOHSMTR00001";
+-        car_len = dev_name ? dev_name_len : (uint16_t)strlen((const char *)car);
++        if (dev_name && dev_name_len) {
++            car = dev_name;
++            car_len = dev_name_len;
++        }
++        else {
++            /* Never emit a shared constant here: OpenSC derives the PKCS#11 token serial
++             * from this CHR, so a fixed value would make every device report the same
++             * serial. */
++            car = hsm_bootstrap_dev_name(&car_len);
++        }
+     }
+     chr = cvc_get_field(apdu.data, (uint16_t)apdu.nc, &chr_len, 0x5F20);
+     if (!chr || !chr_len) {
+diff --git a/src/hsm/sc_hsm.c b/src/hsm/sc_hsm.c
+index 40c5a3a..75c349f 100644
+--- a/src/hsm/sc_hsm.c
++++ b/src/hsm/sc_hsm.c
+@@ -205,6 +205,27 @@ int puk_store_select_chr(const uint8_t *chr) {
+     return PICOKEYS_ERR_FILE_NOT_FOUND;
+ }
+ 
++/* Device name used before EF.C_DevAut exists.
++ *
++ * Layout is the conventional CVC holder reference: an 11-character holder id followed by a
++ * 5-digit sequence number (16 total). OpenSC derives the PKCS#11 token serial by stripping
++ * the last five characters unconditionally (pkcs15-sc-hsm.c), so every bit of uniqueness
++ * has to live in the leading 11 — hence "ESP" plus 32 bits of the board serial, which keeps
++ * the established "ESPICOHSM..." prefix recognisable to operators while making the token
++ * serial distinct per device. */
++#define BOOTSTRAP_DEV_NAME_LEN 16
++static uint8_t bootstrap_dev_name[BOOTSTRAP_DEV_NAME_LEN + 1];
++
++const uint8_t *hsm_bootstrap_dev_name(uint16_t *len) {
++    const uint8_t *sn = pico_serial.id + (PICO_UNIQUE_BOARD_ID_SIZE_BYTES - 4);
++    snprintf((char *) bootstrap_dev_name, sizeof(bootstrap_dev_name),
++             "ESP%02X%02X%02X%02X00001", sn[0], sn[1], sn[2], sn[3]);
++    if (len) {
++        *len = BOOTSTRAP_DEV_NAME_LEN;
++    }
++    return bootstrap_dev_name;
++}
++
+ void reset_puk_store(void) {
+     if (puk_store_entries > 0) { /* From previous session */
+         for (int i = 0; i < puk_store_entries; i++) {
+@@ -234,6 +255,15 @@ void reset_puk_store(void) {
+         }
+     }
+     dev_name = cvc_get_chr(file_get_data(fterm), file_get_size(fterm), &dev_name_len);
++    if (!dev_name || !dev_name_len) {
++        /* No EF.C_DevAut yet (never provisioned, or the filesystem was erased). Without a
++         * device name asn1_cvc_aut() refuses to build the EE certificate, so INITIALIZE
++         * fails and EF.C_DevAut can never be created — a permanent deadlock. Bootstrap a
++         * deterministic, device-unique name so first provisioning can complete. Only ever
++         * taken when the certificate is absent or its CHR is unparseable; a validly
++         * provisioned device keeps the identity already stored on it. */
++        dev_name = hsm_bootstrap_dev_name(&dev_name_len);
++    }
+     memset(puk_status, 0, sizeof(puk_status));
+ }
+ 
+diff --git a/src/hsm/sc_hsm.h b/src/hsm/sc_hsm.h
+index 53f8d33..9b97b43 100644
+--- a/src/hsm/sc_hsm.h
++++ b/src/hsm/sc_hsm.h
+@@ -121,6 +121,9 @@ extern uint16_t check_pin(const file_t *pin, const_byte_array_t data);
+ extern bool pka_enabled(void);
+ extern const uint8_t *dev_name;
+ extern uint16_t dev_name_len;
++/* Deterministic, device-unique device name used when EF.C_DevAut does not exist yet.
++ * See hsm_bootstrap_dev_name() in sc_hsm.c. */
++extern const uint8_t *hsm_bootstrap_dev_name(uint16_t *len);
+ extern uint8_t puk_status[MAX_PUK];
+ extern int puk_store_select_chr(const uint8_t *chr);
+ extern const_byte_array_t get_meta_tag(file_t *ef, uint16_t meta_tag);
+-- 
+2.53.0
+
+
+From a262593c42abf055864e9824fccf0b9ec68eb3cb Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 19:16:21 -0400
+Subject: [PATCH 25/27] =?UTF-8?q?chore(hsm):=20bump=20sdk=20=E2=80=94=20re?=
+ =?UTF-8?q?move=20the=20completion-eating=20dead-man's=20switch?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index bafe74a..25fc4b3 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit bafe74aacebf528f50f13f0c01ab493e3ce648ef
++Subproject commit 25fc4b3c0b6cf1999555f296ae12a1c9d8155bd3
+-- 
+2.53.0
+
+
+From c75ce1920ba569d9e5a23744774b8f0d7da541d5 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 08:09:20 -0400
+Subject: [PATCH 26/27] fix(hsm): reset the output buffer before building
+ C.DevAut
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+asn1_cvc_aut() and asn1_cvc_cert() both APPEND (output->len += out_len). The
+shared 'certificates' buffer was never reset between them, so EF_TERMCA
+(C.DevAut, EF 2F02) was written with the CUMULATIVE length and ended up holding
+the EE authenticated request (tag 0x67, 497 bytes) followed by the certificate
+(tag 7F21, 443 bytes) — 940 bytes instead of 443.
+
+Consequence: OpenSC decodes the FIRST object, so its 'device certificate' was
+actually the EE request, and offline TR-03110 verification failed outright
+('not a parseable CVC certificate').
+
+Measured on hardware: EF 2F02 940 -> 443 bytes, and the staging gate's hw_devaut
+step goes from FAIL to PASS (CHR=ESP2202E14A00001 CAR=ESP2202E14A00001).
+
+The EE request already reached the flash page cache via file_put_data above, so
+reusing the buffer is safe.
+---
+ src/hsm/cmd_initialize.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/hsm/cmd_initialize.c b/src/hsm/cmd_initialize.c
+index 74dfda3..b9a36a1 100644
+--- a/src/hsm/cmd_initialize.c
++++ b/src/hsm/cmd_initialize.c
+@@ -264,6 +264,14 @@ int cmd_initialize(void) {
+                 return SW_EXEC_ERROR();
+             }
+ 
++            /* Reset the output buffer before building the device certificate. asn1_cvc_*
++             * APPEND (output->len += out_len), so without this EF_TERMCA is written with
++             * the CUMULATIVE length and ends up holding the EE authenticated request
++             * (tag 0x67) followed by the certificate (tag 7F21) — 940 bytes instead of
++             * 443. OpenSC then decodes the request as the device certificate. The EE
++             * request has already been copied into the flash page cache by file_put_data
++             * above, so reusing the buffer here is safe. */
++            certificates.len = 0;
+             if (asn1_cvc_cert(&subject_pk, &certificates, CONST_BYTE_ARRAY(NULL, 0), true) == 0) {
+                 mbedtls_ecdsa_free(&ecdsa);
+                 return SW_EXEC_ERROR();
+-- 
+2.53.0
+
+
+From 51821e9d9db1ecb754829f9eb9f2e8ed60c3c4d7 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 08:09:20 -0400
+Subject: [PATCH 27/27] chore(hsm): bump sdk for the accept-and-discard
+ FILE_DATA_FUNC guard
+
+---
+ pico-keys-sdk | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/pico-keys-sdk b/pico-keys-sdk
+index 25fc4b3..3af823e 160000
+--- a/pico-keys-sdk
++++ b/pico-keys-sdk
+@@ -1 +1 @@
+-Subproject commit 25fc4b3c0b6cf1999555f296ae12a1c9d8155bd3
++Subproject commit 3af823e0562d1dd39f95110d066aee717a62f2eb
+-- 
+2.53.0
+

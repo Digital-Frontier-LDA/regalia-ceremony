@@ -1,0 +1,1929 @@
+From 78e9f3032064406f520d642f8f227925f4953d99 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 29 Jul 2026 20:22:06 -0400
+Subject: [PATCH 01/15] fix(flash): bound the USB blackout during a
+ multi-sector erase
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+low_flash_task() handed an entire multi-sector range to flash_range_erase() inside
+ONE save_and_disable_interrupts() critical section. USB on RP2040/RP2350 is
+interrupt-driven and flash_range_erase() must run with interrupts off (XIP is
+unavailable mid-erase, so an ISR resident in flash would fault), so the USB stack
+went unserviced for the duration of the whole CALL rather than of a sector.
+INITIALIZE DEVICE erases the whole file region, which is the worst case.
+
+Erase one sector per critical section instead. Each blackout is now a single sector
+erase (~30-45ms, well inside host tolerance) and the USB IRQ gets a window between
+sectors. Total erase time is unchanged; only the distribution of the blackout is.
+
+HONEST SCOPE — this does NOT, on its own, fix the "Pico hangs on --initialize and
+needs a physical replug" symptom of polhenarejos/pico-hsm#9. That was measured: with
+only this change, the device still ended up with the reader present and the card
+reporting "not present", unrecoverable without a replug. What fixes that symptom is
+resetting the device after re-personalisation (a separate change in pico-hsm's
+cmd_initialize.c); the card does not rebuild its state after the file system is
+wiped until the firmware boots again.
+
+This is therefore a HARDENING change with no measured symptom improvement, kept on
+its own merits: starving the USB stack for the length of a whole-region erase is
+wrong regardless, and a host with tighter timeouts than the one tested here would
+be more likely to drop the device. It has not been isolated from the reset change,
+so its individual effect on any host remains unproven.
+
+The multicore lockout stays held across the whole range by the caller: it parks
+core 1, while save_and_disable_interrupts() is per-core (PRIMASK), so restoring
+between sectors re-enables the USB IRQ on core 0 without letting core 1 loose
+against flash mid-erase.
+
+On ESP_PLATFORM the interrupt macros are already no-ops and
+esp_partition_erase_range() does not block the USB stack, so this is a plain chunked
+erase there and behaviour is unchanged.
+
+Built for pico and pico2; verified the change alters the emitted binary
+(differential build, patched vs pristine .bin hashes differ).
+---
+ src/fs/low_flash.c | 46 +++++++++++++++++++++++++++++++++++++++++++---
+ 1 file changed, 43 insertions(+), 3 deletions(-)
+
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index 3b6ad9a..2731359 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -105,6 +105,45 @@ void low_flash_task(void);
+ void low_flash_commit(void);
+ bool low_flash_commit_sync(uint32_t timeout_ms);
+ 
++#if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
++/* Erase a multi-sector range ONE SECTOR PER CRITICAL SECTION.
++ *
++ * WHY: USB on RP2040 is interrupt-driven. flash_range_erase() has to run with interrupts
++ * disabled — XIP is unavailable while flash is being erased, so any ISR resident in flash would
++ * fault mid-erase — which means the USB stack is not serviced for the duration of the CALL, not
++ * the duration of a sector. INITIALIZE DEVICE erases the whole file region, so the old code
++ * handed flash_range_erase() a many-sector range and the device went silent on the bus long
++ * enough for the host to give up and drop it. The symptom is a Pico that "hangs" on
++ * `sc-hsm-tool --initialize` and needs a PHYSICAL REPLUG to come back — see
++ * polhenarejos/pico-hsm#9 (LIBUSB_ERROR_TIMEOUT / "Card not transacted").
++ *
++ * That behaviour also makes the device unusable in a remote/datacenter deployment, where nobody
++ * can walk over and reseat the USB connector.
++ *
++ * Erasing a single sector per critical section bounds each blackout to one sector erase
++ * (~30-45ms on RP2040, well inside what a host tolerates) and gives the USB IRQ a window between
++ * sectors, so the device stays enumerated across an erase of any size. TOTAL erase time is
++ * unchanged — this only changes how the blackout is distributed.
++ *
++ * The caller keeps the multicore lockout held across the whole range: the lockout parks core 1,
++ * while save_and_disable_interrupts() is per-core (PRIMASK), so restoring here re-enables the
++ * USB IRQ on core 0 without letting core 1 loose against flash mid-erase.
++ *
++ * On ESP_PLATFORM the interrupt macros above are no-ops and esp_partition_erase_range() does not
++ * block the USB stack, so this is simply a chunked erase there and behaviour is unchanged.
++ */
++static void flash_range_erase_chunked(uint32_t offset, size_t total_bytes) {
++    if (total_bytes < FLASH_SECTOR_SIZE) {
++        total_bytes = FLASH_SECTOR_SIZE;
++    }
++    for (size_t done = 0; done < total_bytes; done += FLASH_SECTOR_SIZE) {
++        uint32_t ints = save_and_disable_interrupts();
++        flash_range_erase(offset + done, FLASH_SECTOR_SIZE);
++        restore_interrupts(ints);
++    }
++}
++#endif
++
+ void low_flash_task(void){
+     if (mutex_try_enter(&mtx_flash, NULL) == true) {
+         if (locked_out == true && flash_available == true && ready_pages > 0) {
+@@ -140,9 +179,10 @@ void low_flash_task(void){
+                         continue;
+                     }
+                     //printf("WRITTING\n");
+-                    uint32_t ints = save_and_disable_interrupts();
+-                    flash_range_erase(flash_pages[r].address - XIP_BASE, flash_pages[r].page_size ? ((int) (flash_pages[r].page_size / FLASH_SECTOR_SIZE)) * FLASH_SECTOR_SIZE : FLASH_SECTOR_SIZE);
+-                    restore_interrupts(ints);
++                    /* Chunked: a whole-region erase here is what drops the device off the USB
++                     * bus during INITIALIZE DEVICE. See flash_range_erase_chunked() above. */
++                    flash_range_erase_chunked(flash_pages[r].address - XIP_BASE,
++                                              flash_pages[r].page_size ? ((size_t) (flash_pages[r].page_size / FLASH_SECTOR_SIZE)) * FLASH_SECTOR_SIZE : FLASH_SECTOR_SIZE);
+                     if (multicore_lockout_end_timeout_us(1000) == false) {
+                         printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
+                         continue;
+-- 
+2.53.0
+
+
+From ea8325be5d81272e5192836fcd4a4d40c07db282 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 07:19:42 -0400
+Subject: [PATCH 02/15] feat(ccid): allow reset and BOOTSEL over USB, opt-in at
+ build time
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The handler for RESET_REQUEST_BOOTSEL and RESET_REQUEST_FLASH was present but
+entirely commented out, so there was no software path to reset the device at all.
+The only recovery from any wedged state was physically reseating the USB connector
+— fine on a desk, impossible in a datacenter, and the reason a remote deployment of
+this firmware was not viable.
+
+Enable it behind the CMake option PICOKEYS_REMOTE_RESET, defaulting OFF.
+
+SECURITY — why this is opt-in at BUILD time and not runtime. RESET_REQUEST_BOOTSEL
+drops the device into the bootloader, which permits REMOTE FIRMWARE REPLACEMENT by
+anything that can reach the USB device. Neither request is authenticated, and that
+is not an oversight: a wedged device cannot verify a PIN, which is precisely the
+situation a recovery path exists for. An unauthenticated code-load path is
+appropriate on a development or staging token, where remote recovery and firmware
+updates are worth more than the exposure, and unacceptable on a token holding real
+key material. Deciding that when the firmware is BUILT — rather than letting
+whatever is talking to the device decide — is the only way to make that distinction
+stick. CMake emits a loud warning when it is on.
+
+Uses watchdog_reboot() and deliberately NOT usb_secure_reboot_now(): the latter
+zeroes heap and stack first and was measured to HANG an RP2350 outright, leaving
+the USB bus without re-enumerating. A recovery path that can itself wedge the
+device is worse than none.
+
+Builds clean both ways (option OFF and ON) for pico2.
+---
+ src/usb/ccid/ccid.c | 54 +++++++++++++++++++++++++++++----------------
+ 1 file changed, 35 insertions(+), 19 deletions(-)
+
+diff --git a/src/usb/ccid/ccid.c b/src/usb/ccid/ccid.c
+index 7ed3299..3060e90 100644
+--- a/src/usb/ccid/ccid.c
++++ b/src/usb/ccid/ccid.c
+@@ -30,6 +30,16 @@
+ #include "ccid.h"
+ #include "apdu.h"
+ #include "usb.h"
++#if defined(PICO_PLATFORM) && defined(PICOKEYS_REMOTE_RESET)
++#include "pico/usb_reset_interface.h"
++#include "pico/bootrom.h"
++#include "hardware/watchdog.h"
++/* Grace period before the reset fires, so the control transfer is acknowledged first and the
++ * host sees the request succeed rather than a bare disconnect. */
++#ifndef PICOKEYS_REMOTE_RESET_DELAY_MS
++#define PICOKEYS_REMOTE_RESET_DELAY_MS 100
++#endif
++#endif
+ 
+ #if MAX_RES_APDU_DATA_SIZE > MAX_CMD_APDU_DATA_SIZE
+ #define USB_BUF_SIZE (MAX_RES_APDU_DATA_SIZE + 20 + 9)
+@@ -443,30 +453,36 @@ static bool ccid_control_xfer_cb(uint8_t __unused rhport,
+                 request->bRequest,
+                 request->wValue,
+                 request->wLength);
+-/*
+- #if PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_RESET_TO_BOOTSEL
++#if defined(PICO_PLATFORM) && defined(PICOKEYS_REMOTE_RESET)
++        /* Remote reset over USB. OFF unless the build explicitly opts in — see the CMake option
++         * PICOKEYS_REMOTE_RESET. This block shipped commented out, which is why the ONLY way to
++         * recover a wedged device was to physically reseat the connector. That is fine on a desk
++         * and impossible in a datacenter.
++         *
++         * SECURITY — read before enabling. RESET_REQUEST_BOOTSEL drops the device into the
++         * bootloader, i.e. it allows REMOTE FIRMWARE REPLACEMENT by any process that can reach
++         * the USB device. On a development or staging token that is the point: firmware updates
++         * and recovery without hands on the hardware. On a token holding anything of value it is
++         * an unauthenticated code-load path and must stay off. Neither request is authenticated
++         * — there is no PIN check here, by construction, because a wedged device cannot verify a
++         * PIN. That is precisely why this is opt-in at BUILD time rather than runtime: the
++         * decision is made when the firmware is produced, not by whatever is talking to it.
++         *
++         * Reboot only exposes no key material by itself; BOOTSEL does, indirectly, by allowing
++         * firmware that could then read flash. Enable accordingly. */
+         if (request->bRequest == RESET_REQUEST_BOOTSEL) {
+- #ifdef PICO_STDIO_USB_RESET_BOOTSEL_ACTIVITY_LED
+-            uint gpio_mask = 1u << PICO_STDIO_USB_RESET_BOOTSEL_ACTIVITY_LED;
+- #else
+-            uint gpio_mask = 0u;
+- #endif
+- #if !PICO_STDIO_USB_RESET_BOOTSEL_FIXED_ACTIVITY_LED
+-            if (request->wValue & 0x100) {
+-                gpio_mask = 1u << (request->wValue >> 9u);
+-            }
+- #endif
+-            reset_usb_boot(gpio_mask, (request->wValue & 0x7f) | PICO_STDIO_USB_RESET_BOOTSEL_INTERFACE_DISABLE_MASK);
+-            // does not return, otherwise we'd return true
++            reset_usb_boot(0, 0);
++            // does not return
+         }
+- #endif
+- #if PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_RESET_TO_FLASH_BOOT
+         if (request->bRequest == RESET_REQUEST_FLASH) {
+-            watchdog_reboot(0, 0, PICO_STDIO_USB_RESET_RESET_TO_FLASH_DELAY_MS);
++            /* Plain watchdog reset, deliberately NOT usb_secure_reboot_now(): the latter zeroes
++             * heap and stack first and was measured to HANG an RP2350 outright, leaving the bus
++             * without re-enumerating. A recovery path that can itself wedge the device is worse
++             * than none. */
++            watchdog_reboot(0, 0, PICOKEYS_REMOTE_RESET_DELAY_MS);
+             return true;
+         }
+- #endif
+- */
++#endif
+         return true;
+     }
+     return false;
+-- 
+2.53.0
+
+
+From a4b305d14f8961019297de281b7d14cb718b712e Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 30 Jul 2026 07:48:18 -0400
+Subject: [PATCH 03/15] Revert "feat(ccid): allow reset and BOOTSEL over USB,
+ opt-in at build time"
+
+This reverts commit ea8325be5d81272e5192836fcd4a4d40c07db282.
+---
+ src/usb/ccid/ccid.c | 54 ++++++++++++++++-----------------------------
+ 1 file changed, 19 insertions(+), 35 deletions(-)
+
+diff --git a/src/usb/ccid/ccid.c b/src/usb/ccid/ccid.c
+index 3060e90..7ed3299 100644
+--- a/src/usb/ccid/ccid.c
++++ b/src/usb/ccid/ccid.c
+@@ -30,16 +30,6 @@
+ #include "ccid.h"
+ #include "apdu.h"
+ #include "usb.h"
+-#if defined(PICO_PLATFORM) && defined(PICOKEYS_REMOTE_RESET)
+-#include "pico/usb_reset_interface.h"
+-#include "pico/bootrom.h"
+-#include "hardware/watchdog.h"
+-/* Grace period before the reset fires, so the control transfer is acknowledged first and the
+- * host sees the request succeed rather than a bare disconnect. */
+-#ifndef PICOKEYS_REMOTE_RESET_DELAY_MS
+-#define PICOKEYS_REMOTE_RESET_DELAY_MS 100
+-#endif
+-#endif
+ 
+ #if MAX_RES_APDU_DATA_SIZE > MAX_CMD_APDU_DATA_SIZE
+ #define USB_BUF_SIZE (MAX_RES_APDU_DATA_SIZE + 20 + 9)
+@@ -453,36 +443,30 @@ static bool ccid_control_xfer_cb(uint8_t __unused rhport,
+                 request->bRequest,
+                 request->wValue,
+                 request->wLength);
+-#if defined(PICO_PLATFORM) && defined(PICOKEYS_REMOTE_RESET)
+-        /* Remote reset over USB. OFF unless the build explicitly opts in — see the CMake option
+-         * PICOKEYS_REMOTE_RESET. This block shipped commented out, which is why the ONLY way to
+-         * recover a wedged device was to physically reseat the connector. That is fine on a desk
+-         * and impossible in a datacenter.
+-         *
+-         * SECURITY — read before enabling. RESET_REQUEST_BOOTSEL drops the device into the
+-         * bootloader, i.e. it allows REMOTE FIRMWARE REPLACEMENT by any process that can reach
+-         * the USB device. On a development or staging token that is the point: firmware updates
+-         * and recovery without hands on the hardware. On a token holding anything of value it is
+-         * an unauthenticated code-load path and must stay off. Neither request is authenticated
+-         * — there is no PIN check here, by construction, because a wedged device cannot verify a
+-         * PIN. That is precisely why this is opt-in at BUILD time rather than runtime: the
+-         * decision is made when the firmware is produced, not by whatever is talking to it.
+-         *
+-         * Reboot only exposes no key material by itself; BOOTSEL does, indirectly, by allowing
+-         * firmware that could then read flash. Enable accordingly. */
++/*
++ #if PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_RESET_TO_BOOTSEL
+         if (request->bRequest == RESET_REQUEST_BOOTSEL) {
+-            reset_usb_boot(0, 0);
+-            // does not return
++ #ifdef PICO_STDIO_USB_RESET_BOOTSEL_ACTIVITY_LED
++            uint gpio_mask = 1u << PICO_STDIO_USB_RESET_BOOTSEL_ACTIVITY_LED;
++ #else
++            uint gpio_mask = 0u;
++ #endif
++ #if !PICO_STDIO_USB_RESET_BOOTSEL_FIXED_ACTIVITY_LED
++            if (request->wValue & 0x100) {
++                gpio_mask = 1u << (request->wValue >> 9u);
++            }
++ #endif
++            reset_usb_boot(gpio_mask, (request->wValue & 0x7f) | PICO_STDIO_USB_RESET_BOOTSEL_INTERFACE_DISABLE_MASK);
++            // does not return, otherwise we'd return true
+         }
++ #endif
++ #if PICO_STDIO_USB_RESET_INTERFACE_SUPPORT_RESET_TO_FLASH_BOOT
+         if (request->bRequest == RESET_REQUEST_FLASH) {
+-            /* Plain watchdog reset, deliberately NOT usb_secure_reboot_now(): the latter zeroes
+-             * heap and stack first and was measured to HANG an RP2350 outright, leaving the bus
+-             * without re-enumerating. A recovery path that can itself wedge the device is worse
+-             * than none. */
+-            watchdog_reboot(0, 0, PICOKEYS_REMOTE_RESET_DELAY_MS);
++            watchdog_reboot(0, 0, PICO_STDIO_USB_RESET_RESET_TO_FLASH_DELAY_MS);
+             return true;
+         }
+-#endif
++ #endif
++ */
+         return true;
+     }
+     return false;
+-- 
+2.53.0
+
+
+From ba531cb77561de4593686f6b66f7d30b469ff15d Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Sun, 2 Aug 2026 16:16:55 -0400
+Subject: [PATCH 04/15] fix(hsm): verify core1 starts, recover it when lost,
+ quiesce flash before reset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+SWD forensics (2026-08-02, Debug Probe, xPack OpenOCD rp2350 target) on the
+intermittent post-reset wedge showed two warm-boot core-start failures:
+
+- the boot can complete with core1 still parked in the bootrom's
+  wait-for-launch loop (pc=0x19e, polling SIO FIFO_ST) while the SDK's
+  multicore_launch_core1 FIFO handshake completes against stale/misaligned
+  data and reports success — the card enumerates (TinyUSB is core0) but
+  never answers an APDU;
+- a mid-session variant: core1 parked AFTER it had been serving APDUs.
+
+Hardening, all measured on hardware:
+
+- low_flash_quiesce()/low_flash_unquiesce(): take the flash mutex so a
+  chip reset never lands with flash work in flight. Every op in this
+  layer enters mtx_flash (low_flash_task only via try_enter) and the SDK
+  erase/program calls are synchronous, so a held mutex means the flash
+  chip is idle.
+- card_start(): the launch is VERIFIED via a flag set by
+  card_init_core1(); 3 relaunch attempts, then a bounded chip reset
+  (watchdog scratch[1], max 5 boots, then alive-dark — never a loop).
+- card_watchdog_task(): dead-man's switch on core0. While a card
+  function is active and no command is in flight, ping core1 through the
+  existing queue protocol (apdu_thread echoes unknown events back +1);
+  a missing echo, or a command outstanding past 300s, is core1 death.
+  Recovery is a bounded chip reset ONLY — a bare relaunch was measured
+  insufficient (core0's CCID/TPDU state stays bound to the dead session;
+  the card connects but every APDU fails Transmit failed).
+- Forensic counters in scratch[2..4] (recoveries, relaunches, resets).
+---
+ src/fs/flash.h     |   2 +
+ src/fs/low_flash.c |  17 +++++
+ src/main.c         |   3 +
+ src/usb/usb.c      | 183 +++++++++++++++++++++++++++++++++++++++++++++
+ src/usb/usb.h      |   1 +
+ 5 files changed, 206 insertions(+)
+
+diff --git a/src/fs/flash.h b/src/fs/flash.h
+index 487866f..2c5be8b 100644
+--- a/src/fs/flash.h
++++ b/src/fs/flash.h
+@@ -52,5 +52,7 @@ extern void flash_task(void);
+ extern void low_flash_init(void);
+ extern void flash_commit(void);
+ extern bool flash_commit_sync(uint32_t timeout_ms);
++extern void low_flash_quiesce(void);
++extern void low_flash_unquiesce(void);
+ 
+ #endif // _FLASH_H
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index 2731359..bb5db7f 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -212,6 +212,23 @@ void low_flash_task(void){
+     }
+ }
+ 
++/* Take the flash mutex and NEVER give it back. Every flash operation in this layer — queued
++ * erases, commits, background page handling — enters mtx_flash (low_flash_task only via
++ * try_enter, so a held mutex makes it skip), and the underlying SDK erase/program calls are
++ * synchronous, so once the mutex is held the flash chip is IDLE and stays idle. Intended for
++ * use immediately before a chip reset: a reset landing while the flash chip is internally busy
++ * is the measured cause of the intermittent post-reset boot wedge (see cmd_initialize.c in
++ * pico-hsm). Not re-entrant; the caller is expected to reset the chip before ever releasing. */
++void low_flash_quiesce(void) {
++    mutex_enter_blocking(&mtx_flash);
++}
++
++/* Release the mutex taken by low_flash_quiesce(). Only for the path where the reset the
++ * quiesce was taken for did NOT fire and the device stays alive — see cmd_initialize.c. */
++void low_flash_unquiesce(void) {
++    mutex_exit(&mtx_flash);
++}
++
+ #ifdef PICO_RP2040
+ void phymarker_write(void);
+ #endif
+diff --git a/src/main.c b/src/main.c
+index 7a910ac..ce66a89 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -117,6 +117,9 @@ void execute_tasks(void) {
+     rest_task();
+ #endif
+     usb_task();
++#ifdef PICO_PLATFORM
++    card_watchdog_task();
++#endif
+     led_blinking_task();
+ #ifdef ENABLE_LVGL_UI
+     platform_ui_task();
+diff --git a/src/usb/usb.c b/src/usb/usb.c
+index 19ffc36..939b88a 100644
+--- a/src/usb/usb.c
++++ b/src/usb/usb.c
+@@ -23,7 +23,10 @@
+ #if defined(PICO_PLATFORM)
+ #include "pico/bootrom.h"
+ #include "pico/multicore.h"
++#include "pico/time.h"
+ #include "hardware/sync.h"
++#include "hardware/watchdog.h"
++#include "hardware/structs/scb.h"
+ #define multicore_launch_func_core1(a) multicore_launch_core1((void (*) (void))a)
+ #endif
+ #include "apdu.h"
+@@ -242,6 +245,23 @@ bool is_busy(void) {
+     return timeout > 0;
+ }
+ 
++#if defined(PICO_PLATFORM)
++/* State for the core1 dead-man's switch (card_watchdog_task(), bottom of file). */
++#define EV_PING                 0x10000u
++#define EV_PING_ECHO            (EV_PING + 1)
++#define CARD_PING_INTERVAL_MS   2000
++#define CARD_PING_TIMEOUT_MS    1000
++#define CMD_DEADLINE_MS         300000u   /* 180s commit cap + erase margin */
++
++static volatile bool cmd_in_flight = false;
++static uint64_t cmd_started_ms = 0;
++static uint64_t ping_sent_ms = 0;         /* 0 = no ping outstanding */
++static uint64_t core1_last_ok_ms = 0;
++static uint64_t wd_last_run_ms = 0;
++
++static void card_note_core1_alive(void);
++#endif
++
+ void usb_send_event(uint32_t flag) {
+ #ifndef ENABLE_EMULATION
+     mutex_enter_blocking(&mutex);
+@@ -249,6 +269,10 @@ void usb_send_event(uint32_t flag) {
+     queue_add_blocking(&usb_to_card_q, &flag);
+     if (flag == EV_CMD_AVAILABLE) {
+         timeout_start();
++#if defined(PICO_PLATFORM)
++        cmd_in_flight = true;
++        cmd_started_ms = board_millis();
++#endif
+     }
+ #ifndef ENABLE_EMULATION
+     mutex_exit(&mutex);
+@@ -260,12 +284,71 @@ void usb_send_event(uint32_t flag) {
+     }
+ }
+ 
++/* Core1 liveness flag, cleared by card_start() before each launch and set by
++ * card_init_core1() — the first thing every launched card function runs (apdu.c).
++ * Exists because the SDK's multicore launch handshake CAN report success while core1
++ * never starts: measured 2026-08-02 via SWD on a live failure — core1 parked in the
++ * bootrom's wait-for-launch loop (polling SIO FIFO_ST), one unread word in the FIFO
++ * (VLD=1), core0 convinced the launch succeeded. The card then enumerates USB (TinyUSB
++ * runs on core0) but never answers an APDU. */
++static volatile bool core1_alive = false;
++
+ void card_init_core1(void) {
++    core1_alive = true;
+     low_flash_init_core1();
+ }
+ 
+ volatile uint16_t finished_data_size = 0;
+ 
++#if defined(PICO_PLATFORM)
++/* Hard reset via AIRCR.SYSRESETREQ, with a bounded attempt budget kept in watchdog
++ * scratch[1] (survives warm resets). Used when core1 cannot be launched: each boot is
++ * an independent dice roll, so resetting again converges — but a device that NEVER
++ * gets core1 back must stop rolling and stay alive-dark (enumerated, not answering)
++ * rather than reset-loop forever. */
++#define CORE1_BOOT_ATTEMPTS_MAX 5
++
++static void chip_reset_bounded(void) {
++    watchdog_hw->scratch[4] += 1;
++    uint32_t attempts = watchdog_hw->scratch[1] + 1;
++    watchdog_hw->scratch[1] = attempts;
++    if (attempts > CORE1_BOOT_ATTEMPTS_MAX) {
++        printf("CARD: core1 unrecoverable after %lu boots — staying alive-dark\n",
++               (unsigned long) attempts);
++        return;
++    }
++    printf("CARD: core1 launch failed, resetting chip (attempt %lu)\n", (unsigned long) attempts);
++    __asm volatile("dsb sy" ::: "memory");
++    scb_hw->aircr = (0x05FAu << M33_AIRCR_VECTKEY_LSB)
++                    | M33_AIRCR_SYSRESETREQ_BITS | M33_AIRCR_SYSRESETREQS_BITS;
++    __asm volatile("dsb sy" ::: "memory");
++    busy_wait_ms(2000);
++    printf("CARD: ERROR SYSRESETREQ did not reset — staying alive-dark\n");
++}
++
++/* Launch func on core1 and VERIFY it actually started (the launch handshake can
++ * complete against stale FIFO data while core1 stays parked in the bootrom — the
++ * failure core1_alive exists to catch). Returns core1_alive. */
++static bool card_launch_verified(void *(*func)(void *)) {
++    for (int attempt = 0; attempt < 3 && !core1_alive; attempt++) {
++        if (attempt > 0) {
++            printf("CARD: core1 did not start, relaunching (attempt %d)\n", attempt + 1);
++        }
++        watchdog_hw->scratch[3] += 1;
++        core1_alive = false;
++        multicore_reset_core1();
++        multicore_launch_func_core1(func);
++        for (int waited = 0; waited < 500 && !core1_alive; waited += 10) {
++            busy_wait_ms(10);
++        }
++    }
++    if (core1_alive) {
++        watchdog_hw->scratch[1] = 0;
++    }
++    return core1_alive;
++}
++#endif
++
+ void card_start(uint8_t itf, void *(*func)(void *)) {
+     timeout_start();
+     if (card_locked_itf != itf || card_locked_func != func) {
+@@ -273,8 +356,17 @@ void card_start(uint8_t itf, void *(*func)(void *)) {
+             card_exit();
+         }
+         if (func) {
++#if defined(PICO_PLATFORM)
++            if (!card_launch_verified(func)) {
++                chip_reset_bounded();
++                /* If the reset fired, unreachable. If it didn't (budget exhausted or the
++                 * AIRCR write failed), fall through and stay alive-dark: the host will
++                 * time out, which is honest. */
++            }
++#else
+             multicore_reset_core1();
+             multicore_launch_func_core1(func);
++#endif
+         }
+         led_set_mode(MODE_MOUNTED);
+         card_locked_itf = itf;
+@@ -344,8 +436,17 @@ int card_status(uint8_t itf) {
+             if (m == EV_EXEC_FINISHED) {
+                 timeout_stop();
+                 led_set_mode(MODE_MOUNTED);
++#if defined(PICO_PLATFORM)
++                cmd_in_flight = false;
++                card_note_core1_alive();
++#endif
+                 return PICOKEYS_OK;
+             }
++#if defined(PICO_PLATFORM)
++            else if (m == EV_PING_ECHO) {
++                card_note_core1_alive();
++            }
++#endif
+ #ifndef ENABLE_EMULATION
+             else if (m == EV_PRESS_BUTTON) {
+                 int ret = button_wait();
+@@ -378,6 +479,88 @@ int card_status(uint8_t itf) {
+     return PICOKEYS_ERR_FILE_NOT_FOUND;
+ }
+ 
++#if defined(PICO_PLATFORM)
++/* ---- Core1 dead-man's switch ----------------------------------------------------
++ * The launch-time check in card_start() catches a core1 that never starts, but core1
++ * can ALSO be lost mid-session (measured 2026-08-02 via SWD: core1 parked in a bootrom
++ * FIFO wait after it had been serving APDUs, core0 healthy, card mute). So: while a
++ * card function is active and NO command is in flight, ping core1 through the existing
++ * queue protocol (apdu_thread echoes any non-EV_CMD_AVAILABLE message back +1) and
++ * treat a missing echo as death. While a command IS in flight — an INITIALIZE wipe
++ * legitimately runs 60-90s+ — never probe; but a command outstanding beyond
++ * CMD_DEADLINE_MS is death too, since even the 180s commit cap bounds real work.
++ * Recovery is the same ladder as launch: relaunch, then bounded chip reset. */
++
++static void card_note_core1_alive(void) {
++    core1_last_ok_ms = board_millis();
++    ping_sent_ms = 0;
++}
++
++/* Recover a lost core1. Measured 2026-08-02: relaunching core1 alone is NOT enough —
++ * core0's CCID slot state (TPDU sequencing, block state) belongs to the dead session,
++ * so the card connects but every APDU transmit fails ("Transmit failed" at PC/SC).
++ * The only coherent recovery from a mid-session core1 death is a full chip reset:
++ * both sides reinitialise, the host re-enumerates and reconnects. */
++static void card_recover_core1(void) {
++    watchdog_hw->scratch[2] += 1;
++    printf("CARD: core1 lost mid-session, resetting chip\n");
++    cmd_in_flight = false;
++    ping_sent_ms = 0;
++    chip_reset_bounded();
++}
++
++void card_watchdog_task(void) {
++    uint64_t now = board_millis();
++    if (now - wd_last_run_ms < 50) {
++        return;
++    }
++    wd_last_run_ms = now;
++
++    if (card_locked_itf == ITF_TOTAL || card_locked_func == NULL) {
++        ping_sent_ms = 0;
++        cmd_in_flight = false;
++        return;
++    }
++
++    /* Consume anything core1 sent — every message is proof of life. The CCID layer
++     * does the same via card_status(); both run on core0, so whoever pops first wins
++     * and the handling is identical. */
++    uint32_t m = 0;
++    if (queue_try_remove(&card_to_usb_q, &m)) {
++        if (m == EV_PING_ECHO || m == EV_EXEC_FINISHED) {
++            cmd_in_flight = false;
++        }
++        else if (m == EV_RESET) {
++            usb_secure_reboot_now();
++        }
++        card_note_core1_alive();
++    }
++
++    if (cmd_in_flight) {
++        if (now - cmd_started_ms > CMD_DEADLINE_MS) {
++            printf("CARD: command outstanding >%lus — core1 presumed dead\n",
++                   (unsigned long) (CMD_DEADLINE_MS / 1000));
++            card_recover_core1();
++        }
++        return;
++    }
++
++    if (ping_sent_ms != 0) {
++        if (now - ping_sent_ms > CARD_PING_TIMEOUT_MS) {
++            card_recover_core1();
++        }
++        return;
++    }
++
++    if (now - core1_last_ok_ms > CARD_PING_INTERVAL_MS) {
++        uint32_t ping = EV_PING;
++        if (queue_try_add(&usb_to_card_q, &ping)) {
++            ping_sent_ms = now;
++        }
++    }
++}
++#endif
++
+ #ifndef USB_ITF_CCID
+ #include "device/usbd_pvt.h"
+ usbd_class_driver_t const *usbd_app_driver_get_cb(uint8_t *driver_count) {
+diff --git a/src/usb/usb.h b/src/usb/usb.h
+index 2eb2c33..40f93c0 100644
+--- a/src/usb/usb.h
++++ b/src/usb/usb.h
+@@ -95,6 +95,7 @@ extern void usb_init(void);
+ extern volatile uint16_t finished_data_size;
+ extern void usb_set_timeout_counter(uint8_t itf, uint32_t v);
+ extern void card_init_core1(void);
++extern void card_watchdog_task(void);
+ 
+ extern void usb_send_event(uint32_t flag);
+ extern void timeout_stop(void);
+-- 
+2.53.0
+
+
+From d399654c01d4012ed951be6e8b970637507ef871 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Mon, 3 Aug 2026 14:18:33 -0400
+Subject: [PATCH 05/15] fix(hsm): bootrom reboot, lockout resync, fs-page
+ guard, panic-reboot
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Follow-ups from the first validation campaigns (2026-08-02/03, all SWD-measured):
+
+- chip_reset_now() uses the bootrom's rom_reboot(), not AIRCR.SYSRESETREQ:
+  SYSRESETREQ resets only the asserting core on RP2040/RP2350 (raspberrypi/
+  pico-feedback#329) and was measured as a complete no-op — RAM statics
+  survived the write. rom_reboot is the field-proven path every UF2
+  flash-update reboot takes.
+- schedule_chip_reset(): a reset must never run inside an APDU handler —
+  the response is transmitted after the handler returns, so a synchronous
+  reset lands mid-command (host: Transmit failed). card_watchdog_task()
+  fires the scheduled reset from core0's loop after the grace.
+- Multicore lockout timeouts raised 1ms -> 100ms, and an end-timeout now
+  re-syncs with a start+end pair: 1ms was far inside normal IRQ/entry
+  latency, and a timed-out end orphaned core1 in the lockout victim
+  handler forever (measured: core1 parked in multicore_lockout_handler,
+  card mute).
+- low_flash_task validates queued page addresses against the data region
+  before touching flash: a corrupt entry (measured: address 0x20001A00,
+  an SRAM pointer, after interrupted wipes) hit hard_assert(flash_offs +
+  count <= PICO_FLASH_SIZE_BYTES) and PANICKED the device for a day.
+- hard_assertion_failure() overridden: panic -> rom_reboot instead of
+  panic -> bkpt -> _exit. A catatonic smartcard needs a site visit;
+  a rebooting one recovers itself.
+---
+ src/fs/low_flash.c | 40 +++++++++++++++++++++++++++++++++------
+ src/main.c         | 19 +++++++++++++++++++
+ src/usb/usb.c      | 47 ++++++++++++++++++++++++++++++++++++++++------
+ src/usb/usb.h      |  1 +
+ 4 files changed, 95 insertions(+), 12 deletions(-)
+
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index bb5db7f..eafea46 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -149,10 +149,22 @@ void low_flash_task(void){
+         if (locked_out == true && flash_available == true && ready_pages > 0) {
+             //printf(" DO_FLASH AVAILABLE\n");
+             for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
++                if (flash_pages[r].ready == true || flash_pages[r].erase == true) {
++                    uintptr_t a = flash_pages[r].address;
++                    uint32_t off = a - XIP_BASE;
++                    if (a < XIP_BASE || off < (FLASH_SIZE_BYTES >> 1) || off >= FLASH_SIZE_BYTES) {
++                        printf("ERROR: flash_pages[%d] has out-of-region address %p — dropping entry, NOT erasing\n",
++                               r, (void *) a);
++                        flash_pages[r].ready = false;
++                        flash_pages[r].erase = false;
++                        ready_pages--;
++                        continue;
++                    }
++                }
+                 if (flash_pages[r].ready == true) {
+ #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+                     //printf("WRITTING %X\n",flash_pages[r].address-XIP_BASE);
+-                    if (multicore_lockout_start_timeout_us(1000) == false) {
++                    if (multicore_lockout_start_timeout_us(100000) == false) {
+                         printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
+                         continue;
+                     }
+@@ -161,8 +173,16 @@ void low_flash_task(void){
+                     flash_range_erase(flash_pages[r].address - XIP_BASE, FLASH_SECTOR_SIZE);
+                     flash_range_program(flash_pages[r].address - XIP_BASE, flash_pages[r].page, FLASH_SECTOR_SIZE);
+                     restore_interrupts(ints);
+-                    if (multicore_lockout_end_timeout_us(1000) == false) {
+-                        printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
++                    if (multicore_lockout_end_timeout_us(100000) == false) {
++                        /* A timed-out END can orphan core1 in the lockout victim handler
++                         * forever (measured 2026-08-02: core1 parked in
++                         * multicore_lockout_handler, card mute). The 1ms default was far
++                         * inside normal IRQ/entry latency. Re-sync with a full start+end
++                         * pair: start on an already-locked victim returns immediately,
++                         * and the end then releases it. */
++                        printf("WARN: FLASH LOCKOUT END TIMEOUT — resyncing core1\n");
++                        multicore_lockout_start_timeout_us(100000);
++                        multicore_lockout_end_timeout_us(100000);
+                         continue;
+                     }
+                     //printf("WRITEN %X !\n",flash_pages[r].address);
+@@ -174,7 +194,7 @@ void low_flash_task(void){
+                 }
+                 else if (flash_pages[r].erase == true) {
+ #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+-                    if (multicore_lockout_start_timeout_us(1000) == false) {
++                    if (multicore_lockout_start_timeout_us(100000) == false) {
+                         printf("WARN: FLASH LOCKOUT START TIMEOUT\n");
+                         continue;
+                     }
+@@ -183,8 +203,16 @@ void low_flash_task(void){
+                      * bus during INITIALIZE DEVICE. See flash_range_erase_chunked() above. */
+                     flash_range_erase_chunked(flash_pages[r].address - XIP_BASE,
+                                               flash_pages[r].page_size ? ((size_t) (flash_pages[r].page_size / FLASH_SECTOR_SIZE)) * FLASH_SECTOR_SIZE : FLASH_SECTOR_SIZE);
+-                    if (multicore_lockout_end_timeout_us(1000) == false) {
+-                        printf("WARN: FLASH LOCKOUT END TIMEOUT\n");
++                    if (multicore_lockout_end_timeout_us(100000) == false) {
++                        /* A timed-out END can orphan core1 in the lockout victim handler
++                         * forever (measured 2026-08-02: core1 parked in
++                         * multicore_lockout_handler, card mute). The 1ms default was far
++                         * inside normal IRQ/entry latency. Re-sync with a full start+end
++                         * pair: start on an already-locked victim returns immediately,
++                         * and the end then releases it. */
++                        printf("WARN: FLASH LOCKOUT END TIMEOUT — resyncing core1\n");
++                        multicore_lockout_start_timeout_us(100000);
++                        multicore_lockout_end_timeout_us(100000);
+                         continue;
+                     }
+ #else
+diff --git a/src/main.c b/src/main.c
+index ce66a89..67f87c5 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -31,6 +31,25 @@
+ #include "bsp/board.h"
+ #include "hardware/structs/ioqspi.h"
+ #include "pico/stdio.h"
++#include "pico/bootrom.h"
++#include "boot/picoboot_constants.h"
++#endif
++
++#if defined(PICO_PLATFORM)
++/* The SDK's hard_assertion_failure() is __weak; override it. The default path is
++ * panic() -> __breakpoint -> _exit: a silent, permanent brick that needs a physical
++ * replug — measured 2026-08-03 (a corrupt flash_pages entry hit
++ * hard_assert(flash_offs + count <= PICO_FLASH_SIZE_BYTES) and the device sat
++ * catatonic for a day). A smartcard that cannot recover itself is not one. Reboot
++ * via the bootrom instead: each boot is a fresh roll, and the core1 launch-verify
++ * and dead-man's switch do their jobs from there. */
++void hard_assertion_failure(void) {
++    printf("PANIC: hard assert failed — rebooting via rom_reboot\n");
++    rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL, 1, 0, 0);
++    while (1) {
++        tight_loop_contents();
++    }
++}
+ #endif
+ 
+ #include "random.h"
+diff --git a/src/usb/usb.c b/src/usb/usb.c
+index 939b88a..384e1ef 100644
+--- a/src/usb/usb.c
++++ b/src/usb/usb.c
+@@ -22,6 +22,7 @@
+ #include "pico_time.h"
+ #if defined(PICO_PLATFORM)
+ #include "pico/bootrom.h"
++#include "boot/picoboot_constants.h"
+ #include "pico/multicore.h"
+ #include "pico/time.h"
+ #include "hardware/sync.h"
+@@ -301,6 +302,37 @@ void card_init_core1(void) {
+ volatile uint16_t finished_data_size = 0;
+ 
+ #if defined(PICO_PLATFORM)
++/* Full-chip reset via the BOOTROM's own reboot facility. Why not the alternatives:
++ *  - AIRCR.SYSRESETREQ: resets only the asserting core on RP2040/RP2350 (the datasheet's
++ *    generic ARM text is wrong for these parts; measured here 2026-08-02 as a complete
++ *    no-op — RAM statics survived the write).
++ *  - SDK watchdog_reboot(): full-chip, but measured to wedge the post-reset boot ~7% of
++ *    cycles (shapes A/B in the forensic record).
++ *  - rom_reboot(): still watchdog-based, but it is the bootrom's own sequenced path — the
++ *    same mechanism every UF2 flash-update reboot uses, the most field-exercised warm
++ *    reset this chip has.
++ * Quiesce flash first: no flash op may be in flight when the reset lands. */
++static void chip_reset_now(void) {
++    low_flash_quiesce();
++    printf("CARD: rebooting via bootrom rom_reboot\n");
++    int rc = rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL, 1, 0, 0);
++    /* The reboot is armed asynchronously; if the call returned an error, stay alive. */
++    if (rc != 0) {
++        low_flash_unquiesce();
++        printf("CARD: ERROR rom_reboot refused (%d) — staying alive\n", rc);
++    }
++}
++
++/* Deferred chip reset, fired by card_watchdog_task() from core0's main loop. Exists
++ * because a reset must never run inside an APDU handler: the response is transmitted
++ * after the handler returns, so a synchronous reset lands mid-command (measured:
++ * Transmit failed on the host). */
++static uint64_t scheduled_reset_at_ms = 0;   /* 0 = none pending */
++
++void schedule_chip_reset(uint32_t delay_ms) {
++    scheduled_reset_at_ms = board_millis() + delay_ms;
++}
++
+ /* Hard reset via AIRCR.SYSRESETREQ, with a bounded attempt budget kept in watchdog
+  * scratch[1] (survives warm resets). Used when core1 cannot be launched: each boot is
+  * an independent dice roll, so resetting again converges — but a device that NEVER
+@@ -318,12 +350,7 @@ static void chip_reset_bounded(void) {
+         return;
+     }
+     printf("CARD: core1 launch failed, resetting chip (attempt %lu)\n", (unsigned long) attempts);
+-    __asm volatile("dsb sy" ::: "memory");
+-    scb_hw->aircr = (0x05FAu << M33_AIRCR_VECTKEY_LSB)
+-                    | M33_AIRCR_SYSRESETREQ_BITS | M33_AIRCR_SYSRESETREQS_BITS;
+-    __asm volatile("dsb sy" ::: "memory");
+-    busy_wait_ms(2000);
+-    printf("CARD: ERROR SYSRESETREQ did not reset — staying alive-dark\n");
++    chip_reset_now();
+ }
+ 
+ /* Launch func on core1 and VERIFY it actually started (the launch handshake can
+@@ -516,6 +543,14 @@ void card_watchdog_task(void) {
+     }
+     wd_last_run_ms = now;
+ 
++    /* A scheduled chip reset outranks everything else on this pass. */
++    if (scheduled_reset_at_ms != 0 && (long long) (now - scheduled_reset_at_ms) >= 0) {
++        scheduled_reset_at_ms = 0;
++        printf("CARD: scheduled reset firing\n");
++        chip_reset_now();
++        return;
++    }
++
+     if (card_locked_itf == ITF_TOTAL || card_locked_func == NULL) {
+         ping_sent_ms = 0;
+         cmd_in_flight = false;
+diff --git a/src/usb/usb.h b/src/usb/usb.h
+index 40f93c0..4b93fac 100644
+--- a/src/usb/usb.h
++++ b/src/usb/usb.h
+@@ -96,6 +96,7 @@ extern volatile uint16_t finished_data_size;
+ extern void usb_set_timeout_counter(uint8_t itf, uint32_t v);
+ extern void card_init_core1(void);
+ extern void card_watchdog_task(void);
++extern void schedule_chip_reset(uint32_t delay_ms);
+ 
+ extern void usb_send_event(uint32_t flag);
+ extern void timeout_stop(void);
+-- 
+2.53.0
+
+
+From d11826bff90794b4b290c406ac1926aca201fdd3 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 07:30:38 -0400
+Subject: [PATCH 06/15] fix(hsm): the dead-man's ping must not re-execute the
+ staged APDU
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+apdu_thread echoed EV_PING and then fell through to process_apdu(),
+re-running the previously staged command. A ping landing in an idle gap
+mid-session therefore executed a state-changing APDU a SECOND time —
+the leading suspect for unwrapKey failing SW=6400 (DKEK domain state
+corrupted by duplicate execution). EV_PING now echoes and continues the
+loop; the define moved to usb.h so apdu.c shares it.
+---
+ src/apdu.c    | 8 ++++++++
+ src/usb/usb.c | 2 --
+ src/usb/usb.h | 5 +++++
+ 3 files changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/src/apdu.c b/src/apdu.c
+index e9fb4f6..072aec1 100644
+--- a/src/apdu.c
++++ b/src/apdu.c
+@@ -234,6 +234,14 @@ void *apdu_thread(void *arg) {
+             queue_add_blocking(&card_to_usb_q, &flag);
+         }
+ 
++        /* The dead-man's ping is a liveness probe, NOT a command: echo it and loop.
++         * Without this, a ping landing between APDU exchanges re-runs process_apdu()
++         * on the staged buffer — executing the previous state-changing command a
++         * SECOND time (measured 2026-08-03: duplicate execution broke the DKEK
++         * domain state mid-session and unwrapKey then failed SW=6400). */
++        if (m == EV_PING) {
++            continue;
++        }
+         if (m == EV_VERIFY_CMD_AVAILABLE || m == EV_MODIFY_CMD_AVAILABLE) {
+             set_res_sw(0x6f, 0x00);
+             goto done;
+diff --git a/src/usb/usb.c b/src/usb/usb.c
+index 384e1ef..93d35f5 100644
+--- a/src/usb/usb.c
++++ b/src/usb/usb.c
+@@ -248,8 +248,6 @@ bool is_busy(void) {
+ 
+ #if defined(PICO_PLATFORM)
+ /* State for the core1 dead-man's switch (card_watchdog_task(), bottom of file). */
+-#define EV_PING                 0x10000u
+-#define EV_PING_ECHO            (EV_PING + 1)
+ #define CARD_PING_INTERVAL_MS   2000
+ #define CARD_PING_TIMEOUT_MS    1000
+ #define CMD_DEADLINE_MS         300000u   /* 180s commit cap + erase margin */
+diff --git a/src/usb/usb.h b/src/usb/usb.h
+index 4b93fac..2ffd1e8 100644
+--- a/src/usb/usb.h
++++ b/src/usb/usb.h
+@@ -51,6 +51,11 @@
+ #define EV_BUTTON_PRESSED        32
+ #define EV_BUTTON_CANCELLED      64
+ 
++/* Dead-man's switch probe (card_watchdog_task): apdu_thread must echo this and
++ * CONTINUE the loop — never process it as a command (see apdu.c). */
++#define EV_PING                 0x10000u
++#define EV_PING_ECHO            (EV_PING + 1)
++
+ enum { ITF_INVALID = 0xFF };
+ 
+ #ifdef USB_ITF_HID
+-- 
+2.53.0
+
+
+From 50fc0d468a9098af2c0c0d450d8af7c3b9a793e4 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 09:02:34 -0400
+Subject: [PATCH 07/15] fix(hsm): make every watchdog-family reset a full
+ switched-core power cycle
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Measured: ~5-10% of warm resets wedged the boot (cores never start),
+identically across watchdog_reboot() and rom_reboot(). The default
+watchdog reset leaves the switched core domain powered. POWMAN_WDSEL
+RESET_SWCORE power-cycles it instead — 'the same effect as a power-on
+reset for the switched core power domain' (RP2350 datasheet) — with
+RESET_PSM + RESET_POWMAN_ASYNC and PSM_WDSEL all-ones per the datasheet
+note. Armed at every boot because RESET_POWMAN restores defaults.
+
+VALIDATION: 100/100 rapid reboots (pico-hsm-reset.py -> rescue app ->
+watchdog_reboot) with zero hangs, against a ~5-10% measured wedge rate
+(0.93^100 ~= 0.07% if the rate were unchanged).
+---
+ src/main.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/src/main.c b/src/main.c
+index 67f87c5..32de221 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -33,6 +33,9 @@
+ #include "pico/stdio.h"
+ #include "pico/bootrom.h"
+ #include "boot/picoboot_constants.h"
++#include "hardware/powman.h"
++#include "hardware/structs/psm.h"
++#include "hardware/regs/psm.h"
+ #endif
+ 
+ #if defined(PICO_PLATFORM)
+@@ -184,6 +187,24 @@ int main(void) {
+ #ifdef PICO_PLATFORM
+     board_init();
+     stdio_init_all();
++
++    /* Make EVERY watchdog-family reset a FULL switched-core power cycle. The default
++     * watchdog reset (PSM_WDSEL minus ROSC/XOSC) leaves the switched core domain
++     * powered and was measured to wedge the warm boot ~5-10% of resets on RP2350B —
++     * cores never start, identically across watchdog_reboot() and rom_reboot()
++     * (2026-08-02/03 forensic record in regalia hardware/pico-hsm/). POWMAN_WDSEL
++     * RESET_SWCORE makes the reset power-cycle the switched domain and run the full
++     * PSM sequence — "the same effect as a power-on reset for the switched core
++     * power domain" (RP2350 datasheet). RESET_POWMAN_ASYNC restores powman defaults
++     * without depending on clk_ref; because it restores defaults, this register must
++     * be re-armed on EVERY boot — hence here, first thing. PSM_WDSEL all-ones per
++     * the datasheet note (powman ignores watchdog resets that don't select CLOCKS
++     * or earlier). */
++    powman_set_bits(&powman_hw->wdsel,
++                    POWMAN_WDSEL_RESET_POWMAN_ASYNC_BITS |
++                    POWMAN_WDSEL_RESET_SWCORE_BITS |
++                    POWMAN_WDSEL_RESET_PSM_BITS);
++    psm_hw->wdsel = PSM_WDSEL_BITS;
+ #endif
+ 
+ #else
+-- 
+2.53.0
+
+
+From 840395ee6ac290f205de2c95466c2d9d64b97114 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 14:18:57 -0400
+Subject: [PATCH 08/15] fix(hsm): split reset configs per call site +
+ drain-guard the scheduled reset
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Two measured-good configurations (2026-08-03/04):
+- scheduled post-INITIALIZE reset: drain-guarded (never fire while
+  low_flash has lazy work queued — a reset landing mid-drain leaves a
+  half-written fs and the next boot fails to present the card), then
+  rom_reboot with the POWMAN_WDSEL deep bits CLEARED (22/23 post-wipe
+  recoveries; deep resets after a wipe came back mute 4/4).
+- recovery resets: watchdog_reboot with WDSEL armed at boot — the deep
+  SWCORE power-cycle hammered 100/100 on an idle card.
+main.c re-arms WDSEL on every boot.
+---
+ src/fs/flash.h     |  1 +
+ src/fs/low_flash.c | 11 +++++++++++
+ src/usb/usb.c      | 44 ++++++++++++++++++++++++++++++++++----------
+ 3 files changed, 46 insertions(+), 10 deletions(-)
+
+diff --git a/src/fs/flash.h b/src/fs/flash.h
+index 2c5be8b..300956f 100644
+--- a/src/fs/flash.h
++++ b/src/fs/flash.h
+@@ -54,5 +54,6 @@ extern void flash_commit(void);
+ extern bool flash_commit_sync(uint32_t timeout_ms);
+ extern void low_flash_quiesce(void);
+ extern void low_flash_unquiesce(void);
++extern bool low_flash_busy(void);
+ 
+ #endif // _FLASH_H
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index eafea46..3e2558b 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -343,6 +343,17 @@ static bool low_flash_available(void) {
+     return available;
+ }
+ 
++/* Public idle check for reset scheduling: true while the flash layer has queued or
++ * in-flight work. A reset that lands while lazy writes are still pending leaves a
++ * half-written file system and the next boot may fail to present the card (measured
++ * 2026-08-03: boot mute after init-on-blank-fs, repeatedly). */
++bool low_flash_busy(void) {
++    mutex_enter_blocking(&mtx_flash);
++    bool busy = flash_available || ready_pages > 0;
++    mutex_exit(&mtx_flash);
++    return busy;
++}
++
+ bool low_flash_commit_sync(uint32_t timeout_ms) {
+ #if defined(PICO_PLATFORM)
+     // Core 0 owns low_flash_task(). Waiting for it from core 0 would prevent
+diff --git a/src/usb/usb.c b/src/usb/usb.c
+index 93d35f5..69b2f87 100644
+--- a/src/usb/usb.c
++++ b/src/usb/usb.c
+@@ -28,6 +28,7 @@
+ #include "hardware/sync.h"
+ #include "hardware/watchdog.h"
+ #include "hardware/structs/scb.h"
++#include "hardware/powman.h"
+ #define multicore_launch_func_core1(a) multicore_launch_core1((void (*) (void))a)
+ #endif
+ #include "apdu.h"
+@@ -310,15 +311,32 @@ volatile uint16_t finished_data_size = 0;
+  *    same mechanism every UF2 flash-update reboot uses, the most field-exercised warm
+  *    reset this chip has.
+  * Quiesce flash first: no flash op may be in flight when the reset lands. */
+-static void chip_reset_now(void) {
++static void chip_reset_now(bool deep) {
++    /* Two measured-good configurations (2026-08-03/04):
++     *  - deep == false (scheduled reset after INITIALIZE): drain-guarded, then
++     *    rom_reboot with the POWMAN_WDSEL deep-reset bits CLEARED. This combination
++     *    ran 22/23 post-wipe recovery cycles; deep resets after a wipe came back
++     *    mute in 4/4 attempts. main.c re-arms WDSEL on every boot.
++     *  - deep == true (recovery resets): watchdog_reboot with WDSEL armed —
++     *    power-cycles the switched core domain; hammered 100/100 on an idle card.
++     * Quiesce flash first either way: no flash op may be in flight at the reset. */
+     low_flash_quiesce();
+-    printf("CARD: rebooting via bootrom rom_reboot\n");
+-    int rc = rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL, 1, 0, 0);
+-    /* The reboot is armed asynchronously; if the call returned an error, stay alive. */
+-    if (rc != 0) {
+-        low_flash_unquiesce();
+-        printf("CARD: ERROR rom_reboot refused (%d) — staying alive\n", rc);
++    if (deep) {
++        printf("CARD: rebooting via watchdog (deep: SWCORE power-cycle)\n");
++        watchdog_reboot(0, 0, 0);
+     }
++    else {
++        powman_clear_bits(&powman_hw->wdsel,
++                          POWMAN_WDSEL_RESET_POWMAN_ASYNC_BITS |
++                          POWMAN_WDSEL_RESET_SWCORE_BITS |
++                          POWMAN_WDSEL_RESET_PSM_BITS);
++        printf("CARD: rebooting via rom_reboot (shallow)\n");
++        rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL, 1, 0, 0);
++    }
++    /* Unreachable if the reset took. Stay alive and working if it did not. */
++    busy_wait_ms(2000);
++    low_flash_unquiesce();
++    printf("CARD: ERROR reset did not fire (deep=%d) — staying alive\n", (int) deep);
+ }
+ 
+ /* Deferred chip reset, fired by card_watchdog_task() from core0's main loop. Exists
+@@ -348,7 +366,7 @@ static void chip_reset_bounded(void) {
+         return;
+     }
+     printf("CARD: core1 launch failed, resetting chip (attempt %lu)\n", (unsigned long) attempts);
+-    chip_reset_now();
++    chip_reset_now(true);
+ }
+ 
+ /* Launch func on core1 and VERIFY it actually started (the launch handshake can
+@@ -541,11 +559,17 @@ void card_watchdog_task(void) {
+     }
+     wd_last_run_ms = now;
+ 
+-    /* A scheduled chip reset outranks everything else on this pass. */
++    /* A scheduled chip reset outranks everything else on this pass — but never fire
++     * it while the flash layer still has lazy work queued: a reset landing mid-drain
++     * leaves a half-written file system and the next boot can fail to present the
++     * card. Wait for the drain, bounded so a stuck queue cannot defer it forever. */
+     if (scheduled_reset_at_ms != 0 && (long long) (now - scheduled_reset_at_ms) >= 0) {
++        if (low_flash_busy() && (long long) (now - scheduled_reset_at_ms) < 30000) {
++            return;   /* retry next pass */
++        }
+         scheduled_reset_at_ms = 0;
+         printf("CARD: scheduled reset firing\n");
+-        chip_reset_now();
++        chip_reset_now(false);
+         return;
+     }
+ 
+-- 
+2.53.0
+
+
+From 8e9b18021e3d63f73125a49b858352a793aef2c9 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 16:37:00 -0400
+Subject: [PATCH 09/15] fix(hsm): fs-guard uses the real fs bounds; drain-guard
+ + split resets
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The fs data region is partition-dependent (measured ~[1MB, 4MB) on this
+build, NOT [FLASH_SIZE/2, FLASH_SIZE)). The corrupt-page guard added in
+d399654 hardcoded the half-size bound and would have dropped every
+legitimate lazy write — it now asks flash_addr_in_fs() against the real
+bounds (start_data_pool..end_flash). Also commits the previously
+uncommitted drain-guard (a scheduled reset never fires while lazy flash
+writes are queued) and the split reset configurations (shallow rom_reboot
+post-INITIALIZE, deep watchdog for recovery), plus restores the shipped
+panic->rom_reboot handler after bench forensics.
+---
+ src/fs/flash.c     | 9 +++++++++
+ src/fs/flash.h     | 1 +
+ src/fs/low_flash.c | 3 +--
+ 3 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/src/fs/flash.c b/src/fs/flash.c
+index a3000c4..a671db9 100644
+--- a/src/fs/flash.c
++++ b/src/fs/flash.c
+@@ -57,6 +57,15 @@ uintptr_t end_flash, end_rom_pool, start_rom_pool, end_data_pool, start_data_poo
+ uintptr_t last_base;
+ uint32_t num_files = 0;
+ 
++/* True if addr is inside the fs data region [start_data_pool, end_flash). Used by
++ * low_flash.c's corrupt-page guard — the region is partition-dependent (measured
++ * 2026-08-04: ~[1MB, 4MB) on this build, NOT [8MB, 16MB) as a hardcoded
++ * FLASH_SIZE_BYTES>>1 bound wrongly assumed, which made the guard drop every
++ * legitimate lazy write). */
++bool flash_addr_in_fs(uintptr_t addr) {
++    return addr >= start_data_pool && addr < end_flash;
++}
++
+ void flash_set_bounds(uintptr_t start, uintptr_t end) {
+     end_flash = end;
+     end_rom_pool = end_flash - FLASH_DATA_HEADER_SIZE - 4;
+diff --git a/src/fs/flash.h b/src/fs/flash.h
+index 300956f..c186d63 100644
+--- a/src/fs/flash.h
++++ b/src/fs/flash.h
+@@ -34,6 +34,7 @@ extern uint32_t flash_num_files(void);
+ extern uint32_t flash_size(void);
+ 
+ extern void flash_set_bounds(uintptr_t start, uintptr_t end);
++extern bool flash_addr_in_fs(uintptr_t addr);
+ extern int flash_write_data_to_file(file_t *file, const_byte_array_t data);
+ extern int flash_write_data_to_file_offset(file_t *file, const_byte_array_t data, uint32_t offset);
+ extern int flash_program_block(uintptr_t addr, const_byte_array_t data);
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index 3e2558b..8814454 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -151,8 +151,7 @@ void low_flash_task(void){
+             for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+                 if (flash_pages[r].ready == true || flash_pages[r].erase == true) {
+                     uintptr_t a = flash_pages[r].address;
+-                    uint32_t off = a - XIP_BASE;
+-                    if (a < XIP_BASE || off < (FLASH_SIZE_BYTES >> 1) || off >= FLASH_SIZE_BYTES) {
++                    if (!flash_addr_in_fs(a)) {
+                         printf("ERROR: flash_pages[%d] has out-of-region address %p — dropping entry, NOT erasing\n",
+                                r, (void *) a);
+                         flash_pages[r].ready = false;
+-- 
+2.53.0
+
+
+From a7a1de9cf5cb3876a076252a581c6b074ece986f Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 09:58:47 -0400
+Subject: [PATCH 10/15] review fixes: RP2350-only wdsel guard, no lockout
+ resync, pre-read fs validation
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+From polhenarejos's review of the upstream issue:
+- main.c: arm POWMAN_WDSEL under PICO_RP2350, not PICO_PLATFORM — POWMAN
+  does not exist on RP2040.
+- low_flash.c: drop the start+end re-sync after a lockout end-timeout
+  (lockouts are non-nestable per the SDK); abort the drain pass instead.
+- low_flash.c/flash.c: validate addresses against the real fs bounds
+  BEFORE find_free_page() reads from them, and return
+  PICOKEYS_ERR_MEMORY_FATAL rather than silently dropping — the old
+  drain-time guard ran after the read and quietly discarded pages.
+---
+ src/fs/low_flash.c | 56 ++++++++++++++++++++++------------------------
+ src/main.c         |  4 +++-
+ 2 files changed, 30 insertions(+), 30 deletions(-)
+
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index 8814454..a506fd2 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -149,17 +149,6 @@ void low_flash_task(void){
+         if (locked_out == true && flash_available == true && ready_pages > 0) {
+             //printf(" DO_FLASH AVAILABLE\n");
+             for (int r = 0; r < TOTAL_FLASH_PAGES; r++) {
+-                if (flash_pages[r].ready == true || flash_pages[r].erase == true) {
+-                    uintptr_t a = flash_pages[r].address;
+-                    if (!flash_addr_in_fs(a)) {
+-                        printf("ERROR: flash_pages[%d] has out-of-region address %p — dropping entry, NOT erasing\n",
+-                               r, (void *) a);
+-                        flash_pages[r].ready = false;
+-                        flash_pages[r].erase = false;
+-                        ready_pages--;
+-                        continue;
+-                    }
+-                }
+                 if (flash_pages[r].ready == true) {
+ #if defined(PICO_PLATFORM) || defined(ESP_PLATFORM)
+                     //printf("WRITTING %X\n",flash_pages[r].address-XIP_BASE);
+@@ -174,15 +163,14 @@ void low_flash_task(void){
+                     restore_interrupts(ints);
+                     if (multicore_lockout_end_timeout_us(100000) == false) {
+                         /* A timed-out END can orphan core1 in the lockout victim handler
+-                         * forever (measured 2026-08-02: core1 parked in
+-                         * multicore_lockout_handler, card mute). The 1ms default was far
+-                         * inside normal IRQ/entry latency. Re-sync with a full start+end
+-                         * pair: start on an already-locked victim returns immediately,
+-                         * and the end then releases it. */
+-                        printf("WARN: FLASH LOCKOUT END TIMEOUT — resyncing core1\n");
+-                        multicore_lockout_start_timeout_us(100000);
+-                        multicore_lockout_end_timeout_us(100000);
+-                        continue;
++                         * (measured 2026-08-02: core1 parked in multicore_lockout_handler,
++                         * card mute). The 1ms default was far inside normal IRQ/entry
++                         * latency. Do NOT re-enter the lockout to re-sync — the SDK
++                         * documents lockouts as non-nestable. Stop this drain pass; the
++                         * page stays queued and the next pass retries, and a truly parked
++                         * core1 is caught by the liveness machinery (usb.c). */
++                        printf("ERROR: FLASH LOCKOUT END TIMEOUT — aborting this drain pass\n");
++                        break;
+                     }
+                     //printf("WRITEN %X !\n",flash_pages[r].address);
+ #else
+@@ -204,15 +192,14 @@ void low_flash_task(void){
+                                               flash_pages[r].page_size ? ((size_t) (flash_pages[r].page_size / FLASH_SECTOR_SIZE)) * FLASH_SECTOR_SIZE : FLASH_SECTOR_SIZE);
+                     if (multicore_lockout_end_timeout_us(100000) == false) {
+                         /* A timed-out END can orphan core1 in the lockout victim handler
+-                         * forever (measured 2026-08-02: core1 parked in
+-                         * multicore_lockout_handler, card mute). The 1ms default was far
+-                         * inside normal IRQ/entry latency. Re-sync with a full start+end
+-                         * pair: start on an already-locked victim returns immediately,
+-                         * and the end then releases it. */
+-                        printf("WARN: FLASH LOCKOUT END TIMEOUT — resyncing core1\n");
+-                        multicore_lockout_start_timeout_us(100000);
+-                        multicore_lockout_end_timeout_us(100000);
+-                        continue;
++                         * (measured 2026-08-02: core1 parked in multicore_lockout_handler,
++                         * card mute). The 1ms default was far inside normal IRQ/entry
++                         * latency. Do NOT re-enter the lockout to re-sync — the SDK
++                         * documents lockouts as non-nestable. Stop this drain pass; the
++                         * page stays queued and the next pass retries, and a truly parked
++                         * core1 is caught by the liveness machinery (usb.c). */
++                        printf("ERROR: FLASH LOCKOUT END TIMEOUT — aborting this drain pass\n");
++                        break;
+                     }
+ #else
+                     memset(map + flash_pages[r].address, 0, FLASH_SECTOR_SIZE);
+@@ -418,6 +405,13 @@ int flash_program_block(uintptr_t addr, const_byte_array_t data) {
+     if (!data.data || data.len == 0) {
+         return PICOKEYS_ERR_NULL_PARAM;
+     }
++    /* Validate BEFORE find_free_page() reads from the address: fs metadata corruption
++     * can hand us a garbage pointer (measured 2026-08-04: BFAR=0x6CB44000, a bogus
++     * prev_addr reached via flash_clear_file -> HardFault). Fail loudly, never read. */
++    if (!flash_addr_in_fs(addr)) {
++        printf("ERROR: flash_program_block to out-of-fs address %p — refusing\n", (void *) addr);
++        return PICOKEYS_ERR_MEMORY_FATAL;
++    }
+ 
+     while (data.len > 0) {
+         size_t page_offset = addr & (FLASH_SECTOR_SIZE - 1);
+@@ -554,6 +548,10 @@ uint8_t flash_read_uint8(uintptr_t addr) {
+ int flash_erase_page(uintptr_t addr, size_t page_size) {
+     page_flash_t *p = NULL;
+ 
++    if (!flash_addr_in_fs(addr)) {
++        printf("ERROR: flash_erase_page of out-of-fs address %p — refusing\n", (void *) addr);
++        return PICOKEYS_ERR_MEMORY_FATAL;
++    }
+     mutex_enter_blocking(&mtx_flash);
+     if (ready_pages == TOTAL_FLASH_PAGES) {
+         mutex_exit(&mtx_flash);
+diff --git a/src/main.c b/src/main.c
+index 32de221..6664235 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -187,7 +187,9 @@ int main(void) {
+ #ifdef PICO_PLATFORM
+     board_init();
+     stdio_init_all();
++#endif
+ 
++#ifdef PICO_RP2350
+     /* Make EVERY watchdog-family reset a FULL switched-core power cycle. The default
+      * watchdog reset (PSM_WDSEL minus ROSC/XOSC) leaves the switched core domain
+      * powered and was measured to wedge the warm boot ~5-10% of resets on RP2350B —
+@@ -199,7 +201,7 @@ int main(void) {
+      * without depending on clk_ref; because it restores defaults, this register must
+      * be re-armed on EVERY boot — hence here, first thing. PSM_WDSEL all-ones per
+      * the datasheet note (powman ignores watchdog resets that don't select CLOCKS
+-     * or earlier). */
++     * or earlier). RP2350-only: POWMAN does not exist on RP2040. */
+     powman_set_bits(&powman_hw->wdsel,
+                     POWMAN_WDSEL_RESET_POWMAN_ASYNC_BITS |
+                     POWMAN_WDSEL_RESET_SWCORE_BITS |
+-- 
+2.53.0
+
+
+From 3843cae516aba08fa8ae727977b952e232d6f7ab Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 12:49:53 -0400
+Subject: [PATCH 11/15] fix(reset): guard the POWMAN includes for RP2350 too,
+ not just the code
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The code block was already #ifdef PICO_RP2350, but the powman/psm includes sat
+in the generic PICO_PLATFORM block, so an RP2040 build failed with
+'fatal error: hardware/powman.h: No such file or directory'. Reported by
+@polhenarejos in polhenarejos/pico-keys-sdk#25 (Bug 2).
+
+Build-checked both ways after the fix: rp2040 (PICO_BOARD=pico,
+PICO_PLATFORM=rp2040) and rp2350-arm-s both compile clean. NOTE: this is a
+COMPILE-ONLY check for RP2040 — we have no RP2040 hardware, so the RP2040
+path has never been run.
+---
+ src/main.c | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/src/main.c b/src/main.c
+index 6664235..745031f 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -33,10 +33,15 @@
+ #include "pico/stdio.h"
+ #include "pico/bootrom.h"
+ #include "boot/picoboot_constants.h"
++#ifdef PICO_RP2350
++/* POWMAN is RP2350-only — hardware/powman.h does not exist in an RP2040 build
++ * (verified: including it unguarded fails the rp2040 build with
++ * "fatal error: hardware/powman.h: No such file or directory"). */
+ #include "hardware/powman.h"
+ #include "hardware/structs/psm.h"
+ #include "hardware/regs/psm.h"
+ #endif
++#endif
+ 
+ #if defined(PICO_PLATFORM)
+ /* The SDK's hard_assertion_failure() is __weak; override it. The default path is
+-- 
+2.53.0
+
+
+From fe2a380ed18d4dd0506b9f4aa759a5222cd4c0c3 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 14:58:21 -0400
+Subject: [PATCH 12/15] docs(comments): correct the lockout and panic rationale
+ to match the stock repro
+
+The END-timeout comment claimed the 1ms default orphaned core1. The unmodified-
+firmware reproduction (2026-08-05) shows that is wrong: core0 panics between
+lockout START and END, so the lockout is never released. The 100ms bound stays
+as a defensive bound, now labelled as never-observed.
+
+The panic-override comment said 'permanent brick'; upstream correctly notes
+BOOTSEL + flash_nuke recovers the board. Reworded, and the override is marked as
+recovery-not-fix since it can reboot-loop on persistent corruption.
+---
+ src/fs/low_flash.c | 38 ++++++++++++++++++++++++--------------
+ src/main.c         | 20 ++++++++++++++------
+ 2 files changed, 38 insertions(+), 20 deletions(-)
+
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index a506fd2..2b608b2 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -162,13 +162,18 @@ void low_flash_task(void){
+                     flash_range_program(flash_pages[r].address - XIP_BASE, flash_pages[r].page, FLASH_SECTOR_SIZE);
+                     restore_interrupts(ints);
+                     if (multicore_lockout_end_timeout_us(100000) == false) {
+-                        /* A timed-out END can orphan core1 in the lockout victim handler
+-                         * (measured 2026-08-02: core1 parked in multicore_lockout_handler,
+-                         * card mute). The 1ms default was far inside normal IRQ/entry
+-                         * latency. Do NOT re-enter the lockout to re-sync — the SDK
+-                         * documents lockouts as non-nestable. Stop this drain pass; the
+-                         * page stays queued and the next pass retries, and a truly parked
+-                         * core1 is caught by the liveness machinery (usb.c). */
++                        /* DEFENSIVE ONLY — this timeout has never been observed to fire.
++                         * The core1-parked-in-multicore_lockout_handler state we originally
++                         * measured (2026-08-02) is NOT caused by an END timeout: core0
++                         * panics between lockout START and END (and after
++                         * save_and_disable_interrupts()), so the lockout is never released.
++                         * Reproduced on unmodified upstream firmware 2026-08-05 — see
++                         * regalia hardware/pico-hsm/UPSTREAM-REPRO-STOCK.md. The 100 ms
++                         * bound is kept so a genuine race cannot block forever.
++                         * Do NOT re-enter the lockout to re-sync — the SDK documents
++                         * lockouts as non-nestable. Stop this drain pass; the page stays
++                         * queued and the next pass retries, and a truly parked core1 is
++                         * caught by the liveness machinery (usb.c). */
+                         printf("ERROR: FLASH LOCKOUT END TIMEOUT — aborting this drain pass\n");
+                         break;
+                     }
+@@ -191,13 +196,18 @@ void low_flash_task(void){
+                     flash_range_erase_chunked(flash_pages[r].address - XIP_BASE,
+                                               flash_pages[r].page_size ? ((size_t) (flash_pages[r].page_size / FLASH_SECTOR_SIZE)) * FLASH_SECTOR_SIZE : FLASH_SECTOR_SIZE);
+                     if (multicore_lockout_end_timeout_us(100000) == false) {
+-                        /* A timed-out END can orphan core1 in the lockout victim handler
+-                         * (measured 2026-08-02: core1 parked in multicore_lockout_handler,
+-                         * card mute). The 1ms default was far inside normal IRQ/entry
+-                         * latency. Do NOT re-enter the lockout to re-sync — the SDK
+-                         * documents lockouts as non-nestable. Stop this drain pass; the
+-                         * page stays queued and the next pass retries, and a truly parked
+-                         * core1 is caught by the liveness machinery (usb.c). */
++                        /* DEFENSIVE ONLY — this timeout has never been observed to fire.
++                         * The core1-parked-in-multicore_lockout_handler state we originally
++                         * measured (2026-08-02) is NOT caused by an END timeout: core0
++                         * panics between lockout START and END (and after
++                         * save_and_disable_interrupts()), so the lockout is never released.
++                         * Reproduced on unmodified upstream firmware 2026-08-05 — see
++                         * regalia hardware/pico-hsm/UPSTREAM-REPRO-STOCK.md. The 100 ms
++                         * bound is kept so a genuine race cannot block forever.
++                         * Do NOT re-enter the lockout to re-sync — the SDK documents
++                         * lockouts as non-nestable. Stop this drain pass; the page stays
++                         * queued and the next pass retries, and a truly parked core1 is
++                         * caught by the liveness machinery (usb.c). */
+                         printf("ERROR: FLASH LOCKOUT END TIMEOUT — aborting this drain pass\n");
+                         break;
+                     }
+diff --git a/src/main.c b/src/main.c
+index 745031f..8d94524 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -45,12 +45,20 @@
+ 
+ #if defined(PICO_PLATFORM)
+ /* The SDK's hard_assertion_failure() is __weak; override it. The default path is
+- * panic() -> __breakpoint -> _exit: a silent, permanent brick that needs a physical
+- * replug — measured 2026-08-03 (a corrupt flash_pages entry hit
+- * hard_assert(flash_offs + count <= PICO_FLASH_SIZE_BYTES) and the device sat
+- * catatonic for a day). A smartcard that cannot recover itself is not one. Reboot
+- * via the bootrom instead: each boot is a fresh roll, and the core1 launch-verify
+- * and dead-man's switch do their jobs from there. */
++ * panic() -> __breakpoint -> _exit, which leaves the running firmware permanently
++ * unresponsive until an external reset. (NOT a "brick" — BOOTSEL plus a full
++ * flash_nuke and reflash always recovers the board; upstream was right to correct
++ * that wording.) Worse than a plain hang: the panic fires inside low_flash_task()
++ * between multicore-lockout START and END and after save_and_disable_interrupts(),
++ * so core0 dies holding the lockout with interrupts off and core1 is parked in
++ * multicore_lockout_handler forever — the card enumerates but never answers.
++ * Reproduced on unmodified upstream firmware 2026-08-05: a chain link accepted by
++ * scan_region() yields file->data = 0x2000D5A5 (SRAM), which reaches
++ * hard_assert(flash_offs + count <= PICO_FLASH_SIZE_BYTES). See regalia
++ * hardware/pico-hsm/UPSTREAM-REPRO-STOCK.md. A smartcard that cannot recover itself
++ * is not one, so reboot via the bootrom instead. NOTE: this is recovery, not a fix —
++ * upstream correctly notes it can reboot-loop on persistent corruption, which is why
++ * it is withdrawn from the upstream PR series and kept only in our build. */
+ void hard_assertion_failure(void) {
+     printf("PANIC: hard assert failed — rebooting via rom_reboot\n");
+     rom_reboot(REBOOT2_FLAG_REBOOT_TYPE_NORMAL, 1, 0, 0);
+-- 
+2.53.0
+
+
+From bafe74aacebf528f50f13f0c01ab493e3ce648ef Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 15:13:18 -0400
+Subject: [PATCH 13/15] fix(fs): never write a FILE_DATA_FUNC file's ->data (it
+ is a function pointer)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+ROOT CAUSE of the mute-card-after-INITIALIZE failure, found 2026-08-05 on
+unmodified upstream firmware. This supersedes the earlier scan_region()
+attribution, which was wrong — the on-flash record chain is intact.
+
+OpenSC's INITIALIZE issues UPDATE BINARY on EF.TokenInfo (0x2F03). pico-hsm
+declares that EF as FILE_TYPE_WORKING_EF | FILE_DATA_FUNC with
+.data = parse_token_info, i.e. ->data is a Thumb FUNCTION POINTER (0x2000D5A5 =
+parse_token_info+1), not a flash address. Every other consumer checks the flag
+first (file.c SELECT/FCI path, cmd_read_binary.c read path); the write path did
+not, so flash_program_halfword() was handed a .text address, find_free_page()
+cached 4KB of code as a dirty sector, and low_flash_task() called
+flash_range_erase(0x1000D000) — tripping the SDK bounds assert and killing core0
+while it held the multicore lockout with interrupts disabled. Core1 then parked
+in multicore_lockout_handler forever: reader enumerated, card permanently mute.
+
+Also widens the fs guard from a start-address check to a full-range check
+(flash_range_in_fs): flash_program_block() walks forward across sectors and
+flash_erase_page() erases page_size bytes, so validating only the start address
+let a write run off the end of the region. Requested by upstream review.
+---
+ src/fs/flash.c     | 40 ++++++++++++++++++++++++++++++++++++++++
+ src/fs/flash.h     |  1 +
+ src/fs/low_flash.c | 26 ++++++++++++++++++++------
+ 3 files changed, 61 insertions(+), 6 deletions(-)
+
+diff --git a/src/fs/flash.c b/src/fs/flash.c
+index a671db9..0075bce 100644
+--- a/src/fs/flash.c
++++ b/src/fs/flash.c
+@@ -66,6 +66,28 @@ bool flash_addr_in_fs(uintptr_t addr) {
+     return addr >= start_data_pool && addr < end_flash;
+ }
+ 
++/* True only if the WHOLE [addr, addr + len) span stays inside the fs data region —
++ * and so does the sector-aligned base that find_free_page() will actually operate on.
++ * Checking just the start address is not enough: flash_program_block() walks forward
++ * across sectors as it consumes data, and flash_erase_page() erases page_size bytes,
++ * so a start address one byte inside the region can still run off the end. Upstream
++ * asked for exactly this ("cover the entire aligned sector/range, including erase
++ * size" — polhenarejos/pico-keys-sdk#25). The subtraction is done against end_flash
++ * only after addr is known to be below it, so it cannot wrap. */
++bool flash_range_in_fs(uintptr_t addr, size_t len) {
++    if (len == 0) {
++        return false;
++    }
++    if (addr < start_data_pool || addr >= end_flash) {
++        return false;
++    }
++    /* find_free_page() aligns down; that base must be in-region too. */
++    if ((addr & ~(uintptr_t) (FLASH_SECTOR_SIZE - 1)) < start_data_pool) {
++        return false;
++    }
++    return len <= (size_t) (end_flash - addr);
++}
++
+ void flash_set_bounds(uintptr_t start, uintptr_t end) {
+     end_flash = end;
+     end_rom_pool = end_flash - FLASH_DATA_HEADER_SIZE - 4;
+@@ -187,6 +209,24 @@ static int flash_write_data_to_file_internal(file_t *file, const_byte_array_t da
+         return PICOKEYS_ERR_NULL_PARAM;
+     }
+ 
++    /* A FILE_DATA_FUNC file's ->data is a generator FUNCTION POINTER, not a flash
++     * address. Every other consumer checks this flag before using ->data (the
++     * SELECT/FCI path in file.c and the READ path in cmd_read_binary.c both do);
++     * this write path did not, so an UPDATE BINARY on such an EF handed a .text
++     * address straight to the flash layer.
++     *
++     * Measured on unmodified upstream firmware 2026-08-05: OpenSC's INITIALIZE
++     * writes EF.TokenInfo (0x2F03), which pico-hsm declares as
++     * FILE_TYPE_WORKING_EF | FILE_DATA_FUNC with .data = parse_token_info. The
++     * write reached flash_program_halfword(0x2000D5A5) — parse_token_info+1, a
++     * Thumb pointer — find_free_page() then cached 4 KB of .text as a dirty sector
++     * and low_flash_task() called flash_range_erase(0x1000D000), tripping
++     * hard_assert() and killing core0 while it held the multicore lockout with
++     * interrupts disabled. The card enumerated but never answered again. */
++    if ((file_get_type(file) & FILE_DATA_FUNC) == FILE_DATA_FUNC) {
++        return PICOKEYS_ERR_BLOCKED;
++    }
++
+     len = (uint32_t)data.len;
+ 
+     uint32_t old_size = file_get_size(file);
+diff --git a/src/fs/flash.h b/src/fs/flash.h
+index c186d63..13ea739 100644
+--- a/src/fs/flash.h
++++ b/src/fs/flash.h
+@@ -35,6 +35,7 @@ extern uint32_t flash_size(void);
+ 
+ extern void flash_set_bounds(uintptr_t start, uintptr_t end);
+ extern bool flash_addr_in_fs(uintptr_t addr);
++extern bool flash_range_in_fs(uintptr_t addr, size_t len);
+ extern int flash_write_data_to_file(file_t *file, const_byte_array_t data);
+ extern int flash_write_data_to_file_offset(file_t *file, const_byte_array_t data, uint32_t offset);
+ extern int flash_program_block(uintptr_t addr, const_byte_array_t data);
+diff --git a/src/fs/low_flash.c b/src/fs/low_flash.c
+index 2b608b2..b5fcf68 100644
+--- a/src/fs/low_flash.c
++++ b/src/fs/low_flash.c
+@@ -416,10 +416,15 @@ int flash_program_block(uintptr_t addr, const_byte_array_t data) {
+         return PICOKEYS_ERR_NULL_PARAM;
+     }
+     /* Validate BEFORE find_free_page() reads from the address: fs metadata corruption
+-     * can hand us a garbage pointer (measured 2026-08-04: BFAR=0x6CB44000, a bogus
+-     * prev_addr reached via flash_clear_file -> HardFault). Fail loudly, never read. */
+-    if (!flash_addr_in_fs(addr)) {
+-        printf("ERROR: flash_program_block to out-of-fs address %p — refusing\n", (void *) addr);
++     * can hand us a garbage pointer. Reproduced on unmodified upstream firmware
++     * 2026-08-05 — scan_region() accepts an out-of-region chain link, file->data
++     * becomes 0x2000D5A5 (SRAM), and this call would cache 4KB from SRAM and then
++     * trip hard_assert() inside flash_range_erase(), killing core0 while it holds the
++     * multicore lockout. Validate the WHOLE span, not just the start: the loop below
++     * walks addr forward across sectors as it consumes data. Fail loudly, never read. */
++    if (!flash_range_in_fs(addr, data.len)) {
++        printf("ERROR: flash_program_block %p+%u out of fs region — refusing\n",
++               (void *) addr, (unsigned) data.len);
+         return PICOKEYS_ERR_MEMORY_FATAL;
+     }
+ 
+@@ -558,8 +563,17 @@ uint8_t flash_read_uint8(uintptr_t addr) {
+ int flash_erase_page(uintptr_t addr, size_t page_size) {
+     page_flash_t *p = NULL;
+ 
+-    if (!flash_addr_in_fs(addr)) {
+-        printf("ERROR: flash_erase_page of out-of-fs address %p — refusing\n", (void *) addr);
++    /* Validate the full erase SPAN, not just the start: low_flash_task() erases
++     * page_size rounded down to whole sectors (min one sector), so an address one
++     * byte inside the region can still erase past its end. */
++    size_t erase_len = page_size ? (page_size / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE
++                                 : FLASH_SECTOR_SIZE;
++    if (erase_len == 0) {
++        erase_len = FLASH_SECTOR_SIZE;
++    }
++    if (!flash_range_in_fs(addr, erase_len)) {
++        printf("ERROR: flash_erase_page %p+%u out of fs region — refusing\n",
++               (void *) addr, (unsigned) erase_len);
+         return PICOKEYS_ERR_MEMORY_FATAL;
+     }
+     mutex_enter_blocking(&mtx_flash);
+-- 
+2.53.0
+
+
+From 25fc4b3c0b6cf1999555f296ae12a1c9d8155bd3 Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Wed, 5 Aug 2026 19:15:31 -0400
+Subject: [PATCH 14/15] =?UTF-8?q?fix(hsm):=20remove=20the=20core1=20dead-m?=
+ =?UTF-8?q?an's=20switch=20=E2=80=94=20it=20ate=20CCID=20completion=20even?=
+ =?UTF-8?q?ts?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Upstream predicted this in review of the original series:
+
+  'the dead-man switch ... competes with card_status() for card_to_usb_q and can
+   consume normal completion or button events'
+
+That is exactly what it did. card_watchdog_task() popped card_to_usb_q itself,
+and a comment here claimed the handling was 'identical' to the CCID layer's. It
+is not:
+
+  - card_status() pops EV_EXEC_FINISHED -> ccid_task() calls
+    driver_exec_finished_ccid() -> the response is SENT to the host.
+  - card_watchdog_task() pops it first  -> only clears a local flag -> the
+    response is NEVER sent and the host waits forever.
+
+Both run on core0, so it was a race, and the symptom was intermittent.
+
+Measured on hardware, pkcs11-tool --keypairgen:
+  with the dead-man's switch : 1 ok / 5 bad, failures HANGING for minutes
+  without it                 : 0 hangs; successes complete in ~5s
+
+The card always completed normally in both cases (SW_OK, key persisted, both
+cores idle) — only the response delivery was lost.
+
+The liveness problem this was meant to catch was never independently
+substantiated, so nothing replaces it. Core1 launch verification in card_start()
+is a separate, evidenced mechanism and is retained.
+
+Removes now-dead card_recover_core1().
+---
+ src/usb/usb.c | 73 +++++++++++++--------------------------------------
+ 1 file changed, 18 insertions(+), 55 deletions(-)
+
+diff --git a/src/usb/usb.c b/src/usb/usb.c
+index 69b2f87..486587a 100644
+--- a/src/usb/usb.c
++++ b/src/usb/usb.c
+@@ -539,19 +539,6 @@ static void card_note_core1_alive(void) {
+     ping_sent_ms = 0;
+ }
+ 
+-/* Recover a lost core1. Measured 2026-08-02: relaunching core1 alone is NOT enough —
+- * core0's CCID slot state (TPDU sequencing, block state) belongs to the dead session,
+- * so the card connects but every APDU transmit fails ("Transmit failed" at PC/SC).
+- * The only coherent recovery from a mid-session core1 death is a full chip reset:
+- * both sides reinitialise, the host re-enumerates and reconnects. */
+-static void card_recover_core1(void) {
+-    watchdog_hw->scratch[2] += 1;
+-    printf("CARD: core1 lost mid-session, resetting chip\n");
+-    cmd_in_flight = false;
+-    ping_sent_ms = 0;
+-    chip_reset_bounded();
+-}
+-
+ void card_watchdog_task(void) {
+     uint64_t now = board_millis();
+     if (now - wd_last_run_ms < 50) {
+@@ -573,48 +560,24 @@ void card_watchdog_task(void) {
+         return;
+     }
+ 
+-    if (card_locked_itf == ITF_TOTAL || card_locked_func == NULL) {
+-        ping_sent_ms = 0;
+-        cmd_in_flight = false;
+-        return;
+-    }
+-
+-    /* Consume anything core1 sent — every message is proof of life. The CCID layer
+-     * does the same via card_status(); both run on core0, so whoever pops first wins
+-     * and the handling is identical. */
+-    uint32_t m = 0;
+-    if (queue_try_remove(&card_to_usb_q, &m)) {
+-        if (m == EV_PING_ECHO || m == EV_EXEC_FINISHED) {
+-            cmd_in_flight = false;
+-        }
+-        else if (m == EV_RESET) {
+-            usb_secure_reboot_now();
+-        }
+-        card_note_core1_alive();
+-    }
+-
+-    if (cmd_in_flight) {
+-        if (now - cmd_started_ms > CMD_DEADLINE_MS) {
+-            printf("CARD: command outstanding >%lus — core1 presumed dead\n",
+-                   (unsigned long) (CMD_DEADLINE_MS / 1000));
+-            card_recover_core1();
+-        }
+-        return;
+-    }
+-
+-    if (ping_sent_ms != 0) {
+-        if (now - ping_sent_ms > CARD_PING_TIMEOUT_MS) {
+-            card_recover_core1();
+-        }
+-        return;
+-    }
+-
+-    if (now - core1_last_ok_ms > CARD_PING_INTERVAL_MS) {
+-        uint32_t ping = EV_PING;
+-        if (queue_try_add(&usb_to_card_q, &ping)) {
+-            ping_sent_ms = now;
+-        }
+-    }
++    /* The core1 dead-man's switch used to live here. It has been REMOVED because it
++     * was actively harmful, exactly as upstream predicted in review:
++     *
++     *   "the dead-man switch ... competes with card_status() for card_to_usb_q and can
++     *    consume normal completion or button events"
++     *
++     * It popped card_to_usb_q itself, and an earlier comment here claimed the handling
++     * was "identical" to the CCID layer's. It is not. When card_status() pops
++     * EV_EXEC_FINISHED, ccid_task() calls driver_exec_finished_ccid() and the response
++     * goes out to the host. When this task popped it first, it only cleared a local
++     * flag — the response was NEVER sent and the host waited forever. Both tasks run on
++     * core0, so it was a race: measured as an intermittent hang of
++     * pkcs11-tool --keypairgen (~5 failures in 6 attempts), with the card completing
++     * normally (SW_OK, key persisted) and both cores idle.
++     *
++     * The liveness problem it was meant to catch was never independently substantiated,
++     * so nothing replaces it. Core1 launch verification (card_start) is a separate,
++     * evidenced mechanism and is retained. */
+ }
+ #endif
+ 
+-- 
+2.53.0
+
+
+From 3af823e0562d1dd39f95110d066aee717a62f2eb Mon Sep 17 00:00:00 2001
+From: "open-swe[bot]" <open-swe@users.noreply.github.com>
+Date: Thu, 6 Aug 2026 08:09:20 -0400
+Subject: [PATCH 15/15] fix(fs): accept-and-discard writes to FILE_DATA_FUNC
+ files instead of erroring
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Refusing the write is not viable. Measured 2026-08-06: the Smart Card Shell's
+SmartCardHSM.js aborts initialisation with 'GPError ... Unexpected SW1/SW2=6581'
+the moment a write to one of these EFs is refused, so hsm-init-hardened.js (and
+any scsh-driven provisioning) cannot complete. OpenSC happens to IGNORE the same
+failure, which is why this only surfaced under scsh.
+
+The memory-safety problem is still solved by not writing — ->data is a generator
+function pointer, not storage. Only the reported status changes. The content is
+regenerated from live card state on every read, so discarding the host's copy
+loses nothing structural; the one visible effect is that a host-supplied label
+does not stick, because parse_token_info() hardcodes it.
+
+This resolves the semantic question deferred on polhenarejos/pico-keys-sdk#32,
+now with hardware evidence for which behaviour is correct.
+---
+ src/fs/flash.c | 13 ++++++++++++-
+ 1 file changed, 12 insertions(+), 1 deletion(-)
+
+diff --git a/src/fs/flash.c b/src/fs/flash.c
+index 0075bce..5f88a96 100644
+--- a/src/fs/flash.c
++++ b/src/fs/flash.c
+@@ -224,7 +224,18 @@ static int flash_write_data_to_file_internal(file_t *file, const_byte_array_t da
+      * hard_assert() and killing core0 while it held the multicore lockout with
+      * interrupts disabled. The card enumerated but never answered again. */
+     if ((file_get_type(file) & FILE_DATA_FUNC) == FILE_DATA_FUNC) {
+-        return PICOKEYS_ERR_BLOCKED;
++        /* Accept and discard rather than error. The memory-safety problem is solved by not
++         * writing (->data is a function pointer, not storage); the remaining question is what
++         * to report. Returning an error is NOT viable: measured 2026-08-06, the Smart Card
++         * Shell's SmartCardHSM.js aborts initialisation with
++         * "GPError ... Unexpected SW1/SW2=6581" the moment a write to one of these EFs is
++         * refused, so hardened provisioning becomes impossible. OpenSC happens to ignore the
++         * same failure, which is why it only showed up under scsh.
++         *
++         * The content is regenerated on every read from live card state, so discarding the
++         * host's copy loses nothing structural — the one visible effect is that a host-supplied
++         * label does not stick, because parse_token_info() hardcodes it. */
++        return PICOKEYS_OK;
+     }
+ 
+     len = (uint32_t)data.len;
+-- 
+2.53.0
+
