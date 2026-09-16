@@ -37,4 +37,5 @@ jobs:
               echo "::warning::shellcheck reported findings (advisory)"; }
 
       - name: python compiles
-        run: python3 -m py_compile $(find . -name '*.py' -not -path './.git/*')
+        # -exec … {} + instead of $(find …) — no word-splitting on paths (SC2046).
+        run: find . -name '*.py' -not -path './.git/*' -exec python3 -m py_compile {} +
