@@ -91,7 +91,10 @@ command -v sc-hsm-tool >/dev/null || die "sc-hsm-tool not found (install opensc)
 reader=""
 readers_n="$(opensc-tool --list-readers 2>/dev/null | grep -cE '^[0-9]+ ' || true)"
 for r in $(seq 0 $(( ${readers_n:-1} - 1 )) 2>/dev/null); do
-  atr_serial="$(pkcs15-tool --reader "$r" --dump 2>/dev/null | awk -F': *' '/Serial number/{print $2; exit}')"
+  # Capture first, then parse: under pipefail an awk that exits on its first match can SIGPIPE
+  # pkcs15-tool and poison the pipeline (tools/hsm-lint-predicates.sh).
+  dump="$(pkcs15-tool --reader "$r" --dump 2>/dev/null)"
+  atr_serial="$(awk -F': *' '/Serial number/{print $2; exit}' <<< "$dump")"
   [ "$atr_serial" = "$SERIAL" ] && { reader="$r"; break; }
 done
 [ -n "$reader" ] || die "could not resolve serial '$SERIAL' to a reader for sc-hsm-tool; refusing to --initialize by index"

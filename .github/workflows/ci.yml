@@ -36,6 +36,13 @@ jobs:
             | xargs -0 shellcheck -S warning || {
               echo "::warning::shellcheck reported findings (advisory)"; }
 
+      - name: self-inverting predicates (tools/hsm-lint-predicates.sh; gating, no hardware)
+        # A `producer | grep -q` or early-exiting awk under pipefail can SIGPIPE the producer and
+        # flip the predicate. qubes/emulator/run-tests.sh runs this too, but that suite needs card
+        # and printer emulators and does not run here, so without this step the check would only
+        # ever run in private CI.
+        run: tools/hsm-lint-predicates.sh
+
       - name: python compiles
         # -exec … {} + instead of $(find …) — no word-splitting on paths (SC2046).
         run: find . -name '*.py' -not -path './.git/*' -exec python3 -m py_compile {} +
