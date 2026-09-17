@@ -61,6 +61,10 @@ The bootstrap installs (into the VM, so a template's AppVMs inherit it):
   `/etc/apt/keyrings`.
 - **Claude Code CLI** and **Codex CLI**: `npm install -g`. `INSTALL_AGENT_CLIS=0` skips this when
   refreshing a VM whose CLIs are in use.
+- **The Pico HSM registered with libccid.** Debian's libccid (1.6.2) has no entry for the Pico's
+  `0x2E8A:0x10FD`, so pcscd never creates a reader for it and every Pico drill fails as though no
+  card were attached. The bootstrap appends an entry to `/etc/libccid_Info.plist` (idempotent, and
+  it refuses to write if the three arrays would end up misaligned) and restarts pcscd.
 - **Smart Card Shell 3.18.77** at `/opt/dev-bin/scsh-3.18.77`, SHA-256 pinned (the value in
   `PICO-DRILL-RUNBOOK.md`). The Nitrokey import, hardened-init and DevAut scripts run under it.
   `SCSH_HOME` is exported from `/etc/profile.d/dev-bin.sh`.

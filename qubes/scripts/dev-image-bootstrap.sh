@@ -92,6 +92,36 @@ if [ "${INSTALL_AGENT_CLIS:-1}" = 1 ]; then
   npm install -g @anthropic-ai/claude-code @openai/codex
 fi
 
+# --- Pico HSM: register its VID/PID with libccid ----------------------------------------------
+# WITHOUT THIS A PICO IS INVISIBLE ON LINUX. libccid only binds readers listed in its Info.plist,
+# and 1.6.2 (Debian 13) has no entry for 0x2E8A — so pcscd never creates a reader, `opensc-tool
+# --list-readers` shows nothing, and every Pico drill fails as if no card were attached (measured
+# on dev-regalia 2026-09-17; the bench work was done on macOS, whose CCID driver has its own list).
+# The three arrays are index-aligned, so an entry is appended to each.
+plist=/etc/libccid_Info.plist
+if [ -w "$plist" ] || [ "$(id -u)" = 0 ]; then
+  python3 - "$plist" <<'PICO'
+import re, sys
+p = sys.argv[1]
+s = open(p).read()
+if re.search(r'<string>0x2E8A</string>', s):
+    print("libccid: Pico entry already present"); raise SystemExit(0)
+for key, val in (('ifdVendorID', '0x2E8A'), ('ifdProductID', '0x10FD'), ('ifdFriendlyName', 'Pico Key')):
+    m = re.search(r'(<key>' + key + r'</key>\s*<array>)(.*?)(</array>)', s, re.S)
+    if not m:
+        print("libccid: array %s not found — leaving the plist alone" % key); raise SystemExit(0)
+    s = s[:m.end(2)] + "\n\t\t<string>%s</string>\n\t" % val + s[m.end(2):]
+arrays = {k: re.findall(r'<string>([^<]*)</string>',
+          re.search(r'<key>' + k + r'</key>\s*<array>(.*?)</array>', s, re.S).group(1))
+          for k in ('ifdVendorID', 'ifdProductID', 'ifdFriendlyName')}
+if len({len(v) for v in arrays.values()}) != 1:
+    print("libccid: arrays would be misaligned — refusing to write"); raise SystemExit(1)
+open(p, 'w').write(s)
+print("libccid: registered Pico HSM 0x2E8A:0x10FD")
+PICO
+  systemctl restart pcscd 2>/dev/null || true
+fi
+
 # --- Smart Card Shell (verified zip) ----------------------------------------------------------
 # CardContact publish no checksum or signature; this is the hash recorded on first fetch
 # (PICO-DRILL-RUNBOOK.md) and re-matched on dev-regalia 2026-09-17. A mismatch means the download
@@ -147,6 +177,7 @@ pkg-config --exists libpcsclite || { echo "MISSING: libpcsclite pkg-config (need
 [ -x "/opt/dev-bin/scsh-${SCSH_VERSION}/scriptrunner" ] || { echo "MISSING: Smart Card Shell scriptrunner" >&2; missing=1; }
 /opt/dev-bin/regalia-venv/bin/python -c 'import cvc, cryptography, shamir_mnemonic, mnemonic' \
   || { echo "MISSING: a Python package in /opt/dev-bin/regalia-venv" >&2; missing=1; }
+grep -q '0x2E8A' /etc/libccid_Info.plist || { echo "MISSING: libccid entry for the Pico HSM (0x2E8A)" >&2; missing=1; }
 p11="$(find /usr/lib -name opensc-pkcs11.so -path '*-linux-gnu*' 2>/dev/null | head -1)"
 [ -n "$p11" ] || { echo "MISSING: opensc-pkcs11.so" >&2; missing=1; }
 [ "$missing" = 0 ] || { echo "dev image INCOMPLETE — see MISSING lines above" >&2; exit 1; }
