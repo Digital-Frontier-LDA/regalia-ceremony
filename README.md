@@ -30,6 +30,40 @@ production decision here — by policy, not by limitation.
 | `hardware/pico-hsm/` | **Pico HSM (RP2350) staging hardware:** firmware patches, upstream bug reports (device-auth deadlock, watchdog scope), and a reset tool — see [`hardware/pico-hsm/README.md`](hardware/pico-hsm/README.md) |
 | `debian/offline-bundle/` | Builds and verifies a signed, offline apt/wheel bundle so the tools install on an air-gapped host |
 
+## The document map
+
+The **document map** below is the entry point: what each document is for, and which one wins when
+two disagree.
+
+| Document | What it settles |
+|---|---|
+| [`qubes/README.md`](qubes/README.md) | how a ceremony is actually run, start to finish |
+| [`qubes/CEREMONY-PROFILES.md`](qubes/CEREMONY-PROFILES.md) | the supported token profiles and what each requires |
+| [`qubes/NITROKEY-QUALIFY.md`](qubes/NITROKEY-QUALIFY.md) | qualifying a Nitrokey HSM 2 on Qubes with OpenSC alone |
+| [`qubes/PICO-DRILL-RUNBOOK.md`](qubes/PICO-DRILL-RUNBOOK.md) | the staging bench: what is installed, pinned, and rehearsed |
+| [`qubes/PROOF-OF-WORKS.md`](qubes/PROOF-OF-WORKS.md) | what has actually been proven on hardware, and what has not |
+| [`qubes/recovery/`](qubes/recovery/) | break-glass recovery, for a reader under deadline |
+| [`hardware/pico-hsm/README.md`](hardware/pico-hsm/README.md) | the staging hardware, its firmware fixes and upstream reports |
+| [`debian/offline-bundle/README.md`](debian/offline-bundle/README.md) | installing the tooling on an air-gapped host |
+| [`tools/README.md`](tools/README.md) | the bench tooling and the default-deny staging registry |
+
+**Precedence.** Most documents here predate the ratified ceremony design, so where an older
+document contradicts a newer one, **the newer ratified decision wins** — and the older text is a
+record of how the question was reached, not an instruction. When two disagree and neither is
+obviously newer, `qubes/PROOF-OF-WORKS.md` wins on matters of fact, because it records what was
+measured rather than what was intended.
+
+### How claims are labelled
+
+These words appear throughout, and they are not decoration:
+
+- **MEASURED** — it was run on the hardware named on the same line, on the date given. A measured
+  claim carries its device and date, because a finding without them cannot be attributed.
+- **MODELLED** — an emulator or a piece of software pinned it, and no card confirmed it. Useful,
+  and not the same thing.
+- **DECIDED** — a ratified choice rather than an observation. It can be revisited by the same
+  process that made it; it cannot be refuted by an experiment.
+
 ## Running the emulator tests
 
 The harness is designed to run in the Debian `vault-tools` environment (or its container image).

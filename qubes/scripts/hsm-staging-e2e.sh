@@ -57,7 +57,7 @@ CEREMONY_VENV="${CEREMONY_VENV:-$HOME/.local/share/akash-hsm-venv}"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 P11="${HSM_PKCS11_MODULE:-/usr/lib/opensc-pkcs11.so}"
-. "$(cd "$HERE/../../.." && pwd)/tools/hsm-bench-lock.sh"
+. "$(cd "$HERE/../.." && pwd)/tools/hsm-bench-lock.sh"
 hsm_bench_lock_acquire wait || exit $?
 
 # CAPTURE, THEN MATCH — never `pkcs11-tool ... | grep -q` under `pipefail`.
@@ -91,7 +91,7 @@ EXPECT_SERIAL="${HSM_E2E_SERIAL:-ESP2202E14A}"
 READER="${HSM_PCSC_INDEX:-$SLOT}"
 SLOTID="${HSM_SLOT_ID:-$SLOT}"
 if [ -z "${HSM_E2E_NO_AUTOTARGET:-}" ] && [ -n "$EXPECT_SERIAL" ]; then
-  _rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-reader-select.sh"
+  _rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-reader-select.sh"
   if [ -f "$_rs" ]; then
     # shellcheck source=/dev/null
     . "$_rs"
@@ -113,7 +113,7 @@ SO_PIN_HEX="${HSM_SO_PIN:-3537363231383830}"
 # card this script AIMED at — not that aiming there was permissible. The committed registry
 # (tools/hsm-staging-registry.json) is that permission, default-deny. Sourced above in the autotarget block;
 # source again unconditionally so the gate holds on every path, and refuse without it.
-_e2e_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-reader-select.sh"
+_e2e_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-reader-select.sh"
 # shellcheck source=/dev/null
 [ -f "$_e2e_rs" ] && . "$_e2e_rs"
 if command -v hsm_assert_staging >/dev/null 2>&1; then

@@ -50,7 +50,7 @@ CEREMONY_VENV="${CEREMONY_VENV:-$HOME/.local/share/akash-hsm-venv}"
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"     # …/qubes/scripts
 QUBES="$(cd "$HERE/.." && pwd)"                          # …/qubes
-REPO="$(cd "$QUBES/../.." && pwd)"
+REPO="$(cd "$QUBES/.." && pwd)"
 # The committed staging registry is authoritative for board and probe routing. Test harnesses may
 # disable this only when supplying synthetic identities; real runs fail closed if it is invalid.
 if [ "${HSM_STAGING_REGISTRY_AUTOLOAD:-1}" != 0 ]; then

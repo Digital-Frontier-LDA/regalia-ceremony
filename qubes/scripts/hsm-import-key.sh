@@ -90,7 +90,7 @@ if [ -n "$SLOT" ]; then
     # SOURCE the helper before testing for it. This tested `command -v hsm_serial_at_slot_id` in a
     # script that never sourced tools/hsm-reader-select.sh, so the test ALWAYS failed and the
     # broken fallback below was the only path that ever ran.
-    _hrs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-reader-select.sh"
+    _hrs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-reader-select.sh"
     # shellcheck source=/dev/null
     [ -r "$_hrs" ] && . "$_hrs"
     _disp="$(hsm_serial_at_slot_id "$SLOT" 2>/dev/null || true)"
@@ -136,7 +136,7 @@ fi
 # name returns the other card. The PKCS#11 slot id does not have that problem, so derive the
 # expected serial from --slot and let hsm-auto-import.js assert it before it authenticates.
 EXPECT_SERIAL=""
-_ik_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-reader-select.sh"
+_ik_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-reader-select.sh"
 if [ -n "${SLOT:-}" ] && [ -f "$_ik_rs" ]; then
     # shellcheck source=/dev/null
     . "$_ik_rs"
