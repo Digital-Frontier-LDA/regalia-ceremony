@@ -15,7 +15,7 @@
 #       one is invisible to the tools that need it, while still appearing in --list-objects.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ASSERT="$HERE/../../../../hsm-host-role/files/assert-no-dkek.sh"
+ASSERT="$HERE/../../../hsm-host-role/files/assert-no-dkek.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }

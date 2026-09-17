@@ -48,7 +48,7 @@ printf '\n\033[1m### the CI trigger must cover the directories these tests are w
 # for tools/**: five suites here have their subject under tools/, including the #185 transcript
 # redaction control, so a PR changing only the tool ran none of the tests written against it. That
 # is how hsm_serial_at_reader came to return 141 on success with a test file that nothing executed.
-WF="$HERE/../../../../.github/workflows/ceremony-emulator.yml"
+WF="$HERE/../../../.github/workflows/emulator.yml"
 if [ ! -f "$WF" ]; then
   printf '  \033[31mFAIL\033[0m cannot find the workflow at %s — this check cannot be evaluated\n' "$WF"
   fail=$((fail + 1))
@@ -57,7 +57,7 @@ else
   # hardcoded, so a test added against a new tree is caught instead of silently uncovered.
   # COMMENTS ARE INCLUDED ON PURPOSE, and that is a weaker claim than it looks — say so rather than
   # imply the scan measures code. Measured 2026-09-11: with comments this derives
-  # ceremony/ doc/ kms/ tools/; with comment lines stripped it derives ONLY tools/, because these
+  # qubes/ doc/ tools/; with comment lines stripped it derives ONLY tools/, because these
   # shell suites build their subject paths from variables ("$REPO/tools/...", "$HERE/../../scripts")
   # rather than writing them literally. A literal-path scan therefore cannot see what most of them
   # touch, and restricting it to code would shrink this check to almost nothing.
@@ -66,9 +66,9 @@ else
   # adds CI minutes, while under-including one lets a defect land — which is exactly what happened to
   # #400. A comment naming a tree is weak evidence the suite cares about that tree, and weak evidence
   # is the right bar when being wrong costs minutes in one direction and a red main in the other.
-  dirs="$(grep -ohE '(^|[^a-zA-Z0-9_/.-])(tools|ceremony|doc|kms|salt|infra)/[a-zA-Z0-9_./-]+' \
+  dirs="$(grep -ohE '(^|[^a-zA-Z0-9_/.-])(tools|qubes|debian|hardware|doc|salt)/[a-zA-Z0-9_./-]+' \
             "$HERE"/test-*.sh "$HERE"/test_*.py 2>/dev/null \
-          | grep -oE '(tools|ceremony|doc|kms|salt|infra)/' | sort -u | tr -d '/')"
+          | grep -oE '(tools|qubes|debian|hardware|doc|salt)/' | sort -u | tr -d '/')"
   if [ -z "$dirs" ]; then
     printf '  \033[31mFAIL\033[0m no subject directories were derived — the scan is broken, not the trigger complete\n'
     fail=$((fail + 1))
@@ -91,8 +91,8 @@ printf '\n\033[1m### a test that scans the whole repo needs a trigger that cover
 # `find "$ROOT" -name .git -prune -o -name '*.md' -print`, so its subject is every markdown file in
 # the repository and no directory pattern expresses that.
 #
-# It cost a red main. #400 added kms/OPENPGP-COMPATIBILITY.md citing `tools/custody_manifest.py`
-# (the file is at kms/tools/...), touched only kms/**, and matched none of the workflow's patterns —
+# It cost a red main in the monorepo this was extracted from: a markdown-only change cited a tool
+# by a path that did not exist, touched no directory the workflow watched, and matched none of its patterns —
 # so the gate that exists to catch exactly that never ran, and the defect landed. doc/** and tools/**
 # were each added to that trigger after the same lesson; this is its general form.
 for _ext in $(grep -hoE "\-name '\*\.[a-z]+'" "$HERE"/test-*.sh 2>/dev/null \

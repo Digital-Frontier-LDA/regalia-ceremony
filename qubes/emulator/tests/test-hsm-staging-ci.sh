@@ -36,7 +36,7 @@ SCRIPTS="$T/qubes/scripts"
 EMUT="$T/qubes/emulator/tests"
 TOOLS="$T/tools"
 mkdir -p "$SCRIPTS" "$EMUT" "$TOOLS" "$T/qubes/emulator"
-ln -s "$HERE/../../../..//tools/hsm-bench-lock.sh" "$TOOLS/hsm-bench-lock.sh"
+ln -s "$HERE/../../../tools/hsm-bench-lock.sh" "$TOOLS/hsm-bench-lock.sh"
 
 # ---------------------------------------------------------------------------- the fake tree
 ln -s "$REAL_CI" "$SCRIPTS/hsm-staging-ci.sh"
@@ -44,7 +44,7 @@ ln -s "$REAL_CI" "$SCRIPTS/hsm-staging-ci.sh"
 # The transcript redactor, symlinked like the orchestrator itself: the orchestrator reaches it
 # through its own $REPO resolution, so the fake tree must carry the REAL filter for the
 # redaction cases below to exercise anything.
-REAL_REDACT="$(cd "$(dirname "$REAL_CI")/../../.." && pwd)/tools/hsm-transcript-redact.sh"
+REAL_REDACT="$(cd "$(dirname "$REAL_CI")/../.." && pwd)/tools/hsm-transcript-redact.sh"
 [ -r "$REAL_REDACT" ] && ln -s "$REAL_REDACT" "$TOOLS/hsm-transcript-redact.sh"
 
 # Stub children. Each records the call and honours CHILD_RC so a failing suite can be simulated.
@@ -218,7 +218,7 @@ OUT="$T/out"
 # ceremony/ and the file is simply absent, so the battery falls back, the resolver is never sourced,
 # and every two-card assertion passes vacuously against single-card defaults. Asserted below rather
 # than trusted, because a missing path here fails silently in exactly that direction.
-REAL_RS="$(cd "$HERE/../../../.." && pwd)/tools/hsm-reader-select.sh"
+REAL_RS="$(cd "$HERE/../../.." && pwd)/tools/hsm-reader-select.sh"
 [ -r "$REAL_RS" ] || { echo "  (cannot find the reader resolver at $REAL_RS — two-card cases would pass vacuously)"; exit 1; }
 
 run_ci(){ # $@ = orchestrator args; card state from FAKE_*, harness paths from TEST_*
@@ -638,7 +638,7 @@ hdr "ROLE REGISTRY — a matching pin is permission from the OPERATOR; staging c
 # The fixture is the real registry with the pinned serial removed: it still loads, so what is exercised
 # is the hw_serial cross-check, not a load failure.
 REG_FIXTURE="$T/registry-without-pin.json"
-python3 - "$(cd "$HERE/../../../.." && pwd)/tools/hsm-staging-registry.json" "$REG_FIXTURE" <<'PYFIX'
+python3 - "$(cd "$HERE/../../.." && pwd)/tools/hsm-staging-registry.json" "$REG_FIXTURE" <<'PYFIX'
 import json, sys
 data = json.load(open(sys.argv[1]))
 data["devices"] = [d for d in data["devices"] if d["token_serial"] != "ESP2202E14A"]

@@ -16,7 +16,7 @@ analyzer silently compares the wrong versions and every ordering verdict is wort
 import json, os, struct, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 DECODE = os.path.join(REPO, "tools", "hsm-forensic-decode.py")
 ANALYZER = os.path.join(REPO, "tools", "hsm-drain-analyzer.py")
 

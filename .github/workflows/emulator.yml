@@ -1,0 +1,190 @@
+name: Emulator
+
+# Validates the custodial-wallet key-ceremony hardware emulators by booting them NATIVELY
+# on a Debian/Ubuntu runner (no Docker — the real ceremony runs on a Debian Qubes box, and
+# a native runner mirrors that) and driving every ceremony route, the full wizard, and the
+# go/no-go gate against them.
+
+on:
+  pull_request:
+    paths:
+      - "qubes/**"
+      - "debian/**"
+      - "hardware/**"
+      - ".github/workflows/emulator.yml"
+      # doc/ and README.md, because test-doc-map.sh lives in this suite and its SUBJECT is
+      # doc/. Without these the check could only run when the suites changed, so three docs
+      # reached main unmapped -- AUDIT-COLLECTOR-RECONCILIATION.md (#234),
+      # CONTROL-PLANE-EXPORT.md (#219) and RUNBOOK-DISASTER-RECOVERY.md (#217) -- and the
+      # next ceremony PR inherited all three. A gate whose trigger does not cover its
+      # subject is not a gate.
+      - "doc/**"
+      - "README.md"
+      # tools/**, for the same reason doc/** is here: five suites in this workflow have their
+      # SUBJECT under tools/ — test-hsm-reader-select.sh (tools/hsm-reader-select.sh),
+      # test-hsm-staging-restore.sh (tools/hsm-staging-restore.sh), test-transcript-redact.sh and
+      # test-hsm-staging-ci.sh (tools/hsm-transcript-redact.sh, the #185 redaction control), and
+      # test-forensic-ordering.sh (tools/hsm-wedge-snapshot.sh). Without this a PR that changes only
+      # the tool runs none of the tests written against it — which is how hsm_serial_at_reader came
+      # to return 141 on success with a test suite that never ran. A gate whose trigger does not
+      # cover its subject is not a gate.
+      - "tools/**"
+      # EVERY MARKDOWN FILE, because test-doc-map.sh scans every markdown file:
+      # `find "$ROOT" -name .git -prune -o -name '*.md' -print`. Its subject is the whole repository,
+      # not the trees listed above, so a doc anywhere could break it with this gate never running.
+      # That is not hypothetical: a markdown-only change citing a path that does not exist landed
+            # matched. doc/** and tools/** were each added after the same lesson; this is the general form.
+      - "**/*.md"
+      # with none of the patterns above matching.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ceremony-emulator-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  emulator-suite:
+    name: Emulator route coverage + wizard dress rehearsal
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install the ceremony toolchain + emulator stack (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            age opensc pcscd libccid pcsc-tools yubikey-manager ssss qrencode zbar-tools \
+            gnupg python3 python3-pip xxd softhsm2 opensc-pkcs11 vsmartcard-vpcd \
+            cups cups-client printer-driver-cups-pdf xorriso python3-pyscard openssl \
+            ghostscript cups-filters
+            # ghostscript (PS->PDF renderer) + cups-filters are RECOMMENDS of printer-driver-cups-pdf,
+            # so --no-install-recommends drops them on newer images: the print job is accepted but no
+            # PDF is ever rendered ("no PDF produced (cups-pdf)"). Install them explicitly.
+
+      - name: Install hash-pinned pip deps (SLIP-39 shamir)
+        # run-tests.sh runs under sudo (it boots pcscd/softhsm/cups daemons), so the pip deps + the 'shamir'
+        # console-script must live in ROOT's environment (site-packages + /usr/local/bin), not the runner
+        # user's ~/.local. Install with sudo so `command -v shamir` and `import mnemonic/shamir_mnemonic`
+        # resolve under the sudo'd suite. (User-site installs were invisible to sudo -> "shamir not found".)
+        #
+        # --ignore-installed: requirements.txt pins cryptography==50.0.0, but the image ships a
+        # DPKG-owned cryptography 41.0.7, and pip cannot uninstall that to make room —
+        # "Cannot uninstall cryptography 41.0.7, RECORD file not found. Hint: The package was
+        # installed by debian." That aborted the whole install, so the job failed before reaching a
+        # single test. Without the flag every PR touching ceremony/** is blocked by the base image.
+        # Installing over it is the intended outcome here: /usr/local/lib precedes /usr/lib on
+        # sys.path, so the pinned build is what imports. Hash pinning is unaffected.
+        run: |
+          sudo pip3 install --break-system-packages --ignore-installed --require-hashes \
+            -r qubes/requirements.txt \
+          || sudo pip3 install --ignore-installed --require-hashes -r qubes/requirements.txt
+
+      - name: Install hash-pinned sops (preflight checks for it; not in apt)
+        run: |
+          curl -fsSL -o /tmp/sops \
+            https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64
+          echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /tmp/sops" \
+            | sha256sum -c -
+          sudo install -m 0755 /tmp/sops /usr/local/bin/sops
+
+      - name: Relax cups-pdf AppArmor (emulator writes PDFs to a custom /run/vault-emu dir)
+        run: |
+          # PROVEN by audit: apparmor DENIED gs (under profile /usr/lib/cups/backend/cups-pdf) from mknod-ing
+          # the PDF in the emulator's custom Out=/run/vault-emu/pdf-out. That backend profile confines cups-pdf
+          # to standard dirs. On the ephemeral CI runner it is safe to unload AppArmor for the test. Tear it all
+          # down, then belt-and-suspenders unload/complain the specific cups profiles by their real names.
+          sudo apt-get install -y --no-install-recommends apparmor-utils 2>/dev/null || true
+          sudo aa-teardown 2>/dev/null || sudo systemctl stop apparmor 2>/dev/null || true
+          for prof in /usr/lib/cups/backend/cups-pdf /usr/sbin/cupsd; do
+            sudo aa-complain "$prof" 2>/dev/null || true
+          done
+          for f in /etc/apparmor.d/usr.lib.cups.backend.cups-pdf /etc/apparmor.d/usr.sbin.cupsd; do
+            [ -f "$f" ] && { sudo aa-complain "$f" 2>/dev/null || sudo apparmor_parser -R "$f" 2>/dev/null || true; }
+          done
+          echo "apparmor after teardown:"; sudo aa-status 2>/dev/null | grep -iE 'profiles are loaded|complain|cups' | head || echo "  (apparmor disabled/unavailable)"
+
+      - name: Run the full emulator suite natively (route coverage + go/no-go + wizard)
+        run: sudo qubes/emulator/run-tests.sh
+
+      - name: Show emulator logs on failure
+        if: failure()
+        run: |
+          echo "=== sle4442 vpicc ==="; sudo cat /run/vault-emu/sle4442.log 2>/dev/null || true
+          echo "=== cups ===";          sudo cat /run/vault-emu/cups.log 2>/dev/null || true
+          echo "=== cups-pdf.conf Out ==="; sudo grep -i '^Out ' /etc/cups/cups-pdf.conf 2>/dev/null || true
+          echo "=== EMU_PDF_OUTDIR listing ==="; sudo ls -la /run/vault-emu/pdf-out 2>/dev/null || true
+          echo "=== queue model (lpstat/lpoptions) ==="; sudo lpstat -t 2>/dev/null | head; sudo lpoptions -p vault-pdf 2>/dev/null || true
+          echo "=== AppArmor DENIED (dmesg/audit) ==="; sudo dmesg 2>/dev/null | grep -iE 'apparmor.*DENIED.*cups' | tail -20 || true
+          sudo journalctl -k 2>/dev/null | grep -iE 'apparmor.*DENIED.*cups' | tail -20 || true
+          echo "=== cups error_log ==="; sudo tail -50 /var/log/cups/error_log 2>/dev/null || true
+
+  salt-build-vault:
+    name: Build vault-tools from the salt recipe (debian:12) + validate against it
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Apply the REAL vault-tools recipe in a debian:12 container, then validate
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo debian:12 bash -euxc '
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update
+            apt-get install -y --no-install-recommends ca-certificates curl libdigest-sha-perl xxd
+            # Salt was dropped from Debian bookworm main (on a real Qubes template salt comes from Qubes).
+            # Install salt-call via the official Salt bootstrap: -X = do not start services (salt-call --local
+            # is standalone), -d = skip the daemon dep, -x python3 = use the system python.
+            # Pin the bootstrap to a specific release and verify its SHA-256 before executing it as root:
+            # a moving releases/latest URL is an arbitrary-code-execution supply-chain risk.
+            curl -fsSL -o /tmp/bootstrap-salt.sh https://github.com/saltstack/salt-bootstrap/releases/download/v2026.07.10/bootstrap-salt.sh
+            echo "e70543075fbf7240313066e48ce145d128fb26acf262116306bbd38b98ea47c1  /tmp/bootstrap-salt.sh" | sha256sum -c -
+            sh /tmp/bootstrap-salt.sh -X -x python3 || sh /tmp/bootstrap-salt.sh -X
+            command -v salt-call
+
+            # Stage the salt file_roots exactly as the README dom0 build does
+            cd ./qubes
+            mkdir -p /srv/salt
+            cp -r salt/* /srv/salt/
+            cp -r scripts /srv/salt/vault-ceremony-scripts
+            cp requirements.txt /srv/salt/vault-ceremony-requirements.txt
+            cp -r recovery /srv/salt/vault-ceremony-recovery
+            printf "file_client: local\nfile_roots:\n  base:\n    - /srv/salt\n" > /etc/salt/minion
+
+            # THE BUILD: run the actual state.apply the ceremony docs tell you to run in dom0
+            salt-call --local --retcode-passthrough state.apply vault-tools
+
+            # VERIFY the built image
+            . /etc/profile.d/vault-bin.sh
+            echo "sops:"; sops --version
+            test -f /opt/vault-ceremony/ceremony.sh
+            test -f /opt/vault-ceremony/requirements.txt
+            for t in age pkcs11-tool sc-hsm-tool shamir ssss-split ssss-combine qrencode age-plugin-yubikey; do
+              command -v "$t" >/dev/null || { echo "MISSING built tool: $t"; exit 1; }
+            done
+            ls /opt/vault-ceremony/wheels/*.whl >/dev/null 2>&1 && echo "offline recovery wheels baked in"
+            # the stubbed test/sim/proof harnesses MUST NOT ship in the real image
+            for h in test-ceremony recital-ceremony simulate-ceremony prove-ceremony; do
+              if [ -e "/opt/vault-ceremony/$h.sh" ]; then echo "SECURITY: stub harness $h leaked into the image"; exit 1; fi
+            done
+            echo "vault-tools filesystem BUILT + verified from the salt recipe"
+
+            # VALIDATE the ceremony against the salt-built tree (prove-ceremony is correctly
+            # excluded from the image, so run it from the checkout but against the BUILT tools).
+            cd /repo
+            PATH="/opt/vault-bin:$PATH" bash qubes/scripts/prove-ceremony.sh
+
+            # CROSS-PROFILE EQUIVALENCE (#36). The same test vector runs against the offline Debian
+            # bundle in offline-ceremony-bundle.yml; both are compared with one expected.json from
+            # this checkout, so a field that moves in either profile fails its job by name.
+            E=qubes/emulator/equivalence
+            python3 "$E/run-vector.py" --scripts /opt/vault-ceremony --profile salt-vault-tools --out /tmp/equivalence-salt-vault-tools.json
+            cat /tmp/equivalence-salt-vault-tools.json
+            python3 "$E/compare-vector.py" "$E/expected.json" /tmp/equivalence-salt-vault-tools.json
+            # NEGATIVE CONTROL: a derivation-changing input must make the comparison fail, on the field
+            # it reaches. A comparison that only ever agrees proves nothing about two profiles.
+            BIP39_PASSPHRASE=perturbed-negative-control python3 "$E/run-vector.py" --scripts /opt/vault-ceremony \
+              --profile salt-vault-tools-perturbed --out /tmp/equivalence-perturbed.json
+            python3 "$E/compare-vector.py" "$E/expected.json" /tmp/equivalence-perturbed.json --must-differ bip39.akash_address
+          '

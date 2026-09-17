@@ -10,7 +10,7 @@
 # like it certified everything — and that is the exact failure this project has shipped repeatedly.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CC="$HERE/../../../../hsm-host-role/files/commission-card.sh"
+CC="$HERE/../../../hsm-host-role/files/commission-card.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }

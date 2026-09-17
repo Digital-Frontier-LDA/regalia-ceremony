@@ -16,7 +16,10 @@ import unittest
 # "ModuleNotFoundError: No module named 'ceremony'" while passing locally from the repo root.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
-from ceremony.qubes.emulator.tests.source_lexing import shell_code  # noqa: E402
+# source_lexing lives with the emulator suites in this repository; the monorepo this was
+# extracted from imported it as a package path that does not exist here.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "qubes" / "emulator" / "tests"))
+from source_lexing import shell_code  # noqa: E402
 
 
 HERE = pathlib.Path(__file__).resolve().parent
