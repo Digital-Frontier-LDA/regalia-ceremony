@@ -13,7 +13,7 @@
 # baked in could not pass, and a filter that silently passes values through fails below by name.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-REDACT="$HERE/../../../../tools/hsm-transcript-redact.sh"
+REDACT="$HERE/../../../tools/hsm-transcript-redact.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }

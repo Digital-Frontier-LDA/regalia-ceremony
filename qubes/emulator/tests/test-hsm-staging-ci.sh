@@ -36,7 +36,7 @@ SCRIPTS="$T/qubes/scripts"
 EMUT="$T/qubes/emulator/tests"
 TOOLS="$T/tools"
 mkdir -p "$SCRIPTS" "$EMUT" "$TOOLS" "$T/qubes/emulator"
-ln -s "$HERE/../../../..//tools/hsm-bench-lock.sh" "$TOOLS/hsm-bench-lock.sh"
+ln -s "$HERE/../../../../tools/hsm-bench-lock.sh" "$TOOLS/hsm-bench-lock.sh"
 
 # ---------------------------------------------------------------------------- the fake tree
 ln -s "$REAL_CI" "$SCRIPTS/hsm-staging-ci.sh"

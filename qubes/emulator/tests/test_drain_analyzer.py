@@ -27,7 +27,7 @@ sector was never written.
 import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 ANALYZER = os.path.join(REPO, "tools", "hsm-drain-analyzer.py")
 
 SECTOR = 4096
