@@ -19,3 +19,8 @@ the root is an anchor.
 
 CardContact publishes no detached signature for this certificate. The corroboration above is the
 reason to trust it. If it ever changes, the change must come with new corroboration.
+
+This directory is also what `qubes/scripts/hsm-key-attestation-verify.py --trust-dir` validates a
+device certificate against before it will report a key attestation: an attestation checked under
+an unvalidated device certificate proves nothing, so that tool refuses without either this
+directory or an explicit assertion that the same bytes were validated earlier.

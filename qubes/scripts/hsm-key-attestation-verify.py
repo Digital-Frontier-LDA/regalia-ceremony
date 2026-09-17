@@ -11,16 +11,32 @@ device key PrK.DevAut. OpenSC stores it in EF CExx next to the key. A DKEK impor
 produces no such object, so a verifying attestation means "generated on THIS device".
 
 This script checks that outer signature against the device public key from C.DevAut (EF 2F02,
-first element) and, optionally, that the attested point is the key the token exposes. It does NOT
-verify C.DevAut itself: do that first with cvc-devaut-verify.py
---trust-dir trust-anchors/smartcard-hsm. The two together are the provenance chain
-root -> issuer CA -> device -> key.
+first element) and, optionally, that the attested point is the key the token exposes.
 
-  hsm-key-attestation-verify.py --devaut ef2f02.bin --attestation ce01.bin [--expect-point HEX]
+**THE DEVICE CERTIFICATE MUST BE VALIDATED, OR THIS PROVES NOTHING.** The attestation is only
+evidence because the key that signed it is a CardContact-certified device key. Given an attacker's
+certificate and an attestation forged under its matching private key, every signature check below
+passes — the chain to the trust anchor is the only thing that makes the device key a device key.
+So this refuses to report success unless one of two things is true:
+
+  --trust-dir DIR   the C.DevAut blob is validated to an anchor in DIR first (cvc-devaut-verify.py
+                    does the TR-03110 parse and chain walk; this script shells out to it)
+  --devaut-already-verified
+                    an explicit assertion by the caller that the SAME bytes were validated earlier
+                    in the pipeline. It is printed in the output, so a reader of a transcript can
+                    see which arm was used.
+
+Neither is not a third option: with no assurance about C.DevAut the script exits 2 rather than
+printing a verification a reader would take for one.
+
+  hsm-key-attestation-verify.py --devaut ef2f02.bin --attestation ce01.bin \
+      --trust-dir ../trust-anchors/smartcard-hsm [--expect-point HEX]
 
 Exit: 0 verified; 1 verification failed or the point differs; 2 operator/input error.
 """
 import argparse
+import os
+import subprocess
 import sys
 
 try:
@@ -82,7 +98,20 @@ def main():
     ap.add_argument("--devaut", required=True, help="EF 2F02 blob (C.DevAut first)")
     ap.add_argument("--attestation", required=True, help="EF CExx blob (authenticated request, tag 0x67)")
     ap.add_argument("--expect-point", help="uncompressed EC point (hex) the token exposes for the key")
+    ap.add_argument("--trust-dir",
+                    help="directory of issuer CVC certificates named by CHR; the C.DevAut blob is "
+                         "validated to an anchor here before the attestation is checked")
+    ap.add_argument("--devaut-already-verified", action="store_true",
+                    help="assert that these exact C.DevAut bytes were validated earlier in the "
+                         "pipeline; recorded in the output so a transcript shows which arm ran")
     a = ap.parse_args()
+    if not a.trust_dir and not a.devaut_already_verified:
+        print(f"{PROG} ERROR: refusing to report an attestation without assurance about C.DevAut. "
+              f"Pass --trust-dir DIR to validate it here, or --devaut-already-verified if the same "
+              f"bytes were validated earlier. An attestation verified under an unvalidated device "
+              f"certificate proves nothing: an attacker's certificate and a matching forged "
+              f"attestation would pass every check below.", file=sys.stderr)
+        return 2
     if ec is None:
         print(f"{PROG} ERROR: the `cryptography` package is required", file=sys.stderr)
         return 2
@@ -92,6 +121,26 @@ def main():
     except OSError as e:
         print(f"{PROG} ERROR: {e}", file=sys.stderr)
         return 2
+
+    if a.trust_dir:
+        # Delegate to the TR-03110 parser and chain walker rather than reimplementing it: one
+        # implementation of "does this chain to the anchor", used by both tools.
+        verifier = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cvc-devaut-verify.py")
+        if not os.path.isfile(verifier):
+            print(f"{PROG} ERROR: cvc-devaut-verify.py not found next to this script; cannot "
+                  f"validate C.DevAut", file=sys.stderr)
+            return 2
+        chain = subprocess.run([sys.executable, verifier, "--cert", a.devaut,
+                                "--trust-dir", a.trust_dir, "--require-external-car"],
+                               capture_output=True, text=True)
+        if chain.returncode != 0:
+            print("DEVAUT_CHAIN=failed")
+            print(f"{PROG} FAILED: C.DevAut does not validate to an anchor in {a.trust_dir}; the "
+                  f"attestation below would prove nothing.\n{chain.stderr.strip()}", file=sys.stderr)
+            return 1
+        print("DEVAUT_CHAIN=verified")
+    else:
+        print("DEVAUT_CHAIN=asserted-by-caller")
     try:
         t, dev_body, _ = tlv(devaut)
         if t != 0x7F21:

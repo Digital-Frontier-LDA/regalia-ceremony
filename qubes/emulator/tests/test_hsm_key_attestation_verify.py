@@ -43,6 +43,8 @@ CE01 = (
 )
 TOKEN_POINT = ("04c5007688149bb767a91e1716b3efc4e80b4408b1ba8a3b83712bbbf963e150bd"
                "d7e039af0165e4229cad670398161ae8456ff6b78c2f770a6dc0cf8f6723d34f")
+ANCHORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "trust-anchors",
+                       "smartcard-hsm")
 
 
 class KeyAttestationTest(unittest.TestCase):
@@ -53,6 +55,16 @@ class KeyAttestationTest(unittest.TestCase):
         cls.ce = bytes.fromhex(CE01)
         cls.ef_path = cls.put("ef2f02.bin", cls.ef)
         cls.ce_path = cls.put("ce01.bin", cls.ce)
+        # A trust directory holding the pinned root and the card's own issuer certificate (the
+        # second element of EF 2F02), named by CHR as the verifier expects.
+        cls.trust = os.path.join(cls.tmp, "trust")
+        os.mkdir(cls.trust)
+        n = cls.ef[3] + 4
+        with open(os.path.join(cls.trust, "DEDINK0400001"), "wb") as f:
+            f.write(cls.ef[n:])
+        with open(os.path.join(ANCHORS, "DESRCACC100001"), "rb") as src, \
+                open(os.path.join(cls.trust, "DESRCACC100001"), "wb") as dst:
+            dst.write(src.read())
 
     @classmethod
     def put(cls, name, data):
@@ -69,7 +81,7 @@ class KeyAttestationTest(unittest.TestCase):
         return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
 
     def test_the_real_attestation_verifies_and_names_the_token_key(self):
-        r = self.run_cli("--devaut", self.ef_path, "--attestation", self.ce_path,
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", self.ce_path,
                          "--expect-point", TOKEN_POINT)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ATTEST_CAR=DENK040414400000", r.stdout)
@@ -79,12 +91,12 @@ class KeyAttestationTest(unittest.TestCase):
     def test_a_flipped_signature_byte_is_refused(self):
         bad = bytearray(self.ce)
         bad[-2] ^= 0x01
-        r = self.run_cli("--devaut", self.ef_path, "--attestation", self.put("bad-sig.bin", bytes(bad)))
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", self.put("bad-sig.bin", bytes(bad)))
         self.assertEqual(r.returncode, 1)
         self.assertIn("ATTEST_SIGNATURE=failed", r.stdout)
 
     def test_a_different_key_point_is_refused(self):
-        r = self.run_cli("--devaut", self.ef_path, "--attestation", self.ce_path,
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", self.ce_path,
                          "--expect-point", TOKEN_POINT[:-1] + "0")
         self.assertEqual(r.returncode, 1)
         self.assertIn("ATTESTED_POINT_MATCHES=no", r.stdout)
@@ -93,7 +105,7 @@ class KeyAttestationTest(unittest.TestCase):
         """EF 2F02 minus its first element starts with the issuer CA certificate. Signed by the
         device, not the CA: the CAR check and the signature must both refuse."""
         n = self.ef[3] + 4
-        r = self.run_cli("--devaut", self.put("dica-first.bin", self.ef[n:]), "--attestation", self.ce_path)
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.put("dica-first.bin", self.ef[n:]), "--attestation", self.ce_path)
         self.assertEqual(r.returncode, 1)
         self.assertIn("ATTEST_SIGNATURE=failed", r.stdout)
 
@@ -104,16 +116,52 @@ class KeyAttestationTest(unittest.TestCase):
         self.assertGreater(i, 0)
         bad = bytearray(self.ce)
         bad[i + 12] ^= 0x01
-        r = self.run_cli("--devaut", self.ef_path, "--attestation", self.put("bad-point.bin", bytes(bad)))
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", self.put("bad-point.bin", bytes(bad)))
         self.assertEqual(r.returncode, 1)
 
     def test_garbage_is_a_failure_not_a_crash(self):
-        r = self.run_cli("--devaut", self.ef_path, "--attestation", self.put("junk.bin", os.urandom(64)))
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", self.put("junk.bin", os.urandom(64)))
         self.assertEqual(r.returncode, 1, r.stderr)
         self.assertNotIn("Traceback", r.stderr)
 
+    def test_without_assurance_about_the_device_certificate_it_refuses_to_report(self):
+        """THE finding this contract exists for. Verifying the attestation under whatever key the
+        caller hands in proves nothing: an attacker's certificate plus an attestation forged under
+        its own private key passes every signature check. Neither arm given is an operator error,
+        not a verification."""
+        r = self.run_cli("--devaut", self.ef_path, "--attestation", self.ce_path)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertIn("refusing to report an attestation", r.stderr)
+        self.assertNotIn("ATTEST_SIGNATURE=verified", r.stdout)
+
+    def test_a_device_certificate_that_does_not_chain_is_refused_before_the_attestation(self):
+        """The attacker's arm, end to end: a certificate that does not validate to the anchor is
+        refused even though the attestation would verify under the key it carries."""
+        bad = bytearray(self.ef)
+        i = bad.index(b"\x5f\x37")           # the device certificate's signature
+        bad[i + 8] ^= 0x01
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.put("bad-chain.bin", bytes(bad)),
+                         "--attestation", self.ce_path)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("DEVAUT_CHAIN=failed", r.stdout)
+        self.assertNotIn("ATTEST_SIGNATURE=verified", r.stdout)
+
+    def test_the_explicit_opt_out_is_recorded_in_the_output(self):
+        """A pipeline that validated the same bytes earlier may say so — and a reader of the
+        transcript can see that it did, rather than assuming a chain check happened."""
+        r = self.run_cli("--devaut-already-verified", "--devaut", self.ef_path,
+                         "--attestation", self.ce_path, "--expect-point", TOKEN_POINT)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("DEVAUT_CHAIN=asserted-by-caller", r.stdout)
+
+    def test_the_verified_chain_is_reported(self):
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path,
+                         "--attestation", self.ce_path)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("DEVAUT_CHAIN=verified", r.stdout)
+
     def test_a_missing_file_is_an_operator_error(self):
-        r = self.run_cli("--devaut", self.ef_path, "--attestation", os.path.join(self.tmp, "nope.bin"))
+        r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", os.path.join(self.tmp, "nope.bin"))
         self.assertEqual(r.returncode, 2)
 
 
