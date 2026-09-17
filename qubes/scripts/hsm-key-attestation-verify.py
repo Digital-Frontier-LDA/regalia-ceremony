@@ -38,6 +38,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 
 try:
     from cryptography.exceptions import InvalidSignature
@@ -130,9 +131,19 @@ def main():
             print(f"{PROG} ERROR: cvc-devaut-verify.py not found next to this script; cannot "
                   f"validate C.DevAut", file=sys.stderr)
             return 2
-        chain = subprocess.run([sys.executable, verifier, "--cert", a.devaut,
-                                "--trust-dir", a.trust_dir, "--require-external-car"],
-                               capture_output=True, text=True)
+        # ONE READ, ONE SET OF BYTES. Passing a.devaut to the child would make it open the path a
+        # second time, and a local process that can replace that path between the two opens gets a
+        # trusted certificate validated while the attestation below is checked against the bytes
+        # already cached here (TOCTOU, CWE-367). The child validates exactly what this process read.
+        with tempfile.NamedTemporaryFile(suffix=".devaut", delete=False) as cached:
+            cached.write(devaut)
+            cached_path = cached.name
+        try:
+            chain = subprocess.run([sys.executable, verifier, "--cert", cached_path,
+                                    "--trust-dir", a.trust_dir, "--require-external-car"],
+                                   capture_output=True, text=True)
+        finally:
+            os.unlink(cached_path)
         if chain.returncode != 0:
             print("DEVAUT_CHAIN=failed")
             print(f"{PROG} FAILED: C.DevAut does not validate to an anchor in {a.trust_dir}; the "

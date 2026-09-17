@@ -160,6 +160,25 @@ class KeyAttestationTest(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("DEVAUT_CHAIN=verified", r.stdout)
 
+    def test_the_chain_is_validated_against_the_bytes_this_process_read(self):
+        """TOCTOU: the child must not re-open the caller's path (CWE-367).
+
+        Two reads of one path can see two different files — a local process that swaps the path
+        between them gets a trusted certificate validated while the attestation is checked against
+        the bytes the parent already cached.
+
+        A pipe makes that testable without a race: it can be read exactly once. If the chain check
+        re-opened the path it would find an empty stream and fail; reading once and handing the
+        child those bytes is what makes this pass. Deleting a symlink mid-run was tried first and
+        was itself racy — it failed whether or not the defect was present, which proves nothing.
+        """
+        proc = subprocess.run(
+            [sys.executable, SCRIPT, "--trust-dir", self.trust, "--devaut", "/dev/stdin",
+             "--attestation", self.ce_path],
+            input=self.ef, capture_output=True, timeout=60)
+        self.assertEqual(proc.returncode, 0, proc.stderr.decode())
+        self.assertIn(b"DEVAUT_CHAIN=verified", proc.stdout)
+
     def test_a_missing_file_is_an_operator_error(self):
         r = self.run_cli("--trust-dir", self.trust, "--devaut", self.ef_path, "--attestation", os.path.join(self.tmp, "nope.bin"))
         self.assertEqual(r.returncode, 2)
