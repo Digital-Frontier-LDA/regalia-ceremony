@@ -383,5 +383,93 @@ class GoldenPicoDevautTest(unittest.TestCase):
         self.assertIn("top-level tags present", r.stderr)
 
 
+GOLDEN_NITROKEY_EF2F02 = (
+    "7F2181E47F4E819D5F290100420D444544494E4B303430303030317F494F060A04007F00070202020203864104854A60"
+    "8E6F7B27D4B990C0EEA68F6C1D738E0E38CC9C6D1CEEDE55C0583F0B7B37363551A876B8EC2B0DB88545ADFE418ABECD"
+    "555C128BE81A5C6A0361FCA1DF5F201044454E4B3034303431343430303030307F4C10060B2B0601040181C31F030101"
+    "5301005F25060206000502085F24060301000502075F3740A4D5D47D41451FCFAC7C8766EEBA2871CAA8086C6E789AF7"
+    "52A7968CF3310852962F428EEE0F209FBB6EB928E6DEFF8AA3CC97F4B8EDC000131683AAF291968F7F2181E47F4E819D"
+    "5F290100420E44455352434143433130303030317F494F060A04007F0007020202020386410441BEF11216285DE54D35"
+    "BAE22FC4953E99EDD7D0294B45CF578AA8545E5F5BBB8F8AF9150E936F7F77777B1EECC58F2D823FE520EBC430964889"
+    "A4463A7EB2425F200D444544494E4B303430303030317F4C10060B2B0601040181C31F0301015301805F250602040100"
+    "03005F240603020100020965005F3740039567AA4930C8327D651E45B133B71E90F2C134EB385162B96913C0AB3AC265"
+    "110860CDAD312F970C2A652DA8B31BE8A8FAEA5B87CD146D517937D8B8771122"
+)
+TRUST_ANCHORS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "trust-anchors", "smartcard-hsm")
+
+
+class GoldenNitrokeyDevautTest(unittest.TestCase):
+    """The real EF 2F02 of Nitrokey HSM 2 DENK0404144 (fw 4.1), read 2026-09-17, against the pinned
+    CardContact root. The Pico golden above is the self-signed shape; this is the genuine one,
+    and it is the only fixture that proves the gate's genuineness check accepts real hardware."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.blob = bytes.fromhex(GOLDEN_NITROKEY_EF2F02)
+        cls.hexfile = os.path.join(cls.tmp, "nitrokey.hex")
+        with open(cls.hexfile, "w") as f:
+            f.write(GOLDEN_NITROKEY_EF2F02)
+        # The issuer CA certificate is the second element of EF 2F02 (it travels on the card).
+        n = cls.blob[3] + 3 + 1
+        cls.dica = cls.blob[n:]
+        cls.trust = os.path.join(cls.tmp, "trust")
+        os.mkdir(cls.trust)
+        with open(os.path.join(TRUST_ANCHORS, "DESRCACC100001"), "rb") as f:
+            cls.root = f.read()
+        cls._write_trust(cls.trust, cls.root)
+
+    @classmethod
+    def _write_trust(cls, d, root):
+        with open(os.path.join(d, "DESRCACC100001"), "wb") as f:
+            f.write(root)
+        with open(os.path.join(d, "DEDINK0400001"), "wb") as f:
+            f.write(cls.dica)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+
+    def test_the_genuine_chain_verifies_to_the_cardcontact_root(self):
+        self.assertEqual(hashlib.sha256(self.blob).hexdigest(),
+                         "1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4")
+        r = self.run_cli("--hex", self.hexfile, "--trust-dir", self.trust,
+                         "--require-external-car", "--expect-chr", "DENK040414400000",
+                         "--expect-car", "DEDINK0400001")
+        self.assertEqual(r.returncode, 0, r.stderr[:500])
+        self.assertIn("CVC_CHAIN=verified", r.stdout)
+        self.assertIn("CVC_ELEMENTS=2", r.stdout)
+
+    def test_a_different_root_key_is_refused(self):
+        """THE control for the test above: the same root certificate with a different, VALID
+        public point (the curve generator). If this passes, the root file is not being used."""
+        root = bytearray(self.root)
+        g = root.find(bytes.fromhex("8441048BD2"))
+        p = root.find(bytes.fromhex("8641046D025A"))
+        self.assertTrue(g > 0 and p > 0, "root layout changed under this test")
+        root[p + 2:p + 67] = root[g + 2:g + 67]
+        d = os.path.join(self.tmp, "otherkey")
+        os.mkdir(d)
+        self._write_trust(d, bytes(root))
+        r = self.run_cli("--hex", self.hexfile, "--trust-dir", d)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("CVC_CHAIN=failed", r.stdout)
+
+    def test_an_anchor_whose_point_is_not_on_the_curve_fails_closed_without_a_traceback(self):
+        root = bytearray(self.root)
+        p = root.find(bytes.fromhex("8641046D025A"))
+        root[p + 12] ^= 0x01
+        d = os.path.join(self.tmp, "badpoint")
+        os.mkdir(d)
+        self._write_trust(d, bytes(root))
+        r = self.run_cli("--hex", self.hexfile, "--trust-dir", d)
+        self.assertEqual(r.returncode, 1, r.stderr[:500])
+        self.assertIn("CVC_CHAIN=failed", r.stdout)
+        self.assertNotIn("Traceback", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -84,6 +84,7 @@ python3 "$HERE/tests/test_seed_to_pkcs12.py" || rc=1
 python3 "$HERE/tests/test_verify_hsm_control.py" || rc=1
 python3 "$HERE/tests/test_recovery_card.py" || rc=1
 python3 "$HERE/tests/test_cvc_devaut_verify.py" || rc=1
+python3 "$HERE/tests/test_hsm_key_attestation_verify.py" || rc=1
 python3 "$HERE/tests/test_drain_analyzer.py" || rc=1
 python3 "$HERE/tests/test_forensic_decode.py" || rc=1
 
