@@ -134,7 +134,11 @@ cmd_run() {
   printf '%s' "$DRILL_MNEMONIC" > "$WORK/m.txt"; chmod 600 "$WORK/m.txt"
   # Password material never touches argv; it is generated into a 0600 file.
   ( umask 077; head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$WORK/p12.pw" )
-  ( umask 077; head -c 16 /dev/urandom | xxd -p | tr -d '\n' > "$WORK/dkek.pw" )
+  # od, not xxd: xxd is not in the vault-tools image or a minimal Debian, and without `set -e` a
+  # missing xxd left an EMPTY password file here while the next step still printed "DKEK share
+  # created" (measured on dev-regalia, Debian 13, 2026-09-17). Refuse a short password outright.
+  ( umask 077; head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/dkek.pw" )
+  [ "$(wc -c < "$WORK/dkek.pw")" -eq 32 ] || { err "DKEK share password was not generated (expected 32 hex chars)"; return 1; }
   python3 "$SCRIPTS/seed-to-pkcs12.py" \
       --mnemonic-file "$WORK/m.txt" \
       --password-file "$WORK/p12.pw" \
@@ -155,8 +159,10 @@ cmd_run() {
   else
     # --password env:VAR is what removes every interactive prompt. The value is treated as the
     # LITERAL ASCII password by sc-hsm-tool, and hsm-auto-import.js reads it back the same way.
-    HSM_DKEK_PW="$(cat "$WORK/dkek.pw")" \
-      sc-hsm-tool -r "$READER" --create-dkek-share "$WORK/dkek.pbe" --password env:HSM_DKEK_PW >/dev/null 2>&1 \
+    # In a umask-077 subshell: sc-hsm-tool creates the share file with the caller's umask, and
+    # under the 0002 user-private-group default it came out 0664 (measured 2026-09-17).
+    ( umask 077; HSM_DKEK_PW="$(cat "$WORK/dkek.pw")" \
+      sc-hsm-tool -r "$READER" --create-dkek-share "$WORK/dkek.pbe" --password env:HSM_DKEK_PW >/dev/null 2>&1 ) \
         && [ -s "$WORK/dkek.pbe" ]   # the file is the proof; the exit status is not
     [ -s "$WORK/dkek.pbe" ] || { err "DKEK share not created"; return 1; }
     ok "DKEK share created"
