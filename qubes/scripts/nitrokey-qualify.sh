@@ -100,7 +100,11 @@ done
 [ -n "$reader" ] || die "could not resolve serial '$SERIAL' to a reader for sc-hsm-tool; refusing to --initialize by index"
 
 printf '### provisioning: WIPING and re-initialising serial %s at reader %s\n' "$SERIAL" "$reader"
-sc-hsm-tool --reader "$reader" --initialize --so-pin "$SO_PIN" --pin "$PIN" --dkek-shares 1 --label nitrokey-qual \
+# No DKEK shares. `--dkek-shares 1` leaves the card in "DKEK import pending, 1 share(s) still
+# missing", and a SmartCard-HSM refuses on-card key generation in that state: C_GenerateKeyPair
+# returned CKR_GENERAL_ERROR on a Nitrokey HSM 2 (DENK0404144, fw 4.1, 2026-09-17). This path only
+# needs a key GENERATED on the card, so it initialises without a DKEK domain.
+sc-hsm-tool --reader "$reader" --initialize --so-pin "$SO_PIN" --pin "$PIN" --label nitrokey-qual \
   || die "sc-hsm-tool --initialize failed"
 # Re-resolve the slot (re-init can renumber) and generate a key ON the card.
 mapfile -t SLOTS < <(pkcs11-tool --module "$MODULE" -L 2>/dev/null | awk -v want="$SERIAL" '

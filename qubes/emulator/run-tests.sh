@@ -88,6 +88,7 @@ python3 "$HERE/tests/test_seed_to_pkcs12.py" || suite_failed "test_seed_to_pkcs1
 python3 "$HERE/tests/test_verify_hsm_control.py" || suite_failed "test_verify_hsm_control.py"
 python3 "$HERE/tests/test_recovery_card.py" || suite_failed "test_recovery_card.py"
 python3 "$HERE/tests/test_cvc_devaut_verify.py" || suite_failed "test_cvc_devaut_verify.py"
+python3 "$HERE/tests/test_hsm_key_attestation_verify.py" || suite_failed "test_hsm_key_attestation_verify.py"
 python3 "$HERE/tests/test_drain_analyzer.py" || suite_failed "test_drain_analyzer.py"
 python3 "$HERE/tests/test_forensic_decode.py" || suite_failed "test_forensic_decode.py"
 

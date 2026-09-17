@@ -80,7 +80,11 @@ grep -qi "replug" <<< "$(echo "$out")" \
   && P "explains WHY (needs a physical replug), not just that it refused" \
   || F "refusal does not explain the USB-bus reason — an operator would just retry"
 out2="$("$SH" --init 2>&1)"; rc2=$?
-[ "$rc2" -eq 2 ] && P "the --init abbreviation is refused too" || F "--init slipped through (rc=$rc2)"
+if [ "$rc2" -eq 2 ] && grep -qi "REFUSED" <<< "$out2"; then
+  P "the --init abbreviation is refused too, and says so"
+else
+  F "--init slipped through or was not reported as REFUSED (rc=$rc2)"
+fi
 
 # =====================================================================================
 hdr "SECRET HYGIENE: no secret is inlined, and none reaches argv"
@@ -340,6 +344,34 @@ if [ -r "$CER" ]; then
                     || F "drift: ceremony.sh blocks these but the import path does not:$missing"
 else
   printf '  \033[33mSKIP\033[0m ceremony.sh not readable — cannot check for drift\n'
+fi
+
+hdr "REGRESSION: an unwrapped key is DESCRIBED, or no PKCS#11 consumer can see it"
+# Measured on a Nitrokey HSM 2 (DENK0404144, fw 4.1, 2026-09-17): unwrapKey alone left only EF CCxx
+# on the card, and OpenSC listed no private key even logged in. The Pico hid this by listing the key
+# anyway. The description (EF C4xx) must be written, and written AFTER the unwrap succeeded.
+_unwrap_line="$(grep -n 'sc.unwrapKey(' <<<"$_stripped" | head -1 | cut -d: -f1)"
+_prkd_line="$(grep -n 'buildPrkDforECC(' <<<"$_stripped" | head -1 | cut -d: -f1)"
+_upd_line="$(grep -n 'updateBinary(.*PRKDPREFIX' <<<"$_stripped" | head -1 | cut -d: -f1)"
+if [ -n "$_unwrap_line" ] && [ -n "$_prkd_line" ] && [ -n "$_upd_line" ] \
+   && [ "$_prkd_line" -gt "$_unwrap_line" ] && [ "$_upd_line" -gt "$_prkd_line" ]; then
+  P "the PrKD is built and written to C4xx after unwrapKey"
+else
+  F "no PKCS#15 description is written after unwrapKey (unwrap=$_unwrap_line build=$_prkd_line write=$_upd_line): the key will be invisible on a genuine SmartCard-HSM"
+fi
+
+hdr "PORTABILITY: no xxd on the secret path, and an empty password is refused"
+# xxd is absent from minimal Debian and from the vault-tools image; without set -e its absence
+# produced an empty DKEK password file and a green "DKEK share created" (2026-09-17).
+if grep -qE '(^|[^[:alnum:]_-])xxd([^[:alnum:]_-]|$)' <<<"$_shell_code"; then
+  F "hsm-auto-import.sh still calls xxd"
+else
+  P "hsm-auto-import.sh does not depend on xxd"
+fi
+if grep -q 'dkek.pw").*-eq 32' <<<"$_shell_code"; then
+  P "the generated DKEK password length is asserted"
+else
+  F "nothing refuses an empty or short DKEK password file"
 fi
 
 hdr "RESULT"
