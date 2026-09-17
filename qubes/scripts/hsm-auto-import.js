@@ -207,6 +207,18 @@ print("STEP unwrap: target keyId=" + kid);
 sc.unwrapKey(kid, blob);
 print("STEP unwrap: OK into keyId=" + kid);
 
+// ---- describe the key, or PKCS#11 cannot see it --------------------------------------------
+// UNWRAP KEY stores the key (EF CCxx) and NOTHING ELSE. OpenSC's sc-hsm emulation enumerates
+// private keys from their PKCS#15 description in EF C4xx, so a bare unwrap is invisible to every
+// PKCS#11 consumer, logged in or not. MEASURED on a Nitrokey HSM 2 (DENK0404144, fw 4.1, JCOP 4,
+// 2026-09-17): after IMPORT-OK the card held only CC01, `pkcs11-tool --login --list-objects` listed
+// no private key, and the key could not be signed with. The Pico lists an unwrapped key anyway
+// (with an empty label), which is why this was never caught there. CardContact's own
+// HSMKeyStore.importECCKey writes this description immediately after unwrapKey; so does this.
+var prkd = SmartCardHSM.buildPrkDforECC(kid, alias, pub.getSize());
+sc.updateBinary(ByteString.valueOf((SmartCardHSM.PRKDPREFIX << 8) + kid), 0, prkd.getBytes());
+print("STEP prkd: wrote PKCS#15 description C4" + ByteString.valueOf(kid).toString(HEX) + " label=" + alias);
+
 // ---- read the imported key back to confirm the object exists ------------------------------
 // SmartCardHSMKey has NO getPublicKey() (see SmartCardHSM.js:2565-2930 — only getId/getLabel/
 // getSize/getType/sign/encrypt/decrypt). Calling it threw AFTER the unwrap had already
