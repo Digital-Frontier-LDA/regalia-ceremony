@@ -122,6 +122,21 @@ if [ -z "${CYCLE_PORT_TEST:-}" ]; then
             echo "by the bootstrap path, not by this suite; a wedged card must never pass for a blank one." >&2
             exit 2; }
         hsm_assert_staging "$_ct_ser" || exit 2
+        # RESOLVE THE SLOTS FROM THE CARD WE JUST IDENTIFIED. On this path the reader came from
+        # HSM_PCSC_INDEX and SLOTIX/SLOTID were left at 0 — but the --full chain passes SLOTID to
+        # `pkcs11-tool --slot`, so it could sign with a different token than the one the registry
+        # gate just approved, and then report CHAIN FAIL against a healthy card. An explicit
+        # HSM_SLOT_INDEX / HSM_SLOT_ID still wins: a caller who resolved them is not overridden.
+        if [ -z "${HSM_SLOT_INDEX:-}" ]; then
+            SLOTIX="$(hsm_slot_index_for "$_ct_ser")" || {
+                echo "FATAL: cannot resolve the PKCS#11 slot index for $_ct_ser (reader $READER)" >&2; exit 2; }
+        fi
+        if [ -z "${HSM_SLOT_ID:-}" ]; then
+            SLOTID="$(hsm_slot_id_for "$_ct_ser")" || {
+                echo "FATAL: cannot resolve the PKCS#11 slot id for $_ct_ser (reader $READER)" >&2; exit 2; }
+        fi
+        printf 'targeting card %s (reader %s, slot id %s) — this suite WIPES it\n' \
+            "$_ct_ser" "$READER" "$SLOTID"
     fi
     # Children resolve their own card from these. Two variables, because they are two things:
     # HSM_PCSC_INDEX is what `sc-hsm-tool -r` wants; HSM_READER is a reader NAME, which is what

@@ -66,9 +66,10 @@ say(){ printf '  %s\n' "$*"; }
 # run) and several of them are reached with an OpenOCD server and a pyserial capture running, or —
 # worse — with the DUT's VBUS switched OFF. Leaving either behind means the next run inherits a
 # probe that is already held and a card that looks dead, and the operator debugs the wrong thing.
-OCD_PID="" ; CAP_PID="" ; POWER_IS_CUT=0
+OCD_PID="" ; CAP_PID="" ; WORKLOAD_PID="" ; POWER_IS_CUT=0
 cleanup(){
     local rc=$?
+    [ -n "$WORKLOAD_PID" ] && { kill -TERM -- "-$WORKLOAD_PID" 2>/dev/null || kill "$WORKLOAD_PID" 2>/dev/null; }
     [ -n "$CAP_PID" ] && kill "$CAP_PID" 2>/dev/null
     [ -n "$OCD_PID" ] && kill "$OCD_PID" 2>/dev/null
     if [ "$POWER_IS_CUT" = 1 ]; then
@@ -293,6 +294,7 @@ say "starting the write-heavy workload (repeated keygens, run tag $RUN_TAG)"
       fi
   done
 ) > "$OUT/workload.log" 2>&1 &
+WORKLOAD_PID=$!
 WORKLOAD_START="$(date +%s)"
 
 say "cutting VBUS ${CUT_AFTER}s into the workload"
@@ -303,7 +305,18 @@ cut_power || { echo "ABANDONING THE RUN: uhubctl could not switch hub $LOC port 
 CUT_AT="$(( $(date +%s) - WORKLOAD_START ))"
 say "  cut at t+${CUT_AT}s"
 sleep 4
+# STOP THE WORKER, NOT JUST ITS CURRENT CHILD. `pkill -f pkcs11-tool` kills whichever pkcs11-tool
+# is running; the SUBSHELL driving the loop survives and starts the next iteration — after the cut
+# and, seconds later, after power is restored. Those writes are not part of the experiment, and the
+# success count below would be read while the subshell was still appending to it. The worker is
+# killed by PID (its children with it, via the process group) and REAPED before anything is
+# counted.
+if [ -n "${WORKLOAD_PID:-}" ] && kill -0 "$WORKLOAD_PID" 2>/dev/null; then
+    kill -TERM -- "-$WORKLOAD_PID" 2>/dev/null || kill -TERM "$WORKLOAD_PID" 2>/dev/null
+fi
 pkill -f "pkcs11-tool" 2>/dev/null
+[ -n "${WORKLOAD_PID:-}" ] && wait "$WORKLOAD_PID" 2>/dev/null
+WORKLOAD_PID=""
 kill "$CAP_PID" 2>/dev/null; wait "$CAP_PID" 2>/dev/null
 restore_power
 

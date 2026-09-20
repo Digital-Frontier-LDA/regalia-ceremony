@@ -436,19 +436,34 @@ hsm_assert_staging() {
 # subject and whose evidence are two different devices. Every such tool now resolves the token from
 # the board it just verified, through the same map hsm_assert_staging_board reverse-maps.
 hsm_token_for_board() {
-    local board pair
+    local board pair matches n
     board="$(printf '%s' "${1:-}" | tr 'a-f' 'A-F')"
     [ -n "$board" ] || { echo "hsm_token_for_board: no board id given" >&2; return 1; }
+    matches=""
     while IFS= read -r pair; do
         [ -n "$pair" ] || continue
         [ "$(printf '%s' "${pair#*:}" | tr 'a-f' 'A-F')" = "$board" ] || continue
-        printf '%s\n' "${pair%%:*}"
-        return 0
+        matches="$matches${pair%%:*} "
     done <<EOF
 $(printf '%s' "${HSM_BOARD_MAP:-}" | tr ' \t' '\n\n')
 EOF
-    echo "hsm_token_for_board: board $board has no HSM_BOARD_MAP entry, so its card cannot be" >&2
-    echo "named — refusing to address whichever token enumerates first." >&2
+    # EXACTLY ONE, NEVER THE FIRST. HSM_BOARD_MAP is an environment variable that the standalone
+    # destructive tools accept directly — they do not load the committed registry — so a duplicate
+    # entry for one board is a way to pass the board gate and then have the reader or slot resolved
+    # from a DIFFERENT token. An ambiguous map is a mistake worth stopping on, not one to resolve
+    # by ordering.
+    n="$(printf '%s' "$matches" | wc -w | tr -d ' ')"
+    if [ "$n" = "1" ]; then
+        printf '%s\n' "${matches% }"
+        return 0
+    fi
+    if [ "$n" = "0" ]; then
+        echo "hsm_token_for_board: board $board has no HSM_BOARD_MAP entry, so its card cannot be" >&2
+        echo "named — refusing to address whichever token enumerates first." >&2
+    else
+        echo "hsm_token_for_board: board $board is mapped to $n tokens ($matches) — refusing to" >&2
+        echo "pick one. Fix HSM_BOARD_MAP: a board has exactly one card." >&2
+    fi
     return 1
 }
 
