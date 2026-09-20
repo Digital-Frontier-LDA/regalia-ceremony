@@ -104,7 +104,17 @@ if [ -w "$plist" ] || [ "$(id -u)" = 0 ]; then
 import re, sys
 p = sys.argv[1]
 s = open(p).read()
-if re.search(r'<string>0x2E8A</string>', s):
+# THE PAIR, AT THE SAME INDEX — not "0x2E8A appears somewhere". The three arrays are
+# index-aligned, and libccid binds a reader only when the vendor and product entries line up. A
+# plist that already lists 0x2E8A for a DIFFERENT product (another RP2040/RP2350 device) satisfied
+# a VID-only search, so this exited without adding 0x10FD and the self-check below then accepted
+# the unrelated entry: the Pico stays invisible and every drill fails as if no card were attached.
+def entries(text, key):
+    m = re.search(r'<key>' + key + r'</key>\s*<array>(.*?)</array>', text, re.S)
+    return re.findall(r'<string>([^<]*)</string>', m.group(1)) if m else []
+
+vids, pids = entries(s, 'ifdVendorID'), entries(s, 'ifdProductID')
+if any(v.upper() == '0X2E8A' and p_.upper() == '0X10FD' for v, p_ in zip(vids, pids)):
     print("libccid: Pico entry already present"); raise SystemExit(0)
 for key, val in (('ifdVendorID', '0x2E8A'), ('ifdProductID', '0x10FD'), ('ifdFriendlyName', 'Pico Key')):
     m = re.search(r'(<key>' + key + r'</key>\s*<array>)(.*?)(</array>)', s, re.S)
@@ -150,9 +160,37 @@ chmod 0755 "/opt/dev-bin/scsh-${SCSH_VERSION}/scriptrunner" "/opt/dev-bin/scsh-$
 if [ -n "$REPO_DIR" ] && [ -r "$REPO_DIR/qubes/requirements.txt" ]; then
   cp "$REPO_DIR/qubes/requirements.txt" "$tmp/ceremony-req.txt"
 else
+  # THE FILE THAT DECIDES WHAT ROOT INSTALLS MUST BE PINNED TO CONTENT, NOT TO A MOVING REF.
+  # `--require-hashes` pins the PACKAGES named in this file; it says nothing about the file itself.
+  # Fetched from a branch, whoever can move that branch chooses the package list — and pip then
+  # runs as root on this image. Two ways to pin it, and nothing else is accepted:
+  #   REQ_REF=<40-hex commit sha>   the content is the commit's, and a commit id is a digest
+  #   REQ_SHA256=<sha256>           verified against the bytes that arrive
   REQ_REF="${REQ_REF:-main}"
+  pinned_by_ref=0
+  case "$REQ_REF" in
+    *[!0-9a-fA-F]*) ;;                       # not hex: a branch or tag name
+    ????????????????????????????????????????) pinned_by_ref=1 ;;   # exactly 40 hex digits
+  esac
+  if [ "$pinned_by_ref" != 1 ] && [ -z "${REQ_SHA256:-}" ]; then
+    echo "REFUSING to install from https://raw.githubusercontent.com/.../${REQ_REF}/qubes/requirements.txt:" >&2
+    echo "  that ref can move, and this file decides what pip installs AS ROOT on this image." >&2
+    echo "  Re-run with one of:" >&2
+    echo "    REQ_REF=<40-hex commit sha>  (content-addressed)" >&2
+    echo "    REQ_SHA256=<sha256 of the file>" >&2
+    echo "  or run this from a checkout, where qubes/requirements.txt is read directly." >&2
+    exit 2
+  fi
   curl -fsSL -o "$tmp/ceremony-req.txt" \
     "https://raw.githubusercontent.com/Digital-Frontier-LDA/regalia-ceremony/${REQ_REF}/qubes/requirements.txt"
+  if [ -n "${REQ_SHA256:-}" ]; then
+    got="$(sha256sum "$tmp/ceremony-req.txt" | awk '{print $1}')"
+    [ "$got" = "$REQ_SHA256" ] || {
+      echo "requirements.txt digest mismatch: got $got, expected $REQ_SHA256 — refusing" >&2; exit 1; }
+    echo "requirements.txt: sha256 verified against REQ_SHA256"
+  else
+    echo "requirements.txt: fetched at commit $REQ_REF (content-addressed)"
+  fi
 fi
 grep -q -- '--hash=sha256:' "$tmp/ceremony-req.txt" \
   || { echo "requirements.txt carries no hashes — refusing an unpinned install" >&2; exit 1; }
@@ -177,7 +215,21 @@ pkg-config --exists libpcsclite || { echo "MISSING: libpcsclite pkg-config (need
 [ -x "/opt/dev-bin/scsh-${SCSH_VERSION}/scriptrunner" ] || { echo "MISSING: Smart Card Shell scriptrunner" >&2; missing=1; }
 /opt/dev-bin/regalia-venv/bin/python -c 'import cvc, cryptography, shamir_mnemonic, mnemonic' \
   || { echo "MISSING: a Python package in /opt/dev-bin/regalia-venv" >&2; missing=1; }
-grep -q '0x2E8A' /etc/libccid_Info.plist || { echo "MISSING: libccid entry for the Pico HSM (0x2E8A)" >&2; missing=1; }
+# The PAIR at the same index, for the reason above: 0x2E8A present against another product is not
+# a registered Pico, and a self-check that accepts it declares an image ready that cannot see the
+# card.
+python3 - /etc/libccid_Info.plist <<'PICOCHECK' || missing=1
+import re, sys
+s = open(sys.argv[1]).read()
+def entries(key):
+    m = re.search(r'<key>' + key + r'</key>\s*<array>(.*?)</array>', s, re.S)
+    return re.findall(r'<string>([^<]*)</string>', m.group(1)) if m else []
+ok = any(v.upper() == '0X2E8A' and p.upper() == '0X10FD'
+         for v, p in zip(entries('ifdVendorID'), entries('ifdProductID')))
+if not ok:
+    sys.stderr.write("MISSING: aligned libccid entry for the Pico HSM (0x2E8A:0x10FD)\n")
+raise SystemExit(0 if ok else 1)
+PICOCHECK
 p11="$(find /usr/lib -name opensc-pkcs11.so -path '*-linux-gnu*' 2>/dev/null | head -1)"
 [ -n "$p11" ] || { echo "MISSING: opensc-pkcs11.so" >&2; missing=1; }
 [ "$missing" = 0 ] || { echo "dev image INCOMPLETE — see MISSING lines above" >&2; exit 1; }
