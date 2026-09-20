@@ -89,6 +89,8 @@ python3 "$HERE/tests/test_verify_hsm_control.py" || suite_failed "test_verify_hs
 python3 "$HERE/tests/test_recovery_card.py" || suite_failed "test_recovery_card.py"
 python3 "$HERE/tests/test_cvc_devaut_verify.py" || suite_failed "test_cvc_devaut_verify.py"
 python3 "$HERE/tests/test_hsm_key_attestation_verify.py" || suite_failed "test_hsm_key_attestation_verify.py"
+python3 "$HERE/tests/test_hsm_devaut_read.py" || suite_failed "test_hsm_devaut_read.py"
+python3 "$HERE/tests/test_hsm_time_bound.py" || suite_failed "test_hsm_time_bound.py"
 python3 "$HERE/tests/test_drain_analyzer.py" || suite_failed "test_drain_analyzer.py"
 python3 "$HERE/tests/test_forensic_decode.py" || suite_failed "test_forensic_decode.py"
 

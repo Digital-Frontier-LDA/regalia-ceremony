@@ -155,6 +155,30 @@ check "the gate reads the file hsm-staging-registry.sh loads, not a second regis
   env -u HSM_STAGING_REGISTRY_FILE -u HSM_BOARD_MAP -u HSM_CI_PROBE_MAP \
   bash -c '. "'"$UNDER_TEST"'"; . "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1 || { echo loader-failed; exit 0; }; case " $HSM_BOARD_MAP " in *" ESP41D722E2:"*) hsm_role_of ESP41D722E2 ;; *) echo loader-disagrees ;; esac'
 
+# VALIDATION MUST NOT DEPEND ON HOW PYTHON WAS INVOKED. Both readers validated the registry with
+# `assert`, and `python3 -O` — or a PYTHONOPTIMIZE exported anywhere in the environment — REMOVES
+# assert statements. Every schema, role and format check would silently vanish, on the one file
+# that decides which cards may be wiped. These repeat the checks above with PYTHONOPTIMIZE set.
+check "under PYTHONOPTIMIZE, another schema still protects everything" 0 "protected" \
+  env PYTHONOPTIMIZE=1 HSM_STAGING_REGISTRY_FILE="$REG_OTHERSCHEMA" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_role_of ESPAAAAAAAA'
+
+check "under PYTHONOPTIMIZE, a serial listed twice is still protected" 0 "protected" \
+  env PYTHONOPTIMIZE=1 HSM_STAGING_REGISTRY_FILE="$REG" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_role_of ESPDDDDDDDD'
+
+# …and the map loader, which is what hands board ids to the erase path.
+REG_BADROLE="$BIN/registry-badrole.json"
+cat > "$REG_BADROLE" <<'JSON'
+{"schema": "regalia.staging-hardware/v1", "environment": "production", "devices": [
+  {"token_serial": "ESP41D722E2", "role": "staging", "kind": "pico-hsm2",
+   "board_id": "8625B32841D722E2", "debug_probe": {"serial": "E6614C775B8E9A25"}}
+]}
+JSON
+check "under PYTHONOPTIMIZE, the loader still rejects a non-staging registry" 1 "" \
+  env PYTHONOPTIMIZE=1 HSM_STAGING_REGISTRY_FILE="$REG_BADROLE" \
+  bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1'
+
 legacy_roles="$REPO/tools/hsm-roles"".env"
 if [ -e "$legacy_roles" ]; then no "$legacy_roles still exists — a second registry the gate no longer reads"; else ok "no second role registry ships beside the staging registry"; fi
 

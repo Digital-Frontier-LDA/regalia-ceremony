@@ -16,19 +16,34 @@ hsm_staging_registry_load() {
     [ -r "$registry" ] || { echo "registry unavailable: $registry" >&2; return 1; }
     raw="$(python3 - "$registry" <<'PY'
 import json, re, sys
+
+# NO `assert` IN THIS VALIDATOR. `python3 -O`, or a PYTHONOPTIMIZE set anywhere in the environment,
+# REMOVES assert statements outright — so every check below would vanish and a malformed registry
+# would load clean. This registry is what decides which cards may be wiped; it must validate the
+# same way no matter how the interpreter was invoked.
+def need(cond, msg):
+    if not cond:
+        raise ValueError(msg)
+
 try:
     data = json.load(open(sys.argv[1], encoding='utf-8'))
-    devices = data['devices']
-    assert data['schema'] == 'regalia.staging-hardware/v1'
-    assert data['environment'] == 'staging' and devices
+    need(isinstance(data, dict), 'top level is not an object')
+    devices = data.get('devices')
+    need(data.get('schema') == 'regalia.staging-hardware/v1',
+         f"schema is {data.get('schema')!r}, expected 'regalia.staging-hardware/v1'")
+    need(data.get('environment') == 'staging', f"environment is {data.get('environment')!r}, expected 'staging'")
+    need(isinstance(devices, list) and devices, 'devices is empty or not a list')
     seen = set()
     for d in devices:
-        assert d['role'] == 'staging' and d['kind'] == 'pico-hsm2'
-        t, b = d['token_serial'], d['board_id']
-        p = d['debug_probe']['serial']
-        assert re.fullmatch(r'ESP[0-9A-F]{8}', t)
-        assert re.fullmatch(r'[0-9A-F]{16}', b) and re.fullmatch(r'[0-9A-F]{16}', p)
-        assert not ({t, b, p} & seen)
+        need(isinstance(d, dict), 'a device entry is not an object')
+        need(d.get('role') == 'staging', f"device {d.get('token_serial')!r} has role {d.get('role')!r}, expected 'staging'")
+        need(d.get('kind') == 'pico-hsm2', f"device {d.get('token_serial')!r} has kind {d.get('kind')!r}, expected 'pico-hsm2'")
+        t, b = d.get('token_serial'), d.get('board_id')
+        p = (d.get('debug_probe') or {}).get('serial')
+        need(isinstance(t, str) and re.fullmatch(r'ESP[0-9A-F]{8}', t), f'token_serial {t!r} is malformed')
+        need(isinstance(b, str) and re.fullmatch(r'[0-9A-F]{16}', b), f'board_id {b!r} is malformed')
+        need(isinstance(p, str) and re.fullmatch(r'[0-9A-F]{16}', p), f'debug_probe.serial {p!r} is malformed')
+        need(not ({t, b, p} & seen), f'{t} reuses an identifier already claimed by another device')
         seen.update((t, b, p))
         print(f'{t}\t{b}\t{p}')
 except Exception as exc:

@@ -61,6 +61,23 @@ EOP
 
 mkdir -p "$OUT"
 say(){ printf '  %s\n' "$*"; }
+
+# EVERY EXIT PATH TIDIES UP. This script refuses at a dozen points (capacity, channel, dump, void
+# run) and several of them are reached with an OpenOCD server and a pyserial capture running, or —
+# worse — with the DUT's VBUS switched OFF. Leaving either behind means the next run inherits a
+# probe that is already held and a card that looks dead, and the operator debugs the wrong thing.
+OCD_PID="" ; CAP_PID="" ; POWER_IS_CUT=0
+cleanup(){
+    local rc=$?
+    [ -n "$CAP_PID" ] && kill "$CAP_PID" 2>/dev/null
+    [ -n "$OCD_PID" ] && kill "$OCD_PID" 2>/dev/null
+    if [ "$POWER_IS_CUT" = 1 ]; then
+        printf '  restoring VBUS on hub %s port %s before exiting\n' "${LOC:-?}" "${PORT:-?}"
+        restore_power 2>/dev/null
+    fi
+    return $rc
+}
+trap cleanup EXIT INT TERM
 ocd(){ printf '%s\nexit\n' "$1" | perl -e 'alarm 120; exec @ARGV' -- nc localhost 4444 2>&1 | LC_ALL=C tr -d '\000'; }
 
 # ---- 0. PROVE THE INSTRUMENT BEFORE USING IT -----------------------------------------------------
@@ -95,8 +112,8 @@ if [ -n "${PROBE_PORT:-}" ] && [ "$PROBE_PORT" = "$PORT" ]; then
 fi
 [ -n "${PROBE_PORT:-}" ] && say "debug probe is on port $PROBE_PORT — will not be cut"
 
-cut_power(){ uhubctl -e -l "$LOC" -p "$PORT" -a off -r 2 >/dev/null 2>&1; }
-restore_power(){ uhubctl -e -l "$LOC" -p "$PORT" -a on >/dev/null 2>&1; }
+cut_power(){ POWER_IS_CUT=1; uhubctl -e -l "$LOC" -p "$PORT" -a off -r 2 >/dev/null 2>&1; }
+restore_power(){ uhubctl -e -l "$LOC" -p "$PORT" -a on >/dev/null 2>&1; POWER_IS_CUT=0; }
 
 # THE VERIFICATION CUT IS OPT-IN, BECAUSE IT DESTROYS THE INSTRUMENT IT PRECEDES.
 #
@@ -112,7 +129,9 @@ restore_power(){ uhubctl -e -l "$LOC" -p "$PORT" -a on >/dev/null 2>&1; }
 #
 # HSM_BUG6_VERIFY_CUT=1 re-enables it, for a bench where the cut is not yet trusted. Expect the
 # trace channel to be dead afterwards.
-if [ -n "${HSM_BUG6_VERIFY_CUT:-}" ]; then
+# `= 1`, not `-n`: with a -n test, HSM_BUG6_VERIFY_CUT=0 — the natural way to write "no" — ENABLED
+# the verification cut and killed the UART bridge this run depends on.
+if [ "${HSM_BUG6_VERIFY_CUT:-0}" = "1" ]; then
 say "verifying the cut is real before relying on it (this will disturb the probe)"
 _id0="$(reg_id)"
 cut_power; sleep 4
@@ -160,6 +179,7 @@ say "capacity: $("$REPO/tools/hsm-capacity-check.sh" 2>/dev/null | head -1)"
 say "capturing the pre-run flash baseline"
 pkill -f "$(basename "$OCD_BIN")" 2>/dev/null; sleep 2
 "$OCD_BIN" -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 5000" > "$OUT/ocd-pre.log" 2>&1 &
+OCD_PID=$!
 sleep 9
 ocd "halt
 dump_image $OUT/flash-before.bin $FLASH_BASE $FLASH_SIZE" >/dev/null 2>&1
@@ -270,15 +290,22 @@ say "waiting for the device to reappear, then dumping flash"
 perl -e 'alarm 90; exec @ARGV' -- bash -c 'until _o="$(ioreg -p IOUSB -w0 2>/dev/null)"; grep -qi "Pico Key" <<< "$_o"; do sleep 2; done' || say "  device did not reappear on its own"
 pkill -f "$(basename "$OCD_BIN")" 2>/dev/null; sleep 2
 "$OCD_BIN" -f interface/cmsis-dap.cfg -f target/rp2350.cfg -c "adapter speed 5000" > "$OUT/ocd-post.log" 2>&1 &
+OCD_PID=$!
 sleep 9
 ocd "halt
 dump_image $OUT/flash-after.bin $FLASH_BASE $FLASH_SIZE" >/dev/null 2>&1
 ocd "resume" >/dev/null 2>&1
+POST_FLASH=""
 if assert_dump_is_real "$OUT/flash-after.bin"; then
+    POST_FLASH="$OUT/flash-after.bin"
     say "  $(wc -c < "$OUT/flash-after.bin") bytes of real filesystem"
 else
+    # DO NOT HAND THE ANALYZER A DUMP WE JUST REJECTED. It was still passed as --post-flash, so the
+    # physical cross-check ran against 1 MiB of 0xFF: every record "missing from flash", which reads
+    # as evidence of loss when it is evidence of a bad base address or a failed dump. The run is
+    # still worth analysing on the trace alone — it just must not claim a physical finding.
     say "  WARNING: post-cut dump is all-0xFF — physical evidence UNAVAILABLE for this run"
-    say "  the trace verdict below rests on the trace ALONE"
+    say "  the trace verdict below rests on the trace ALONE (--post-flash withheld)"
 fi
 
 # ---- 4. ANALYSE ----------------------------------------------------------------------------------
@@ -302,9 +329,14 @@ python3 "$REPO/tools/hsm-forensic-decode.py" "$OUT/trace.bin" > "$OUT/trace.json
 cat "$OUT/decode.log" | sed 's/^/    /'
 
 say "running the analyzer against the post-cut flash"
-python3 "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" \
-    --post-flash "$OUT/flash-after.bin" --flash-base "$FLASH_BASE" \
-    > "$OUT/verdict.txt" 2>&1
+if [ -n "$POST_FLASH" ]; then
+    python3 "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" \
+        --post-flash "$POST_FLASH" --flash-base "$FLASH_BASE" \
+        > "$OUT/verdict.txt" 2>&1
+else
+    python3 "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" > "$OUT/verdict.txt" 2>&1
+    echo "PHYSICAL_EVIDENCE=UNAVAILABLE (post-cut flash dump was not real flash)" >> "$OUT/verdict.txt"
+fi
 sed 's/^/    /' "$OUT/verdict.txt"
 
 {

@@ -59,19 +59,34 @@ say ""
 reboot_apdu=()
 vbus=()
 
+# A CONTROL ACTION THAT FAILED IS NOT A CONTROL. This comparison only means anything if the
+# rescue-reboot APDU was actually delivered and the port was actually switched: if opensc-tool
+# never reached the card, "time to answer" measures a card that was never rebooted, and the run
+# concludes that a VBUS cycle is much faster than a full boot — the alarming verdict — from an
+# experiment that did not happen. Every command's status is checked, and a failure abandons the
+# run rather than being averaged into a number.
+die_control() { printf '\n  ABANDONING THE RUN: %s\n' "$1" >&2
+                printf '  The comparison is only meaningful when both actions actually happen; a\n' >&2
+                printf '  failed control would be scored as evidence about the firmware.\n' >&2
+                exit 2; }
+
 for i in $(seq 1 "$REPS"); do
     # --- positive control: force a real firmware boot -------------------------------------------
-    perl -e 'alarm 45; exec @ARGV' -- opensc-tool \
-        -s "00:A4:04:00:08:A0:58:3F:C1:9B:7E:4F:21" -s "80:1F:00:00" >/dev/null 2>&1
+    if ! perl -e 'alarm 45; exec @ARGV' -- opensc-tool \
+        -s "00:A4:04:00:08:A0:58:3F:C1:9B:7E:4F:21" -s "80:1F:00:00" >/dev/null 2>&1; then
+        die_control "the rescue-reboot APDU did not reach the card on rep $i"
+    fi
     t="$(time_to_answer)"
     reboot_apdu+=("$t")
     say "  rep $i  rescue reboot  -> answered in ${t}s"
     sleep 3
 
     # --- test: cut the port ----------------------------------------------------------------------
-    uhubctl -e -l "$L" -p "$P" -a off >/dev/null 2>&1
+    uhubctl -e -l "$L" -p "$P" -a off >/dev/null 2>&1 \
+        || die_control "uhubctl could not switch hub $L port $P OFF on rep $i"
     sleep "$OFF_SECS"
-    uhubctl -e -l "$L" -p "$P" -a on  >/dev/null 2>&1
+    uhubctl -e -l "$L" -p "$P" -a on  >/dev/null 2>&1 \
+        || die_control "uhubctl could not switch hub $L port $P back ON on rep $i (the board may still be unpowered)"
     t="$(time_to_answer)"
     vbus+=("$t")
     say "  rep $i  VBUS cycle     -> answered in ${t}s"

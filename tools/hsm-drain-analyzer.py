@@ -302,7 +302,17 @@ def main():
     elif not a.txns:
         verdict = "INCOMPLETE"
     else:
-        incomplete = [t for t in a.txns.values() if t["referent"] is None]
+        # A TRANSACTION WITH NO LINK TO ITS NEW RECORD ANSWERS NOTHING.
+        #
+        # Completeness was measured as "the referent record was seen", but the question is whether a
+        # LINK to that record became durable first — and only links whose value is the new base are
+        # examined at all (see findings()). A run whose transactions all carried referents and no
+        # such link therefore reached NO_ORDERING_VIOLATION without a single comparison having been
+        # possible: the strongest verdict this tool can print, from evidence that could not have
+        # produced any other. It is the same defect as scoring an empty trace usable, one level in.
+        incomplete = [t for t in a.txns.values()
+                      if t["referent"] is None
+                      or not any(l.get("value") == t["new_base"] for l in t["links"])]
         verdict = "INCOMPLETE" if incomplete else "NO_ORDERING_VIOLATION"
 
     if args.json:
@@ -326,6 +336,14 @@ def main():
             print("  No violation was seen, but the evidence is not complete enough to say there")
             print("  was none. A card that wedges abruptly can leave the deciding event unsent in")
             print("  the ring. Supply --post-flash from the bootrom window to settle it.")
+            _noref = sum(1 for t in a.txns.values() if t["referent"] is None)
+            _nolink = sum(1 for t in a.txns.values()
+                          if t["referent"] is not None
+                          and not any(l.get("value") == t["new_base"] for l in t["links"]))
+            if _nolink:
+                print(f"  {_nolink} transaction(s) had a referent but NO link pointing at the new")
+                print("  record, so nothing could be ordered against it; "
+                      f"{_noref} never assembled a referent.")
             return 3
         for f in v:
             print(f"\n  txn                  {f['txn']}")

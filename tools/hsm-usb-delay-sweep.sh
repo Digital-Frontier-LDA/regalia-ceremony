@@ -128,8 +128,12 @@ for d in $DELAYS; do
     fi
     say "  binary md5: $bin_md5"
 
-    pkill -f "$(basename "$OCD_BIN")" 2>/dev/null; sleep 2
-    perl -e 'alarm 240; exec @ARGV' -- "$OCD_BIN" -f interface/cmsis-dap.cfg -f target/rp2350.cfg \
+    # Scoped to THIS probe. `pkill -f openocd` kills every OpenOCD on the host, including a
+    # session driving the other staging board — hsm-swd-powman-recover.sh records the same hazard
+    # and scopes its kill the same way.
+    pkill -f "$(basename "$OCD_BIN").*${PROBE}" 2>/dev/null; sleep 2
+    perl -e 'alarm 240; exec @ARGV' -- "$OCD_BIN" -f interface/cmsis-dap.cfg \
+        -c "adapter serial $PROBE" -f target/rp2350.cfg \
         -c "adapter speed 5000" \
         -c "program $PICO/$BUILD/pico_hsm.elf verify reset exit" > "$OUT/$tag.flash.log" 2>&1
     if ! grep -qa 'Verified OK' "$OUT/$tag.flash.log"; then

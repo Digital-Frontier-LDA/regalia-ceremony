@@ -50,24 +50,34 @@ def sum8(b):
     return (0xFF - (sum(b) & 0xFF)) & 0xFF
 
 
-def frames(data):
-    """Yield validated records, and the count of bytes discarded resynchronising."""
-    i, lost = 0, 0
+def frames(data, stats):
+    """Yield validated records, recording every byte the decoder had to throw away in `stats`.
+
+    THE COUNT MUST LEAVE THIS FUNCTION. It used to accumulate into a local `lost` that a generator
+    `return` discarded, so a stream of torn frames decoded whatever survived and reported NOTHING:
+    no DROPPED record, no stderr count. After the sort by sequence number the result looks like a
+    short but contiguous trace, and the analyzer — which condemns a run on any DROPPED — had
+    nothing to condemn it with. Framing loss is exactly the case the DROPPED record exists for.
+    """
+    i = 0
     n = len(data)
     while i < n:
         if data[i] != SYNC:
             i += 1
-            lost += 1
+            stats["resync_bytes"] += 1
             continue
         if i + 1 + REC_SIZE + 1 > n:
-            break                                   # truncated tail; the caller reports it
+            # A capture cut mid-frame is EXPECTED here: the power cut is the experiment. Recorded
+            # so it appears on stderr, but a partial trailing frame alone does not condemn the run.
+            stats["truncated_tail"] = n - i
+            break
         body = data[i + 1:i + 1 + REC_SIZE]
         ck = data[i + 1 + REC_SIZE]
         if sum8(body) != ck:
             # A corrupt frame must never be parsed. Skip this sync byte only — the real frame
             # start may be inside what we would otherwise swallow.
             i += 1
-            lost += 1
+            stats["bad_checksum"] += 1
             continue
         yield struct.unpack(REC, body)
         i += 1 + REC_SIZE + 1
@@ -83,7 +93,8 @@ def main():
     bad = 0
     out = []
 
-    gen = frames(data)
+    stats = {"resync_bytes": 0, "bad_checksum": 0, "truncated_tail": 0}
+    gen = frames(data, stats)
     while True:
         try:
             rec = next(gen)
@@ -140,12 +151,23 @@ def main():
 
     for o in out:
         print(json.dumps(o))
-    if bad:
+    # EVERY KIND OF LOSS COUNTS, not just an unrecognised event id. A byte discarded resynchronising
+    # and a frame that failed its checksum are both records that did not arrive, and either can be
+    # the program that decides the ordering question.
+    lost = bad + stats["bad_checksum"] + stats["resync_bytes"]
+    if lost:
         # Emitted last so it is never mistaken for a real event; the analyzer treats any DROPPED
         # as fatal to an ordering verdict, which is the correct response to a mis-framed stream.
         print(json.dumps({"seq": (out[-1]["seq"] + 1) if out else 1,
-                          "ev": "DROPPED", "count": bad}))
-    print(f"decoded {len(out)} records, {bad} frame(s) rejected", file=sys.stderr)
+                          "ev": "DROPPED", "count": lost,
+                          "unknown_event": bad, "bad_checksum": stats["bad_checksum"],
+                          "resync_bytes": stats["resync_bytes"]}))
+    print(f"decoded {len(out)} records, {lost} lost "
+          f"({bad} unknown event id, {stats['bad_checksum']} bad checksum, "
+          f"{stats['resync_bytes']} byte(s) resynchronising)", file=sys.stderr)
+    if stats["truncated_tail"]:
+        print(f"  note: {stats['truncated_tail']} trailing byte(s) were a partial frame — expected "
+              "when the capture ends at a power cut", file=sys.stderr)
     return 0
 
 

@@ -377,11 +377,15 @@ hsm_role_of() {
     fi
     role="$(python3 -c '
 import json, sys
+# NO `assert` HERE: python3 -O (or PYTHONOPTIMIZE in the environment) strips assert statements, and
+# these are the checks that keep an unrecognised registry from naming a card wipeable.
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
-    assert isinstance(data, dict) and data.get("schema") == "regalia.staging-hardware/v1"
+    if not (isinstance(data, dict) and data.get("schema") == "regalia.staging-hardware/v1"):
+        raise ValueError("not a regalia.staging-hardware/v1 registry")
     devices = data.get("devices")
-    assert isinstance(devices, list)
+    if not isinstance(devices, list):
+        raise ValueError("devices is not a list")
     matches = [d for d in devices if isinstance(d, dict) and d.get("token_serial") == sys.argv[2]]
     # Listed twice is ambiguous, and ambiguity never arms a wipe.
     role = matches[0].get("role") if len(matches) == 1 else None

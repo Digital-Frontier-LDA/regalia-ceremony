@@ -309,6 +309,23 @@ def main() -> int:
         print("error: GITHUB_REPOSITORY is not set; cannot resolve the actions API", file=sys.stderr)
         return 2
 
+    # NO NETWORK WHEN THE ANSWER IS ALREADY KNOWN. If this run's battery succeeded, the bound is
+    # satisfied by this run and `check()` ignores history entirely — but main() still walked the
+    # whole Actions API first: one call for the runs and one MORE PER RUN. Beyond the waste, every
+    # one of those calls is a way for a green bench to report red, because `gh` failures raise
+    # (check=True) and a rate-limited or flaky API would fail a check whose answer was "fresh".
+    if args.current_battery_conclusion == "success":
+        result = check(
+            now=dt.datetime.now(dt.timezone.utc),
+            runs=[],
+            jobs_by_run={},
+            current_battery_conclusion="success",
+            current_reason=args.current_reason,
+            max_days=args.max_days,
+        )
+        print(json.dumps(result, indent=2, default=str))
+        return 0
+
     runs = _gh_api(endpoint_for_runs(owner_repo), key="workflow_runs")
 
     # For each candidate run, fetch its jobs. This is the per-run API call; the workflow-level

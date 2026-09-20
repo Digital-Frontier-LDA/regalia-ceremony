@@ -216,8 +216,34 @@ def main():
     else:
         fails += F("lost_total was ignored — silent loss would pass as a clean run")
 
+    # 11. A TRANSACTION WITH NO LINK TO THE NEW RECORD ANSWERS NOTHING. Completeness used to mean
+    #     only "the referent was seen", so a run where nothing ever pointed at the new record —
+    #     no comparison possible, in either direction — reached NO_ORDERING_VIOLATION, the
+    #     strongest verdict this tool can print, from evidence that could not have produced any
+    #     other. Same defect as scoring an empty trace usable, one level in.
+    ev = [e for e in trace(link_slot=0, referent_slot=5, link_first=False)
+          if e["ev"] != "LINK_QUEUED_TO_CACHE"]
+    for i, e in enumerate(ev, 1):
+        e["seq"] = i
+    r10 = run(ev)
+    if r10["verdict"] == "INCOMPLETE":
+        fails += P("a referent with no link pointing at it reports INCOMPLETE, not a clean bill")
+    else:
+        fails += F(f"a run that could not have shown a violation was scored clean: {r10['verdict']}")
+
+    # 12. …and a link that points somewhere ELSE does not count as the missing evidence either.
+    ev = trace(link_slot=0, referent_slot=5, link_first=False)
+    for e in ev:
+        if e["ev"] == "LINK_QUEUED_TO_CACHE":
+            e["value"] = ORIG_PREV          # points at the predecessor, not at the new record
+    r11 = run(ev)
+    if r11["verdict"] == "INCOMPLETE":
+        fails += P("a link that does not point at the new record leaves the run INCOMPLETE")
+    else:
+        fails += F(f"an unrelated link was accepted as ordering evidence: {r11['verdict']}")
+
     print("\n\033[1m### RESULT\033[0m")
-    print(f"  {10 - fails} passed, {fails} failed")
+    print(f"  {12 - fails} passed, {fails} failed")
     if fails:
         print("\n  The analyzer has NOT been shown to detect an engineered inversion.")
         print("  Do not use its verdict as evidence about the device.")

@@ -57,7 +57,20 @@ while [ $# -gt 0 ]; do
         *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
 done
-[ -n "$ELF" ] || { echo "usage: $0 --elf <pico_hsm.elf> [--probe S --expect-board ID --reader N]" >&2; exit 2; }
+[ -n "$ELF" ] || { echo "usage: $0 --elf <pico_hsm.elf> --probe S --expect-board ID [--reader N]" >&2; exit 2; }
+
+# THE ERASE IS THE WHOLE TEST, SO IDENTITY IS NOT OPTIONAL. This runs a FULL CHIP ERASE. Without
+# --probe, OpenOCD picks a probe arbitrarily among those attached; without --expect-board there is
+# nothing to compare the die against, and the run erases whichever board that probe happens to be
+# on. Both used to be optional, with the reader-side --protect-serial interlock as the only guard —
+# but that guard reads a TOKEN SERIAL over PC/SC, and reader indices renumber independently of
+# probe ordering, so it cannot say which die the erase will land on.
+#
+# This is not a hardship for a blank board: the OTP chip id is read over SWD from the die itself
+# (0x40130000), which answers on a board carrying no firmware at all — the case the old opt-out
+# existed for. `--expect-board` is available exactly when the erase is.
+[ -n "$PROBE" ] || { echo "REFUSING: --probe is required. This test runs a full chip erase, and with several probes attached OpenOCD would pick one arbitrarily." >&2; exit 2; }
+[ -n "$EXPECT_BOARD" ] || { echo "REFUSING: --expect-board is required. The OTP chip id read over SWD is the only identity that names the die about to be erased (reader indices and USB order do not)." >&2; exit 2; }
 [ -f "$ELF" ] || { echo "FAIL: ELF not found: $ELF" >&2; exit 1; }
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
@@ -133,9 +146,8 @@ $otp"
     # THE ROLE REGISTRY GATE. The OTP check above proves WHICH board the probe reaches; this
     # proves that board is registered scratch before the full-chip erase below runs. The board is
     # reverse-mapped through HSM_BOARD_MAP to its token serial, so the same committed registry
-    # (tools/hsm-staging-registry.json) that gates every --initialize gates the erase path too. Without an
-    # --expect-board there is no identity to check, and the --protect-serial interlock plus
-    # resolve_reader's positive-location rule remain the guards (blank-board bootstrap).
+    # (tools/hsm-staging-registry.json) that gates every --initialize gates the erase path too. It
+    # runs only when the reverse map knows this board; the OTP check above is the unconditional one.
     _da_rr="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hsm-reader-select.sh"
     # shellcheck source=/dev/null
     [ -f "$_da_rr" ] && . "$_da_rr"

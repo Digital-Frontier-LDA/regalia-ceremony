@@ -82,6 +82,13 @@ sleep 2
 "$OCD_BIN" -f interface/cmsis-dap.cfg -f target/rp2350.cfg \
     -c "rp2350.cm0 configure -defer-examine; rp2350.cm1 configure -defer-examine" \
     -c "adapter speed ${ADAPTER_SPEED:-5000}" > /tmp/ocd-snapshot.log 2>&1 &
+OCD_PID=$!
+# STOP THE SERVER WE STARTED. It was left running on every exit path, holding the SWD link — and
+# this script refuses to run while another master is on that link, so one snapshot poisoned the
+# next one and any recovery ladder that came after it. Killed by PID, never `pkill -f openocd`:
+# there is a second probe on this bench and its session is not ours to end.
+cleanup(){ [ -n "${OCD_PID:-}" ] && kill "$OCD_PID" 2>/dev/null; return 0; }
+trap cleanup EXIT INT TERM
 sleep 9
 
 if LC_ALL=C grep -qai 'issuing ABORT' /tmp/ocd-snapshot.log; then

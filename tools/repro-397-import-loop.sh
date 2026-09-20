@@ -18,13 +18,33 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 # THE CARD IS NAMED BY THE CALLER, NEVER DEFAULTED. A default here is how a loop that wipes and
 # re-provisions ends up addressing somebody else's card: the serial must come from whoever
 # knows which device is scratch. Registry role still gates the wipe; this is the layer above it.
-# The card this harness was written against, overridable for another bench. The wipe is
-# still gated by the registry's staging role; this only decides which card it addresses.
-PINNED_SERIAL="${HSM_PINNED_SERIAL:-ESP41D722E2}"
+# THE CALLER NAMES THE CARD. A built-in default aims INITIALIZE DEVICE at a serial nobody typed:
+# if that card is not the scratch one, the loop erases it. The registry's staging role still gates
+# the wipe, but a default here decides WHICH staging card, which is the operator's call. The card
+# this harness was written against is ESP41D722E2; pass it explicitly.
+PINNED_SERIAL="${HSM_PINNED_SERIAL:-}"
+# ONE PIN FOR BOTH HALVES OF THE ITERATION. Phase d initialised the card with HSM_USER_PIN (default
+# 123456) and then handed it to the recovery drill, which reads HSM_PIN (default 111111): with
+# neither set, every iteration logged in with the WRONG PIN. That is not a harmless mismatch — it
+# fails each iteration for a reason unrelated to #397, and three wrong logins BLOCK the card, so a
+# loop meant to reproduce an intermittent import failure would instead lock the scratch token and
+# report the lockout as the bug. Both halves now take the same value, and it is exported so the
+# drill's own default cannot come back.
+PIN="${HSM_USER_PIN:-${HSM_PIN:-123456}}"
+export HSM_PIN="$PIN" HSM_USER_PIN="$PIN"
 ITER="${1:-30}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/repro397.XXXXXXXX")"
 LEDGER="$WORK/ledger.tsv"
 LOCK_TOOL="$REPO_ROOT/tools/hsm-bench-lock.sh"
+# The drill lives in qubes/scripts/ here; ceremony/qubes/scripts/ is the retired monorepo layout,
+# and pointing at it made every iteration fail before reaching the card.
+DRILL="${HSM_RECOVERY_DRILL:-}"
+if [ -z "$DRILL" ]; then
+  for c in "$REPO_ROOT/qubes/scripts/hsm-recovery-drill.sh" \
+           "$REPO_ROOT/ceremony/qubes/scripts/hsm-recovery-drill.sh"; do
+    [ -r "$c" ] && { DRILL="$c"; break; }
+  done
+fi
 
 log(){ printf '%s\n' "$*" >&2; }
 die(){ log "repro397: $*"; exit 1; }
@@ -89,6 +109,11 @@ classify_selftest(){
 classify_selftest
 # The serial is required to touch the bench, and only then: the classifier self-test above runs
 # with no card at all, and refusing at parse time made a card-free check depend on naming a card.
+if [ "${REPRO397_SELFTEST_ONLY:-}" != "1" ] && [ -z "$DRILL" ]; then
+  echo "REFUSING: hsm-recovery-drill.sh not found (set HSM_RECOVERY_DRILL) — every iteration would" >&2
+  echo "  wipe the card and then fail before phase e, spending cycles to learn nothing." >&2
+  exit 2
+fi
 if [ "${REPRO397_SELFTEST_ONLY:-}" != "1" ] && [ -z "$PINNED_SERIAL" ]; then
   echo "REFUSING: set HSM_PINNED_SERIAL to the scratch card this loop may use" >&2
   exit 2
@@ -145,7 +170,7 @@ printf 'iter\texit\tserial\tpka_before\tclass\twhy\tdrill_log\n' > "$LEDGER"
 # failing iteration had. Source the drill's own env for pins/labels where possible.
 phase_d_init(){
   sc-hsm-tool --reader "$READER" --initialize --so-pin "${HSM_SO_PIN:-3537363231383830}" \
-    --pin "${HSM_USER_PIN:-123456}" --dkek-shares 1 --label pka-repro \
+    --pin "$PIN" --dkek-shares 1 --label pka-repro \
     --public-key-auth 3 --required-pub-keys 2 > "$1" 2>&1 || true
 }
 
@@ -161,8 +186,8 @@ while [ "$i" -lt "$ITER" ]; do
   ilog="$WORK/iter-$i-import.log"
   dout="$WORK/iter-$i-drill.log"
   set +e
-  IMPORT_LOG="$ilog" HSM_PKCS11_MODULE="$P11" \
-    "$REPO_ROOT/ceremony/qubes/scripts/hsm-recovery-drill.sh" --run --slot "$SLOTID" --reader "$READER" --auto \
+  IMPORT_LOG="$ilog" HSM_PKCS11_MODULE="$P11" HSM_PIN="$PIN" \
+    "$DRILL" --run --slot "$SLOTID" --reader "$READER" --auto \
     > "$dout" 2>&1
   rc=$?
   set -e
