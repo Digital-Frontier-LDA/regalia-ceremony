@@ -44,6 +44,26 @@ else
   printf '%s\n' "$offenders" | sed 's|^|      |'
 fi
 
+hdr "every tools/ helper a script reaches for is published here"
+# THE SAME DEFECT ONE DIRECTORY OVER. The tools reach for each other by "$REPO/tools/<name>", and
+# four of those names were never published with them: hsm-capacity-check.sh (the refusal that stops
+# a power-loss run on a full card), hsm-forensic-capture.py (the pyserial capture the whole trace
+# depends on), hsm-reboot-soak.sh and hsm-ahb-transition-watch.sh. Each script ran up to the moment
+# it needed one and then failed on a bench, mid-run, naming a file the operator can see referenced
+# in the repository they are standing in.
+refs="$(grep -rhoE '(\$REPO|\$REPO_ROOT|\$HERE/\.\.)/tools/[A-Za-z0-9._-]+' \
+          "$REPO/tools" "$REPO/qubes/scripts" 2>/dev/null | sed 's|.*/tools/||' | sort -u)"
+if [ -z "$refs" ]; then
+  F "no tools/ references were found — this scan cannot be passing for the right reason"
+else
+  for n in $refs; do
+    # lib.sh appears only inside hsm-lint-predicates.sh's own documentation of the shapes it
+    # detects, not as a file anything sources.
+    [ "$n" = "lib.sh" ] && continue
+    if [ -e "$REPO/tools/$n" ]; then P "tools/$n"; else F "tools/$n is referenced but not published here"; fi
+  done
+fi
+
 hdr "scripts referenced by the host role exist too"
 # commission-card.sh resolves its helpers across both layouts; the names must still be present.
 for n in hsm-devaut-id.js hsm-devaut-read.sh derive-akash-address.py; do

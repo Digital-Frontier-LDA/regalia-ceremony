@@ -50,7 +50,7 @@ printf '%s' "$M" > "$W/m.txt"; chmod 600 "$W/m.txt"
 
 python3 "$SCRIPTS/seed-to-pkcs12.py" --mnemonic-file "$W/m.txt" --password-file "$W/pw" \
     --out "$W/f.p12" >/dev/null 2>&1 \
-  || { printf 'seed-to-pkcs12.py failed — is the ceremony venv present? (see ceremony/qubes/requirements.txt)\n' >&2; exit 2; }
+  || { printf 'seed-to-pkcs12.py failed — is the ceremony venv present? (see qubes/requirements.txt)\n' >&2; exit 2; }
 openssl pkcs12 -in "$W/f.p12" -nodes -passin file:"$W/pw" 2>/dev/null \
   | openssl ec -pubout -outform DER > "$W/pub.der" 2>/dev/null
 [ -s "$W/pub.der" ] || { printf 'could not derive the public key from the drill seed\n' >&2; exit 2; }

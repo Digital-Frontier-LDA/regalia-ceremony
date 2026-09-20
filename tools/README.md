@@ -20,3 +20,32 @@ export HSM_STAGING_REGISTRY_FILE=/etc/regalia/hsm-staging-registry.json
 ```
 
 Never add a production device to the copy in this repository.
+
+## What the scripts reach for
+
+They call each other by path. Four that this repository originally shipped without — and that
+`qubes/emulator/tests/test-tool-helper-paths.sh` now checks for — are the ones a bench run hits
+only once it is already underway:
+
+| script | what stops working without it |
+| --- | --- |
+| `hsm-capacity-check.sh` | `hsm-bug6-powerloss.sh` REFUSES to start on a card at its object limit. A full card fails writes with the same message as a broken build: on 2026-08-10 that produced two consecutive wrong diagnoses before anyone counted the objects. |
+| `hsm-forensic-capture.py` | the pyserial capture every trace depends on. `stty`+`cat` is not a fallback — it mis-clocks the Debug Probe's UART bridge and yields a confident verdict from an unreadable trace. |
+| `hsm-reboot-soak.sh` | the soak `hsm-usb-delay-sweep.sh` runs per arm; without it the sweep has nothing to measure. |
+| `hsm-ahb-transition-watch.sh` | the AHB sampler the soak's recovery ladder uses to record *when* the bus stopped answering rather than only that it had. |
+
+The rule this encodes: a script that reaches outside the repository it ships in fails on a bench,
+mid-run, after touching a card — naming a file the operator can see referenced in the tree they are
+standing in. The test opens every helper name the scripts ask for.
+
+## The rest of the bench toolkit
+
+The firmware-investigation scripts came across with them, so the toolkit is complete here rather
+than split across two repositories: `hsm-quiesce.sh` (the identity-and-role interlock the flash
+tools' comments already pointed at), `hsm-firmware-invariants.sh` (+ its suite in
+`qubes/emulator/tests/`), `hsm-identify-firmware.sh`, `hsm-wedge-hunt.sh`,
+`hsm-capture-then-recover.sh`, `hsm-bug6-hunt-physical.sh`, `hsm-rtt-log.sh` and
+`hsm-powman-dbgmode.sh`.
+
+They drive a Pico HSM over SWD with a debug probe and are the tools the RP2350 wedge and Bug 6
+investigations were done with; `hardware/` documents what they found.
