@@ -63,18 +63,24 @@ hdr "libccid registration binds the Pico by VID *and* PID"
 
 plist "$WORK/empty.plist" "0x20A0:0x4230"
 python3 "$WORK/register.py" "$WORK/empty.plist" >/dev/null 2>&1
-pairs_of "$WORK/empty.plist" | grep -qi '^0x2E8A 0x10FD$' \
-  && P "a plist without the Pico gains the aligned 0x2E8A:0x10FD entry" \
-  || F "the Pico was not registered at all"
+# Captured first, matched second: `pairs_of … | grep -q` is the SIGPIPE-under-pipefail shape
+# tools/hsm-lint-predicates.sh exists to catch, and it caught this file.
+got="$(pairs_of "$WORK/empty.plist")"
+if grep -qi '^0x2E8A 0x10FD$' <<< "$got"; then
+  P "a plist without the Pico gains the aligned 0x2E8A:0x10FD entry"
+else
+  F "the Pico was not registered at all"
+fi
 
 # THE REGRESSION. 0x2E8A listed against another product satisfied a vendor-only search.
 plist "$WORK/othervid.plist" "0x2E8A:0x000A" "0x20A0:0x4230"
 python3 "$WORK/register.py" "$WORK/othervid.plist" >/dev/null 2>&1
-if pairs_of "$WORK/othervid.plist" | grep -qi '^0x2E8A 0x10FD$'; then
+got="$(pairs_of "$WORK/othervid.plist")"
+if grep -qi '^0x2E8A 0x10FD$' <<< "$got"; then
   P "0x2E8A present for a DIFFERENT product does not count as registered"
 else
   F "the Pico stayed unregistered because its vendor id appeared against another product"
-  pairs_of "$WORK/othervid.plist" | sed 's/^/      /'
+  sed 's/^/      /' <<< "$got"
 fi
 
 plist "$WORK/already.plist" "0x2E8A:0x10FD"
