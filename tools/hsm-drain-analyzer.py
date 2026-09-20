@@ -205,6 +205,20 @@ class Analyzer:
                         f["evidence"] = "physical-partial"
                         f["verdict"] = "INDETERMINATE"
                         out.append(f)
+                    elif phys_link is None:
+                        # NO EVENT AND NO DUMP IS NOT "NO VIOLATION". This branch used to fall
+                        # through silently, and the transaction still counted as complete because
+                        # its LINK_QUEUED_TO_CACHE event existed — so a trace truncated before the
+                        # link's program event produced NO_ORDERING_VIOLATION. Neither source says
+                        # what happened to this link, which is the definition of indeterminate.
+                        f = self._violation(t, link, link_sector, ref_sector, None, ref_prog,
+                                            "neither the trace nor a dump establishes whether this "
+                                            "link was ever programmed")
+                        f["evidence"] = "none"
+                        f["verdict"] = "INDETERMINATE"
+                        out.append(f)
+                    # else: the dump shows this link absent, so it never became durable and cannot
+                    # have preceded the referent. That is a real answer, not a gap.
                     continue
 
                 if ref_prog is None:
@@ -217,10 +231,18 @@ class Analyzer:
                         f["evidence"] = "physical-partial"
                         f["verdict"] = "INDETERMINATE"
                     else:
+                        # A VIOLATION NEEDS POSITIVE PHYSICAL EVIDENCE, NOT MERELY A DUMP. This read
+                        # `self.post is not None` as proof the referent stayed erased — but
+                        # _phys_is_erased returns None for an address outside the dump, and the link
+                        # may be physically absent too. The decisive combination (link present,
+                        # referent erased) is caught above and never reaches here, so what is left
+                        # is a missing program event the dump did not settle.
                         f = self._violation(t, link, link_sector, ref_sector, link_prog, None,
-                                            "the referent sector was never observed programmed")
-                        f["evidence"] = "trace"
-                        f["verdict"] = "INDETERMINATE" if self.post is None else "ORDERING_VIOLATION"
+                                            "the referent sector was never observed programmed, and "
+                                            "the dump does not show the link present against an "
+                                            "erased referent")
+                        f["evidence"] = "trace" if self.post is None else "trace+dump"
+                        f["verdict"] = "INDETERMINATE"
                     out.append(f)
                 elif link_prog[0] < ref_prog[0]:
                     f = self._violation(t, link, link_sector, ref_sector, link_prog, ref_prog,

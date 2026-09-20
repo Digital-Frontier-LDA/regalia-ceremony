@@ -75,9 +75,17 @@ say "  $N reboots per arm, delays: $DELAYS"
 say "  artifacts: $OUT"
 say ""
 
+# THE COUNT MUST COME FROM THE BOARD BEING SWEPT. This had no slot selector, so on the two-board
+# bench it counted whichever token enumerated first and wrote that number into this arm's
+# `objects=` field — the board pinned by OTP id, the evidence taken from the other card. The token
+# is resolved from the verified board and its slot id passed explicitly.
+SWEPT_TOKEN="$(hsm_token_for_board "$EXPECT_BOARD")" || exit 2
 objcount(){
+    local slot
+    slot="$(hsm_slot_id_for "$SWEPT_TOKEN")" || { echo "unknown"; return 0; }
     perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool \
         --module "${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}" \
+        --slot "$slot" \
         --login --pin "${HSM_USER_PIN:-648219}" --list-objects 2>/dev/null \
         | grep -c 'Key Object'
 }

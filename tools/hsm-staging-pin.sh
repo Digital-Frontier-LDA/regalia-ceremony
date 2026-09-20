@@ -25,7 +25,9 @@
 set -u
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPTS="$REPO/ceremony/qubes/scripts"
+# shellcheck source=/dev/null
+. "$REPO/tools/hsm-ceremony-scripts.sh"
+SCRIPTS="$HSM_CEREMONY_SCRIPTS"
 STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
 AUTO_IMPORT="${HSM_AUTO_IMPORT:-$SCRIPTS/hsm-auto-import.sh}"
 PIN_FILE="$STAGING/expected-pub.der"

@@ -61,8 +61,32 @@ hsm_assert_staging_board "$EXPECT_BOARD" || exit 2
 ocd_run(){ perl -e 'alarm 200; exec @ARGV' -- "$OCD_BIN" -f interface/cmsis-dap.cfg \
     -f target/rp2350.cfg -c "adapter speed 5000" -c "$1" 2>&1; }
 
-card_answers(){ local o; o="$(perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool 2>&1)"; \
-    grep -qi '^Version' <<< "$o"; }
+# ASK THE BOARD WE ARE TESTING, NOT READER 0. This predicate is the sole input to both arms of the
+# A/B below, and it ran sc-hsm-tool with no -r: on the two-board bench a target that is genuinely
+# dead reads as ALIVE because the SPARE answered, and the script then prints
+# RESULT=NO_HARM_OBSERVED — a result the header treats as weakening the Bug 6 story. The failure is
+# silent and points one way only, which is the worst shape a control can have.
+# Resolved at FIRST USE, not here: the identity and role interlocks above are the gate, and this
+# tool runs its own prerequisites (firmware images, a readable filesystem dump) before it ever asks
+# a card anything. Resolving at load time would refuse runs that never reach a PC/SC call.
+SCAN_READER=""
+scan_reader(){
+    [ -n "$SCAN_READER" ] && { printf '%s' "$SCAN_READER"; return 0; }
+    local tok
+    tok="$(hsm_token_for_board "$EXPECT_BOARD")" || return 1
+    SCAN_READER="$(hsm_reader_for "$tok")" || return 1
+    printf '%s' "$SCAN_READER"
+}
+card_answers(){
+    local r o
+    r="$(scan_reader)"
+    [ -n "$r" ] || { echo "REFUSING: board $EXPECT_BOARD does not resolve to exactly one reader, so" >&2
+                     echo "  'does the card answer' cannot be asked of THIS board — and answering it" >&2
+                     echo "  from another card is how a dead target reads as ALIVE." >&2
+                     exit 2; }
+    o="$(perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool -r "$r" 2>&1)"
+    grep -qi '^Version' <<< "$o"
+}
 
 for e in "$PATCHED" "$UNPATCHED"; do
     [ -f "$e" ] || { echo "missing firmware: $e" >&2; exit 2; }

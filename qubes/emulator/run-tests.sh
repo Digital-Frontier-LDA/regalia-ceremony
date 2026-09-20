@@ -198,6 +198,7 @@ say "PIN BINDING — the escrowed PIN must be the PIN the card answers to (PLAN.
 
 say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine card must be caught (B3, B6, B7)"
 "$HERE/tests/test-commission-card.sh" || suite_failed "test-commission-card.sh"
+"$HERE/tests/test-tool-helper-paths.sh" || suite_failed "test-tool-helper-paths.sh"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"
 "$HERE/tests/test-pka-threshold.sh" || suite_failed "test-pka-threshold.sh"

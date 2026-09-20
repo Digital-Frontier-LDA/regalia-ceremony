@@ -427,6 +427,31 @@ hsm_assert_staging() {
     return 0
 }
 
+# The token serial pinned to board id $1 by HSM_BOARD_MAP, or empty with a refusal on stderr.
+#
+# WHY IT IS SHARED. Tools that flash a board over SWD also have to TALK to its card over PC/SC —
+# to count objects, take an inventory, or ask whether it answers at all. Those calls had no slot or
+# reader selector, so on the two-board bench they addressed whichever token enumerated first. The
+# board was pinned by OTP id and the measurement was taken from the other card: an experiment whose
+# subject and whose evidence are two different devices. Every such tool now resolves the token from
+# the board it just verified, through the same map hsm_assert_staging_board reverse-maps.
+hsm_token_for_board() {
+    local board pair
+    board="$(printf '%s' "${1:-}" | tr 'a-f' 'A-F')"
+    [ -n "$board" ] || { echo "hsm_token_for_board: no board id given" >&2; return 1; }
+    while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        [ "$(printf '%s' "${pair#*:}" | tr 'a-f' 'A-F')" = "$board" ] || continue
+        printf '%s\n' "${pair%%:*}"
+        return 0
+    done <<EOF
+$(printf '%s' "${HSM_BOARD_MAP:-}" | tr ' \t' '\n\n')
+EOF
+    echo "hsm_token_for_board: board $board has no HSM_BOARD_MAP entry, so its card cannot be" >&2
+    echo "named — refusing to address whichever token enumerates first." >&2
+    return 1
+}
+
 # The role gate for tools that address a BOARD over SWD rather than a token over PC/SC. Flash
 # erases and filesystem rewrites go down the debug port, where no token serial exists — the
 # stable identity there is the RP2350 OTP board id. Reverse-map the board through the same

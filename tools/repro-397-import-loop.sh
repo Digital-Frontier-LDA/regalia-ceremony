@@ -36,15 +36,12 @@ ITER="${1:-30}"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/repro397.XXXXXXXX")"
 LEDGER="$WORK/ledger.tsv"
 LOCK_TOOL="$REPO_ROOT/tools/hsm-bench-lock.sh"
-# The drill lives in qubes/scripts/ here; ceremony/qubes/scripts/ is the retired monorepo layout,
-# and pointing at it made every iteration fail before reaching the card.
-DRILL="${HSM_RECOVERY_DRILL:-}"
-if [ -z "$DRILL" ]; then
-  for c in "$REPO_ROOT/qubes/scripts/hsm-recovery-drill.sh" \
-           "$REPO_ROOT/ceremony/qubes/scripts/hsm-recovery-drill.sh"; do
-    [ -r "$c" ] && { DRILL="$c"; break; }
-  done
-fi
+# The drill lives in qubes/scripts/ here; the default named ceremony/qubes/scripts/, the retired
+# monorepo layout, so every iteration would have wiped the card and then failed before phase e.
+# shellcheck source=/dev/null
+. "$REPO_ROOT/tools/hsm-ceremony-scripts.sh"
+DRILL="${HSM_RECOVERY_DRILL:-$(hsm_ceremony_script hsm-recovery-drill.sh)}"
+[ -r "$DRILL" ] || DRILL=""
 
 log(){ printf '%s\n' "$*" >&2; }
 die(){ log "repro397: $*"; exit 1; }
@@ -143,6 +140,17 @@ REPRO397_TOUCHED=1
 READER="${READER:-$(hsm_reader_for "$PINNED_SERIAL" || true)}"
 SLOTID="${SLOTID:-$(hsm_slot_id_for "$PINNED_SERIAL" || true)}"
 [ -n "$READER" ] && [ -n "$SLOTID" ] || die "cannot resolve $PINNED_SERIAL to a reader and slot — not running"
+
+# THE ROLE REGISTRY GATE, BEFORE THE FIRST INITIALIZE DEVICE. Resolving a reader and matching the
+# serial the caller typed only proves that card is present and where it says it is — not that it is
+# a card anyone agreed may be erased. This loop wipes its target eight times an iteration, and
+# `hsm_assert_staging` is the committed, default-deny answer to "may this one be wiped": every other
+# destructive tool here goes through it (hsm-cycle-test.sh, hsm-scenarios.sh, the erase path in
+# hsm-devaut-bootstrap-test.sh). A production or unlisted card that resolves to a reader was
+# otherwise erased on the operator's typo.
+command -v hsm_assert_staging >/dev/null 2>&1 \
+  || die "the role registry gate is unavailable (tools/hsm-reader-select.sh) — refusing to run a loop that re-initialises a card"
+hsm_assert_staging "$PINNED_SERIAL" || die "the registry does not list $PINNED_SERIAL as staging — refusing to wipe it"
 P11="${HSM_PKCS11_MODULE:-${P11:-}}"
 [ -n "$P11" ] || die "HSM_PKCS11_MODULE (or P11) unset — the drill needs the PKCS#11 module path"
 

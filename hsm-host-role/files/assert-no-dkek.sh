@@ -39,7 +39,13 @@ scan_dir() {
   local dir="$1"; shift
   local errs out rc
   errs="$(mktemp)"
-  out="$(find "$dir" -xdev -maxdepth "$MAXDEPTH" "$@" 2>"$errs" | head -50)"; rc=$?
+  # NO PIPE INTO head HERE. Under pipefail, `find … | head -50` on a directory holding more than
+  # 50 matches SIGPIPEs find, the pipeline status becomes 141, and this refuses with an EMPTY error
+  # file — a "could not be scanned" that names no path and no reason, on a host that scanned fine.
+  # find runs to completion into a variable; the cap is applied afterwards, where the producer is
+  # bash itself and nothing can be signalled.
+  out="$(find "$dir" -xdev -maxdepth "$MAXDEPTH" "$@" 2>"$errs")"; rc=$?
+  out="$(head -50 <<< "$out")"
   if [ "$rc" -ne 0 ] || [ -s "$errs" ]; then
     printf 'REFUSING: %s could not be scanned completely, so this host cannot be reported clean:\n' "$dir" >&2
     sed 's/^/    /' "$errs" >&2

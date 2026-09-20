@@ -58,40 +58,54 @@ hex_to_bin() {
   for (( i = 0; i < ${#h}; i += 2 )); do printf "%b" "\\x${h:i:2}"; done
 }
 
-# Send one APDU and print its response data as hex. A SmartCard-HSM answers a read that runs past
-# the end of the file with SW 6282 ("end of file reached") AND the bytes it did have — treating
-# that as an error truncated EF 2F02 at 255 bytes and produced a digest of a PREFIX, which would
-# have matched nothing and failed commissioning on a genuine card. Both 9000 and 6282 carry data.
-LAST_SW=""
+# Send one APDU and print "<SW> <response data as hex>".
+#
+# THE STATUS WORD TRAVELS WITH THE DATA. It used to be assigned to a global inside the function —
+# which every caller invokes in a command substitution, i.e. a SUBSHELL, so the parent's copy stayed
+# empty and the loop could not tell "end of file" from "read failed". A card that answered the
+# second READ BINARY with anything else would then leave the loop holding 255 bytes and print a
+# confident DEVAUT_SHA256 of a PREFIX of the certificate: commissioning reports DEVAUT DIGEST
+# MISMATCH on a genuine card, and nothing says the reader, not the card, was at fault.
+#
+# A SmartCard-HSM answers a read that runs past the end of the file with SW 6282 ("end of file
+# reached") AND the bytes it did have, so both 9000 and 6282 carry data; anything else is a refusal.
 apdu_data() {
-  local out
+  local out sw data
   out="$(opensc-tool ${RARGS[@]+"${RARGS[@]}"} -s "$1" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
-  LAST_SW="$(sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$out" | tail -1)"
-  case "${LAST_SW^^}" in
-    9000|6282) ;;
+  sw="$(sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$out" | tail -1)"
+  sw="${sw^^}"
+  data="$(awk '/^Received/ {buf=""; want=1; next}
+               want && /^[0-9A-F][0-9A-F] / { s=substr($0,1,48); gsub(/[^0-9A-F]/,"",s); buf = buf s }
+               END { printf "%s", buf }' <<< "$out")"
+  printf '%s %s' "${sw:-????}" "$data"
+  case "$sw" in
+    9000|6282) return 0;;
     *) printf '%s\n' "$out" >&2; return 1;;
   esac
-  awk '/^Received/ {buf=""; want=1; next}
-       want && /^[0-9A-F][0-9A-F] / { s=substr($0,1,48); gsub(/[^0-9A-F]/,"",s); buf = buf s }
-       END { printf "%s", buf }' <<< "$out"
 }
 
 # SELECT the application. Two encodings, because they are not interchangeable across devices: a
 # Nitrokey HSM 2 answers P2=0C ("no response data"), while a Pico HSM rejects it with 6A86 and wants
 # P2=00 with an Le byte. Trying only one silently limits this reader to one vendor.
-apdu_data "00A4040C0B${AID}" >/dev/null \
-  || apdu_data "00A404000B${AID}00" >/dev/null \
+apdu_data "00A4040C0B${AID}" >/dev/null 2>&1 \
+  || apdu_data "00A404000B${AID}00" >/dev/null 2>&1 \
   || die "could not select the SmartCard-HSM application (is a card inserted? is pcscd running? is this a SmartCard-HSM?)"
 
 hex=""
 off=0
 while :; do
   # READ BINARY, odd instruction B1, with an offset data object: 54 02 <offset, big-endian>.
-  chunk="$(apdu_data "$(printf '00B12F0204540%s%02X%02X%02X' 2 $(( (off >> 8) & 0xFF )) $(( off & 0xFF )) "$CHUNK")")" || break
+  resp="$(apdu_data "$(printf '00B12F0204540%s%02X%02X%02X' 2 $(( (off >> 8) & 0xFF )) $(( off & 0xFF )) "$CHUNK")")" || {
+    # A FAILED READ IS NOT THE END OF THE FILE. Truncating here and hashing what arrived is the
+    # one outcome this reader must never produce.
+    die "READ BINARY at offset $off answered SW ${resp%% *} — refusing to digest a partial C.DevAut"
+  }
+  sw="${resp%% *}"
+  chunk="${resp#* }"
   [ -n "$chunk" ] || break
   hex="$hex$chunk"
   n=$(( ${#chunk} / 2 ))
-  [ "${LAST_SW^^}" = "6282" ] && break     # the card said that was the end of the file
+  [ "$sw" = "6282" ] && break               # the card said that was the end of the file
   [ "$n" -lt "$CHUNK" ] && break
   off=$(( off + n ))
   [ "$off" -gt 8192 ] && die "EF 2F02 exceeds 8 KiB — refusing to keep reading"

@@ -29,7 +29,21 @@ say(){ printf '  %s\n' "$*"; }
 die(){ printf '  \033[31m%s\033[0m\n' "$*" >&2; exit 1; }
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SCRIPTS="$REPO/ceremony/qubes/scripts"
+# shellcheck source=/dev/null
+. "$REPO/tools/hsm-ceremony-scripts.sh"
+SCRIPTS="$HSM_CEREMONY_SCRIPTS"
+
+# PRIVATE LOG FILES, NOT FIXED /tmp PATHS. The init log is the ONLY place the hardened init's
+# "REFUSING" reaches this script — the exit status is meaningless here because the Pico drops off
+# the bus mid-command. With a fixed path and no `set -e`, another local user can pre-create
+# /tmp/hsm-restore-init.log as a symlink: to an unwritable target, and the redirect fails silently
+# leaving yesterday's contents; or to /dev/null, and the refusal is discarded. Either way the
+# `grep REFUSING` finds nothing, the script reports the card is back, and step 2 spends the SO-PIN
+# on a card the init refused to touch. mktemp in a 0700 directory removes the pre-creation window.
+_SR_LOGDIR="$(mktemp -d "${TMPDIR:-/tmp}/hsm-restore.XXXXXXXX")" || exit 1
+chmod 700 "$_SR_LOGDIR"
+INIT_LOG="$_SR_LOGDIR/init.log"
+IMPORT_LOG_FILE="$_SR_LOGDIR/import.log"
 . "$REPO/tools/hsm-bench-lock.sh"
 hsm_bench_lock_acquire wait || exit $?
 STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
@@ -147,16 +161,16 @@ fi
 ( cd "$SCSH" && HSM_SO_PIN="$SO_PIN" HSM_USER_PIN="$PIN" HSM_PIN_RETRIES="$RETRIES" \
     HSM_READER="$_sr_name" HSM_EXPECT_SERIAL="$RESTORE_SERIAL" \
       HSM_RRC_MODE=off HSM_LABEL=staging ./scriptrunner "$SCRIPTS/hsm-init-hardened.js" \
-) > /tmp/hsm-restore-init.log 2>&1
+) > "$INIT_LOG" 2>&1
 # The init's exit status means nothing for a run that REACHED the card — the Pico drops off the USB
 # bus mid-command. But it means nothing for a REFUSAL either, and a refusal never touches the card:
 # MEASURED 2026-09-11, the JS guard refused with "WRONG CARD", this script printed "card is back"
 # because the card was trivially alive, and step 2 then spent an SO-PIN on it. Read the log for the
 # refusal the exit status throws away.
-if grep -qi 'REFUSING' /tmp/hsm-restore-init.log 2>/dev/null; then
-    die "the hardened init REFUSED and no key material was touched: $(grep -io 'REFUSING[^"]*' /tmp/hsm-restore-init.log | head -1 | cut -c1-240)"
+if grep -qi 'REFUSING' "$INIT_LOG" 2>/dev/null; then
+    die "the hardened init REFUSED and no key material was touched: $(grep -io 'REFUSING[^"]*' "$INIT_LOG" | head -1 | cut -c1-240)"
 fi
-wait_card || die "card never came back after the hardened init (see /tmp/hsm-restore-init.log)"
+wait_card || die "card never came back after the hardened init (see $INIT_LOG)"
 # VERIFY THE POSTURE, DO NOT ASSERT IT. wait_card proves the card ANSWERS, which is liveness, not
 # posture — step 1 printed "RRC OFF ... card is back" while RRC remained ENABLED on both cards
 # (MEASURED 2026-09-11). D3 requires the "User PIN reset with SO-PIN enabled" tell to be absent, so
@@ -167,7 +181,7 @@ if ! printf '%s\n' "$_sr_post" | grep -qi '^Version'; then
     die "cannot verify the posture — sc-hsm-tool did not answer on reader $READER after the init"
 fi
 if printf '%s\n' "$_sr_post" | grep -qi 'reset with SO-PIN'; then
-    die "the hardened init reported no failure, but RRC is still ENABLED on $RESTORE_SERIAL (the 'User PIN reset with SO-PIN enabled' tell is present). D3 requires it OFF. See /tmp/hsm-restore-init.log."
+    die "the hardened init reported no failure, but RRC is still ENABLED on $RESTORE_SERIAL (the 'User PIN reset with SO-PIN enabled' tell is present). D3 requires it OFF. See $INIT_LOG."
 fi
 say "RRC verified OFF on $RESTORE_SERIAL"
 
@@ -186,8 +200,8 @@ HSM_PCSC_INDEX="$READER" HSM_SLOT_ID="$SLOTID" \
 HSM_AUTO_DIR="$STAGING/auto-import" SCSH_HOME="$SCSH" HSM_USER_PIN="$PIN" \
 HSM_DKEK_SHARE_IN="$STAGING/dkek.pbe" HSM_DKEK_PW_IN="$STAGING/dkek.pw" \
     perl -e 'alarm 300; exec @ARGV' -- "$SCRIPTS/hsm-auto-import.sh" --run \
-    > /tmp/hsm-restore-import.log 2>&1 \
-  && say "seed key imported" || die "auto-import failed (see /tmp/hsm-restore-import.log)"
+    > "$IMPORT_LOG_FILE" 2>&1 \
+  && say "seed key imported" || die "auto-import failed (see $IMPORT_LOG_FILE)"
 
 say "4. re-pin expected-pub.der to the key provisioning actually installs"
 "$REPO/tools/hsm-staging-pin.sh" --write >/dev/null 2>&1 || true

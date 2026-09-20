@@ -77,7 +77,12 @@ cleanup(){
     fi
     return $rc
 }
-trap cleanup EXIT INT TERM
+# EXIT tidies up; INT and TERM must also STOP. errexit is deliberately off in this script, so a
+# handler that only returns leaves bash running the next command — the capture stopped, the power
+# restored, and the run carrying on to produce a verdict from a sequence that was interrupted.
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT
+trap 'cleanup; exit 143' TERM
 ocd(){ printf '%s\nexit\n' "$1" | perl -e 'alarm 120; exec @ARGV' -- nc localhost 4444 2>&1 | LC_ALL=C tr -d '\000'; }
 
 # ---- 0. PROVE THE INSTRUMENT BEFORE USING IT -----------------------------------------------------
@@ -112,7 +117,13 @@ if [ -n "${PROBE_PORT:-}" ] && [ "$PROBE_PORT" = "$PORT" ]; then
 fi
 [ -n "${PROBE_PORT:-}" ] && say "debug probe is on port $PROBE_PORT — will not be cut"
 
-cut_power(){ POWER_IS_CUT=1; uhubctl -e -l "$LOC" -p "$PORT" -a off -r 2 >/dev/null 2>&1; }
+# A CUT THAT DID NOT HAPPEN MUST NOT BE SCORED AS ONE. POWER_IS_CUT was set before uhubctl ran and
+# the status was discarded, so a failed switch produced an ordinary interrupted workload analysed as
+# a power-loss experiment — the one thing this bench exists to measure, faked.
+cut_power(){
+    uhubctl -e -l "$LOC" -p "$PORT" -a off -r 2 >/dev/null 2>&1 || return 1
+    POWER_IS_CUT=1
+}
 restore_power(){ uhubctl -e -l "$LOC" -p "$PORT" -a on >/dev/null 2>&1; POWER_IS_CUT=0; }
 
 # THE VERIFICATION CUT IS OPT-IN, BECAUSE IT DESTROYS THE INSTRUMENT IT PRECEDES.
@@ -134,7 +145,10 @@ restore_power(){ uhubctl -e -l "$LOC" -p "$PORT" -a on >/dev/null 2>&1; POWER_IS
 if [ "${HSM_BUG6_VERIFY_CUT:-0}" = "1" ]; then
 say "verifying the cut is real before relying on it (this will disturb the probe)"
 _id0="$(reg_id)"
-cut_power; sleep 4
+cut_power || { echo "REFUSING TO RUN: uhubctl could not switch hub $LOC port $PORT off for the" >&2
+               echo "  verification cut, so the instrument cannot be verified at all." >&2
+               exit 2; }
+sleep 4
 if card_answers; then
     restore_power
     echo "REFUSING TO RUN: the card still answers with its port powered off." >&2
@@ -262,20 +276,30 @@ say "  channel verified: $_st records from a single keygen (capture continues)"
 # an experiment that had effectively run twice.
 RUN_TAG="$(( $(date +%s) % 4096 ))"
 say "starting the write-heavy workload (repeated keygens, run tag $RUN_TAG)"
+# COUNT WHAT SUCCEEDED. Every keygen failure was swallowed with `|| true`, and the record
+# threshold below counts the ONE CONTINUOUS CAPTURE — which already contains the self-test keygen.
+# A run where every workload keygen failed (a full card, colliding ids, a card no longer accepting
+# writes) could therefore clear the threshold on the self-test alone and be scored as a power-loss
+# experiment that never exercised the drain.
+: > "$OUT/workload.ok"
 (
   for i in 1 2 3 4 5 6 7 8; do
-      perl -e 'alarm 25; exec @ARGV' -- pkcs11-tool \
+      if perl -e 'alarm 25; exec @ARGV' -- pkcs11-tool \
           --module "${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}" \
           --login --pin "${HSM_USER_PIN:-648219}" --keypairgen --key-type EC:prime256v1 \
           --id "$(printf '%04x' $(( (RUN_TAG * 16 + i) % 65536 )))" --label "bug6-$RUN_TAG-$i" \
-          >/dev/null 2>&1 || true
+          >/dev/null 2>&1; then
+          echo "$i" >> "$OUT/workload.ok"
+      fi
   done
 ) > "$OUT/workload.log" 2>&1 &
 WORKLOAD_START="$(date +%s)"
 
 say "cutting VBUS ${CUT_AFTER}s into the workload"
 sleep "$CUT_AFTER"
-cut_power
+cut_power || { echo "ABANDONING THE RUN: uhubctl could not switch hub $LOC port $PORT off." >&2
+               echo "  Without a real cut this is an interrupted workload, not a power-loss run." >&2
+               exit 2; }
 CUT_AT="$(( $(date +%s) - WORKLOAD_START ))"
 say "  cut at t+${CUT_AT}s"
 sleep 4
@@ -316,8 +340,19 @@ fi
 # denominator and makes a negative look stronger than the evidence supports.
 _rec="$(python3 "$REPO/tools/hsm-forensic-decode.py" "$OUT/trace.bin" 2>&1 >/dev/null \
         | grep -oE '^decoded [0-9]+' | awk '{print $2}')"
-if [ "${_rec:-0}" -lt 300 ]; then
-    say "VOID RUN: only ${_rec:-0} records — the workload did not exercise the drain"
+_ok="$(wc -l < "$OUT/workload.ok" 2>/dev/null | tr -d ' ')"
+if [ "${_ok:-0}" -eq 0 ]; then
+    say "VOID RUN: not one workload keygen succeeded (${_rec:-0} records, self-test included)"
+    say "  (duplicate key IDs, a full filesystem, or a card no longer accepting writes)"
+    say "  NOT scored as a miss"
+    echo "RESULT=VOID_WORKLOAD" > "$OUT/verdict.txt"
+    echo "RESULT=VOID_WORKLOAD"
+    exit 3
+fi
+# The self-test's own records are already in this capture — one keygen yielded ~947 on this bench —
+# so the floor has to be counted BEYOND them, not from zero.
+if [ $(( ${_rec:-0} - ${_st:-0} )) -lt 300 ]; then
+    say "VOID RUN: only $(( ${_rec:-0} - ${_st:-0} )) records beyond the self-test's ${_st:-0} — the workload did not exercise the drain"
     say "  (duplicate key IDs, a full filesystem, or a card no longer accepting writes)"
     say "  NOT scored as a miss"
     echo "RESULT=VOID_WORKLOAD" > "$OUT/verdict.txt"

@@ -66,9 +66,20 @@ else
   # adds CI minutes, while under-including one lets a defect land — which is exactly what happened to
   # #400. A comment naming a tree is weak evidence the suite cares about that tree, and weak evidence
   # is the right bar when being wrong costs minutes in one direction and a red main in the other.
-  dirs="$(grep -ohE '(^|[^a-zA-Z0-9_/.-])(tools|qubes|debian|hardware|doc|salt)/[a-zA-Z0-9_./-]+' \
+  # THE ALPHABET IS THE TOP-LEVEL TREES, NOTHING ELSE. `salt` was in it while the workflow has no
+  # salt/** trigger — and there is no top-level salt/ either, so a path like qubes/salt/... derived
+  # BOTH qubes and salt and failed this check for a subtree that is already covered. `hsm-host-role`
+  # was missing, so removing that trigger would not have been noticed even though two suites have
+  # their subject there.
+  #
+  # A SEGMENT ANYWHERE IN A PATH COUNTS. The old pattern refused to match after a '/', so a suite
+  # naming "$HERE/../../../hsm-host-role/files/assert-no-dkek.sh" — which is how every one of these
+  # reaches outside qubes/emulator/ — derived nothing at all. Over-including a tree costs CI
+  # minutes; under-including one lets a defect land, which is the error this file exists to stop.
+  TREES='tools|qubes|debian|hardware|doc|hsm-host-role'
+  dirs="$(grep -ohE "(^|[^a-zA-Z0-9_.-])($TREES)/[a-zA-Z0-9_./-]+" \
             "$HERE"/test-*.sh "$HERE"/test_*.py 2>/dev/null \
-          | grep -oE '(tools|qubes|debian|hardware|doc|salt)/' | sort -u | tr -d '/')"
+          | grep -oE "(^|[^a-zA-Z0-9_.-])($TREES)/" | grep -oE "($TREES)/" | sort -u | sed 's|/$||')"
   if [ -z "$dirs" ]; then
     printf '  \033[31mFAIL\033[0m no subject directories were derived — the scan is broken, not the trigger complete\n'
     fail=$((fail + 1))

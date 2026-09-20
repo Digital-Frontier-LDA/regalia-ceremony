@@ -81,6 +81,23 @@ else
   fi
   chmod 755 "$d4/hidden"
 
+  # MANY MATCHES IS NOT A BROKEN SCAN. The refusal above was reached through `find … | head -50`
+  # under pipefail: past 50 matches, head exits, find takes SIGPIPE, the status is 141, and a
+  # perfectly readable directory was reported as unscannable — with an empty error list, so the
+  # operator is refused and told nothing. A developer host with many *dkek*-shaped files hits it.
+  # 5000, not 60: the pipe buffer holds about 64 KiB, so a small match set is written before head
+  # exits and the bug does not fire. The count has to exceed what fits, or the test passes against
+  # the defect (verified: at 60 it did).
+  d5="$ROOT/d5"; mkdir -p "$d5"
+  for n in $(seq 1 5000); do : > "$d5/bulk-$n-dkek.pbe"; done
+  out="$("$ASSERT" --only-dir "$d5" 2>&1)"; rc=$?
+  [ "$rc" -eq 1 ] \
+    && P "60 matching files is a DETECTION (exit 1), not a cannot-scan refusal" \
+    || F "a directory with many matches reported exit $rc instead of finding the material"
+  grep -qi 'could not be scanned' <<<"$out" \
+    && F "many matches were reported as an unscannable directory (SIGPIPE from head)" \
+    || P "…and the operator is not told the directory could not be scanned"
+
   # The failure message has to tell an operator what NOT to do, or the check gets deleted
   # the first time it blocks a deploy at an inconvenient moment.
   msg="$("$ASSERT" --only-dir "$d1" 2>&1 || true)"

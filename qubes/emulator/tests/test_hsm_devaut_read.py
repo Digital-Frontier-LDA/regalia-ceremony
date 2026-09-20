@@ -132,6 +132,18 @@ class DevAutReadTest(unittest.TestCase):
         self.assertIn("DENK0400664", r.stderr)
         self.assertNotIn("DEVAUT_SHA256", r.stdout)
 
+    def test_a_failed_read_midway_is_a_refusal_not_a_short_certificate(self):
+        # The status word used to be assigned to a global INSIDE a command substitution, so the
+        # parent never saw it and any non-9000 answer merely ended the loop. The reader then hashed
+        # the 255 bytes it happened to hold and printed them as the device's identity, which
+        # commissioning compares against the pinned digest: DEVAUT DIGEST MISMATCH on a genuine
+        # card, with nothing pointing at the reader.
+        r = self.run_reader(STUB_FAIL_READ_AT=255)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("DEVAUT_SHA256", r.stdout)
+        self.assertIn("6F00", r.stderr)
+        self.assertIn("partial", r.stderr)
+
     def test_the_named_card_is_read(self):
         r = self.run_reader("--expect-serial", "DENK0404144")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -167,6 +179,10 @@ for apdu in apdus:
             sys.exit(0)
     elif a.startswith("00B12F02"):
         off = int(a[14:18], 16)
+        fail_at = os.environ.get("STUB_FAIL_READ_AT")
+        if fail_at is not None and off == int(fail_at):
+            print("Received (SW1=0x6F, SW2=0x00)")
+            sys.exit(0)
         le = int(a[18:20], 16) or 256
         chunk = blob[off:off+le]
         eof = off + len(chunk) >= len(blob)

@@ -70,8 +70,31 @@ hsm_assert_staging_board "$EXPECT_BOARD" || exit 2
 
 [ -f "$IMG" ] || { echo "no dangling image at $IMG — run hsm-verify-scan-guard.sh first" >&2; exit 2; }
 
+# ADDRESS THE BOARD'S OWN CARD. Neither call below had a slot selector, so on the two-board bench
+# they listed the first token — and the before/after difference they produce IS the result of this
+# experiment. It could inventory the other card and report "pre-existing objects LOST: 0" for a
+# board that lost records. The token is resolved from the board just verified over SWD.
+# Resolved at FIRST USE: the card only exists to be asked once firmware has been flashed, and a
+# load-time resolution would refuse runs that fail their own prerequisites first.
+SLOTID=""
+swept_slot(){
+    [ -n "$SLOTID" ] && { printf '%s' "$SLOTID"; return 0; }
+    local tok
+    tok="$(hsm_token_for_board "$EXPECT_BOARD")" || return 1
+    SLOTID="$(hsm_slot_id_for "$tok")" || return 1
+    printf '%s' "$SLOTID"
+}
+require_slot(){
+    local s
+    s="$(swept_slot)"
+    [ -n "$s" ] || { echo "REFUSING: board $EXPECT_BOARD does not resolve to exactly one PKCS#11 slot;" >&2
+                     echo "  this experiment IS a before/after diff of one card and must not read another." >&2
+                     exit 2; }
+    printf '%s' "$s"
+}
+
 inventory(){   # -> sorted "id label" lines, one per key object
-    perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --login --pin "$PIN" \
+    perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --slot "$(require_slot)" --login --pin "$PIN" \
         --list-objects 2>/dev/null \
         | awk '/^(Private|Public) Key Object/{t=$1} /^  label:/{l=$2} /^  ID:/{print t" "$2" "l}' \
         | sort
@@ -97,7 +120,7 @@ run_arm(){   # $1 = elf, $2 = label, $3 = HEX id for the new key
 
     # ONE write. The hypothesis is about the next allocation, so do not obscure it with a burst.
     say "  creating one key"
-    if perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --login --pin "$PIN" \
+    if perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --slot "$(require_slot)" --login --pin "$PIN" \
         --keypairgen --key-type EC:prime256v1 --id "$3" --label "lastbase-$2" \
         > "$OUT/keygen-$2.log" 2>&1; then
         say "  key created"

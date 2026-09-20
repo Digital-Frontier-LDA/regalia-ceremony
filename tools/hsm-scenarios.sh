@@ -35,8 +35,10 @@ STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
 # ($HOME/code/Akash-Console-hsmfix/...), which meant the suite ran for exactly one person on
 # exactly one machine and reported a clean skip for everyone else.
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-AUTO_IMPORT="${HSM_AUTO_IMPORT:-$REPO/ceremony/qubes/scripts/hsm-auto-import.sh}"
-VERIFY="${HSM_VERIFY:-$REPO/ceremony/qubes/scripts/verify-hsm-control.py}"
+# shellcheck source=/dev/null
+. "$REPO/tools/hsm-ceremony-scripts.sh"
+AUTO_IMPORT="${HSM_AUTO_IMPORT:-$(hsm_ceremony_script hsm-auto-import.sh)}"
+VERIFY="${HSM_VERIFY:-$(hsm_ceremony_script verify-hsm-control.py)}"
 P11="${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}"
 . "$REPO/tools/hsm-bench-lock.sh"
 hsm_bench_lock_acquire wait || exit $?
@@ -216,7 +218,7 @@ refresh_ref_pub() {
     [ -n "$DRILL_MNEMONIC" ] || { echo "  could not read DRILL_MNEMONIC from $AUTO_IMPORT" >&2; return 1; }
     printf '%s' "$DRILL_MNEMONIC" > "$WORK/ref-m.txt"; chmod 600 "$WORK/ref-m.txt"
     ( umask 077; head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$WORK/ref.pw" )
-    python3 "$REPO/ceremony/qubes/scripts/seed-to-pkcs12.py" --mnemonic-file "$WORK/ref-m.txt" \
+    python3 "$(hsm_ceremony_script seed-to-pkcs12.py)" --mnemonic-file "$WORK/ref-m.txt" \
         --password-file "$WORK/ref.pw" --out "$WORK/ref.p12" >/dev/null 2>&1 || return 1
     openssl pkcs12 -in "$WORK/ref.p12" -nodes -passin file:"$WORK/ref.pw" 2>/dev/null \
         | openssl ec -pubout -outform DER > "$WORK/ref-pub.der" 2>/dev/null
@@ -628,7 +630,7 @@ if [ ! -x "$SCSH/scriptrunner" ]; then
 elif ! card_alive; then
     S "S10: card not responding$(why)"
 else
-    devaut_field(){ ( cd "$SCSH" && ./scriptrunner "$REPO/ceremony/qubes/scripts/hsm-devaut-id.js" ) 2>/dev/null \
+    devaut_field(){ ( cd "$SCSH" && ./scriptrunner "$(hsm_ceremony_script hsm-devaut-id.js)" ) 2>/dev/null \
                        | grep -E "^DEVAUT_$1=" | head -1 | cut -d= -f2-; }
     before="$(devaut_field CHR)"
     before_sha="$(devaut_field SHA256)"
@@ -659,7 +661,7 @@ else
             fi
             # And the digest the card reports must still satisfy the offline verifier, so the
             # gate's authoritative parse and the card's own readout cannot drift apart.
-            hexline="$( ( cd "$SCSH" && ./scriptrunner "$REPO/ceremony/qubes/scripts/hsm-devaut-id.js" ) \
+            hexline="$( ( cd "$SCSH" && ./scriptrunner "$(hsm_ceremony_script hsm-devaut-id.js)" ) \
                         2>/dev/null | grep '^DEVAUT_HEX=' | cut -d= -f2- )"
             if [ -n "$hexline" ]; then
                 printf '%s' "$hexline" > "$WORK/devaut.hex"
@@ -669,7 +671,7 @@ else
                 # the truth is that the VERIFIER could not run — which is what happened here
                 # once Homebrew moved python3 to 3.14 and orphaned the site-packages holding
                 # pycvc. The certificate was fine: 443 bytes, correct CHR/CAR, valid 7F21.
-                cvcout="$(python3 "$REPO/ceremony/qubes/scripts/cvc-devaut-verify.py" \
+                cvcout="$(python3 "$(hsm_ceremony_script cvc-devaut-verify.py)" \
                             --hex "$WORK/devaut.hex" 2>&1)"; cvcrc=$?
                 case $cvcrc in
                     0) P "the post-wipe certificate still parses as a valid TR-03110 CVC offline" ;;

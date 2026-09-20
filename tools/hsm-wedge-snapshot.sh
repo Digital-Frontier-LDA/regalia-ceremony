@@ -35,6 +35,11 @@ set -uo pipefail
 
 OCD_PORT="${OCD_PORT:-4444}"
 OCD_BIN="${OCD_BIN:-$HOME/tools/xpack-openocd-0.12.0-7/bin/openocd}"
+# NAME THE PROBE. Without it the server binds whichever probe OpenOCD finds first, so a snapshot
+# can describe the OTHER board while reading as a valid wedge capture — and the startup sweep-up
+# below would end that board's session too. HSM_SNAPSHOT_PROBE (or --probe) is the serial; with
+# none, this stays on the legacy single-probe behaviour and says so.
+PROBE="${HSM_SNAPSHOT_PROBE:-}"
 # MODE. Observation and intervention are separated deliberately.
 #
 #   --classify  (default)  read everything, THEN arp_examine last, then print a VERDICT.
@@ -46,10 +51,16 @@ OCD_BIN="${OCD_BIN:-$HOME/tools/xpack-openocd-0.12.0-7/bin/openocd}"
 #                          ABORT machinery. Once the recovery experiment begins, the pre-experiment
 #                          state must not already have been perturbed by the classifier.
 MODE=classify
-case "${1:-}" in
-  --preserve) MODE=preserve; shift ;;
-  --classify) MODE=classify; shift ;;
-esac
+# A loop, not a single `case`, so --probe and --preserve can be given in either order; the
+# remaining positional argument is still the optional output file.
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --preserve) MODE=preserve; shift ;;
+    --classify) MODE=classify; shift ;;
+    --probe)    PROBE="${2:-}"; shift 2 ;;
+    *) break ;;
+  esac
+done
 OUT="${1:-}"
 # DO NOT RUN WHILE A SOAK OWNS THE BENCH.
 #
@@ -77,9 +88,17 @@ say(){ printf '  %s\n' "$*"; }
 ocd(){ printf '%s\nexit\n' "$1" | perl -e 'alarm 40; exec @ARGV' -- nc localhost "$OCD_PORT" 2>&1 | LC_ALL=C tr -d '\000'; }
 
 # A server that has already examined has already aborted. Always start fresh with deferral.
-pkill -f "$(basename "$OCD_BIN")" 2>/dev/null
+if [ -n "$PROBE" ]; then
+    pkill -f "$(basename "$OCD_BIN").*${PROBE}" 2>/dev/null
+else
+    say "no --probe given: sweeping up every OpenOCD and binding whichever probe answers first"
+    say "  (single-probe hosts only — on the two-probe bench this can snapshot the wrong board)"
+    pkill -f "$(basename "$OCD_BIN")" 2>/dev/null
+fi
 sleep 2
-"$OCD_BIN" -f interface/cmsis-dap.cfg -f target/rp2350.cfg \
+OCD_ADAPTER=()
+[ -n "$PROBE" ] && OCD_ADAPTER=(-c "adapter serial $PROBE")
+"$OCD_BIN" -f interface/cmsis-dap.cfg ${OCD_ADAPTER[@]+"${OCD_ADAPTER[@]}"} -f target/rp2350.cfg \
     -c "rp2350.cm0 configure -defer-examine; rp2350.cm1 configure -defer-examine" \
     -c "adapter speed ${ADAPTER_SPEED:-5000}" > /tmp/ocd-snapshot.log 2>&1 &
 OCD_PID=$!

@@ -106,7 +106,10 @@ t0=$(date +%s)
 HSM_RECOVER_PROBE="$PROBE" HSM_RECOVER_BOARD="$BOARD" HSM_RECOVER_SERIAL="$SERIAL" \
   OCD_PORT="${OCD_PORT:-4488}" \
   perl -e 'alarm 300; exec @ARGV' -- "$RECOVER" >/tmp/wedge-recover.log 2>&1
-pkill -f "$(basename "$OCD_BIN")" 2>/dev/null; sleep 6
+# Scoped to OUR probe, the way tools/hsm-swd-powman-recover.sh scopes its own stop_ocd: a blanket
+# `pkill -f openocd` on this bench ends the session driving the OTHER board, turning a recovery
+# test of one card into an outage of two.
+pkill -f "$(basename "$OCD_BIN").*${PROBE}" 2>/dev/null; sleep 6
 t1=$(date +%s)
 
 hdr "5 — the card is back"
