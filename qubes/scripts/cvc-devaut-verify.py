@@ -125,10 +125,20 @@ def verify_chain(blob, cert_dir):
     cert_dir_b = os.fsencode(cert_dir)
     cur = blob
     seen = set()
+    car = chr_ = b"?"
     while True:
-        c = CVC().decode(cur)
-        car, chr_ = bytes(c.car()), bytes(c.chr())
-        if not c.verify(cert_dir=cert_dir_b):
+        # Any exception in the walk is a verification FAILURE, reported as one. An issuer file
+        # whose public point is not on the curve raised ValueError("Invalid EC key") out of
+        # pycvc/cryptography and ended the script in a traceback (measured 2026-09-17 with a
+        # corrupted anchor). The exit code happened to be 1, but by accident, and with no
+        # CVC_CHAIN line for a caller to read.
+        try:
+            c = CVC().decode(cur)
+            car, chr_ = bytes(c.car()), bytes(c.chr())
+            verified = c.verify(cert_dir=cert_dir_b)
+        except Exception:
+            return False, car, chr_
+        if not verified:
             return False, car, chr_
         if car == chr_:
             return True, car, chr_  # reached a self-signed root that verified against itself

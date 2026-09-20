@@ -10,7 +10,7 @@
 # SELFTEST-ONLY MODE touches no bench: it exits after the self-test, before the bench lock is taken.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-LOOP="${REPRO_LOOP:-$HERE/../../../../tools/repro-397-import-loop.sh}"
+LOOP="${REPRO_LOOP:-$HERE/../../../tools/repro-397-import-loop.sh}"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }

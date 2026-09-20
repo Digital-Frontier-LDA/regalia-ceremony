@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../.." && pwd)"
+REPO="$(cd "$HERE/../../.." && pwd)"
 LOCK="$REPO/tools/hsm-bench-lock.sh"
 [ -f "$LOCK" ] || { printf 'missing %s\n' "$LOCK" >&2; exit 1; }
 work="$(mktemp -d)"

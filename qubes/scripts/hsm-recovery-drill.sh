@@ -106,13 +106,13 @@ while [ $# -gt 0 ]; do case "$1" in
   *) err "unknown argument: $1"; exit 2;;
 esac; shift; done
 [ -n "$MODE" ] || { sed -n '2,60p' "$0"; exit 2; }
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-bench-lock.sh"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-bench-lock.sh"
 hsm_bench_lock_acquire wait || exit $?
 
 # Two handles, derived after parsing so --reader is actually visible. --reader wins; otherwise
 # fall back to what the parent exported, and finally to --slot (correct on a single-card host,
 # where the reader index and the PKCS#11 slot id are both 0).
-_rd_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-reader-select.sh"
+_rd_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-reader-select.sh"
 # shellcheck source=/dev/null
 [ -f "$_rd_rs" ] && . "$_rd_rs"
 READER="${READER_ARG:-${HSM_PCSC_INDEX:-$SLOT}}"

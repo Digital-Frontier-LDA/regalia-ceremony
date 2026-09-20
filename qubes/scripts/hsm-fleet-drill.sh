@@ -120,14 +120,14 @@ while [ $# -gt 0 ]; do case "$1" in
   -h|--help) sed -n '2,63p' "$0"; exit 0;;
   *) err "unknown argument: $1"; exit 2;;
 esac; shift; done
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-bench-lock.sh"
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-bench-lock.sh"
 hsm_bench_lock_acquire wait || exit $?
 
 # Resolve both handles per card. Serial wins; otherwise fall back to the index for both, which is
 # correct only where the reader index and the slot id happen to coincide.
 READER_A="$SLOT_A"; SLOTID_A="$SLOT_A"
 READER_B="$SLOT_B"; SLOTID_B="$SLOT_B"
-_fd_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-reader-select.sh"
+_fd_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-reader-select.sh"
 if [ -f "$_fd_rs" ]; then
   # shellcheck source=/dev/null
   . "$_fd_rs"
@@ -159,7 +159,7 @@ SLOT_A="$SLOTID_A"; SLOT_B="$SLOTID_B"
 # The few that shell out to sc-hsm-tool need a PC/SC reader index instead, and the two numbers are
 # not interchangeable — measured 2026-09-03, slot ids 0 and 4 against reader indices 0 and 1.
 # reader_of() is the translation, so the single-argument helper signatures can stay.
-QUIESCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/tools/hsm-quiesce.sh"
+QUIESCE="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-quiesce.sh"
 _ISOLATED=""; _ISOLATED_BOARD=""
 
 # Hold the OTHER card off the bus so scsh has only one candidate, then re-resolve THIS card's

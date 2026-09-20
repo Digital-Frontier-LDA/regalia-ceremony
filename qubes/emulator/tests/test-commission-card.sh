@@ -10,7 +10,7 @@
 # like it certified everything — and that is the exact failure this project has shipped repeatedly.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-CC="$HERE/../../../../hsm-host-role/files/commission-card.sh"
+CC="$HERE/../../../hsm-host-role/files/commission-card.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -33,8 +33,16 @@ esac
 STUB
 cat > "$FAKE/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
+# EC_POINT is a real secp256k1 point read off DENK0404144; EC_PARAMS 06052b8104000a is secp256k1.
+# FAKE_CURVE lets a test put a non-secp256k1 key at the wallet id.
 case "$*" in
   *--list-slots*) printf 'Slot 0 (0x0): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}";;
+  *"--type pubkey"*)
+    printf 'Public Key Object; EC  EC_POINT 256 bits\n'
+    printf '  EC_POINT:   0441042e3986e7ff710e3a8b8d2e4c1fbab63ee23d7cf92a691906250b4ab6d8c723d35f432bcbd2a7f5e24cb6329cbba4379b990c1b1811179ee3fba9193a61458840\n'
+    printf '  EC_PARAMS:  %s\n' "${FAKE_CURVE:-06052b8104000a}"
+    printf '  label:      wallet\n  ID:         %s\n' "${FAKE_KEY_ID:-01}"
+    ;;
   *--list-objects*) printf 'Private Key Object\n';;
 esac
 exit 0
@@ -54,9 +62,43 @@ STUB
 chmod +x "$FAKE/scsh/scriptrunner"
 : > "$FAKE/devaut.js"
 
+# The OpenSC-only reader (qubes/scripts/hsm-devaut-read.sh) prints the same fields without Java.
+# Stubbed here so these tests never touch a card; the reader itself is covered, against a real
+# card blob, by test_hsm_devaut_read.py.
+cat > "$FAKE/devaut-read.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'DEVAUT_CHR=%s\n' "${FAKE_CHR:-DEVCHR001}"
+printf 'DEVAUT_CAR=%s\n' "${FAKE_CAR:-ISSUER-CA-01}"
+printf 'DEVAUT_SHA256=%s\n' "${FAKE_SHA:-AABBCC}"
+STUB
+chmod +x "$FAKE/devaut-read.sh"
+
+# derive-akash-address.py stub: turns the card's EC point into whatever FAKE_ADDR says.
+cat > "$FAKE/derive.py" <<'STUB'
+#!/usr/bin/env python3
+import os, sys
+print(os.environ.get("FAKE_ADDR", "akash1cardkey"))
+STUB
+chmod +x "$FAKE/derive.py"
+
+# The DKEK guard is exercised for real by test-day0-dkek-rule-and-roles.sh. Here it is stubbed so
+# the suite is hermetic — otherwise every run scans the developer's own home directory — and so the
+# THREE outcomes it can return (clean / found / could-not-scan) can each be put to commissioning.
+cat > "$FAKE/assert-no-dkek.sh" <<'STUB'
+#!/usr/bin/env bash
+case "${FAKE_DKEK:-clean}" in
+  found)   echo "DKEK MATERIAL PRESENT ON A HOST WITH PIN ACCESS" >&2; exit 1;;
+  unknown) echo "REFUSING: /root could not be scanned completely" >&2; exit 2;;
+  *)       echo "OK: no DKEK material found on this host"; exit 0;;
+esac
+STUB
+chmod +x "$FAKE/assert-no-dkek.sh"
+export HSM_ASSERT_NO_DKEK="$FAKE/assert-no-dkek.sh"
+
 run_cc(){ RRC_STATE="${1}" FAKE_CHR="${2:-DEVCHR001}" FAKE_SERIAL="${3:-SER123}" \
-  SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" \
-  bash "$CC" --expect-chr "${4:-DEVCHR001}" --expect-serial "${5:-SER123}" >"$FAKE/out" 2>&1; echo $?; }
+  SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" \
+  bash "$CC" --expect-chr "${4:-DEVCHR001}" --expect-serial "${5:-SER123}" \
+             --expect-devaut-sha "${6:-AABBCC}" >"$FAKE/out" 2>&1; echo $?; }
 
 # =================================================================================================
 hdr "The RRC check BITES — a vulnerable card must be refused"
@@ -117,11 +159,66 @@ rc="$(FAKE_SHA=DEADBEEF SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" R
 [ "$rc" != 0 ] && P "a digest mismatch is refused (stronger than the CHR, which is just a name)" \
                || F "a substituted device passed on the digest check"
 
-hdr "Missing Smart Card Shell is CANNOT-EVALUATE, not a pass"
-rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME=/nonexistent \
-      bash "$CC" --expect-serial SER123 --expect-chr X >"$FAKE/out4" 2>&1; echo $?)"
-[ "$rc" != 0 ] && P "no scsh available -> identity CANNOT BE EVALUATED -> failure" \
-               || F "identity silently skipped when scsh is absent"
+hdr "No reader for C.DevAut at all is CANNOT-EVALUATE, not a pass"
+rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME=/nonexistent HSM_DEVAUT_READ_SH=/nonexistent \
+      bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC >"$FAKE/out4" 2>&1; echo $?)"
+[ "$rc" != 0 ] && P "neither scsh nor the OpenSC reader -> identity CANNOT BE EVALUATED -> failure" \
+               || F "identity silently skipped when no C.DevAut reader is available"
+grep -qi 'CANNOT BE EVALUATED' "$FAKE/out4" && P "…and says so" || F "the failure is not named as unevaluable"
+
+hdr "Commissioning does NOT require a Java toolchain at the rack"
+# Requiring a Smart Card Shell install in a colocation cage is how a mandatory check becomes a
+# skipped one. hsm-devaut-read.sh reads the same EF 2F02 with opensc-tool alone.
+rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME=/nonexistent HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" \
+      bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC >"$FAKE/out5" 2>&1; echo $?)"
+[ "$rc" = 0 ] && P "with no scsh, the OpenSC-only reader satisfies the identity check" \
+              || { F "commissioning failed with the OpenSC reader available"; sed 's/^/      /' "$FAKE/out5"; }
+grep -q 'digest matches' "$FAKE/out5" && P "…and the pinned digest is what was compared" || F "the digest was not compared"
+
+hdr "PINNING ONE FIELD IS NOT PINNING IDENTITY"
+# A serial is self-reported and a CHR is a name; only the C.DevAut digest covers the device public
+# key. Accepting any ONE of the three let a run that pinned only the CHR report a commissioned card.
+rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" \
+      bash "$CC" --expect-chr DEVCHR001 >"$FAKE/out6" 2>&1; echo $?)"
+[ "$rc" != 0 ] && P "--expect-chr alone is refused" || F "a CHR alone was accepted as identity"
+rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" \
+      bash "$CC" --expect-serial SER123 >"$FAKE/out6" 2>&1; echo $?)"
+[ "$rc" != 0 ] && P "--expect-serial without the digest is refused" \
+               || F "a self-reported serial alone was accepted as identity"
+grep -qi 'expect-devaut-sha' "$FAKE/out6" && P "…and the missing flag is named" || F "the operator is not told what to pass"
+
+hdr "--expect-address is CHECKED, not merely accepted"
+# It used to parse and then be ignored: the operator read "Commissioning PASSED" believing the
+# funding address had been confirmed. A silently ignored expectation manufactures confidence.
+cc_addr(){ RRC_STATE=disabled FAKE_SERIAL=SER123 FAKE_ADDR="${2:-akash1cardkey}" \
+  SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" HSM_DERIVE_ADDRESS_PY="$FAKE/derive.py" \
+  bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC --expect-address "$1" \
+    >"$FAKE/out7" 2>&1; echo $?; }
+rc="$(cc_addr akash1cardkey)"
+[ "$rc" = 0 ] && P "the address the card's key derives to is accepted" \
+              || { F "a matching funding address was rejected"; sed 's/^/      /' "$FAKE/out7"; }
+rc="$(cc_addr akash1somebodyelse)"
+[ "$rc" != 0 ] && P "a DIFFERENT funding address is refused" \
+               || F "--expect-address was accepted and ignored — the check is decorative"
+grep -qi 'ADDRESS MISMATCH' "$FAKE/out7" && P "…named as an address mismatch" || F "the mismatch is not identified"
+rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" \
+      HSM_DERIVE_ADDRESS_PY=/nonexistent bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC \
+      --expect-address akash1cardkey >"$FAKE/out8" 2>&1; echo $?)"
+[ "$rc" != 0 ] && P "no deriver present -> the address CANNOT BE EVALUATED -> failure" \
+               || F "the address check was silently skipped when the deriver was missing"
+
+hdr "B3 at the rack: found and could-not-scan are DIFFERENT failures"
+# Collapsing them sends an operator hunting for a share that does not exist while the real fault —
+# a scan that never ran — goes unnamed. Both must still refuse the card.
+rc="$(FAKE_DKEK=found run_cc disabled)"
+[ "$rc" != 0 ] && P "DKEK material on the host refuses the card" || F "a host carrying a DKEK was commissioned"
+grep -q 'DKEK MATERIAL PRESENT' "$FAKE/out" && P "…named as material present" || F "the DKEK failure is not named"
+rc="$(FAKE_DKEK=unknown run_cc disabled)"
+[ "$rc" != 0 ] && P "a DKEK scan that could not complete refuses the card" \
+               || F "an unscannable host was commissioned — cannot-evaluate was treated as clean"
+grep -q 'CANNOT BE EVALUATED' "$FAKE/out" \
+  && P "…and is reported as unevaluable, not as material found" \
+  || F "could-not-scan is reported as if a DKEK share had been found"
 
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"

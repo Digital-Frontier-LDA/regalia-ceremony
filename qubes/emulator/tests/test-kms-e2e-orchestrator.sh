@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-E2E="$ROOT/kms/e2e/run.sh"
+# The orchestrator under test is regalia-kms's e2e/run.sh: it drives this repository's emulator
+# and battery, and lives in the repository whose suites it runs first. Point REGALIA_KMS_DIR at a
+# checkout to exercise it; without one this SKIPS loudly, because a cross-repository check that
+# quietly passes is worth nothing.
+KMS_DIR="${REGALIA_KMS_DIR:-}"
+if [ -z "$KMS_DIR" ]; then
+  _repo="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+  for candidate in "$(dirname "$_repo")/regalia-kms" "$HOME/regalia-kms"; do
+    if [ -f "$candidate/e2e/run.sh" ]; then KMS_DIR="$candidate"; break; fi
+  done
+fi
+if [ -z "$KMS_DIR" ] || [ ! -f "$KMS_DIR/e2e/run.sh" ]; then
+  echo "  (skipping: no regalia-kms checkout — set REGALIA_KMS_DIR to one to check the e2e orchestrator)"
+  exit 0
+fi
+E2E="$KMS_DIR/e2e/run.sh"
 pass=0; fail=0
 P(){ echo "  PASS $1"; pass=$((pass+1)); }
 F(){ echo "  FAIL $1"; fail=$((fail+1)); }

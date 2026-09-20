@@ -1,0 +1,44 @@
+{
+  "schema": "regalia.staging-hardware/v1",
+  "environment": "staging",
+  "devices": [
+    {
+      "id": "pico-hsm-a",
+      "role": "staging",
+      "kind": "pico-hsm2",
+      "token_serial": "ESP2202E14A",
+      "board_id": "C858BA452202E14A",
+      "debug_probe": {
+        "kind": "raspberry-pi-debug-probe",
+        "serial": "E6647C74038B9430"
+      },
+      "observed_public_objects": {
+        "secp256k1": [
+          "01"
+        ],
+        "observed_at": "2026-09-14"
+      },
+      "presence": "connected",
+      "verification": "SWD OTP read via probe E6647C74038B9430"
+    },
+    {
+      "id": "pico-hsm-b",
+      "role": "staging",
+      "kind": "pico-hsm2",
+      "token_serial": "ESP41D722E2",
+      "board_id": "8625B32841D722E2",
+      "debug_probe": {
+        "kind": "raspberry-pi-debug-probe",
+        "serial": "E665485457138525"
+      },
+      "observed_public_objects": {
+        "secp256k1": [
+          "31"
+        ],
+        "observed_at": "2026-09-14"
+      },
+      "presence": "connected",
+      "verification": "SWD OTP read via probe E665485457138525"
+    }
+  ]
+}

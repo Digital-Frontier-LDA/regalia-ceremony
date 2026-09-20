@@ -91,13 +91,20 @@ command -v sc-hsm-tool >/dev/null || die "sc-hsm-tool not found (install opensc)
 reader=""
 readers_n="$(opensc-tool --list-readers 2>/dev/null | grep -cE '^[0-9]+ ' || true)"
 for r in $(seq 0 $(( ${readers_n:-1} - 1 )) 2>/dev/null); do
-  atr_serial="$(pkcs15-tool --reader "$r" --dump 2>/dev/null | awk -F': *' '/Serial number/{print $2; exit}')"
+  # Capture first, then parse: under pipefail an awk that exits on its first match can SIGPIPE
+  # pkcs15-tool and poison the pipeline (tools/hsm-lint-predicates.sh).
+  dump="$(pkcs15-tool --reader "$r" --dump 2>/dev/null)"
+  atr_serial="$(awk -F': *' '/Serial number/{print $2; exit}' <<< "$dump")"
   [ "$atr_serial" = "$SERIAL" ] && { reader="$r"; break; }
 done
 [ -n "$reader" ] || die "could not resolve serial '$SERIAL' to a reader for sc-hsm-tool; refusing to --initialize by index"
 
 printf '### provisioning: WIPING and re-initialising serial %s at reader %s\n' "$SERIAL" "$reader"
-sc-hsm-tool --reader "$reader" --initialize --so-pin "$SO_PIN" --pin "$PIN" --dkek-shares 1 --label nitrokey-qual \
+# No DKEK shares. `--dkek-shares 1` leaves the card in "DKEK import pending, 1 share(s) still
+# missing", and a SmartCard-HSM refuses on-card key generation in that state: C_GenerateKeyPair
+# returned CKR_GENERAL_ERROR on a Nitrokey HSM 2 (DENK0404144, fw 4.1, 2026-09-17). This path only
+# needs a key GENERATED on the card, so it initialises without a DKEK domain.
+sc-hsm-tool --reader "$reader" --initialize --so-pin "$SO_PIN" --pin "$PIN" --label nitrokey-qual \
   || die "sc-hsm-tool --initialize failed"
 # Re-resolve the slot (re-init can renumber) and generate a key ON the card.
 mapfile -t SLOTS < <(pkcs11-tool --module "$MODULE" -L 2>/dev/null | awk -v want="$SERIAL" '
