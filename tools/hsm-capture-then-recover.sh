@@ -39,7 +39,11 @@ SNAP="$DIR/wedge-$STAMP.snapshot.txt"
 # `reset run`, so it no longer describes the wedge as it occurred.
 if [ -n "${HSM_WEDGE_SNAPSHOT:-}" ]; then
     printf '      wedge already photographed by the soak — not duplicating\n'
-    exec "$HERE/hsm-swd-powman-recover.sh"
+    # HSM_WEDGE_DUMP_DIR travels on THIS path too. Not duplicating the SNAPSHOT is the point; the
+    # ladder's fs-tail dump in the bootrom window is the other half of the evidence and the soak
+    # does not take it. Without this, every wedge the soak had already photographed lost its flash
+    # half — silently, since the run still ends with a recovered card.
+    HSM_WEDGE_DUMP_DIR="$DIR" exec "$HERE/hsm-swd-powman-recover.sh"
 fi
 
 {

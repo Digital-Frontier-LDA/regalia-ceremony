@@ -39,6 +39,17 @@ if [ ! -x "$REPO/tools/hsm-wedge-snapshot.sh" ]; then
     exit 2
 fi
 RECOVER="${HSM_RECOVER_CMD:-$REPO/tools/hsm-swd-powman-recover.sh}"
+# CHECKED HERE, FOR THE SAME REASON THE SNAPSHOT HELPER IS. The ladder runs under `perl -e alarm`
+# with its status unexamined, so a missing or non-executable RECOVER produces no recovery and no
+# error: the card stays down, the run records "this one needs a human", and the verdict describes
+# the device instead of the harness. A soak is hours long and unattended; the refusal belongs at
+# the start.
+if [ ! -x "$RECOVER" ]; then
+    echo "REFUSING TO RUN: the recovery command '$RECOVER' is missing or not executable." >&2
+    echo "  Every wedge would be recorded as 'needs a human' without the ladder ever running." >&2
+    echo "  Set HSM_RECOVER_CMD, or HSM_REPO to the repository root." >&2
+    exit 2
+fi
 N="${1:-10}"
 WAIT="${2:-90}"
 

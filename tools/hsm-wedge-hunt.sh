@@ -153,26 +153,41 @@ mdw 0x400d800c 4"
         # the part that makes it usable.
         #
         # Symbols are resolved from the ELF rather than hardcoded: they move on every rebuild.
-        ELF="${HSM_ELF:-/Users/jonathanborduas/code/pico-hsm/build_rtt/pico_hsm.elf}"
-        NM="${HSM_NM:-$HOME/toolchains/arm-gnu-15.2/bin/arm-none-eabi-nm}"
+        # DEFAULTS THAT CAN EXIST ON THIS MACHINE, AND A LOUD SKIP WHEN THEY DO NOT. The ELF
+        # default was one developer's absolute macOS path: anywhere else `sym` returned empty for
+        # every symbol, each read below was skipped by its `[ -n … ]` guard, and the capture
+        # printed the section HEADINGS with no values under them. A reader cannot tell that from a
+        # clean state — which is the difference between "the corruption fields are zero" and "the
+        # corruption fields were never read".
+        ELF="${HSM_ELF:-${HSM_TREE:-$HOME/code/pico-hsm}/build_rtt/pico_hsm.elf}"
+        NM="${HSM_NM:-$(command -v arm-none-eabi-nm || echo "$HOME/toolchains/arm-gnu-15.2/bin/arm-none-eabi-nm")}"
         sym(){ "$NM" "$ELF" 2>/dev/null | awk -v n="$1" '$3==n {print "0x"$1; exit}'; }
+        if [ ! -r "$ELF" ] || [ ! -x "$NM" ]; then
+            echo
+            echo "=== SYMBOL READS SKIPPED — the flash-side forensics below are ABSENT, not clean ==="
+            echo "    ELF: $ELF $( [ -r "$ELF" ] && echo '(readable)' || echo '(NOT READABLE — set HSM_ELF or HSM_TREE)')"
+            echo "    nm : $NM $( [ -x "$NM" ] && echo '(executable)' || echo '(NOT EXECUTABLE — set HSM_NM)')"
+            echo "    fs_corruption_*, flash_pages and the raw record headers were NOT read."
+        fi
         S_DET=$(sym fs_corruption_detected); S_ADDR=$(sym fs_corruption_addr)
         S_PREV=$(sym fs_corruption_prev);    S_PAGES=$(sym flash_pages)
         echo; echo "=== fs corruption state (detected/addr/prev) ==="
         [ -n "$S_DET" ]  && ocd "mdw $S_DET"
-        [ -n "$S_ADDR" ] && ocd "mdw $S_ADDR"
-        [ -n "$S_PREV" ] && ocd "mdw $S_PREV"
+        if [ -n "$S_ADDR" ]; then ocd "mdw $S_ADDR"; else echo "    (not read: fs_corruption_addr unresolved)"; fi
+        if [ -n "$S_PREV" ]; then ocd "mdw $S_PREV"; else echo "    (not read: fs_corruption_prev unresolved)"; fi
         echo; echo "=== flash_pages (the dirty sector cache) ==="
-        [ -n "$S_PAGES" ] && ocd "mdw $S_PAGES 32"
+        if [ -n "$S_PAGES" ]; then ocd "mdw $S_PAGES 32"; else echo "    (not read: flash_pages unresolved)"; fi
         # The offending link and the one before it, read as RAW PHYSICAL FLASH — this is the record
         # header upstream asked for, and reading it here shows what is actually on the device
         # rather than what the in-memory structures claim.
         BAD=$( [ -n "$S_ADDR" ] && ocd "mdw $S_ADDR" | grep -aoE '[0-9a-f]{8}$' | tail -1 )
         PRV=$( [ -n "$S_PREV" ] && ocd "mdw $S_PREV" | grep -aoE '[0-9a-f]{8}$' | tail -1 )
         echo; echo "=== raw record header at the OFFENDING link (0x$BAD) ==="
-        [ -n "$BAD" ] && [ "$BAD" != "00000000" ] && ocd "mdw 0x$BAD 8"
+        if [ -n "$BAD" ] && [ "$BAD" != "00000000" ]; then ocd "mdw 0x$BAD 8"
+        else echo "    (not read: the offending link address is ${BAD:-unresolved})"; fi
         echo; echo "=== raw record header at the PRECEDING link (0x$PRV) ==="
-        [ -n "$PRV" ] && [ "$PRV" != "00000000" ] && ocd "mdw 0x$PRV 8"
+        if [ -n "$PRV" ] && [ "$PRV" != "00000000" ]; then ocd "mdw 0x$PRV 8"
+        else echo "    (not read: the preceding link address is ${PRV:-unresolved})"; fi
         echo; echo "=== USB port ==="; uhubctl 2>/dev/null | grep -iE 'Pico Key|Port [0-9]:'
         echo; echo "=== ioreg ==="; ioreg -p IOUSB -w0 2>/dev/null | sed 's/<.*//' | grep -iE 'pico|probe'
         echo; echo "=== sc-hsm-tool ==="; perl -e 'alarm 20; exec @ARGV' -- sc-hsm-tool 2>&1 | head -5
@@ -221,7 +236,7 @@ for i in $(seq 1 "$N"); do
     sed -n '1,60p' "$OUT/wedge-state.txt"
     echo
     echo "--- firmware's last words over RTT ---"
-    cat "$OUT/rtt-tail.txt" 2>/dev/null | tail -20
+    tail -20 "$OUT/rtt-tail.txt" 2>/dev/null
     exit 0
 done
 

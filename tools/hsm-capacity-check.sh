@@ -16,7 +16,13 @@
 set -uo pipefail
 
 MOD="${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}"
-PIN="${HSM_USER_PIN:-648219}"
+# THE PIN NEVER REACHES argv. `--pin "$PIN"` puts it in the process table, where any local user
+# reading /proc (or `ps`) sees it, and it lands in shell history and in any strace or audit log of
+# the run. pkcs11-tool reads `env:NAME` instead, so the value is exported to the child and nothing
+# else. The staging default is unchanged.
+HSM_CAPACITY_PIN="${HSM_USER_PIN:-648219}"
+export HSM_CAPACITY_PIN
+PINARG=(--pin env:HSM_CAPACITY_PIN)
 # The role registry gate lives in the resolver, sourced for the --free path below.
 _cap_rr="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hsm-reader-select.sh"
 # A missing resolver is NOT silently tolerated: --free checks `command -v hsm_assert_staging` and
@@ -39,7 +45,16 @@ if [ -n "${HSM_SLOT_ID:-}" ]; then
   esac
 fi
 LIMIT="${HSM_OBJECT_LIMIT:-128}"          # observed ceiling on this card
-WANT="${2:-8}"                             # headroom required, in objects
+# HEADROOM AND "HOW MANY TO DELETE" ARE DIFFERENT NUMBERS, and $2 used to be both. With
+# `--free 40`, WANT became 40: if fewer than 40 deletions succeeded but the card still had the 8
+# objects of headroom this script exists to require, it reported CAPACITY=EXHAUSTED — a refusal
+# earned by the argument, not by the card. HSM_CAPACITY_HEADROOM sets the headroom; the positional
+# argument means "delete this many" on --free and "require this much headroom" otherwise.
+if [ "${1:-}" = "--free" ]; then
+    WANT="${HSM_CAPACITY_HEADROOM:-8}"
+else
+    WANT="${HSM_CAPACITY_HEADROOM:-${2:-8}}"
+fi
 
 # --free N: delete N private keys (and their public halves) to make room. Destructive by request.
 if [ "${1:-}" = "--free" ]; then
@@ -59,20 +74,20 @@ if [ "${1:-}" = "--free" ]; then
     [ -n "$_cap_ser" ] || { echo "REFUSING: no readable serial at slot id ${HSM_SLOT_ID:-0} — cannot prove it is a registered staging card." >&2; exit 2; }
     hsm_assert_staging "$_cap_ser" || exit 2
     want="${2:-40}"
-    ids="$(perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" "${SLOTARG[@]}" --login --pin "$PIN" \
+    ids="$(perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" "${SLOTARG[@]}" --login "${PINARG[@]}" \
            --list-objects 2>/dev/null \
            | awk '/^Private Key Object/{p=1} p&&/^  ID:/{print $NF; p=0}' \
            | tr -d '()' | sed 's/^0x//' | head -"$want")"
     d=0
     while read -r id; do
         [ -z "$id" ] && continue
-        perl -e 'alarm 20; exec @ARGV' -- pkcs11-tool --module "$MOD" "${SLOTARG[@]}" --login --pin "$PIN" \
+        perl -e 'alarm 20; exec @ARGV' -- pkcs11-tool --module "$MOD" "${SLOTARG[@]}" --login "${PINARG[@]}" \
             --delete-object --type privkey --id "$id" >/dev/null 2>&1 && d=$((d + 1))
     done <<< "$ids"
     printf 'deleted %s key(s)\n' "$d"
 fi
 
-n="$(perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" "${SLOTARG[@]}" --login --pin "$PIN" \
+n="$(perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" "${SLOTARG[@]}" --login "${PINARG[@]}" \
      --list-objects 2>/dev/null | grep -c 'Key Object')"
 
 # "0 OBJECTS" AND "NO CARD" ARE NOT THE SAME ANSWER.
