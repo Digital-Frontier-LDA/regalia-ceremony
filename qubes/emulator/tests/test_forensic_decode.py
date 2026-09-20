@@ -16,7 +16,7 @@ analyzer silently compares the wrong versions and every ordering verdict is wort
 import json, os, struct, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 DECODE = os.path.join(REPO, "tools", "hsm-forensic-decode.py")
 ANALYZER = os.path.join(REPO, "tools", "hsm-drain-analyzer.py")
 
@@ -105,8 +105,34 @@ def main():
     fails += P("firmware lost_total survives the wire and condemns the run") \
         if r4["verdict"] == "UNUSABLE" else F(f"lost_total ignored: {r4['verdict']}")
 
+    # A TORN FRAME AT THE END OF THE STREAM. The case above is caught by the sequence gap it leaves
+    # behind — but corrupt the LAST frame and there is no gap to find, only a shorter trace. The
+    # decoder counted that loss into a local variable a generator `return` threw away, so it emitted
+    # no DROPPED record and printed "0 frame(s) rejected": the analyzer then scored the remains
+    # NO_ORDERING_VIOLATION. Framing loss must reach the verdict on its own, not via a side effect.
+    raw = bytearray(build(link_first=False))
+    raw[-1] ^= 0xFF                                  # break the final frame's checksum byte
+    r5 = pipeline(bytes(raw))
+    fails += P("a torn frame at the END of the stream still condemns the run") \
+        if r5["verdict"] == "UNUSABLE" else F(f"a lost trailing frame produced {r5['verdict']}")
+
+    rf = tempfile.NamedTemporaryFile(suffix=".bin", delete=False); rf.write(bytes(raw)); rf.close()
+    d = subprocess.run([sys.executable, DECODE, rf.name], capture_output=True, text=True)
+    os.unlink(rf.name)
+    dropped = [json.loads(l) for l in d.stdout.splitlines() if '"DROPPED"' in l]
+    fails += P("…and the decoder emits a DROPPED record naming the framing loss") \
+        if dropped and dropped[0].get("bad_checksum", 0) >= 1 \
+        else F("no DROPPED record was emitted for a frame that failed its checksum")
+    fails += P("…and says so on stderr rather than reporting 0 rejected") \
+        if "0 lost" not in d.stderr else F(f"stderr claims nothing was lost: {d.stderr.strip()}")
+
+    # Bytes the decoder had to skip to resynchronise are records that did not arrive either.
+    r6 = pipeline(b"\x00\xa5garbage" + build(link_first=False))
+    fails += P("bytes discarded resynchronising also condemn the run") \
+        if r6["verdict"] == "UNUSABLE" else F(f"leading garbage was ignored: {r6['verdict']}")
+
     print("\n\033[1m### RESULT\033[0m")
-    print(f"  {4 - fails} passed, {fails} failed")
+    print(f"  {7 - fails} passed, {fails} failed")
     return 1 if fails else 0
 
 

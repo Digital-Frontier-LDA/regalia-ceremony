@@ -27,7 +27,7 @@ sector was never written.
 import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPO = os.path.abspath(os.path.join(HERE, "..", "..", "..", ".."))
+REPO = os.path.abspath(os.path.join(HERE, "..", "..", ".."))
 ANALYZER = os.path.join(REPO, "tools", "hsm-drain-analyzer.py")
 
 SECTOR = 4096
@@ -216,8 +216,80 @@ def main():
     else:
         fails += F("lost_total was ignored — silent loss would pass as a clean run")
 
+    # 11. A TRANSACTION WITH NO LINK TO THE NEW RECORD ANSWERS NOTHING. Completeness used to mean
+    #     only "the referent was seen", so a run where nothing ever pointed at the new record —
+    #     no comparison possible, in either direction — reached NO_ORDERING_VIOLATION, the
+    #     strongest verdict this tool can print, from evidence that could not have produced any
+    #     other. Same defect as scoring an empty trace usable, one level in.
+    ev = [e for e in trace(link_slot=0, referent_slot=5, link_first=False)
+          if e["ev"] != "LINK_QUEUED_TO_CACHE"]
+    for i, e in enumerate(ev, 1):
+        e["seq"] = i
+    r10 = run(ev)
+    if r10["verdict"] == "INCOMPLETE":
+        fails += P("a referent with no link pointing at it reports INCOMPLETE, not a clean bill")
+    else:
+        fails += F(f"a run that could not have shown a violation was scored clean: {r10['verdict']}")
+
+    # 12. …and a link that points somewhere ELSE does not count as the missing evidence either.
+    ev = trace(link_slot=0, referent_slot=5, link_first=False)
+    for e in ev:
+        if e["ev"] == "LINK_QUEUED_TO_CACHE":
+            e["value"] = ORIG_PREV          # points at the predecessor, not at the new record
+    r11 = run(ev)
+    if r11["verdict"] == "INCOMPLETE":
+        fails += P("a link that does not point at the new record leaves the run INCOMPLETE")
+    else:
+        fails += F(f"an unrelated link was accepted as ordering evidence: {r11['verdict']}")
+
+    # 13. A TRACE TRUNCATED BEFORE THE LINK'S PROGRAM EVENT, WITH NO DUMP. Neither source says what
+    #     happened to the link, but the transaction looked complete (the link event exists) and the
+    #     branch fell through silently, so the run reached NO_ORDERING_VIOLATION on the strength of
+    #     evidence that stops exactly where the question begins.
+    ev = [e for e in trace(link_slot=0, referent_slot=5, link_first=False)
+          if not (e["ev"] == "FLASH_PROGRAM_RETURNED" and e["sector_addr"] == LINK_SECTOR)]
+    for i, e in enumerate(ev, 1):
+        e["seq"] = i
+    r12 = run(ev)
+    if r12["verdict"] == "INDETERMINATE":
+        fails += P("no link program event and no dump -> INDETERMINATE, not a clean bill")
+    else:
+        fails += F(f"a truncated trace was scored as evidence of correct ordering: {r12['verdict']}")
+
+    # 14. …but a dump that shows the link ABSENT is a real answer: it never became durable, so it
+    #     cannot have preceded the referent. Refusing to conclude here would make the tool useless.
+    r13 = run(ev, post_flash=make_flash(link_value=0xFFFFFFFF, referent_written=True))
+    if r13["verdict"] == "NO_ORDERING_VIOLATION":
+        fails += P("a dump showing the link absent settles it — no violation, not indeterminate")
+    else:
+        fails += F(f"a physically absent link was not treated as settled: {r13['verdict']}")
+
+    # 15. THE REFERENT'S PROGRAM EVENT IS MISSING AND THE DUMP DOES NOT COVER IT. Having *a* dump
+    #     was treated as proof the referent stayed erased, which promoted a gap to ORDERING_VIOLATION
+    #     — the strongest claim in the tool — on no physical evidence at all. The address here is
+    #     outside the dump, so `_phys_is_erased` answers None.
+    ev = [e for e in trace(link_slot=0, referent_slot=5, link_first=True)
+          if not (e["ev"] == "FLASH_PROGRAM_RETURNED" and e["sector_addr"] == REFERENT_SECTOR)]
+    for i, e in enumerate(ev, 1):
+        e["seq"] = i
+    short = make_flash(link_value=NEW_BASE, referent_written=False)[:SECTOR]   # link sector only
+    with tempfile.NamedTemporaryFile("wb", suffix=".bin", delete=False) as bf:
+        bf.write(short); shortpath = bf.name
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        for e in ev:
+            fh.write(json.dumps(e) + "\n")
+        evpath = fh.name
+    pr = subprocess.run([sys.executable, ANALYZER, evpath, "--json", "--post-flash", shortpath,
+                         "--flash-base", hex(LINK_SECTOR)], capture_output=True, text=True)
+    os.unlink(shortpath); os.unlink(evpath)
+    r14 = json.loads(pr.stdout)
+    if r14["verdict"] == "INDETERMINATE":
+        fails += P("a dump that does not cover the referent gives INDETERMINATE, not a violation")
+    else:
+        fails += F(f"a missing program event was promoted to {r14['verdict']} with no physical evidence")
+
     print("\n\033[1m### RESULT\033[0m")
-    print(f"  {10 - fails} passed, {fails} failed")
+    print(f"  {15 - fails} passed, {fails} failed")
     if fails:
         print("\n  The analyzer has NOT been shown to detect an engineered inversion.")
         print("  Do not use its verdict as evidence about the device.")

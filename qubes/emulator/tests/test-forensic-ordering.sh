@@ -20,7 +20,7 @@
 # they claim to.
 set -u
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 SNAP="$REPO/tools/hsm-wedge-snapshot.sh"
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }

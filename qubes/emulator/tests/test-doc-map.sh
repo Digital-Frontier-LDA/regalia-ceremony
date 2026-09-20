@@ -12,7 +12,7 @@
 # contradicts the ratified plan.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ROOT="$(cd "$HERE/../../../.." && pwd)"
+ROOT="$(cd "$HERE/../../.." && pwd)"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }

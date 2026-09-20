@@ -19,7 +19,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO="$(cd "$HERE/../../../.." && pwd)"
+REPO="$(cd "$HERE/../../.." && pwd)"
 UNDER_TEST="$REPO/tools/hsm-staging-restore.sh"
 [ -f "$UNDER_TEST" ] || { echo "missing $UNDER_TEST" >&2; exit 1; }
 

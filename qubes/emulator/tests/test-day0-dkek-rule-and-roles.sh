@@ -15,7 +15,7 @@
 #       one is invisible to the tools that need it, while still appearing in --list-objects.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-ASSERT="$HERE/../../../../hsm-host-role/files/assert-no-dkek.sh"
+ASSERT="$HERE/../../../hsm-host-role/files/assert-no-dkek.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -59,6 +59,44 @@ else
   "$ASSERT" --only-dir "$d3" >/dev/null 2>&1 \
     && F "a renamed share slipped past — name-only matching is not enough" \
     || P "detects a renamed share by CONTENT, not just by name"
+
+  # CANNOT-SCAN IS NOT CLEAN. The first cut discarded find's stderr, so a run that could not read a
+  # directory printed "OK: no DKEK material found" having inspected nothing. On a host where the
+  # guard lacks privilege — or where a share sits in a mode-000 directory precisely so it is not
+  # found — that is a false clean bill of health on the one rule custody depends on.
+  d4="$ROOT/d4"; mkdir -p "$d4/hidden"; echo share > "$d4/hidden/dkek.pbe"; chmod 000 "$d4/hidden"
+  if find "$d4" -mindepth 2 >/dev/null 2>&1; then
+    printf '  \033[33mSKIP\033[0m unreadable-directory case: this user traverses mode-000 dirs (root?)\n'
+  else
+    out="$("$ASSERT" --only-dir "$d4" 2>&1)"; rc=$?
+    [ "$rc" -eq 0 ] \
+      && F "a directory the guard could not read still reported a clean host (exit 0)" \
+      || P "a directory the guard could not read is a refusal, not a clean bill of health"
+    grep -qi 'could not be scanned' <<<"$out" \
+      && P "…and the refusal names the directory it could not scan" \
+      || F "the refusal does not say which directory could not be scanned"
+    grep -qi 'OK: no DKEK material' <<<"$out" \
+      && F "the guard printed OK despite an incomplete scan" \
+      || P "…and it does not print OK for an incomplete scan"
+  fi
+  chmod 755 "$d4/hidden"
+
+  # MANY MATCHES IS NOT A BROKEN SCAN. The refusal above was reached through `find … | head -50`
+  # under pipefail: past 50 matches, head exits, find takes SIGPIPE, the status is 141, and a
+  # perfectly readable directory was reported as unscannable — with an empty error list, so the
+  # operator is refused and told nothing. A developer host with many *dkek*-shaped files hits it.
+  # 5000, not 60: the pipe buffer holds about 64 KiB, so a small match set is written before head
+  # exits and the bug does not fire. The count has to exceed what fits, or the test passes against
+  # the defect (verified: at 60 it did).
+  d5="$ROOT/d5"; mkdir -p "$d5"
+  for n in $(seq 1 5000); do : > "$d5/bulk-$n-dkek.pbe"; done
+  out="$("$ASSERT" --only-dir "$d5" 2>&1)"; rc=$?
+  [ "$rc" -eq 1 ] \
+    && P "60 matching files is a DETECTION (exit 1), not a cannot-scan refusal" \
+    || F "a directory with many matches reported exit $rc instead of finding the material"
+  grep -qi 'could not be scanned' <<<"$out" \
+    && F "many matches were reported as an unscannable directory (SIGPIPE from head)" \
+    || P "…and the operator is not told the directory could not be scanned"
 
   # The failure message has to tell an operator what NOT to do, or the check gets deleted
   # the first time it blocks a deploy at an inconvenient moment.

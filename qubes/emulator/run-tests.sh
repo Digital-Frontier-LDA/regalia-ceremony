@@ -89,6 +89,8 @@ python3 "$HERE/tests/test_verify_hsm_control.py" || suite_failed "test_verify_hs
 python3 "$HERE/tests/test_recovery_card.py" || suite_failed "test_recovery_card.py"
 python3 "$HERE/tests/test_cvc_devaut_verify.py" || suite_failed "test_cvc_devaut_verify.py"
 python3 "$HERE/tests/test_hsm_key_attestation_verify.py" || suite_failed "test_hsm_key_attestation_verify.py"
+python3 "$HERE/tests/test_hsm_devaut_read.py" || suite_failed "test_hsm_devaut_read.py"
+python3 "$HERE/tests/test_hsm_time_bound.py" || suite_failed "test_hsm_time_bound.py"
 python3 "$HERE/tests/test_drain_analyzer.py" || suite_failed "test_drain_analyzer.py"
 python3 "$HERE/tests/test_forensic_decode.py" || suite_failed "test_forensic_decode.py"
 
@@ -196,6 +198,7 @@ say "PIN BINDING — the escrowed PIN must be the PIN the card answers to (PLAN.
 
 say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine card must be caught (B3, B6, B7)"
 "$HERE/tests/test-commission-card.sh" || suite_failed "test-commission-card.sh"
+"$HERE/tests/test-tool-helper-paths.sh" || suite_failed "test-tool-helper-paths.sh"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"
 "$HERE/tests/test-pka-threshold.sh" || suite_failed "test-pka-threshold.sh"
