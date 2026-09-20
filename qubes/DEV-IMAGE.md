@@ -35,8 +35,9 @@ Then, **inside `dev-regalia`** (it has network; these repos are public, so no cr
 sudo apt-get update && sudo apt-get install -y git
 git clone https://github.com/Digital-Frontier-LDA/regalia-ceremony.git ~/regalia-ceremony
 # look up the SHA-256 for go1.26.6.linux-amd64.tar.gz at https://go.dev/dl/
+# (the bootstrap reads qubes/requirements.txt from this checkout)
 sudo GO_SHA256=<paste-that-hash> bash ~/regalia-ceremony/qubes/scripts/dev-image-bootstrap.sh
-source /etc/profile.d/dev-bin.sh             # put Go on PATH (or log out/in)
+source /etc/profile.d/dev-bin.sh             # Go on PATH, SCSH_HOME and CEREMONY_VENV set (or log out/in)
 ```
 
 TemplateVM alternative (if you want AppVMs to inherit the tools): `qvm-clone debian-12 dev-regalia`,
@@ -45,17 +46,39 @@ netvm none`** to re-isolate the template, and `qvm-create --template dev-regalia
 
 The bootstrap installs (into the VM, so a template's AppVMs inherit it):
 
-- **apt** (GPG-authenticated): `git build-essential curl ca-certificates gnupg jq ripgrep`.
-- **Go** — the toolchain `kms/go.mod` requires. Fetch the tarball from <https://go.dev/dl/> and
-  **verify its SHA-256 against the checksum published there** before extracting to `/opt/dev-bin/go`
-  (Debian's `golang` is too old). The bootstrap prints the expected vs actual hash and aborts on a
-  mismatch — never run a toolchain off an unverified download.
-- **Node.js + npm** — from Debian apt (bookworm ships Node 18, enough for the CLIs) or NodeSource for
-  a newer LTS.
-- **VS Code** — Microsoft's signed apt repo (`packages.microsoft.com/repos/code`), key pinned into
+- **apt** (GPG-authenticated):
+  - base: `git build-essential curl ca-certificates gnupg jq ripgrep gh unzip xxd shellcheck`, `python3 python3-pip python3-venv`
+  - regalia-kms's `-tags piv` cgo build: `pkg-config libpcsclite-dev` (without them `go build -tags piv ./...` fails on `pkg-config`)
+  - the smart-card stack: `opensc opensc-pkcs11 pcscd libccid pcsc-tools softhsm2`
+  - the emulator suite's host tier: `age qrencode zbar-tools ssss yubikey-manager python3-pyscard`
+  - a headless JRE for Smart Card Shell: the newest of `openjdk-{25,21,17}-jre-headless` the release has
+- **Go**: the toolchain regalia-kms's `go.mod` requires. Fetch the tarball from
+  <https://go.dev/dl/> and **verify its SHA-256 against the checksum published there** before
+  extracting to `/opt/dev-bin/go` (Debian's `golang` is too old). The bootstrap prints the expected
+  vs actual hash and aborts on a mismatch. Never run a toolchain off an unverified download.
+- **Node.js + npm**: from Debian apt.
+- **VS Code**: Microsoft's signed apt repo (`packages.microsoft.com/repos/code`), key pinned into
   `/etc/apt/keyrings`.
-- **Claude Code CLI** — `npm install -g @anthropic-ai/claude-code`.
-- **Codex CLI** — `npm install -g @openai/codex`.
+- **Claude Code CLI** and **Codex CLI**: `npm install -g`. `INSTALL_AGENT_CLIS=0` skips this when
+  refreshing a VM whose CLIs are in use.
+- **The Pico HSM registered with libccid.** Debian's libccid (1.6.2) has no entry for the Pico's
+  `0x2E8A:0x10FD`, so pcscd never creates a reader for it and every Pico drill fails as though no
+  card were attached. The bootstrap appends an entry to `/etc/libccid_Info.plist` (idempotent, and
+  it refuses to write if the three arrays would end up misaligned) and restarts pcscd.
+- **Smart Card Shell 3.18.77** at `/opt/dev-bin/scsh-3.18.77`, SHA-256 pinned (the value in
+  `PICO-DRILL-RUNBOOK.md`). The Nitrokey import, hardened-init and DevAut scripts run under it.
+  `SCSH_HOME` is exported from `/etc/profile.d/dev-bin.sh`.
+- **A hash-pinned Python venv** at `/opt/dev-bin/regalia-venv` from `qubes/requirements.txt` (pycvc,
+  shamir-mnemonic, …). `CEREMONY_VENV` points at it, which `hsm-auto-import.sh` honours. The file is
+  read from the checkout the script runs from, or fetched from this public repository at `REQ_REF`
+  (default `main`) when the script is piped in, and a file without hashes is refused.
+
+It ends with a **self-check** of every item above and exits non-zero, naming what is missing, if
+anything is absent. A dev image that builds "successfully" but cannot run the suites is what this
+guards against. The first Nitrokey HSM 2 gate run needed ten of these installed by hand.
+
+To refresh an existing dev VM: `sudo GO_VERSION=<ver> GO_SHA256=<sha256> INSTALL_AGENT_CLIS=0 bash
+~/regalia-ceremony/qubes/scripts/dev-image-bootstrap.sh`.
 
 ## Authenticate and test
 
