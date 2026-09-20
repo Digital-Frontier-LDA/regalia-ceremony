@@ -29,6 +29,11 @@ on:
       # to return 141 on success with a test suite that never ran. A gate whose trigger does not
       # cover its subject is not a gate.
       - "tools/**"
+      # hsm-host-role/**, same reason again: test-commission-card.sh and
+      # test-day0-dkek-rule-and-roles.sh have their SUBJECT there (commission-card.sh and
+      # assert-no-dkek.sh), so a change to the two deploy-blocking scripts in the repo would
+      # otherwise run none of the tests written against them.
+      - "hsm-host-role/**"
       # EVERY MARKDOWN FILE, because test-doc-map.sh scans every markdown file:
       # `find "$ROOT" -name .git -prune -o -name '*.md' -print`. Its subject is the whole repository,
       # not the trees listed above, so a doc anywhere could break it with this gate never running.

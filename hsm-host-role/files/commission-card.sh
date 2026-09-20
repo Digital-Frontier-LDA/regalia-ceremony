@@ -13,7 +13,14 @@
 #   * the card is OUR card (B7) — a swapped genuine Nitrokey passes every policy check ever written
 #   * no SO-PIN material is present at the site
 #
-#   commission-card.sh --expect-chr <CHR> --expect-serial <SERIAL> [--expect-address akash1...]
+#   commission-card.sh --expect-serial <SERIAL> --expect-devaut-sha <SHA256>
+#                      [--expect-chr <CHR>] [--expect-address akash1… [--wallet-id 01]]
+#
+# BOTH --expect-serial AND --expect-devaut-sha are required. A serial is self-reported by the card
+# and a CHR is only a name; the digest of C.DevAut covers the device public key, which is what a
+# substituted genuine Nitrokey cannot reproduce. Accepting any one of the three — which this script
+# used to do — let a run that pinned only the CHR report a commissioned card while never checking
+# WHICH device answered.
 #
 # FAILS CLOSED. Any check that cannot be EVALUATED is a failure, not a skip. A commissioning script
 # that returns 0 because a tool was missing is worse than no script: it certifies nothing while
@@ -23,7 +30,20 @@ set -uo pipefail
 P11="${HSM_PKCS11_MODULE:-/usr/lib/opensc-pkcs11.so}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 EXPECT_CHR="" EXPECT_SERIAL="" EXPECT_ADDR="" SLOT="" EXPECT_DEVAUT_SHA=""
-DEVAUT_JS="${HSM_DEVAUT_JS:-$HERE/../../ceremony/qubes/scripts/hsm-devaut-id.js}"
+WALLET_ID="01"
+# Helpers live in qubes/scripts/ of the ceremony repo. The default used to name
+# ../../ceremony/qubes/scripts/, a path that exists only in the retired monorepo layout — so on the
+# published repo the C.DevAut read could never succeed and commissioning could never pass.
+find_helper() {
+  local name="$1" c
+  for c in "$HERE/../../qubes/scripts/$name" "$HERE/../../ceremony/qubes/scripts/$name"; do
+    [ -r "$c" ] && { printf '%s' "$c"; return 0; }
+  done
+  return 1
+}
+DEVAUT_JS="${HSM_DEVAUT_JS:-$(find_helper hsm-devaut-id.js)}"
+DEVAUT_SH="${HSM_DEVAUT_READ_SH:-$(find_helper hsm-devaut-read.sh)}"
+DERIVE_PY="${HSM_DERIVE_ADDRESS_PY:-$(find_helper derive-akash-address.py)}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -31,6 +51,7 @@ while [ $# -gt 0 ]; do
     --expect-devaut-sha) EXPECT_DEVAUT_SHA="${2:-}"; shift 2;;
     --expect-serial)  EXPECT_SERIAL="${2:-}"; shift 2;;
     --expect-address) EXPECT_ADDR="${2:-}"; shift 2;;
+    --wallet-id)      WALLET_ID="${2:-}"; shift 2;;
     --slot)           SLOT="${2:-}"; shift 2;;
     --module)         P11="${2:-}"; shift 2;;
     -h|--help) sed -n '2,26p' "$0"; exit 0;;
@@ -45,18 +66,27 @@ hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 
 SLOT_ARGS=()
 [ -n "$SLOT" ] && SLOT_ARGS=(--slot "$SLOT")
-sc(){ perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool "$@" 2>/dev/null; }
+# No arguments on purpose: this reads the card's configuration options and nothing else. It is
+# time-capped because an unresponsive reader must FAIL the gate, not hang it.
+card_info(){ perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool 2>/dev/null; }
 
 # =================================================================================================
 hdr "B3 — the host carries no DKEK"
 # The rule the threat model produces: PIN + DKEK together export every key on the token, offline and
 # undetectably. The ceremony can promise the DKEK was destroyed; only the host can show it is absent.
-if [ -x "$HERE/assert-no-dkek.sh" ]; then
-  if "$HERE/assert-no-dkek.sh" >/dev/null 2>&1; then
-    P "no DKEK material found on this host"
-  else
-    F "DKEK MATERIAL PRESENT — with PIN access on this host, every key on the card is exportable"
-  fi
+ASSERT_NO_DKEK="${HSM_ASSERT_NO_DKEK:-$HERE/assert-no-dkek.sh}"
+if [ -x "$ASSERT_NO_DKEK" ]; then
+  # THREE OUTCOMES, NOT TWO. The guard exits 0 clean, 1 when it found material, and 2 when it could
+  # not scan a directory at all. Collapsing 1 and 2 into "DKEK MATERIAL PRESENT" sends an operator
+  # hunting for a share that does not exist while the real fault — a scan that never ran — goes
+  # unnamed. Both still fail commissioning.
+  dkek_out="$("$ASSERT_NO_DKEK" 2>&1)"; dkek_rc=$?
+  case "$dkek_rc" in
+    0) P "no DKEK material found on this host";;
+    1) F "DKEK MATERIAL PRESENT — with PIN access on this host, every key on the card is exportable";;
+    *) F "the DKEK scan could not complete — B3 CANNOT BE EVALUATED (run as root, or fix the paths it names)"
+       printf '%s\n' "$dkek_out" | sed 's/^/     /';;
+  esac
 else
   F "assert-no-dkek.sh not found — B3 CANNOT BE EVALUATED, so this is a failure, not a skip"
 fi
@@ -68,10 +98,13 @@ hdr "B6 — the card has RESET RETRY COUNTER disabled"
 # HARDCODES RRC on, so a card provisioned the ordinary way is in the vulnerable state. Only a Smart
 # Card Shell initialisation can disable it — and nothing but this check can tell them apart at the
 # rack.
-info_out="$(sc)"
+info_out="$(card_info)"
 if [ -z "$info_out" ]; then
   F "could not read the card — B6 CANNOT BE EVALUATED (is the card inserted, is pcscd running?)"
-elif printf '%s' "$info_out" | grep -qi 'User PIN reset with SO-PIN enabled'; then
+elif grep -qi 'User PIN reset with SO-PIN enabled' <<< "$info_out"; then
+  # A here-string, not `printf … | grep -q`: under pipefail a grep that exits on its first match can
+  # leave the pipeline status non-zero, and THIS predicate inverting means a card with RRC ENABLED
+  # falls through to the else branch and is reported as compliant.
   F "RRC IS ENABLED — the SO-PIN can reset the user PIN and export every key. DO NOT RACK THIS CARD."
   printf '     Re-initialise via Smart Card Shell (SmartCardHSMInitializer) with RRC disabled.\n'
   printf '     sc-hsm-tool --initialize CANNOT produce such a card: it hardcodes the option ON.\n'
@@ -84,16 +117,19 @@ hdr "B7 — this is OUR card, not merely A genuine one"
 # The distinction that matters in someone else's building. Every genuine Nitrokey validates to the
 # same CardContact root, so chain validation proves "a real SmartCard-HSM" and nothing more. Only a
 # match against the CHR and serial recorded AT THE CEREMONY identifies THIS device.
-if [ -z "$EXPECT_CHR" ] && [ -z "$EXPECT_SERIAL" ] && [ -z "$EXPECT_DEVAUT_SHA" ]; then
-  F "no --expect-chr / --expect-serial given — identity CANNOT BE EVALUATED, which is a failure"
-  printf '     These are recorded at the ceremony. Commissioning without them proves nothing about\n'
+if [ -z "$EXPECT_SERIAL" ] || [ -z "$EXPECT_DEVAUT_SHA" ]; then
+  F "--expect-serial AND --expect-devaut-sha are both required — identity CANNOT BE EVALUATED"
+  printf '     Both are recorded at the ceremony. Commissioning without them proves nothing about\n'
   printf '     WHICH device is in the rack, and substitution is the attack colocation introduces.\n'
+  printf '     Pinning just one of serial/CHR/digest is not a weaker check, it is no check against\n'
+  printf '     a substituted genuine card: the serial is self-reported and the CHR is a name, while\n'
+  printf '     only the digest covers the device public key.\n'
 else
   serial="$(perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} \
               --list-slots 2>/dev/null | grep -oE 'serial num *: *[A-Za-z0-9]+' | awk '{print $NF}' | head -1)"
   if [ -z "$serial" ]; then
     F "could not read a token serial — identity CANNOT BE EVALUATED"
-  elif [ -n "$EXPECT_SERIAL" ] && [ "$serial" != "$EXPECT_SERIAL" ]; then
+  elif [ "$serial" != "$EXPECT_SERIAL" ]; then
     F "SERIAL MISMATCH — expected '$EXPECT_SERIAL', card reports '$serial'. This is a DIFFERENT DEVICE."
   else
     P "token serial matches the value recorded at the ceremony ($serial)"
@@ -106,29 +142,40 @@ else
     # never pass: it failed closed, which is the right direction, but a check that cannot succeed
     # makes commissioning impossible rather than safe. Reading it needs the scsh helper.
     devout=""
-    if [ -n "${SCSH_HOME:-}" ] && [ -x "$SCSH_HOME/scriptrunner" ] && [ -r "$DEVAUT_JS" ]; then
+    if [ -n "${SCSH_HOME:-}" ] && [ -x "$SCSH_HOME/scriptrunner" ] && [ -n "$DEVAUT_JS" ] && [ -r "$DEVAUT_JS" ]; then
       devout="$(cd "$SCSH_HOME" && perl -e 'alarm 60; exec @ARGV' -- ./scriptrunner "$DEVAUT_JS" 2>/dev/null)"
+    fi
+    # NO JAVA AT THE RACK. hsm-devaut-read.sh reads the same EF 2F02 with opensc-tool alone, verified
+    # byte-identical to the scsh reader on DENK0404144 (2026-09-18). Requiring a Smart Card Shell
+    # install in a colocation cage is how a mandatory check turns into a skipped one.
+    if [ -z "$devout" ] && [ -n "$DEVAUT_SH" ] && [ -r "$DEVAUT_SH" ]; then
+      devout="$(perl -e 'alarm 60; exec @ARGV' -- bash "$DEVAUT_SH" --expect-serial "$EXPECT_SERIAL" 2>/dev/null)"
     fi
     if [ -z "$devout" ]; then
       F "could not read C.DevAut — device identity CANNOT BE EVALUATED"
-      printf '     Needs SCSH_HOME pointing at a Smart Card Shell install; sc-hsm-tool cannot read it.\n'
+      printf '     Needs qubes/scripts/hsm-devaut-read.sh (opensc-tool only) or SCSH_HOME pointing\n'
+      printf '     at a Smart Card Shell install. sc-hsm-tool itself cannot read C.DevAut.\n'
     else
-      chr="$(printf '%s' "$devout" | grep -oE '^DEVAUT_CHR=.*' | cut -d= -f2-)"
-      car="$(printf '%s' "$devout" | grep -oE '^DEVAUT_CAR=.*' | cut -d= -f2-)"
-      sha="$(printf '%s' "$devout" | grep -oE '^DEVAUT_SHA256=.*' | cut -d= -f2-)"
+      chr="$(grep -oE '^DEVAUT_CHR=.*' <<< "$devout" | cut -d= -f2-)"
+      car="$(grep -oE '^DEVAUT_CAR=.*' <<< "$devout" | cut -d= -f2-)"
+      sha="$(grep -oE '^DEVAUT_SHA256=.*' <<< "$devout" | cut -d= -f2-)"
 
       if [ -n "$EXPECT_CHR" ]; then
-        [ "$chr" = "$EXPECT_CHR" ] \
-          && P "DevAut CHR matches the value pinned at the ceremony ($chr)" \
-          || F "CHR MISMATCH — expected '$EXPECT_CHR', card reports '$chr'. A swapped genuine card looks like this."
+        if [ "$chr" = "$EXPECT_CHR" ]; then
+          P "DevAut CHR matches the value pinned at the ceremony ($chr)"
+        else
+          F "CHR MISMATCH — expected '$EXPECT_CHR', card reports '$chr'. A swapped genuine card looks like this."
+        fi
       fi
 
       # PIN THE DIGEST, not just the name. The CHR is a label; the digest covers the whole
       # certificate including the device public key, so a substitute cannot reproduce it.
       if [ -n "$EXPECT_DEVAUT_SHA" ]; then
-        [ "$sha" = "$EXPECT_DEVAUT_SHA" ] \
-          && P "C.DevAut digest matches the pinned value" \
-          || F "DEVAUT DIGEST MISMATCH — this is not the device that was commissioned."
+        if [ "$sha" = "$EXPECT_DEVAUT_SHA" ]; then
+          P "C.DevAut digest matches the pinned value"
+        else
+          F "DEVAUT DIGEST MISMATCH — this is not the device that was commissioned."
+        fi
       else
         printf '  \033[33mNOTE\033[0m no --expect-devaut-sha given. The CHR alone is a NAME; pin the digest\n'
         printf '        (%s) for substitution resistance.\n' "${sha:0:16}…"
@@ -142,6 +189,52 @@ else
         printf '     Expected on a Pico HSM, which is why a Pico must never hold production keys.\n'
         printf '     On a Nitrokey the CAR should name a CardContact Device Issuer CA, not the device.\n'
       fi
+    fi
+  fi
+fi
+
+# =================================================================================================
+hdr "Funding address — the key in this card controls the money we think it controls"
+# --expect-address used to be ACCEPTED AND IGNORED: the flag parsed, nothing compared it, and the
+# operator read "Commissioning PASSED" believing the funding address had been confirmed. A silently
+# ignored expectation is worse than an absent one — it manufactures confidence.
+if [ -z "$EXPECT_ADDR" ]; then
+  printf '  \033[33mNOTE\033[0m no --expect-address given; the on-chain identity of the wallet key was not\n'
+  printf '        checked. Pass the akash1… address recorded at the ceremony to check it here.\n'
+elif [ -z "$DERIVE_PY" ] || [ ! -r "$DERIVE_PY" ]; then
+  F "--expect-address given but derive-akash-address.py was not found — CANNOT BE EVALUATED"
+  printf '     Point HSM_DERIVE_ADDRESS_PY at qubes/scripts/derive-akash-address.py.\n'
+elif ! command -v python3 >/dev/null; then
+  F "--expect-address given but python3 is absent — CANNOT BE EVALUATED"
+else
+  # Read the wallet public key from the token. --wallet-id names WHICH key: a card that serves every
+  # role (REQUIREMENTS E1) carries several, and deriving an address from the SSH key would compare
+  # the wrong thing and fail for the wrong reason.
+  objs="$(perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} \
+            --list-objects --type pubkey 2>/dev/null)"
+  read -r point params <<< "$(awk -v want="$WALLET_ID" '
+      /EC_POINT:/  { p=$2 }
+      /EC_PARAMS:/ { q=$2 }
+      /^[[:space:]]*ID:/ { if ($2 == want) { print p, q; exit } }' <<< "$objs")"
+  # 06052b8104000a is secp256k1. An akash address derived from a P-256 or RSA key is a well-formed
+  # string that corresponds to nothing — exactly the kind of green check this file exists to refuse.
+  if [ -z "$point" ]; then
+    F "no public key with ID $WALLET_ID on this token — the funding key CANNOT BE EVALUATED"
+  elif [ "$params" != "06052b8104000a" ]; then
+    F "key ID $WALLET_ID is not secp256k1 (EC_PARAMS=$params) — an akash address from it would be meaningless"
+  else
+    # pkcs11-tool prints the DER OCTET STRING wrapper (0441 / 0421) around the EC point; strip it.
+    case "$point" in
+      0441*) point="${point#0441}";;
+      0421*) point="${point#0421}";;
+    esac
+    got="$(perl -e 'alarm 30; exec @ARGV' -- python3 "$DERIVE_PY" --hex "$point" 2>/dev/null | tr -d '[:space:]')"
+    if [ -z "$got" ]; then
+      F "could not derive an address from the key on this card — CANNOT BE EVALUATED"
+    elif [ "$got" = "$EXPECT_ADDR" ]; then
+      P "the wallet key on this card derives to the expected address ($got)"
+    else
+      F "ADDRESS MISMATCH — this card holds $got, not $EXPECT_ADDR. It is not the funding key."
     fi
   fi
 fi

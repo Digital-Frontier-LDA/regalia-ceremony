@@ -43,7 +43,12 @@ else
     REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
     FILES=()
     while IFS= read -r f; do FILES+=("$f"); done < <(
-        find "$REPO/tools" "$REPO/qubes" "$REPO/debian" "$REPO/hardware" -name '*.sh' -type f 2>/dev/null | sort)
+        # hsm-host-role/ is in this list because its two scripts are the DEPLOY-BLOCKING ones —
+        # assert-no-dkek.sh and commission-card.sh decide whether a card goes into service. A
+        # self-inverting predicate there is the most expensive place in the repo to have one, and
+        # it was the one tree the scan did not look at.
+        find "$REPO/tools" "$REPO/qubes" "$REPO/debian" "$REPO/hardware" "$REPO/hsm-host-role" \
+             -name '*.sh' -type f 2>/dev/null | sort)
 fi
 
 echo "checking ${#FILES[@]} shell scripts for self-inverting predicates"

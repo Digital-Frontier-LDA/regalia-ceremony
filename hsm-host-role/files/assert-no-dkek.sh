@@ -26,6 +26,31 @@ DIRS=(/root /home /etc /opt /srv /var/lib)
 # so depth is capped and both the depth and the root set are overridable.
 MAXDEPTH="${DKEK_SCAN_MAXDEPTH:-4}"
 
+# A SCAN THAT COULD NOT READ A DIRECTORY IS NOT A CLEAN SCAN. `find … 2>/dev/null` discarded
+# traversal errors, so a run without access to /root — or to anything under the configured roots —
+# printed OK having inspected nothing, which is the opposite of what a deploy-blocking, fail-closed
+# assertion must do. Traversal errors are captured and become a refusal (exit 2, "cannot evaluate"),
+# distinct from exit 1 ("material found").
+#
+# Callers must use `out="$(scan_dir …)" || exit $?` and never `< <(scan_dir …)`: inside a process
+# substitution this exit ends only the subshell, the loop reads no lines, and the script goes on to
+# print OK — the exact failure this guard exists to prevent.
+scan_dir() {
+  local dir="$1"; shift
+  local errs out rc
+  errs="$(mktemp)"
+  out="$(find "$dir" -xdev -maxdepth "$MAXDEPTH" "$@" 2>"$errs" | head -50)"; rc=$?
+  if [ "$rc" -ne 0 ] || [ -s "$errs" ]; then
+    printf 'REFUSING: %s could not be scanned completely, so this host cannot be reported clean:\n' "$dir" >&2
+    sed 's/^/    /' "$errs" >&2
+    printf '  Re-run with enough privilege to read these paths (the guard runs as root on a KMS\n  host), or scope the scan with --only-dir if they are genuinely out of scope.\n' >&2
+    rm -f "$errs"
+    exit 2
+  fi
+  rm -f "$errs"
+  printf '%s\n' "$out"
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --extra-dir) DIRS+=("$2"); shift 2;;
@@ -50,6 +75,7 @@ hits=""
 for d in "${DIRS[@]}"; do
   [ -d "$d" ] || continue
   # -xdev: do not wander onto network or bind mounts and take minutes doing it.
+  names="$(scan_dir "$d" -type f \( -iname '*.pbe' -o -iname '*.dkek' -o -iname '*dkek*' \))" || exit $?
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     # ansible.builtin.script executes a temporary copy under /root/.ansible. The source file is
@@ -58,21 +84,27 @@ for d in "${DIRS[@]}"; do
     [ "$f" -ef "$0" ] 2>/dev/null && continue
     hits="$hits\n    $f"
     found=1
-  done < <(find "$d" -xdev -maxdepth "$MAXDEPTH" -type f \( -iname '*.pbe' -o -iname '*.dkek' -o -iname '*dkek*' \) 2>/dev/null | head -50)
+  done <<< "$names"
 done
 
 # Content probe: a DKEK share is a small PBE blob. Checking the magic avoids depending on a name.
 # Scoped to the same dirs and to small files so this stays a bounded scan.
 for d in "${DIRS[@]}"; do
   [ -d "$d" ] || continue
+  blobs="$(scan_dir "$d" -type f -size -8k -name '*.pbe')" || exit $?
   while IFS= read -r f; do
     [ -n "$f" ] || continue
     case "$hits" in *"$f"*) continue;; esac
-    if head -c 16 "$f" 2>/dev/null | grep -qa "Salted__\|DKEK"; then
+    # NO PIPE INTO grep -q UNDER pipefail. grep -q exits the moment it matches, head takes SIGPIPE,
+    # and pipefail makes the pipeline status 141 — so the branch is NOT taken and a renamed DKEK
+    # share goes UNDETECTED, with the guard printing OK. The race is timing-dependent, which is
+    # worse than a reliable failure. (tools/hsm-lint-predicates.sh flags exactly this shape.)
+    magic="$(head -c 16 "$f" 2>/dev/null)"
+    if grep -qa "Salted__\|DKEK" <<< "$magic"; then
       hits="$hits\n    $f  (content looks like an encrypted share)"
       found=1
     fi
-  done < <(find "$d" -xdev -maxdepth "$MAXDEPTH" -type f -size -8k -name '*.pbe' 2>/dev/null | head -50)
+  done <<< "$blobs"
 done
 
 if [ "$found" -eq 1 ]; then
