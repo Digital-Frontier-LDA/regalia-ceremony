@@ -37,3 +37,15 @@ only once it is already underway:
 The rule this encodes: a script that reaches outside the repository it ships in fails on a bench,
 mid-run, after touching a card — naming a file the operator can see referenced in the tree they are
 standing in. The test opens every helper name the scripts ask for.
+
+## The rest of the bench toolkit
+
+The firmware-investigation scripts came across with them, so the toolkit is complete here rather
+than split across two repositories: `hsm-quiesce.sh` (the identity-and-role interlock the flash
+tools' comments already pointed at), `hsm-firmware-invariants.sh` (+ its suite in
+`qubes/emulator/tests/`), `hsm-identify-firmware.sh`, `hsm-wedge-hunt.sh`,
+`hsm-capture-then-recover.sh`, `hsm-bug6-hunt-physical.sh`, `hsm-rtt-log.sh` and
+`hsm-powman-dbgmode.sh`.
+
+They drive a Pico HSM over SWD with a debug probe and are the tools the RP2350 wedge and Bug 6
+investigations were done with; `hardware/` documents what they found.
