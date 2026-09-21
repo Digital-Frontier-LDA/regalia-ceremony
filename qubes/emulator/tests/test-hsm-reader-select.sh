@@ -232,6 +232,35 @@ check "a Nitrokey entry carrying a board_id is refused" 1 "" \
   env -u HSM_BOARD_MAP -u HSM_CI_PROBE_MAP -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$BADREG" \
   bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1'
 
+printf '\n\033[1m### the pin is found through the REGISTRY, not only through the loader\033[0m\n'
+# Most callers source this resolver and ask about a card; they never call
+# hsm_staging_registry_load. Reading HSM_DEVAUT_MAP alone made the pin look ABSENT on those paths —
+# and an absent pin for a Nitrokey is a refusal, so the recovery drill stopped on "the registry
+# pins no devaut_sha256" for a serial the registry pins.
+check "the pin is read from the registry with no loader run" 0 "1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4" \
+  env -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$REG_NK" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_devaut_pin_for DENK0404144'
+
+check "a Pico entry has no pin to find" 1 "" \
+  env -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$REG_NK" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_devaut_pin_for ESPAAAAAAAA'
+
+check "an unlisted serial has no pin" 1 "" \
+  env -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$REG_NK" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_devaut_pin_for DENK9999999'
+
+# Ambiguity never arms a wipe — the same rule hsm_role_of applies to a duplicated serial.
+REG_DUP="$BIN/registry-nk-dup.json"
+python3 - "$REG_NK" "$REG_DUP" <<'PYDUP'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["devices"].append(dict(d["devices"][1], id="nk-a-again"))
+json.dump(d, open(sys.argv[2], "w"))
+PYDUP
+check "a serial listed twice yields no pin, so the wipe gate refuses" 1 "" \
+  env -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$REG_DUP" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_devaut_pin_for DENK0404144'
+
 printf '\n\033[1m### the DevAut pin is checked against the CARD before a wipe\033[0m\n'
 # A serial is self-reported; a substituted genuine Nitrokey reports whatever its issuer put there.
 # The pin covers the device public key, so the card has to produce it.
