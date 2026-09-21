@@ -105,10 +105,30 @@ exit "${FAKE_INIT_RC:-0}"
 EOF
   chmod +x "$scsh/scriptrunner"
 
+  # The APDU initializer the restore now prefers (regalia#486). Stubbed for the same reason the
+  # scriptrunner is: these cases are about the RESTORE's behaviour — posture verification, step
+  # order, refusals — and the initializer has its own suite (test-hsm-init-hardened.sh) where its
+  # APDUs are checked byte for byte. FAKE_INIT_OUT / FAKE_INIT_RC drive both paths identically, so
+  # every case below reads the same whichever initializer ran.
+  cat > "$bin/init-hardened-stub.sh" <<'EOF'
+#!/usr/bin/env bash
+# The restore sends the initializer's output to a log and echoes only the REFUSING line from it, so
+# that is how a case observes what the initializer was handed — the same trick the scriptrunner
+# stub uses for the scsh path.
+if [ "${FAKE_INIT_ECHO_EXPECT:-0}" = 1 ]; then
+  printf 'REFUSING: received %s\n' "$*"
+  exit 0
+fi
+printf '%s\n' "${FAKE_INIT_OUT:-STEP connect: Version 6.6}"
+exit "${FAKE_INIT_RC:-0}"
+EOF
+  chmod +x "$bin/init-hardened-stub.sh"
+
   # The script has no default card, so every case names one. ESP2202E14A is the card these cases were
   # written around; a case that means something else overrides it, and the no-card case clears it.
   OUT="$(env PATH="$bin:$PATH" \
       HSM_STAGING_DIR="$staging" SCSH_HOME="$scsh" FAKE_CALL_COUNT="$work/calls" \
+      HSM_INIT_HARDENED_SH="${INIT_SH_OVERRIDE:-$bin/init-hardened-stub.sh}" \
       HSM_PKCS11_MODULE="$work/fake.so" HSM_RESTORE_SERIAL=ESP2202E14A \
       "$@" bash "$UNDER_TEST" 2>&1)"; RC=$?
   rm -rf "$work"
@@ -174,11 +194,20 @@ run_restore FAKE_NAMES="$TWO_BOARDS" FAKE_SERIAL_0=ESP41D722E2 FAKE_SERIAL_1=ESP
 want "an explicit HSM_RESTORE_SERIAL outranks the parent's pin" 1 \
      "target: ESP2202E14A at PC/SC reader 1"
 
-# THE BANNER IS NOT THE HANDOFF. Assert what the initializer actually receives.
+# THE BANNER IS NOT THE HANDOFF. Assert what the initializer actually receives — on the APDU path
+# that is `--expect-serial <serial>` on its command line, which the stub echoes back.
 run_restore FAKE_NAMES="$TWO_BOARDS" FAKE_SERIAL_0=ESP41D722E2 FAKE_SERIAL_1=ESP2202E14A \
             HSM_RESTORE_SERIAL= HSM_TARGET_SERIAL=ESP41D722E2 HSM_PCSC_INDEX=0 FAKE_SLOTS="0 ESP41D722E2" \
             FAKE_INIT_ECHO_EXPECT=1
 want "the initializer is handed the SAME serial the target line names" 1 \
+     "expect-serial ESP41D722E2"
+
+# …and the same claim for the scsh fallback, which receives it through the environment.
+INIT_SH_OVERRIDE=/nonexistent \
+run_restore FAKE_NAMES="$TWO_BOARDS" FAKE_SERIAL_0=ESP41D722E2 FAKE_SERIAL_1=ESP2202E14A \
+            HSM_RESTORE_SERIAL= HSM_TARGET_SERIAL=ESP41D722E2 HSM_PCSC_INDEX=0 FAKE_SLOTS="0 ESP41D722E2" \
+            FAKE_INIT_ECHO_EXPECT=1
+want "  and so is the scsh fallback, through the environment" 1 \
      "HSM_EXPECT_SERIAL=ESP41D722E2"
 
 printf '\n\033[1m### an on-card writer proves the card first (the sc-hsm-tool steps had no guard)\033[0m\n'
@@ -192,12 +221,23 @@ run_restore FAKE_NAMES="$TWO_BOARDS" FAKE_SERIAL_1=ESP2202E14A HSM_PCSC_INDEX=0
 want "a reader that answers with NO serial is refused, not assumed safe" 1 \
      "did not answer with a serial"
 
-printf '\n\033[1m### scsh cannot address a prefix-named reader, so the wipe is refused\033[0m\n'
-
+printf '\n\033[1m### scsh cannot address a prefix-named reader, so THAT path refuses the wipe\033[0m\n'
+# The interlock is a Smart Card Shell limitation: scsh matches reader NAMES by prefix, so when one
+# attached reader's name is a prefix of another's the intended card cannot be addressed at all
+# (measured 2026-09-03: asking for the first card's exact full name returned the SECOND card's
+# certificate). These cases therefore force the scsh fallback — on the APDU path the reader is an
+# INDEX and the ambiguity does not exist, which the case after them states.
+INIT_SH_OVERRIDE=/nonexistent \
 run_restore FAKE_NAMES="$TWO_BOARDS" FAKE_SERIAL_0=ESP41D722E2 FAKE_SERIAL_1=ESP2202E14A \
             FAKE_SLOTS="4 ESP2202E14A"
 want "the prefix-named pinned card refuses before INITIALIZE DEVICE runs" 1 "strict PREFIX"
 wantnot . "card is back" "and the init never ran (no liveness message)"
+
+# THE APDU PATH IS IMMUNE, and that is the point of preferring it: it addresses the reader by index.
+run_restore FAKE_NAMES="$TWO_BOARDS" FAKE_SERIAL_0=ESP41D722E2 FAKE_SERIAL_1=ESP2202E14A \
+            FAKE_SLOTS="4 ESP2202E14A" FAKE_INIT_ECHO_EXPECT=1
+wantnot . "strict PREFIX" "the APDU initializer needs no reader-NAME interlock"
+want "  and it proceeds to initialise the card the index names" 1 "expect-serial ESP2202E14A"
 
 printf '\n\033[1m### a refusal is not a success, and liveness is not posture\033[0m\n'
 
@@ -220,6 +260,15 @@ run_restore FAKE_NAMES="$TWO_SWAPPED" FAKE_SERIAL_0=ESP2202E14A FAKE_SERIAL_1=ES
             FAKE_SLOTS="0 ESP2202E14A" FAKE_FAIL_AFTER=1
 want "an unread posture is a failure, not an absent RRC tell" 1 "cannot verify the posture"
 wantnot . "RRC verified OFF" "and it is not reported as verified"
+
+printf '\n\033[1m### an initializer that FAILED stops the restore\033[0m\n'
+# The APDU initializer exits non-zero on a known-bad INITIALIZE DEVICE answer. Ignoring that, a
+# card that stays present and already reports RRC off carries the run on into the DKEK import and
+# the key operations — on a card that was never initialised.
+run_restore FAKE_NAMES="$TWO_SWAPPED" FAKE_SERIAL_0=ESP2202E14A FAKE_SERIAL_1=ESP41D722E2 \
+            FAKE_SLOTS="0 ESP2202E14A" FAKE_RRC=off FAKE_INIT_RC=2
+want "a non-zero initializer status stops the run" 1 "hardened init FAILED"
+wantnot . "DKEK" "  and the DKEK step is never reached"
 
 printf '\n\033[1m### control: an addressable card in the right posture proceeds\033[0m\n'
 

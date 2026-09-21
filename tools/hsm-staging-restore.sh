@@ -166,13 +166,36 @@ say "1. hardened init — RRC OFF, staging PIN, $RETRIES retries"
 # RP2350 stays ENUMERATED, so PC/SC still lists two readers (hsm-fleet-drill.sh records the same
 # measurement). This is a bench-topology limit, so refuse here and say so, rather than running a
 # wipe and leaving the JS guard's "WRONG CARD" refusal to be read as a defect in the guard.
-if command -v hsm_require_scsh_addressable >/dev/null 2>&1; then
-    hsm_require_scsh_addressable "$READER" "$RESTORE_SERIAL" || exit 1
+# THE APDU PATH FIRST, JAVA ONLY IF IT IS ABSENT (regalia#486, decided 2026-09-21).
+# hsm-init-hardened.sh builds the same INITIALIZE DEVICE with opensc-explorer — options 0x0000, the
+# PINs on stdin rather than in argv, the label written in the init's own session. It needs no JVM,
+# so it also works on a rack or a vault VM where installing one is not on the table. Verified on
+# DENK0404144 (fw 4.1, 2026-09-21): options readback shows RRC off, C_InitPIN with the SO-PIN is
+# REFUSED, the original user PIN still opens the card, and the token label is what was asked for.
+# The scsh script stays as the fallback and is byte-compatible; the reader-name interlock below is
+# only needed by that path, since scsh matches reader names by PREFIX.
+INIT_SH="${HSM_INIT_HARDENED_SH:-$SCRIPTS/hsm-init-hardened.sh}"
+if [ -r "$INIT_SH" ]; then
+    HSM_SO_PIN="$SO_PIN" HSM_USER_PIN="$PIN" \
+      perl -e 'alarm 300; exec @ARGV' -- bash "$INIT_SH" --reader "$READER" \
+        --expect-serial "$RESTORE_SERIAL" --rrc off --retries "$RETRIES" --label staging \
+        > "$INIT_LOG" 2>&1
+    _init_rc=$?
+    # THIS status MEANS SOMETHING, unlike the scsh path's. The APDU initializer exits non-zero on a
+    # known-bad INITIALIZE DEVICE answer, and a card that stays present and already reports RRC off
+    # would otherwise carry the run on into the DKEK import and the key operations — on a card that
+    # was never initialised. The one status worth ignoring is a card that left the bus, which this
+    # initializer reports as "no status word came back" and exits 0 for.
+    [ "$_init_rc" -eq 0 ] || die "the hardened init FAILED (exit $_init_rc): $(tail -3 "$INIT_LOG" | tr '\n' ' ' | cut -c1-240)"
+else
+    if command -v hsm_require_scsh_addressable >/dev/null 2>&1; then
+        hsm_require_scsh_addressable "$READER" "$RESTORE_SERIAL" || exit 1
+    fi
+    ( cd "$SCSH" && HSM_SO_PIN="$SO_PIN" HSM_USER_PIN="$PIN" HSM_PIN_RETRIES="$RETRIES" \
+        HSM_READER="$_sr_name" HSM_EXPECT_SERIAL="$RESTORE_SERIAL" \
+          HSM_RRC_MODE=off HSM_LABEL=staging ./scriptrunner "$SCRIPTS/hsm-init-hardened.js" \
+    ) > "$INIT_LOG" 2>&1
 fi
-( cd "$SCSH" && HSM_SO_PIN="$SO_PIN" HSM_USER_PIN="$PIN" HSM_PIN_RETRIES="$RETRIES" \
-    HSM_READER="$_sr_name" HSM_EXPECT_SERIAL="$RESTORE_SERIAL" \
-      HSM_RRC_MODE=off HSM_LABEL=staging ./scriptrunner "$SCRIPTS/hsm-init-hardened.js" \
-) > "$INIT_LOG" 2>&1
 # The init's exit status means nothing for a run that REACHED the card — the Pico drops off the USB
 # bus mid-command. But it means nothing for a REFUSAL either, and a refusal never touches the card:
 # MEASURED 2026-09-11, the JS guard refused with "WRONG CARD", this script printed "card is back"
