@@ -29,9 +29,22 @@
 # Each sample costs ~23s, almost all of it the PBKDF: budget 20 samples per 8 minutes.
 set -uo pipefail
 
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# HSM_PROBE_REPO lets a frozen copy of this script (one run from outside the tree, so that editing
+# the original mid-run cannot corrupt the running instance) still find the resolver it sources.
+REPO="${HSM_PROBE_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+[ -r "$REPO/tools/hsm-reader-select.sh" ] \
+  || { printf 'dkek-refusal-probe: no resolver at %s/tools/hsm-reader-select.sh — set HSM_PROBE_REPO to the repository root\n' "$REPO" >&2; exit 2; }
 READER="${HSM_PROBE_READER:-}"
-SAMPLES="${1:-60}"
+DRILL_FAITHFUL=0
+SAMPLES=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --drill-faithful) DRILL_FAITHFUL=1; shift;;
+    -h|--help) sed -n '2,32p' "$0"; exit 0;;
+    *) SAMPLES="$1"; shift;;
+  esac
+done
+SAMPLES="${SAMPLES:-60}"
 OUT="${HSM_PROBE_DIR:-}"
 
 die(){ printf 'dkek-refusal-probe: %s\n' "$*" >&2; exit 2; }
@@ -93,9 +106,25 @@ mint(){   # one fresh 4-of-6 share set; the password is random per mint
       --pwd-shares-threshold 4 --pwd-shares-total 6 < /dev/null > "$2" 2>&1 && [ -s "$1" ]
 }
 
-say "minting the share set (one PBKDF, ~25s)"
-mint "$OUT/dkek.pbe" "$OUT/shares.txt" || die "could not create the share set"
-chmod 600 "$OUT/dkek.pbe" "$OUT/shares.txt"
+# --drill-faithful REPRODUCES THE DRILL'S CONDITIONS, not just its command.
+#
+# The default mode reuses one share set and varies WHICH wrong password is reconstructed, which is
+# the efficient way to sample the host-side decrypt. But the two acceptances of 2026-09-14 happened
+# inside a loop that also WIPED AND RE-INITIALISED the card between runs and minted a fresh share
+# set each time — so the card met each import with a PENDING DKEK domain, not a complete one, and
+# the password was new every time. If the acceptance depends on either, the efficient mode cannot
+# see it. This mode pays ~50s per sample to hold nothing constant.
+if [ "$DRILL_FAITHFUL" = 1 ]; then
+  [ -n "${HSM_SO_PIN:-}" ] && [ -n "${HSM_USER_PIN:-}" ] \
+    || die "--drill-faithful re-initialises the card between samples: HSM_SO_PIN and HSM_USER_PIN are required"
+  INIT_SH="${HSM_INIT_HARDENED_SH:-$REPO/qubes/scripts/hsm-init-hardened.sh}"
+  [ -r "$INIT_SH" ] || die "--drill-faithful needs $INIT_SH"
+  say "mode: drill-faithful — re-initialising the card and minting a fresh share set per sample"
+else
+  say "minting the share set (one PBKDF, ~25s)"
+  mint "$OUT/dkek.pbe" "$OUT/shares.txt" || die "could not create the share set"
+  chmod 600 "$OUT/dkek.pbe" "$OUT/shares.txt"
+fi
 
 refused=0; accepted=0; other=0; i=0
 printf 'sample\tcorrupt_at\tcorrupt_value\tverdict\texit\n' > "$OUT/ledger.tsv"
@@ -106,11 +135,25 @@ while [ "$i" -lt "$SAMPLES" ]; do
   # not how often a wrong one does. The corrupted position moves through the four fed shares, and
   # from sample 5 the value is random rather than the drill's zeros, which also separates "the
   # zeros are special" from "any wrong password does this".
-  CORRUPT_AT=$(( (i - 1) % 4 + 1 ))
-  if [ "$i" -le 4 ]; then
+  if [ "$DRILL_FAITHFUL" = 1 ]; then
+    # Exactly the drill: a wiped card with one DKEK share outstanding, a freshly minted set, and
+    # share 1 replaced by zeros.
+    HSM_SO_PIN="$HSM_SO_PIN" HSM_USER_PIN="$HSM_USER_PIN" \
+      perl -e 'alarm 200; exec @ARGV' -- bash "$INIT_SH" --reader "$READER" \
+        --expect-serial "$_probe_serial" --rrc off --dkek-shares 1 --retries 3 \
+        --label probe > "$OUT/init-$i.log" 2>&1 \
+      || { printf '%s\n' "  $i: init failed, see $OUT/init-$i.log" >&2; }
+    mint "$OUT/dkek.pbe" "$OUT/shares.txt" || die "sample $i: could not mint a share set"
+    chmod 600 "$OUT/dkek.pbe" "$OUT/shares.txt"
+    CORRUPT_AT=1
     CORRUPT_VALUE="00:00:00:00:00:00:00:00"
   else
-    CORRUPT_VALUE="$(od -An -N8 -tx1 /dev/urandom | tr -s ' ' | sed 's/^ //; s/ /:/g')"
+    CORRUPT_AT=$(( (i - 1) % 4 + 1 ))
+    if [ "$i" -le 4 ]; then
+      CORRUPT_VALUE="00:00:00:00:00:00:00:00"
+    else
+      CORRUPT_VALUE="$(od -An -N8 -tx1 /dev/urandom | tr -s ' ' | sed 's/^ //; s/ /:/g')"
+    fi
   fi
   export CORRUPT_AT CORRUPT_VALUE
   out="$(feed_shares "$OUT/shares.txt" 4 wrong | perl -e 'alarm 200; exec @ARGV' -- \
