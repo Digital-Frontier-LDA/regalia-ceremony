@@ -148,6 +148,15 @@ done
 out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --retries 0)"
 grep -q 'at least 1' <<<"$out" && P "--retries 0 is refused (it would lock the card on one wrong PIN)" \
   || F "--retries 0 was accepted"
+# BYTES, NOT CHARACTERS. 60 emoji are 60 characters and 240 bytes: the character count passes,
+# the TLV length byte and the Lc are then both computed from the wrong number, and the card has
+# already been wiped by the time the label write is malformed.
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 \
+        --label "$(printf '\xf0\x9f\x94\x91%.0s' $(seq 1 60))")"
+grep -q 'encodes to 240 bytes' <<<"$out" \
+  && P "a 60-character / 240-byte emoji label is refused on its BYTE length" \
+  || F "a 240-byte label passed a character-count check: $(tail -2 <<<"$out")"
+
 out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --label "$(printf 'x%.0s' $(seq 1 240))")"
 grep -q 'keep it under 200' <<<"$out" && P "an over-long label is refused, not truncated into a bad Lc" \
   || F "a label too long for a short APDU was accepted"

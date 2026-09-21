@@ -73,7 +73,11 @@ for n in "$DKEK_SHARES" "$RETRIES" "$PKA_KEYS" "$PKA_REQUIRED"; do
   [ "$n" -le 255 ] || die "$n does not fit in the single byte its TLV encodes (max 255)"
 done
 [ "$RETRIES" -ge 1 ] || die "--retries must be at least 1; 0 would lock the card on its first wrong PIN"
-[ "${#LABEL}" -le 200 ] || die "--label is ${#LABEL} bytes; keep it under 200 so the TokenInfo write stays a short APDU"
+# BYTES, NOT CHARACTERS. ${#LABEL} counts characters in a UTF-8 locale, so a 200-character label
+# can encode to far more than 200 bytes — and then the one-byte TLV length and the short-APDU Lc
+# are both wrong, after the card has already been wiped.
+_label_bytes="$(LC_ALL=C printf '%s' "$LABEL" | wc -c | tr -d ' ')"
+[ "$_label_bytes" -le 200 ] || die "--label encodes to $_label_bytes bytes; keep it under 200 so the TokenInfo write stays a short APDU"
 
 # The published pico-hsm example values must never reach a card that will hold anything. The same
 # list is in the JS and in the ceremony; it is repeated because a guard that lives only upstream is

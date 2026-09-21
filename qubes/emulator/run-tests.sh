@@ -24,10 +24,17 @@ set -uo pipefail
 # invisible: the summary said nothing was wrong and the runner disagreed.
 #
 # The staging battery had this preamble and this runner did not, so the same test passed there
-# (25 assertions) and crashed here. Falls through to the system python3 when the venv is absent, so
-# nothing breaks on a host that never made one.
-CEREMONY_VENV="${CEREMONY_VENV:-$HOME/.local/share/akash-hsm-venv}"
-[ -x "$CEREMONY_VENV/bin/python3" ] && PATH="$CEREMONY_VENV/bin:$PATH"
+# (25 assertions) and crashed here.
+#
+# IT ALSO LOOKED IN THE WRONG PLACE. This hard-coded ~/.local/share/akash-hsm-venv while
+# dev-image-bootstrap.sh creates /opt/dev-bin/regalia-venv — so on a freshly bootstrapped image the
+# venv was never found, the tier silently ran against the system python3, and six suites failed
+# with ModuleNotFoundError and "EVM derivation needs keccak256": failures that describe the
+# environment and say nothing about the code. tools/ceremony-python.sh now knows every location and
+# accepts one only after its interpreter IMPORTS the modules, and this REFUSES when none can — a
+# tier that cannot evaluate must not report results.
+. "$(cd "$(dirname "$0")/../.." && pwd)/tools/ceremony-python.sh"
+ceremony_python_require cvc mnemonic shamir_mnemonic Crypto || exit 2
 
 HERE="$(cd "$(dirname "$0")" && pwd)"          # …/emulator
 QUBES="$(cd "$HERE/.." && pwd)"                # …/qubes
@@ -203,6 +210,7 @@ say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine car
 "$HERE/tests/test-dev-image-bootstrap.sh" || suite_failed "test-dev-image-bootstrap.sh"
 "$HERE/tests/test-hsm-init-hardened.sh" || suite_failed "test-hsm-init-hardened.sh"
 "$HERE/tests/test-hsm-unwrap-key.sh" || suite_failed "test-hsm-unwrap-key.sh"
+"$HERE/tests/test-ceremony-python-resolver.sh" || suite_failed "test-ceremony-python-resolver.sh"
 python3 "$HERE/tests/test_dkek_encode_key.py" || suite_failed "test_dkek_encode_key.py"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"
@@ -365,6 +373,34 @@ say "booting emulator daemons natively (pcscd + vpcd + SLE-4442 + SoftHSM2 + cup
 source "$EMU_BIN/emu-boot.sh"
 boot_all
 trap 'stop_all' EXIT
+
+# THE DAEMON-BACKED SUITES DRIVE REAL TOOLS. Without them, route-coverage.sh reports seven route
+# FAILURES — "sle4442-manager info failed", "no PDF produced (cups-pdf)", "growisofs burn failed" —
+# which read as defects in the ceremony and are nothing of the kind: the host simply does not have
+# vsmartcard-vpcd, printer-driver-cups-pdf, xorriso or growisofs. Measured on the qualification box
+# 2026-09-21. Name what is missing, and refuse the daemon-backed tier rather than producing results
+# that describe the host. The suites that need no daemons have already run and reported honestly.
+missing_tools=()
+for t in vpcd-config cups-pdf xorriso growisofs; do
+  case "$t" in
+    cups-pdf)  [ -x /usr/lib/cups/backend/cups-pdf ] || command -v cups-pdf >/dev/null 2>&1 || missing_tools+=("printer-driver-cups-pdf");;
+    vpcd-config) command -v vpcd-config >/dev/null 2>&1 || [ -x /usr/sbin/vpcd ] || missing_tools+=("vsmartcard-vpcd");;
+    *) command -v "$t" >/dev/null 2>&1 || missing_tools+=("$t");;
+  esac
+done
+if [ "${#missing_tools[@]}" -gt 0 ]; then
+  printf '\n\033[1;31m========== REFUSING THE DAEMON-BACKED TIER ==========\033[0m\n' >&2
+  printf 'These suites drive real tools, and this host is missing: %s\n\n' "${missing_tools[*]}" >&2
+  printf '  Running them anyway reports route FAILURES that describe the host, not the ceremony.\n' >&2
+  printf '  Install them and re-run:\n\n      sudo %s --install-deps\n\n' "$0" >&2
+  printf '  or, for just these:      sudo apt-get install -y %s\n\n' "${missing_tools[*]}" >&2
+  printf '  (The host-runnable suites above ran and their results stand.)\n' >&2
+  suite_failed "daemon-backed tier (missing: ${missing_tools[*]})"
+  printf '\n\033[1;35m========== RESULT ==========\033[0m\n' >&2
+  printf 'SOME SUITES FAILED:\n'
+  for s in "${FAILED_SUITES[@]}"; do printf '  - %s\n' "$s"; done
+  exit 1
+fi
 
 say "ROUTE COVERAGE — every hardware route vs the emulators"
 "$HERE/tests/route-coverage.sh" || suite_failed "route-coverage.sh"

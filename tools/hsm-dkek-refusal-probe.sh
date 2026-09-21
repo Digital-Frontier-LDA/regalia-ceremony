@@ -142,7 +142,9 @@ while [ "$i" -lt "$SAMPLES" ]; do
       perl -e 'alarm 200; exec @ARGV' -- bash "$INIT_SH" --reader "$READER" \
         --expect-serial "$_probe_serial" --rrc off --dkek-shares 1 --retries 3 \
         --label probe > "$OUT/init-$i.log" 2>&1 \
-      || { printf '%s\n' "  $i: init failed, see $OUT/init-$i.log" >&2; }
+      || die "sample $i: the initializer failed (see $OUT/init-$i.log). Continuing would mint and
+  import into a card nobody confirmed was freshly initialised, and record the result as a
+  drill-faithful sample — a rate computed from runs that did not meet their own conditions."
     mint "$OUT/dkek.pbe" "$OUT/shares.txt" || die "sample $i: could not mint a share set"
     chmod 600 "$OUT/dkek.pbe" "$OUT/shares.txt"
     CORRUPT_AT=1

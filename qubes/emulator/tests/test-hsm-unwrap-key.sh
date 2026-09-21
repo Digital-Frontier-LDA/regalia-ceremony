@@ -30,12 +30,29 @@ for sw in ${STUB_SW:-9000 9000 9000 9000}; do
 done
 STUB
 chmod +x "$BIN/opensc-explorer"
+
+# The opensc-explorer stub is not the only child. Every helper the script runs — wc, grep, od, tr —
+# inherits the environment too, and an exported PIN is readable from /proc for as long as one lives.
+# This stub records what `wc` saw, then becomes the real wc so the byte counts stay honest.
+cat > "$BIN/wc" <<'STUB'
+#!/usr/bin/env bash
+# NO :? HERE. Tests that invoke the script directly set no ledger, and a stub that dies on its own
+# bookkeeping turns every one of them into a false failure about the script under test.
+[ -n "${STUB_HELPER_ENV:-}" ] && printf 'WC_PIN_IN_ENV=%s\n' "${HSM_USER_PIN:-<unset>}" >> "$STUB_HELPER_ENV"
+exec /usr/bin/wc "$@"
+STUB
+chmod +x "$BIN/wc"
 export PATH="$BIN:$PATH"
 
 run_unwrap(){
-  : > "$BIN/stdin.txt"; : > "$BIN/argv.txt"
-  env STUB_STDIN="$BIN/stdin.txt" STUB_ARGV="$BIN/argv.txt" HSM_USER_PIN=123456 "$@" \
-      bash "$UNWRAP" --reader 0 --key-id 2 --blob "$BIN/blob.bin" --label akash-funding 2>&1
+  : > "$BIN/stdin.txt"; : > "$BIN/argv.txt"; : > "$BIN/helperenv.txt"
+  local args=(--reader 0 --key-id 2 --blob "$BIN/blob.bin" --label akash-funding)
+  local envs=()
+  while [ $# -gt 0 ]; do case "$1" in *=*) envs+=("$1"); shift;; *) break;; esac; done
+  [ $# -gt 0 ] && args=("$@")
+  env STUB_STDIN="$BIN/stdin.txt" STUB_ARGV="$BIN/argv.txt" STUB_HELPER_ENV="$BIN/helperenv.txt" \
+      HSM_USER_PIN=123456 ${envs[@]+"${envs[@]}"} \
+      bash "$UNWRAP" "${args[@]}" 2>&1
 }
 apdu_at(){ grep -oE '^apdu [0-9A-Fa-f]+' "$BIN/stdin.txt" | awk '{print $2}' | sed -n "$1p" | tr 'a-f' 'A-F'; }
 
@@ -68,6 +85,39 @@ grep -q '313233343536' "$BIN/stdin.txt" && P "the VERIFY APDU carries the PIN" |
 grep -q '123456' "$BIN/argv.txt" && F "the PIN appears in the child's argv" || P "no PIN in the child's argv"
 grep -q 'PIN_IN_ENV=<unset>' "$BIN/stdin.txt" && P "and the child does not inherit it either" \
   || F "the child inherited HSM_USER_PIN: $(grep PIN_IN_ENV "$BIN/stdin.txt")"
+# NOT JUST THE CARD COMMAND. `env -u HSM_USER_PIN` on the opensc-explorer call left every other
+# helper — wc, grep, od — holding the PIN in its own environment, readable from /proc while it ran.
+if [ -s "$BIN/helperenv.txt" ]; then
+  grep -q 'WC_PIN_IN_ENV=123456' "$BIN/helperenv.txt" \
+    && F "a plain helper (wc) inherited HSM_USER_PIN — it is still exported" \
+    || P "plain helpers (wc) do not inherit it either — the PIN is off the environment entirely"
+else
+  F "the wc stub never ran, so this test proves nothing about helper environments"
+fi
+
+hdr "malformed numbers and outsized inputs are refused BEFORE the card is touched"
+refuses(){ # refuses <why> <expected message> <args...>
+  local why="$1" want="$2"; shift 2
+  local o; o="$(run_unwrap "$@")"; local rc=$?
+  : > "$BIN/stdin.txt.check"
+  if [ "$rc" -eq 0 ]; then F "$why: accepted (exit 0)"; return; fi
+  grep -qi -- "$want" <<<"$o" && P "$why" || F "$why: refused, but not for that reason: $o"
+  grep -q '^apdu' "$BIN/stdin.txt" && F "$why: an APDU was sent anyway" || true
+}
+refuses "--key-size 0 is refused (it would encode as an empty DER INTEGER, 02 00)"         "key-size must be between" --reader 0 --key-id 2 --key-size 0 --blob "$BIN/blob.bin" --label x123456
+head -c 20 /dev/urandom > "$BIN/tiny.bin"
+refuses "a 20-byte blob is refused — that is not a key blob"         "not a key blob" --reader 0 --key-id 2 --blob "$BIN/tiny.bin" --label akash-funding
+head -c 70000 /dev/urandom > "$BIN/huge.bin"
+refuses "a 70000-byte blob is refused — extended Lc tops out at 65535"         "tops out at 65535" --reader 0 --key-id 2 --blob "$BIN/huge.bin" --label akash-funding
+EMOJI="$(printf '\xf0\x9f\x94\x91%.0s' $(seq 1 30))"   # 30 emoji = 30 chars, 120 bytes
+refuses "a 30-character / 120-byte emoji label is refused on BYTES, not characters"         "encodes to 120 bytes" --reader 0 --key-id 2 --blob "$BIN/blob.bin" --label "$EMOJI"
+
+hdr "a leading-zero key id still addresses the right file (base 10, not octal)"
+out="$(run_unwrap --reader 0 --key-id 08 --blob "$BIN/blob.bin" --label akash-funding)"
+case "$(apdu_at 4)" in
+  00D7C408*) P "--key-id 08 writes EF C408 — read as decimal 8";;
+  *) F "--key-id 08 did not produce EF C408: $(apdu_at 4 | cut -c1-16) (octal parse?)";;
+esac
 
 hdr "every status word is checked, and named"
 out="$(run_unwrap STUB_SW="9000 63C2 9000 9000")"

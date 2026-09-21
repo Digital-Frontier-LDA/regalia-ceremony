@@ -39,23 +39,45 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# THE PIN STOPS BEING AN ENVIRONMENT VARIABLE HERE, before any helper runs. It arrives exported —
+# that is how the caller passes it — and every child this script spawns (grep, od, tr, wc) would
+# otherwise carry it in its own environment, readable from /proc for as long as it lives. `env -u`
+# on the card command alone was not enough; this removes it from the environment entirely and keeps
+# the value in a shell variable, which children do not inherit.
+USER_PIN="${HSM_USER_PIN:-}"
+export -n HSM_USER_PIN 2>/dev/null || true
+unset HSM_USER_PIN
+
 command -v opensc-explorer >/dev/null || die "opensc-explorer not found (install opensc)"
 [ -n "$READER" ] || die "--reader is required"
 [ -n "$BLOB" ] && [ -r "$BLOB" ] || die "--blob must name a readable key blob"
 [ -n "$LABEL" ] || die "--label is required: it is what PKCS#11 consumers match the key by"
-[ -n "${HSM_USER_PIN:-}" ] || die "HSM_USER_PIN is required (UNWRAP KEY needs the user PIN verified)"
+[ -n "$USER_PIN" ] || die "HSM_USER_PIN is required (UNWRAP KEY needs the user PIN verified)"
 case "$KEY_ID" in ""|*[!0-9]*) die "--key-id must be a number (1-255)";; esac
-[ "$KEY_ID" -ge 1 ] && [ "$KEY_ID" -le 255 ] || die "--key-id must be between 1 and 255"
 case "$KEY_SIZE" in *[!0-9]*|"") die "--key-size must be a number of bits";; esac
-grep -qE '^[0-9]{6,16}$' <<< "$HSM_USER_PIN" || die "HSM_USER_PIN must be 6-16 digits"
-[ "${#LABEL}" -le 100 ] || die "--label is too long for a short APDU"
+# BASE 10, EXPLICITLY. Bash arithmetic reads a leading zero as octal: `--key-id 08` is an invalid
+# octal literal that printf renders as 00, and `--key-size 0256` becomes 0xAE — a PrKD claiming a
+# 174-bit key. The digit check above passes both.
+KEY_ID=$(( 10#$KEY_ID ))
+KEY_SIZE=$(( 10#$KEY_SIZE ))
+[ "$KEY_ID" -ge 1 ] && [ "$KEY_ID" -le 255 ] || die "--key-id must be between 1 and 255"
+[ "$KEY_SIZE" -ge 8 ] && [ "$KEY_SIZE" -le 65535 ] || die "--key-size must be between 8 and 65535 bits"
+grep -qE '^[0-9]{6,16}$' <<< "$USER_PIN" || die "HSM_USER_PIN must be 6-16 digits"
+# Bytes, not characters: ascii_hex encodes bytes, so a 100-character emoji label is a 400-byte
+# UTF8String and both the TLV length and Lc overflow — after UNWRAP KEY has already stored the key.
+_label_bytes="$(LC_ALL=C printf '%s' "$LABEL" | wc -c | tr -d ' ')"
+[ "$_label_bytes" -le 100 ] || die "--label encodes to $_label_bytes bytes; keep it under 100 so the PrKD write stays a short APDU"
 
 ascii_hex(){ printf '%s' "$1" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F'; }
 tlv(){ printf '%s%02X%s' "$1" "$(( ${#2} / 2 ))" "$2"; }
 
+# THE SIZE IS CHECKED BEFORE THE FILE IS EXPANDED. A blob over 65535 bytes makes `%04X` emit five
+# digits and the extended Lc is then malformed — and hexing an arbitrary file into shell memory
+# first is its own bad idea.
+blob_len="$(LC_ALL=C wc -c < "$BLOB" | tr -d ' ')"
+[ "$blob_len" -ge 33 ] || die "$BLOB is only $blob_len bytes — that is not a key blob"
+[ "$blob_len" -le 65535 ] || die "$BLOB is $blob_len bytes; an extended-Lc command tops out at 65535"
 blob_hex="$(od -An -tx1 "$BLOB" | tr -d ' \n' | tr 'a-f' 'A-F')"
-blob_len=$(( ${#blob_hex} / 2 ))
-[ "$blob_len" -gt 32 ] || die "$BLOB is only $blob_len bytes — that is not a key blob"
 
 # The PKCS#15 PrivateECCKey description SmartCardHSM.buildPrkDforECC builds:
 #   A0 { SEQUENCE { UTF8String label }, SEQUENCE { OCTET STRING keyid, BIT STRING 07 20 80 },
@@ -69,7 +91,7 @@ prkd_id="$(tlv 30 "$(tlv 04 "$(printf '%02X' "$KEY_ID")")$(tlv 03 "072080")")"
 prkd_attr="$(tlv A1 "$(tlv 30 "$(tlv 30 "$(tlv 04 "")")$(tlv 02 "$size_hex")")")"
 prkd="$(tlv A0 "$prkd_label$prkd_id$prkd_attr")"
 
-pin_hex="$(ascii_hex "$HSM_USER_PIN")"
+pin_hex="$(ascii_hex "$USER_PIN")"
 verify_apdu="00200081$(printf '%02X' "$(( ${#pin_hex} / 2 ))")$pin_hex"
 # Extended Lc (00 hi lo): a 363-byte EC blob does not fit a short APDU.
 unwrap_apdu="$(printf '8074%02X9300%04X%s' "$KEY_ID" "$blob_len" "$blob_hex")"
@@ -79,7 +101,7 @@ prkd_apdu="00D7C4$(printf '%02X' "$KEY_ID")$(printf '%02X' "$(( ${#prkd_data} / 
 say "unwrapping $blob_len bytes into key id $KEY_ID as '$LABEL'"
 out="$(printf 'apdu 00A4040C0B%s\napdu %s\napdu %s\napdu %s\nquit\n' \
         "$AID" "$verify_apdu" "$unwrap_apdu" "$prkd_apdu" \
-       | env -u HSM_USER_PIN perl -e 'alarm 120; exec @ARGV' -- opensc-explorer -r "$READER" 2>&1)" || true
+       | perl -e 'alarm 120; exec @ARGV' -- opensc-explorer -r "$READER" 2>&1)" || true
 mapfile -t SW < <(sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$out" | tr 'a-f' 'A-F')
 
 # Four answers, in order, and each one is named: a run that reports success while the PIN was
