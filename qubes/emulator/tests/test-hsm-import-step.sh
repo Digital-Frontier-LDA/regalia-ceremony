@@ -127,14 +127,44 @@ open(S+"/oncard.der","wb").write(b"\x30"+bytes([len(body)])+body)
 open(S+"/oncard.key","w").write(hex(k))
 PY
 }
-reset(){ rm -f "$WORK/funding.p12" "$WORK/p12.pw" "$WORK/imported-pub.der" "$STATE"/oncard.*; \
-         printf '%s' "$MNEMONIC" > "$WORK/funding.mnemonic"; }
+# THE IMPORT IS MODELLED, LIKE THE CARD. This suite places a key on a modelled card out of band
+# and tests the guards and the proofs around it; the step itself now performs a real import
+# (regalia#486 — no Smart Card Shell), which needs a DKEK and a card. The stub stands in for that
+# one action and RECORDS its arguments, so these rows can assert the step actually attempted an
+# import. Before the step drove the import, nothing here could tell whether one had happened.
+export HSM_IMPORTER="$STATE/import-stub.sh"
+export IMPORT_STUB_LOG="$STATE/import-args.txt"
+cat > "$HSM_IMPORTER" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${IMPORT_STUB_LOG:?}"
+[ "${STUB_IMPORT_FAIL:-0}" = 1 ] && { echo "import stub: refusing on purpose" >&2; exit 1; }
+exit 0
+STUB
+chmod +x "$HSM_IMPORTER"
+
+reset(){ rm -f "$WORK/funding.p12" "$WORK/p12.pw" "$WORK/imported-pub.der" "$STATE"/oncard.* \
+               "$IMPORT_STUB_LOG"; \
+         printf '%s' "$MNEMONIC" > "$WORK/funding.mnemonic"
+         # The DKEK and its share file are the step's inputs, not its outputs: it refuses without
+         # them because there would be nothing to wrap the key under.
+         printf 'Salted__01234567' > "$WORK/dkek.pbe"
+         printf 'Prime       : e2:8c:4e:2a:93:cc:a8:77\nShare ID    : 1\nShare value : be:d9:2a:f6:96:43:c4:41\n' \
+           > "$WORK/dkek-shares.txt"
+         printf '648219' > "$WORK/hsm-user.pin"; }
 
 # =====================================================================================
 hdr "HAPPY PATH: container built, card holds the seed's key, address matches, signing proven"
 reset; place_on_card "$MNEMONIC"
 out="$(step_hsm_import 2>&1)"
 [ -s "$WORK/funding.p12" ] && P "PKCS#12 container built from the seed" || F "no container produced"
+[ -s "$IMPORT_STUB_LOG" ] && P "the step ATTEMPTED an import — it no longer hands the card work to an operator" \
+  || F "no import was attempted; the step only built a container"
+grep -q -- '--dkek-shares' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "…passing the DKEK share file, so the password is reconstructed and never typed" \
+  || F "the importer was called without --dkek-shares: $(cat "$IMPORT_STUB_LOG" 2>/dev/null)"
+grep -q -- '--pin-file' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "…and the PIN as a FILE, never in argv where ps would see it" \
+  || F "the PIN was not passed as a file"
 grep -qi "ADDRESS MATCH" <<< "$out" && P "card address matches the seed derivation" \
                                        || F "address-match proof did not run or failed"
 grep -qi "SIGN PROOF PASSED" <<< "$out" && P "card proven able to SIGN with the imported key" \
@@ -244,6 +274,24 @@ grep -qi "would ERASE it" <<< "$(echo "$out")" \
 grep -qi "IMPORT COMPLETE AND PROVEN" <<< "$(echo "$out")" \
   && F "BUG: declared success after refusing the hand-off" || P "no success claim after refusal"
 
+hdr "A FAILED IMPORT STOPS THE STEP — the proofs must not run against a stale card"
+# The card is modelled, so its state does not change when the import fails. If the step carried on
+# it would read the key that was already there and print ADDRESS MATCH and SIGN PROOF PASSED for
+# an import that did not happen — the most convincing possible false pass.
+reset; place_on_card "$MNEMONIC"
+out="$(STUB_IMPORT_FAIL=1 step_hsm_import 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && P "a failed import is a failed step (exit $rc)" || F "the step returned 0 after a failed import"
+grep -qi 'the import failed' <<<"$out" && P "…saying so" || F "the failure is not reported: $(tail -2 <<<"$out")"
+grep -qi 'ADDRESS MATCH' <<<"$out" \
+  && F "it printed ADDRESS MATCH after a failed import — proving a card state it did not create" \
+  || P "…and does NOT print the proofs, which would describe the card as it was before"
+
+hdr "MISSING DKEK: the step refuses rather than importing under nothing"
+reset; place_on_card "$MNEMONIC"; rm -f "$WORK/dkek.pbe"
+out="$(step_hsm_import 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'dkek' <<<"$out" \
+  && P "no DKEK is a refusal that names it" || F "ran with no DKEK: $(tail -2 <<<"$out")"
+
 hdr "DESTRUCTIVE-PROCEDURE GUARD: an unreadable target is not treated as blank"
 reset; place_on_card "$MNEMONIC"
 out="$(STUB_ENUM_FAIL=1 step_hsm_import 2>&1)"
@@ -278,7 +326,9 @@ grep -qi "IMPORT COMPLETE AND PROVEN" <<< "$(echo "$out")" \
 
 hdr "DEVICE-IDENTITY GUARD: an unreadable reader is not assumed to be the right device"
 reset; place_on_card "$MNEMONIC"
-out="$(STUB_ATR= step_hsm_import 2>&1)"
+# shellcheck disable=SC1007  # DELIBERATE: STUB_ATR is set to EMPTY for this one call, which is
+# the case under test — a reader that reports no ATR at all. It is not a missing assignment.
+out="$(STUB_ATR='' step_hsm_import 2>&1)"
 grep -qiE "no ATR from the reader|unidentified card" <<< "$out" \
   && P "fails closed when no ATR can be read" \
   || F "BUG: proceeded without identifying the card"

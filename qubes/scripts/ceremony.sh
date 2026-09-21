@@ -1246,7 +1246,12 @@ step_hsm_import() {
   # --pwd-shares-threshold/-total generates it, splits it, and prints only the shares. Verified on
   # DENK0404144 (2026-09-21): a password rebuilt from shares 2,4,5,6 produced the same key check
   # value the card reported after being fed shares 1,2,3,4 — EDE4B653C8280D28.
-  local importer="$HERE/hsm-import-key-nojvm.sh"
+  # HSM_IMPORTER exists so the emulator suite can model the import the way it already models the
+  # card, and — more to the point — so it can ASSERT the import was attempted. Before this step
+  # drove the import, test-hsm-import-step.sh could not tell whether one had happened at all; it
+  # placed a key on a modelled card out of band and checked the proofs. A seam that is only a
+  # default is not a weakening: an operator who can set this variable can edit this file.
+  local importer="${HSM_IMPORTER:-$HERE/hsm-import-key-nojvm.sh}"
   if [ ! -r "$importer" ]; then
     err "hsm-import-key-nojvm.sh is missing next to this script — cannot import without it."
     err "Do NOT fall back to Smart Card Shell here: this image is not built to carry a JRE."
