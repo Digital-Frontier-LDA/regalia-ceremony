@@ -211,6 +211,7 @@ say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine car
 "$HERE/tests/test-hsm-init-hardened.sh" || suite_failed "test-hsm-init-hardened.sh"
 "$HERE/tests/test-hsm-unwrap-key.sh" || suite_failed "test-hsm-unwrap-key.sh"
 "$HERE/tests/test-ceremony-python-resolver.sh" || suite_failed "test-ceremony-python-resolver.sh"
+"$HERE/tests/test-dkek-kcv-control.sh" || suite_failed "test-dkek-kcv-control.sh"
 python3 "$HERE/tests/test_dkek_encode_key.py" || suite_failed "test_dkek_encode_key.py"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"

@@ -107,6 +107,9 @@ while [ $# -gt 0 ]; do case "$1" in
 esac; shift; done
 [ -n "$MODE" ] || { sed -n '2,60p' "$0"; exit 2; }
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/hsm-bench-lock.sh"
+# kcv_of() — the same parse ceremony.sh uses, sourced from it so the two cannot drift. It is the
+# only thing needed from that file here, and ceremony.sh is a library at the top.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ceremony-kcv.sh"
 hsm_bench_lock_acquire wait || exit $?
 
 # Two handles, derived after parsing so --reader is actually visible. --reader wins; otherwise
@@ -611,6 +614,31 @@ new_ref(){ # $1=refs before  $2=refs after -> echoes the reference that appeared
 # cmd_key_wrap refuses with SW 6A88 ("Data object not found") when the DKEK domain is not
 # complete — dkeks != current_dkeks. That reads like a missing key but is a missing SHARE, so
 # check it explicitly and say which it is.
+# THE KEY CHECK VALUE, AND WHY THE DRILL NOW READS IT (regalia#460).
+#
+# `sc-hsm-tool --import-dkek-share` rebuilds a password from the typed shares and decrypts
+# dkek.pbe with it. A WRONG password leaves valid PKCS#7 padding about 1 time in 256, so the tool
+# can exit 0 having installed a DIFFERENT DKEK — no error, no clue. Measured over 180 wrong-share
+# imports on DENK0404144 (2026-09-21): 180 refusals, 0 acceptances, which excludes the systematic
+# fallback the drill's 2-in-30 suggested but is entirely consistent with 1/256.
+#
+# Exit status is therefore not integrity. The KCV is: two cards hold the same DKEK iff their key
+# check values match, and it is SHA-256(dkek)[:8], so the value recorded when the domain was first
+# built is exactly what a restore must reproduce. Comparing it turns a 1-in-256 probabilistic
+# control into a certain one, and — when the negative control does fire — says which side accepted
+# the wrong material instead of leaving the question open the way the #397 loop did.
+#
+# A card that cannot report one (a Pico prints all zeros; kcv_of rejects that) yields UNVERIFIED,
+# never a PASS: an unreadable KCV is the absence of evidence, not evidence of agreement.
+dkek_kcv_now(){                      # -> prints the lowercase KCV, or returns 1
+  local t; t="$(mktemp)"
+  sc-hsm-tool --reader "$READER" > "$t" 2>&1
+  local k; k="$(kcv_of "$t")"; local rc=$?
+  rm -f "$t"
+  [ "$rc" -eq 0 ] && [ -n "$k" ] || return 1
+  printf '%s' "$k"
+}
+
 assert_dkek_complete(){ # $1=context for the message
   local out
   out="$(sc-hsm-tool --reader "$READER" 2>&1)"
@@ -671,6 +699,11 @@ if [ "$AUTO" = 1 ]; then
     || F "the import never asked for shares — the prompt path the fix depends on is absent"
   if [ "$rc" = 0 ]; then
     restore_ok=1; P "break-glass DKEK imported (rep #1, shares fed programmatically)"
+    # The value step 1's restore has to reproduce. Recorded here, while the domain is known good.
+    BREAKGLASS_KCV="$(dkek_kcv_now || true)"
+    [ -n "${BREAKGLASS_KCV:-}" ] \
+      && printf '  break-glass DKEK key check value: %s (step 1 must reproduce it)\n' "$BREAKGLASS_KCV" \
+      || printf '  this card reports no usable DKEK key check value — step 1 will say UNVERIFIED\n'   
   else
     F "the fed DKEK import failed with CORRECT shares: $(printf '%s' "$out" | tail -1)"
   fi
@@ -680,6 +713,11 @@ else
   printf '  any 4 of the 6 shares from %s.\n' "$SHARES_FILE"
   if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 < /dev/tty; then
     restore_ok=1; P "break-glass DKEK imported (rep #1)"
+    # The value step 1's restore has to reproduce. Recorded here, while the domain is known good.
+    BREAKGLASS_KCV="$(dkek_kcv_now || true)"
+    [ -n "${BREAKGLASS_KCV:-}" ] \
+      && printf '  break-glass DKEK key check value: %s (step 1 must reproduce it)\n' "$BREAKGLASS_KCV" \
+      || printf '  this card reports no usable DKEK key check value — step 1 will say UNVERIFIED\n'   
   else
     F "the interactive DKEK import failed with CORRECT shares — check the share file and retry"
   fi
@@ -728,6 +766,19 @@ if [ "$AUTO" = 1 ]; then
     # Keep the evidence. This fired once in the #397 repro loop and the output was discarded, so that
     # occurrence cannot say which side accepted the wrong share: sc-hsm-tool's host-side decrypt of
     # dkek.pbe under the reconstructed password, or the card.
+    # WHICH SIDE ACCEPTED IT. A host-side PKCS#7 padding collision (about 1 in 256, regalia#460)
+    # installs a DIFFERENT DKEK and the card's KCV then differs from the one recorded above. A
+    # card-side integrity bypass would leave the SAME domain. The #397 loop could not tell these
+    # apart because it discarded the output; this records the distinguishing fact at the moment.
+    _neg_kcv="$(dkek_kcv_now || true)"
+    if [ -n "${BREAKGLASS_KCV:-}" ] && [ -n "$_neg_kcv" ]; then
+      if [ "$_neg_kcv" = "$BREAKGLASS_KCV" ]; then
+        printf '  the card holds the SAME DKEK (%s): the wrong share was accepted card-side.\n' "$_neg_kcv"
+      else
+        printf '  the card now holds a DIFFERENT DKEK (%s, was %s): a host-side decrypt of dkek.pbe\n' "$_neg_kcv" "$BREAKGLASS_KCV"
+        printf '  under a wrong reconstructed password survived padding validation — the ~1/256 path in regalia#460.\n'
+      fi
+    fi
     printf '  sc-hsm-tool exited 0 with share 1 corrupted. Its last lines (hex elided):\n'
     printf '%s\n' "$out" | elide_hex | grep -v '^[[:space:]]*$' | tail -12 | sed 's/^/    | /'
   elif grep -qi 'Error decrypting DKEK share' <<< "$out"; then
@@ -756,6 +807,17 @@ if [ "$AUTO" = 1 ]; then
       --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then
     P "4-of-6 shares restored the DKEK — the corrected command works as documented"
+    # EXIT STATUS IS NOT INTEGRITY (regalia#460). --import-dkek-share exits 0 whenever the
+    # decrypted share passes padding validation, which a WRONG password does about 1 time in 256.
+    # The key check value is what says the restored domain is the domain that was built.
+    _pos_kcv="$(dkek_kcv_now || true)"
+    if [ -z "${BREAKGLASS_KCV:-}" ] || [ -z "$_pos_kcv" ]; then
+      U "restored DKEK identity not confirmed by key check value (this card reports none) — the carrier unwrap below is the gate"
+    elif [ "$_pos_kcv" = "$BREAKGLASS_KCV" ]; then
+      P "…and it is the SAME DKEK: key check value $_pos_kcv matches the one recorded at build time"
+    else
+      F "the restore exited 0 but installed a DIFFERENT DKEK (kcv $_pos_kcv, expected $BREAKGLASS_KCV) — a wrong password survived padding validation"
+    fi
   else
     F "the correct 4 shares did NOT restore the DKEK — the break-glass path is broken: $(printf '%s' "$out" | tail -1)"
   fi
@@ -763,6 +825,17 @@ else
   printf '  Press Enter to begin the correct restore (rep #2 — 4 CORRECT shares). > '; IFS= read -r _
   if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 < /dev/tty; then
     P "4-of-6 shares restored the DKEK — the corrected command works as documented"
+    # EXIT STATUS IS NOT INTEGRITY (regalia#460). --import-dkek-share exits 0 whenever the
+    # decrypted share passes padding validation, which a WRONG password does about 1 time in 256.
+    # The key check value is what says the restored domain is the domain that was built.
+    _pos_kcv="$(dkek_kcv_now || true)"
+    if [ -z "${BREAKGLASS_KCV:-}" ] || [ -z "$_pos_kcv" ]; then
+      U "restored DKEK identity not confirmed by key check value (this card reports none) — the carrier unwrap below is the gate"
+    elif [ "$_pos_kcv" = "$BREAKGLASS_KCV" ]; then
+      P "…and it is the SAME DKEK: key check value $_pos_kcv matches the one recorded at build time"
+    else
+      F "the restore exited 0 but installed a DIFFERENT DKEK (kcv $_pos_kcv, expected $BREAKGLASS_KCV) — a wrong password survived padding validation"
+    fi
   else
     F "the correct 4 shares did NOT restore the DKEK — the break-glass path is broken"
   fi
