@@ -207,6 +207,41 @@ rc="$(RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS
 [ "$rc" != 0 ] && P "no deriver present -> the address CANNOT BE EVALUATED -> failure" \
                || F "the address check was silently skipped when the deriver was missing"
 
+hdr "A card the staging registry still lists as wipeable is not commissionable"
+# Future-production units are registered `staging` so the drills that qualify them can run, which
+# means automation may erase them on schedule. Commissioning is where that has to stop: a
+# production key on a card the fleet may wipe is not custody. The way out of the wipe list is
+# enforced here rather than remembered (regalia#481).
+REG_STAGING="$FAKE/reg-staging.json"
+cat > "$REG_STAGING" <<'JSON'
+{"schema": "regalia.staging-hardware/v1", "environment": "staging", "devices": [
+  {"id": "n-a", "role": "staging", "kind": "nitrokey-hsm2", "token_serial": "SER123",
+   "devaut_chr": "DEVCHR001", "devaut_sha256": "aabbcc"}
+]}
+JSON
+REG_ABSENT="$FAKE/reg-absent.json"
+cat > "$REG_ABSENT" <<'JSON'
+{"schema": "regalia.staging-hardware/v1", "environment": "staging", "devices": [
+  {"id": "p-a", "role": "staging", "kind": "pico-hsm2", "token_serial": "ESPAAAAAAAA",
+   "board_id": "C858BA452202E14A", "debug_probe": {"kind": "raspberry-pi-debug-probe", "serial": "E6647C74038B9430"}}
+]}
+JSON
+cc_reg(){ RRC_STATE=disabled FAKE_SERIAL=SER123 SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" \
+  HSM_STAGING_REGISTRY_FILE="$1" bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC \
+  >"$FAKE/out9" 2>&1; echo $?; }
+
+rc="$(cc_reg "$REG_STAGING")"
+[ "$rc" != 0 ] && P "a card still listed staging is REFUSED at commissioning" \
+               || F "a card automation may wipe was commissioned"
+grep -qi 'STILL LISTED staging' "$FAKE/out9" && P "…and the refusal names the registry entry" || F "the refusal is not named"
+rc="$(cc_reg "$REG_ABSENT")"
+[ "$rc" = 0 ] && P "a card the registry does not list passes the interlock" \
+              || { F "a card outside the registry was refused"; sed 's/^/      /' "$FAKE/out9"; }
+rc="$(cc_reg /nonexistent/registry.json)"
+grep -qi 'interlock could not run' "$FAKE/out9" \
+  && P "no registry at all says so, rather than implying the card is clear" \
+  || F "a missing registry was silently treated as 'not listed'"
+
 hdr "B3 at the rack: found and could-not-scan are DIFFERENT failures"
 # Collapsing them sends an operator hunting for a share that does not exist while the real fault —
 # a scan that never ran — goes unnamed. Both must still refuse the card.

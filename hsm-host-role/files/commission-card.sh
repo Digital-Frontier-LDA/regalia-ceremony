@@ -92,6 +92,49 @@ else
 fi
 
 # =================================================================================================
+hdr "The staging registry must not still list this card as wipeable"
+# THE WAY OUT OF THE WIPE LIST, ENFORCED RATHER THAN REMEMBERED (regalia#481, decision 2026-09-21).
+# Future-production units are registered as `staging` so the drills that qualify them can run —
+# which means automation may erase them on schedule. Commissioning is the moment that stops being
+# acceptable: after this, the card holds production keys. So the last step of qualification is
+# removing it from the registry, and this refuses to certify a card the registry still lists.
+_cc_reg="${HSM_STAGING_REGISTRY_FILE:-}"
+if [ -z "$_cc_reg" ]; then
+  for c in "$HERE/../../tools/hsm-staging-registry.json" /etc/regalia/hsm-staging-registry.json; do
+    [ -r "$c" ] && { _cc_reg="$c"; break; }
+  done
+fi
+if [ -z "$EXPECT_SERIAL" ]; then
+  : # already failed above; nothing to look up
+elif [ -z "$_cc_reg" ] || [ ! -r "$_cc_reg" ]; then
+  printf '  \033[33mNOTE\033[0m no staging registry found, so the "still wipeable" interlock could not run.\n'
+  printf '        Point HSM_STAGING_REGISTRY_FILE at the fleet registry to enforce it here.\n'
+elif ! command -v python3 >/dev/null; then
+  F "a staging registry is present but python3 is not — the wipeable interlock CANNOT BE EVALUATED"
+else
+  _cc_role="$(python3 - "$_cc_reg" "$EXPECT_SERIAL" <<'PYREG'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    hits = [d for d in (data.get("devices") or [])
+            if isinstance(d, dict) and d.get("token_serial") == sys.argv[2]]
+    print(hits[0].get("role") if len(hits) == 1 else ("ambiguous" if hits else "absent"))
+except Exception:
+    print("unreadable")
+PYREG
+)"
+  case "$_cc_role" in
+    absent)     P "the staging registry does not list $EXPECT_SERIAL — it is not wipeable by automation";;
+    staging)    F "THIS CARD IS STILL LISTED staging IN $_cc_reg — the drills may wipe it on schedule."
+                printf '     Remove the entry in a reviewed change BEFORE putting the card into service;\n'
+                printf '     a production key on a card automation may erase is not custody.\n';;
+    unreadable) F "the staging registry at $_cc_reg could not be read — the interlock CANNOT BE EVALUATED";;
+    ambiguous)  F "$EXPECT_SERIAL is listed more than once in $_cc_reg — refusing to interpret it";;
+    *)          P "the staging registry lists $EXPECT_SERIAL with role '$_cc_role', not staging";;
+  esac
+fi
+
+# =================================================================================================
 hdr "B6 — the card has RESET RETRY COUNTER disabled"
 # THE CHECK THAT MAKES THE D3 RULING REAL. With RRC enabled, the SO-PIN resets the user PIN without
 # touching keys, at any time, and `--wrap-key` then exports everything. `sc-hsm-tool --initialize`

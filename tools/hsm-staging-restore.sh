@@ -88,7 +88,13 @@ _sr_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/hsm-reader-select
 # is the one this script AIMED at, not that aiming there was permissible. The committed registry
 # (tools/hsm-staging-registry.json) is that permission, default-deny: unlisted, prod, or an unreadable
 # registry all refuse here, before a single APDU is spent.
-if command -v hsm_assert_staging >/dev/null 2>&1; then
+# hsm_assert_staging_card, not hsm_assert_staging: the role gate says a card with this SERIAL may
+# be wiped, and a serial is self-reported. For a registered Nitrokey the card must also match the
+# C.DevAut digest the registry pins, which covers the device public key (regalia#481). A Pico entry
+# has no pin and passes straight through — its identity is proven over SWD instead.
+if command -v hsm_assert_staging_card >/dev/null 2>&1; then
+    hsm_assert_staging_card "$RESTORE_SERIAL" || exit 1
+elif command -v hsm_assert_staging >/dev/null 2>&1; then
     hsm_assert_staging "$RESTORE_SERIAL" || exit 1
 else
     die "the role registry gate is unavailable (tools/hsm-reader-select.sh did not source) — a wipe script does not run without it"

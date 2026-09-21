@@ -179,6 +179,100 @@ check "under PYTHONOPTIMIZE, the loader still rejects a non-staging registry" 1 
   env PYTHONOPTIMIZE=1 HSM_STAGING_REGISTRY_FILE="$REG_BADROLE" \
   bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1'
 
+printf '\n\033[1m### a Nitrokey is registered by what it can PROVE, not by a board it does not have\033[0m\n'
+# A Pico is an RP2350 board with an OTP id and a debug probe; a Nitrokey HSM 2 has neither, and its
+# identity is C.DevAut in EF 2F02. Requiring board_id and debug_probe of every device is why the
+# authorised units could not be listed at all, and an unlistable card is one every drill refuses
+# (regalia#481).
+REG_NK="$BIN/registry-nitrokey.json"
+cat > "$REG_NK" <<'JSON'
+{"schema": "regalia.staging-hardware/v1", "environment": "staging", "devices": [
+  {"id": "pico-a", "role": "staging", "kind": "pico-hsm2", "token_serial": "ESPAAAAAAAA",
+   "board_id": "C858BA452202E14A", "debug_probe": {"kind": "raspberry-pi-debug-probe", "serial": "E6647C74038B9430"}},
+  {"id": "nk-a", "role": "staging", "kind": "nitrokey-hsm2", "token_serial": "DENK0404144",
+   "devaut_chr": "DENK040414400000",
+   "devaut_sha256": "1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4"}
+]}
+JSON
+check "a Nitrokey entry loads, and the board map stays Pico-only" 0 "ESPAAAAAAAA:C858BA452202E14A" \
+  env -u HSM_BOARD_MAP -u HSM_CI_PROBE_MAP -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$REG_NK" \
+  bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1 && printf "%s" "$HSM_BOARD_MAP"'
+
+check "…and its DevAut pin is exported for the wipe-time identity check" 0 "DENK0404144:1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4" \
+  env -u HSM_BOARD_MAP -u HSM_CI_PROBE_MAP -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$REG_NK" \
+  bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1 && printf "%s" "$HSM_DEVAUT_MAP"'
+
+check "the registry answers staging for the Nitrokey, so the drills stop refusing it" 0 "staging" \
+  env HSM_STAGING_REGISTRY_FILE="$REG_NK" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_role_of DENK0404144'
+
+# Each malformed shape must be a refusal: this file decides which cards may be erased.
+for bad in \
+  's/"DENK0404144"/"DENK04041"/' \
+  's/"1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4"/"1B7763B72B871F37A4CC43808B72D65A915A488420FA18C0137F8389260D9AA4"/' \
+  's/"devaut_sha256"/"devaut_digest"/' \
+  's/"devaut_chr": "DENK040414400000",//' \
+  ; do
+  BADREG="$BIN/registry-nk-bad.json"; sed "$bad" "$REG_NK" > "$BADREG"
+  check "a malformed Nitrokey entry is refused [$bad]" 1 "" \
+    env -u HSM_BOARD_MAP -u HSM_CI_PROBE_MAP -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$BADREG" \
+    bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1'
+done
+
+# A board id on a Nitrokey entry is a copy-paste from the Pico rows, and accepting it would let the
+# flash tools aim SWD at a card with no debug port.
+BADREG="$BIN/registry-nk-board.json"
+python3 - "$REG_NK" "$BADREG" <<'PYADD'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d["devices"][1]["board_id"] = "8625B32841D722E2"
+json.dump(d, open(sys.argv[2], "w"))
+PYADD
+check "a Nitrokey entry carrying a board_id is refused" 1 "" \
+  env -u HSM_BOARD_MAP -u HSM_CI_PROBE_MAP -u HSM_DEVAUT_MAP HSM_STAGING_REGISTRY_FILE="$BADREG" \
+  bash -c '. "'"$REPO"'/tools/hsm-staging-registry.sh"; hsm_staging_registry_load >/dev/null 2>&1'
+
+printf '\n\033[1m### the DevAut pin is checked against the CARD before a wipe\033[0m\n'
+# A serial is self-reported; a substituted genuine Nitrokey reports whatever its issuer put there.
+# The pin covers the device public key, so the card has to produce it.
+cat > "$BIN/devaut-read-stub.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'DEVAUT_CHR=DENK040414400000
+'
+printf 'DEVAUT_SHA256=%s
+' "${STUB_DEVAUT_SHA:-1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4}"
+STUB
+chmod +x "$BIN/devaut-read-stub.sh"
+# The card is named through the same stub readers the rest of this suite uses, so these checks do
+# not depend on what happens to be plugged into the machine running them.
+PIN_ENV=(FAKE_READERS="0" FAKE_SERIAL_0=DENK0404144
+         HSM_DEVAUT_MAP="DENK0404144:1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4"
+         HSM_DEVAUT_READ_SH="$BIN/devaut-read-stub.sh")
+
+check "a card whose certificate matches the pin may be wiped" 0 "" \
+  env "${PIN_ENV[@]}" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_assert_devaut_pinned DENK0404144 2>/dev/null'
+
+check "a card whose certificate does NOT match is refused" 1 "" \
+  env "${PIN_ENV[@]}" STUB_DEVAUT_SHA=0000000000000000000000000000000000000000000000000000000000000000 \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_assert_devaut_pinned DENK0404144 2>/dev/null'
+
+check "a Nitrokey with NO pin in the registry is refused, not waved through" 1 "" \
+  env -u HSM_DEVAUT_MAP FAKE_READERS="0" FAKE_SERIAL_0=DENK0404144 HSM_DEVAUT_READ_SH="$BIN/devaut-read-stub.sh" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_assert_devaut_pinned DENK0404144 2>/dev/null'
+
+# No reader answers with that serial: the identity the registry pins cannot be checked, and an
+# unevaluated identity check is not a passed one.
+check "a reader that cannot be resolved is CANNOT-EVALUATE, not a pass" 1 "" \
+  env FAKE_READERS="0" FAKE_SERIAL_0=ESPAAAAAAAA \
+      HSM_DEVAUT_MAP="DENK0404144:1b7763b72b871f37a4cc43808b72d65a915a488420fa18c0137f8389260d9aa4" \
+      HSM_DEVAUT_READ_SH="$BIN/devaut-read-stub.sh" \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_assert_devaut_pinned DENK0404144 2>/dev/null'
+
+check "a Pico serial has no pin to check and passes straight through" 0 "" \
+  env -u HSM_DEVAUT_MAP \
+  bash -c '. "'"$UNDER_TEST"'"; hsm_assert_devaut_pinned ESPAAAAAAAA 2>/dev/null'
+
 legacy_roles="$REPO/tools/hsm-roles"".env"
 if [ -e "$legacy_roles" ]; then no "$legacy_roles still exists — a second registry the gate no longer reads"; else ok "no second role registry ships beside the staging registry"; fi
 
