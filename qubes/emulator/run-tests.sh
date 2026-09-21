@@ -201,6 +201,7 @@ say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine car
 "$HERE/tests/test-commission-card.sh" || suite_failed "test-commission-card.sh"
 "$HERE/tests/test-tool-helper-paths.sh" || suite_failed "test-tool-helper-paths.sh"
 "$HERE/tests/test-dev-image-bootstrap.sh" || suite_failed "test-dev-image-bootstrap.sh"
+"$HERE/tests/test-hsm-init-hardened.sh" || suite_failed "test-hsm-init-hardened.sh"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"
 "$HERE/tests/test-pka-threshold.sh" || suite_failed "test-pka-threshold.sh"
