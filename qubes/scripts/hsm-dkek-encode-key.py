@@ -215,7 +215,11 @@ def main() -> int:
     with os.fdopen(fd, "wb") as fh:
         fh.write(blob)
     kcv, _, _ = dkek_keys(dkek)
+    # The key size is printed so the caller does not have to assume one. It goes into the PrKD,
+    # which is what every PKCS#11 consumer reads; a description that disagrees with the key is
+    # exactly the mismatch this path exists to avoid, and "probably 256" is not a measurement.
     print(f"wrapped {key.curve.name} key: {len(blob)} bytes -> {args.out}")
+    print(f"key size: {key.curve.key_size}")
     if args.print_kcv:
         print(f"dkek kcv: {kcv.hex()}")
     return 0

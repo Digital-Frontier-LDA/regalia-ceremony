@@ -39,6 +39,13 @@ err()  { printf '   \033[31mFAIL %s\033[0m\n' "$1"; }
 ask()  { local a; read -r -p "   $1 [y/N] " a; [ "$a" = y ] || [ "$a" = Y ]; }
 pause(){ read -r -p "   press Enter to continue… " _; }
 show() { printf '   \033[36m$ %s\033[0m\n' "$1"; }   # display a command, not run it
+# eval IS LOAD-BEARING HERE, and shellcheck's SC2294 does not apply. Callers pass a whole shell
+# COMMAND as one string, including pipelines, redirections, subshells and && chains — see the
+# feed_dkek_shares | sc-hsm-tool pipelines, `ssss-split … < '$f' > '$WORK/shares.txt'`, and the
+# `( cd … && find … | xargs … )` manifest line. Dropping eval would run those words as a command
+# name and its arguments. The string is also what show() prints, so the operator approves exactly
+# what runs.
+# shellcheck disable=SC2294
 run()  { show "$*"; ask "run it?" && { eval "$@"; return $?; } || { warn "skipped"; return 100; }; }
 # Like run(), but ALSO tees the tool's output to $1 so a later step can parse it (the DKEK
 # key check value) without hiding anything from the operator. Returns the eval's own status,
@@ -46,34 +53,14 @@ run()  { show "$*"; ask "run it?" && { eval "$@"; return $?; } || { warn "skippe
 run_tee() {
   local out="$1"; shift
   show "$*"
+  # shellcheck disable=SC2294  # same as run(): the argument is a shell command string, not argv
   if ask "run it?"; then eval "$@" 2>&1 | tee "$out"; return "${PIPESTATUS[0]}"; fi
   warn "skipped"; return 100
 }
 
-# Extract the DKEK key check value from captured sc-hsm-tool output. OpenSC prints
-# "DKEK key check value : <hex>"; the emulator model prints "KCV <hex>". Accept either.
-kcv_of() {
-  [ -s "${1:-}" ] || return 1
-  local kcv
-  # Normalise to LOWERCASE. The KCV is later compared with a string equality test to decide
-  # whether two devices share a DKEK domain, and different producers print different case
-  # (the emulator model uppercases, OpenSC lowercases). Without folding, the SAME key check
-  # value reads as a mismatch and aborts the clone path on a correctly-cloned pair.
-  kcv="$(grep -oiE '(key check value|kcv)[[:space:]:.=]*[0-9a-f]{6,}' "$1" | tail -1 \
-    | grep -oiE '[0-9a-f]{6,}$' | tr 'A-F' 'a-f')"
-  [ -n "$kcv" ] || return 1
-  # An ALL-ZERO KCV is not a key check value, it is the absence of one. Measured 2026-07-29: a
-  # Pico HSM (firmware 6.6) reports "DKEK key check value : 0000000000000000" even for a domain
-  # populated with a random share whose correctly-derived KCV was DA4BF33D408C5C57 — it simply
-  # does not compute the field. Returning it would make two UNRELATED devices compare EQUAL and
-  # print "same domain confirmed", which is a false assurance drawn from no evidence. Fail the
-  # parse instead, so the caller takes its existing "could not parse → warn, do not block" path
-  # and the unwrap + restored-pubkey byte-compare stays the real gate.
-  case "$kcv" in
-    *[!0]*) printf '%s' "$kcv" ;;
-    *) return 1 ;;
-  esac
-}
+# kcv_of() lives in ceremony-kcv.sh, sourced here, because hsm-recovery-drill.sh needs the same
+# parse and a second copy of it would be free to drift.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ceremony-kcv.sh"
 
 # Feed captured --create-dkek-share output to `sc-hsm-tool --import-dkek-share … --pwd-shares-total N`
 # in the order OpenSC 0.27.1 reads it: the prime once, then for each share one blank line (its
@@ -314,8 +301,12 @@ pick_printer() {
 # arg1 = human label, arg2 = path to a file holding the secret string (one line).
 print_share() {
   local label="$1" secret_file="$2"
-  local png="$WORK/$(echo "$label" | tr ' /' '__').png"
-  local txt="$WORK/$(echo "$label" | tr ' /' '__').txt"
+  # Declared and assigned separately: `local x="$(…)"` makes the exit status that of `local`,
+  # which always succeeds, so a failing substitution would be invisible here (SC2155).
+  local slug png txt
+  slug="$(printf '%s' "$label" | tr ' /' '__')"
+  png="$WORK/$slug.png"
+  txt="$WORK/$slug.txt"
   # -l H = 30% Reed-Solomon error correction, the HIGHEST of qrencode's four levels. qrencode
   # DEFAULTS TO L (7%), which is the wrong trade for a backup meant to outlive its operator:
   # a crease through the symbol, a coffee ring, foxing, or flaked toner over ~8% of the modules
@@ -1167,6 +1158,7 @@ hsm_pin_tries_left() {
   [ -n "$n" ] && echo "$n" || echo "?"
 }
 
+# shellcheck disable=SC2120  # the parameter is OPTIONAL (the mnemonic file, defaulted to $WORK/funding.mnemonic); the menu calls this with none, which is the intended path
 step_hsm_import() {
   b "Import the seed-derived funding key into the HSM (supported custody path)"
   # THE POINT: the key is derived FROM the seed that lives 4-of-6 on metal, so the HSM protects
@@ -1343,6 +1335,7 @@ step_hsm_import() {
   warn "(They are in the RAM workdir and go on exit, but do not leave them lying there mid-ceremony.)"
 }
 
+# shellcheck disable=SC2120  # the parameter is OPTIONAL (the share to write, defaulted to empty and prompted for); the menu calls this with none, which is the intended path
 step_chipcard() {
   b "Write a SLIP-39 share to an SLE-4442 chip card"
   # WHY A SHARE AND NOT THE PAYLOAD: an SLE-4442 has 256 bytes of main memory. A realistic

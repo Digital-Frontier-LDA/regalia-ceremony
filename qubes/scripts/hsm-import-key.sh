@@ -30,7 +30,14 @@ DKEK_PW="${HSM_DKEK_PW_IN:-}"
 PIN_FILE="${HSM_USER_PIN_FILE:-}"
 SLOT="${HSM_SLOT:-}"
 READER="${HSM_READER:-}"
+# THE DEFAULT POINTED AT THE WRONG DIRECTORY. The tarball unpacks as scsh-3.18.77/scsh-3.18.77/,
+# and scriptrunner is in the INNER one — so this default produced `./scriptrunner: No such file or
+# directory` from inside a `cd`, on stderr, while the drill reported only "key import failed:" with
+# an empty reason. Measured 2026-09-21 mid-drill. Accept either layout, and REFUSE with the reason
+# named when neither has it: a missing interpreter is not an import failure, and reporting it as
+# one sends whoever reads the transcript looking at the card.
 SCSH="${SCSH_HOME:-$HOME/tools/scsh-3.18.77}"
+[ -x "$SCSH/scriptrunner" ] || [ ! -x "$SCSH/scsh-3.18.77/scriptrunner" ] || SCSH="$SCSH/scsh-3.18.77"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [ $# -gt 0 ]; do
@@ -112,6 +119,27 @@ else
     # Left UNSET rather than set to an empty array: `"${a[@]}"` on an empty array is an
     # unbound-variable error under `set -u` on bash 3.2, which is still /bin/bash on macOS.
     inf "slot: (single token attached)"
+fi
+
+# AFTER THE ARGUMENTS AND THE CARD CHOICE, BEFORE ANYTHING IS WRITTEN. Discovering there is no
+# interpreter after writing to a card is a bad order to fail in — the drill had already initialised
+# the card when the import died on a missing ./scriptrunner. But it must come AFTER the slot guard
+# above, not before it: placed first, this refused on a CI runner with no Smart Card Shell before
+# --slot was ever considered, and test-fleet-device-selection.sh read the word "Refusing" as the
+# slot guard firing. Checking the interpreter is not a reason to skip checking which card.
+if [ ! -x "$SCSH/scriptrunner" ]; then
+    err "no Smart Card Shell at $SCSH (no executable scriptrunner there)"
+    printf '  The DKEK-wrapped import path runs hsm-auto-import.js under Smart Card Shell.\n' >&2
+    printf '  Point SCSH_HOME at the directory that CONTAINS scriptrunner — note the tarball\n' >&2
+    printf '  unpacks as scsh-3.18.77/scsh-3.18.77/, so it is usually the inner one:\n\n' >&2
+    printf '      export SCSH_HOME=$HOME/tools/scsh-3.18.77/scsh-3.18.77\n\n' >&2
+    printf '  Stopping here rather than reporting this as a failed import — the card is not at fault.\n' >&2
+    # NOT the word "REFUSING". In this script that word belongs to the destructive-card-selection
+    # guard above, and test-fleet-device-selection.sh identifies that guard by it. A second,
+    # unrelated refusal wearing the same word made a CI runner without Smart Card Shell look like
+    # the slot guard firing — and two different refusals sharing a signature is confusing to a
+    # reader long before it is confusing to a test.
+    exit 2
 fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

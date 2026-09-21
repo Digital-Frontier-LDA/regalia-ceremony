@@ -57,11 +57,33 @@ P11=(pkcs11-tool --module "$MODULE" --slot-index "$SLOT")
 printf '### nitrokey-qualify — token serial %s, slot %s, module %s\n' "$SERIAL" "$SLOT" "$MODULE"
 
 # ---- #448: device certificate as a PKCS#11 CKO_CERTIFICATE ------------------------------------
-cert_count="$("${P11[@]}" --list-objects --type cert 2>/dev/null | grep -c 'Certificate Object' || true)"
-if [ "${cert_count:-0}" -ge 1 ]; then
-  printf '#448 device certificate: %s CKO_CERTIFICATE object(s) present -- the daemon identity probe CAN read it here\n' "$cert_count"
+# A KEY'S CERTIFICATE IS NOT A DEVICE CERTIFICATE. This counted every CKO_CERTIFICATE and
+# concluded from one that the identity probe "CAN read it here" — so on any commissioned card the
+# check could never fail, and on DENK0404144 (2026-09-21) it reported exactly that while the only
+# certificate present was CN=cosmos-staging-qual, written beside an imported key minutes earlier.
+# The answer it gave was the opposite of the truth.
+#
+# The device-authentication certificate of a SmartCard-HSM is a CVC in EF 2F02 and is never
+# exposed through PKCS#11. What distinguishes it from a key's certificate is that a key's
+# certificate shares its CKA_ID with a key object. So certificates are matched against the key ids,
+# and only an UNPAIRED one could be a device certificate.
+certs="$("${P11[@]}" --list-objects --type cert 2>/dev/null)"
+cert_count="$(grep -c 'Certificate Object' <<< "$certs" || true)"
+cert_ids="$(grep -oE '^[[:space:]]*ID:[[:space:]]*[0-9a-fA-F]+' <<< "$certs" | grep -oE '[0-9a-fA-F]+$' | tr 'A-F' 'a-f' | sort -u)"
+key_objs="$("${P11[@]}" --list-objects --type pubkey 2>/dev/null; "${P11[@]}" --list-objects --type privkey 2>/dev/null)"
+key_ids="$(grep -oE '^[[:space:]]*ID:[[:space:]]*[0-9a-fA-F]+' <<< "$key_objs" | grep -oE '[0-9a-fA-F]+$' | tr 'A-F' 'a-f' | sort -u)"
+unpaired=0
+while IFS= read -r cid; do
+  [ -n "$cid" ] || continue
+  grep -qxF "$cid" <<< "$key_ids" || unpaired=$((unpaired+1))
+done <<< "$cert_ids"
+if [ "${unpaired:-0}" -ge 1 ]; then
+  printf '#448 device certificate: %s CKO_CERTIFICATE object(s) present, %s of them NOT paired with a key -- the daemon identity probe CAN read one here\n' "$cert_count" "$unpaired"
 else
-  printf '#448 device certificate: none exposed as a PKCS#11 CKO_CERTIFICATE -- the daemon identity probe would refuse (same as the Pico); it needs the EF 2F02 APDU fallback\n'
+  printf '#448 device certificate: none exposed as a PKCS#11 CKO_CERTIFICATE'
+  [ "${cert_count:-0}" -ge 1 ] \
+    && printf ' (%s certificate object(s) are present, all paired with a key -- those are key certificates, not the device certificate)' "$cert_count"
+  printf ' -- the daemon identity probe would refuse (same as the Pico); it needs the EF 2F02 APDU fallback (qubes/scripts/hsm-devaut-read.sh)\n'
 fi
 
 # ---- #447: CKA_LOCAL per public key ----------------------------------------------------------
