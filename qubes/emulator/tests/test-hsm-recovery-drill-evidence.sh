@@ -84,8 +84,11 @@ hdr "the transcript names the device it actually ran on"
 # a Nitrokey run throws away exactly what that run was worth (regalia#481 made such a run possible,
 # and the first one passed 25/0/2 on DENK0404144).
 eval "$(sed -n '/^device_kind(){/,/^}/p' "$DRILL")"
+# The drill reads the serial of the slot it is driving; here that is whatever the fixture says.
+# SLOT is referenced by the function being tested, so it has to exist — export it so the check is
+# not mistaken for a stray assignment.
+export SLOT=0
 slot_serial(){ printf '%s\n' "${FAKE_SERIAL:-}"; }
-SLOT=0
 
 for pair in "DENK0404144:nitrokey-hsm2" "ESP41D722E2:pico-hsm2" ":unknown" "XYZ123:unknown"; do
   FAKE_SERIAL="${pair%%:*}"; want="${pair##*:}"

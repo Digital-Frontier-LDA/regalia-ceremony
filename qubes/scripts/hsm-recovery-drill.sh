@@ -250,8 +250,10 @@ EOF
 # that discards the evidence the run just produced (regalia#481 made such a run possible).
 #
 # SmartCard-HSM serials name the vendor: DENK… is a Nitrokey HSM 2, ESP… a Pico HSM.
+# No argument: every caller asks about the slot this run is driving, and an optional one that is
+# never passed is a parameter nobody maintains (SC2120). $SLOT is the drill's target throughout.
 device_kind(){
-  case "$(slot_serial "${1:-$SLOT}")" in
+  case "$(slot_serial "$SLOT")" in
     DENK*) printf 'nitrokey-hsm2\n' ;;
     ESP*)  printf 'pico-hsm2\n' ;;
     *)     printf 'unknown\n' ;;
