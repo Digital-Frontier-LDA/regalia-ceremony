@@ -32,7 +32,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 READER="${HSM_PROBE_READER:-}"
 SAMPLES="${1:-60}"
-OUT="${HSM_PROBE_DIR:-${TMPDIR:-/tmp}/dkek-refusal-probe-$(date +%Y%m%d-%H%M%S)}"
+OUT="${HSM_PROBE_DIR:-}"
 
 die(){ printf 'dkek-refusal-probe: %s\n' "$*" >&2; exit 2; }
 say(){ printf '  %s\n' "$*"; }
@@ -55,7 +55,16 @@ else
   die "hsm_assert_staging_card is unavailable; this probe can reach the card and will not run without the gate"
 fi
 
-mkdir -p "$OUT"; chmod 700 "$OUT"
+# CREATED EXCLUSIVELY, NOT JUST CHMODDED. A predictable name under /tmp can be pre-created by
+# another local user; `mkdir -p` accepts their directory and a failed chmod does not stop the run,
+# so the DKEK share this writes would land somewhere readable. mktemp -d creates 0700 or fails, and
+# an explicit HSM_PROBE_DIR must not already exist.
+if [ -n "$OUT" ]; then
+  mkdir "$OUT" 2>/dev/null || die "$OUT already exists (or cannot be created) — refusing to write DKEK material into a directory this run did not create"
+  chmod 700 "$OUT" || die "could not restrict $OUT to this user"
+else
+  OUT="$(mktemp -d "${TMPDIR:-/tmp}/dkek-refusal-probe.XXXXXXXX")" || die "could not create a private working directory"
+fi
 say "probing $_probe_serial at reader $READER, $SAMPLES samples"
 say "artifacts: $OUT"
 
@@ -89,7 +98,7 @@ mint "$OUT/dkek.pbe" "$OUT/shares.txt" || die "could not create the share set"
 chmod 600 "$OUT/dkek.pbe" "$OUT/shares.txt"
 
 refused=0; accepted=0; other=0; i=0
-printf 'sample\tcorrupt_at\tcorrupt_value\tverdict\n' > "$OUT/ledger.tsv"
+printf 'sample\tcorrupt_at\tcorrupt_value\tverdict\texit\n' > "$OUT/ledger.tsv"
 while [ "$i" -lt "$SAMPLES" ]; do
   i=$((i+1))
   # VARY THE WRONG PASSWORD, not just repeat one. A fixed corrupted set reconstructs the SAME wrong
@@ -105,10 +114,14 @@ while [ "$i" -lt "$SAMPLES" ]; do
   fi
   export CORRUPT_AT CORRUPT_VALUE
   out="$(feed_shares "$OUT/shares.txt" 4 wrong | perl -e 'alarm 200; exec @ARGV' -- \
-         sc-hsm-tool --reader "$READER" --import-dkek-share "$OUT/dkek.pbe" --pwd-shares-total 4 2>&1)"
-  if grep -qi 'Error decrypting DKEK share' <<< "$out"; then
+         sc-hsm-tool --reader "$READER" --import-dkek-share "$OUT/dkek.pbe" --pwd-shares-total 4 2>&1)"; rc=$?
+  # THE STATUS AND THE TEXT TOGETHER. Classifying on output alone counts a command that died for an
+  # unrelated reason — a reader that went away mid-run, a timeout — as a refusal or an acceptance,
+  # and the whole point of this probe is a RATE. A refusal is the tool exiting non-zero AND saying
+  # it could not decrypt; an acceptance is it exiting zero after getting past the decrypt.
+  if [ "$rc" -ne 0 ] && grep -qi 'Error decrypting DKEK share' <<< "$out"; then
     verdict=refused; refused=$((refused+1))
-  elif grep -qiE 'DKEK share imported|shares? still missing|Not allowed|Condition of use' <<< "$out"; then
+  elif [ "$rc" -eq 0 ] && grep -qiE 'DKEK share imported|shares? still missing|Not allowed|Condition of use' <<< "$out"; then
     # The decrypt SUCCEEDED and the tool went on to the card. That is the finding, whatever the
     # card then said — the control is the refusal, and there was none.
     verdict=ACCEPTED; accepted=$((accepted+1))
@@ -119,12 +132,16 @@ while [ "$i" -lt "$SAMPLES" ]; do
     printf '%s\n' "$out" | sed 's/[0-9A-Fa-f]\{2\}\(:[0-9A-Fa-f]\{2\}\)\{3,\}/<hex elided>/g' \
       > "$OUT/other-$i.log"
   fi
-  printf '%s\t%s\t%s\t%s\n' "$i" "$CORRUPT_AT" "$CORRUPT_VALUE" "$verdict" >> "$OUT/ledger.tsv"
+  printf '%s\t%s\t%s\t%s\trc=%s\n' "$i" "$CORRUPT_AT" "$CORRUPT_VALUE" "$verdict" "$rc" >> "$OUT/ledger.tsv"
   printf '  %3d/%s  %s\n' "$i" "$SAMPLES" "$verdict"
 done
 
 printf '\n'
 say "RESULT over $SAMPLES samples: refused=$refused ACCEPTED=$accepted other=$other"
+# `other` is not noise to be rounded away: it is every run that neither refused cleanly nor got
+# past the decrypt, and a probe reporting a RATE has to say how much of its sample it could not
+# classify.
+[ "$other" -eq 0 ] || say "NOTE $other sample(s) were neither: read $OUT/other-*.log before quoting a rate"
 say "ledger: $OUT/ledger.tsv"
 if [ "$accepted" -gt 0 ]; then
   say "an acceptance is recorded in $OUT/accepted-*.log (hex elided) — read what the tool printed"

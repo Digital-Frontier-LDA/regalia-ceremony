@@ -180,6 +180,13 @@ if [ -r "$INIT_SH" ]; then
       perl -e 'alarm 300; exec @ARGV' -- bash "$INIT_SH" --reader "$READER" \
         --expect-serial "$RESTORE_SERIAL" --rrc off --retries "$RETRIES" --label staging \
         > "$INIT_LOG" 2>&1
+    _init_rc=$?
+    # THIS status MEANS SOMETHING, unlike the scsh path's. The APDU initializer exits non-zero on a
+    # known-bad INITIALIZE DEVICE answer, and a card that stays present and already reports RRC off
+    # would otherwise carry the run on into the DKEK import and the key operations — on a card that
+    # was never initialised. The one status worth ignoring is a card that left the bus, which this
+    # initializer reports as "no status word came back" and exits 0 for.
+    [ "$_init_rc" -eq 0 ] || die "the hardened init FAILED (exit $_init_rc): $(tail -3 "$INIT_LOG" | tr '\n' ' ' | cut -c1-240)"
 else
     if command -v hsm_require_scsh_addressable >/dev/null 2>&1; then
         hsm_require_scsh_addressable "$READER" "$RESTORE_SERIAL" || exit 1

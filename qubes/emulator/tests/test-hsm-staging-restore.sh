@@ -261,6 +261,15 @@ run_restore FAKE_NAMES="$TWO_SWAPPED" FAKE_SERIAL_0=ESP2202E14A FAKE_SERIAL_1=ES
 want "an unread posture is a failure, not an absent RRC tell" 1 "cannot verify the posture"
 wantnot . "RRC verified OFF" "and it is not reported as verified"
 
+printf '\n\033[1m### an initializer that FAILED stops the restore\033[0m\n'
+# The APDU initializer exits non-zero on a known-bad INITIALIZE DEVICE answer. Ignoring that, a
+# card that stays present and already reports RRC off carries the run on into the DKEK import and
+# the key operations — on a card that was never initialised.
+run_restore FAKE_NAMES="$TWO_SWAPPED" FAKE_SERIAL_0=ESP2202E14A FAKE_SERIAL_1=ESP41D722E2 \
+            FAKE_SLOTS="0 ESP2202E14A" FAKE_RRC=off FAKE_INIT_RC=2
+want "a non-zero initializer status stops the run" 1 "hardened init FAILED"
+wantnot . "DKEK" "  and the DKEK step is never reached"
+
 printf '\n\033[1m### control: an addressable card in the right posture proceeds\033[0m\n'
 
 run_restore FAKE_NAMES="$TWO_SWAPPED" FAKE_SERIAL_0=ESP2202E14A FAKE_SERIAL_1=ESP41D722E2 \

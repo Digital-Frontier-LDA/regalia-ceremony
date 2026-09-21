@@ -64,9 +64,16 @@ command -v opensc-explorer >/dev/null || die "opensc-explorer not found (install
 grep -qE '^[0-9A-Fa-f]{16}$' <<< "$HSM_SO_PIN" || die "HSM_SO_PIN must be exactly 16 hex digits (8 bytes)"
 grep -qE '^[0-9]{6,16}$' <<< "$HSM_USER_PIN" || die "HSM_USER_PIN must be 6-16 digits"
 case "$RRC" in off|reset-only) ;; *) die "--rrc must be 'off' or 'reset-only'";; esac
+# EVERY VALUE MUST FIT THE FIELD IT IS ENCODED INTO. `printf '%02X' 256` is "100" — three hex
+# digits, an odd-length TLV value, and every byte after it in the APDU shifts by half a byte. The
+# card would then be initialised from a command nobody wrote. A label long enough to push Lc past
+# 255 breaks the short APDU the same way.
 for n in "$DKEK_SHARES" "$RETRIES" "$PKA_KEYS" "$PKA_REQUIRED"; do
   case "$n" in *[!0-9]*|"") die "counts must be whole numbers, got '$n'";; esac
+  [ "$n" -le 255 ] || die "$n does not fit in the single byte its TLV encodes (max 255)"
 done
+[ "$RETRIES" -ge 1 ] || die "--retries must be at least 1; 0 would lock the card on its first wrong PIN"
+[ "${#LABEL}" -le 200 ] || die "--label is ${#LABEL} bytes; keep it under 200 so the TokenInfo write stays a short APDU"
 
 # The published pico-hsm example values must never reach a card that will hold anything. The same
 # list is in the JS and in the ceremony; it is repeated because a guard that lives only upstream is
@@ -155,8 +162,12 @@ lapdu="00D72F03$(printf '%02X' "$(( ${#labeldata} / 2 ))")$labeldata"
 # STDIN, NOT argv (see the header). opensc-explorer reads its commands from stdin, so the APDUs —
 # which contain both PINs — never appear in the process table.
 send_init(){
+  # `env -u`: the PINs are already inside the APDU on stdin, so the child has no use for them —
+  # and a child that inherits them can leak them through its own /proc/<pid>/environ, a core dump
+  # or a crash reporter. The variables are removed for the whole exec chain (perl included).
   printf 'apdu 00A4040C0B%s\napdu %s\napdu %s\nquit\n' "$AID" "$apdu" "$lapdu" \
-    | perl -e 'alarm 120; exec @ARGV' -- opensc-explorer -r "$READER" 2>&1
+    | env -u HSM_SO_PIN -u HSM_USER_PIN perl -e 'alarm 120; exec @ARGV' -- \
+        opensc-explorer -r "$READER" 2>&1
 }
 sws(){ sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$1" \
        | tr 'a-f' 'A-F'; }
@@ -182,7 +193,15 @@ esac
 
 case "$(printf '%s' "${lsw:-}" | tr 'a-f' 'A-F')" in
   9000) say "label: '$LABEL' written to EF 2F03" ;;
-  *)    say "label: EF 2F03 write answered ${lsw:-no answer} — cosmetic, the posture is unaffected" ;;
+  # A KNOWN ERROR IS NOT COSMETIC. The label is what `pkcs11-tool -L` shows and what the drills and
+  # the restore match on, so a card that answered 6982 and a script that says "complete" disagree
+  # about what is on the device. The init itself succeeded, so this says exactly that rather than
+  # implying the card is unusable.
+  "")   say "label: no answer — expected if the card left the bus; the label is UNVERIFIED, re-read"
+        say "       it with \`pkcs11-tool -L\` before recording this card as provisioned" ;;
+  *)    die "INITIALIZE DEVICE succeeded but the label write to EF 2F03 answered $lsw, so this card
+  does NOT carry the label '$LABEL'. The posture is set; re-run to write the label, or record the
+  card with the label it actually has." ;;
 esac
 
 printf '\n'

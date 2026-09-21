@@ -133,6 +133,60 @@ grep -q 'does not end in the bytes' <<<"$out" \
   && P "a board id that disagrees with the serial is a refusal, not a preference" \
   || F "accepted a board id and a serial that describe different devices"
 
+hdr "values that do not fit their field are refused, not encoded badly"
+# printf '%02X' 256 is "100": three hex digits, an odd-length TLV value, and every byte after it in
+# the APDU shifts by half a byte. The card would be initialised from a command nobody wrote.
+for bad in "--retries 256" "--dkek-shares 300" "--pka-keys 999 --pka-required 1"; do
+  # shellcheck disable=SC2086  # the fixture is a literal argument pair
+  out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 $bad)"
+  if grep -q 'does not fit in the single byte' <<<"$out"; then
+    P "'$bad' is refused before the APDU is built"
+  else
+    F "'$bad' was encoded anyway: $(init_apdu)"
+  fi
+done
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --retries 0)"
+grep -q 'at least 1' <<<"$out" && P "--retries 0 is refused (it would lock the card on one wrong PIN)" \
+  || F "--retries 0 was accepted"
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --label "$(printf 'x%.0s' $(seq 1 240))")"
+grep -q 'keep it under 200' <<<"$out" && P "an over-long label is refused, not truncated into a bad Lc" \
+  || F "a label too long for a short APDU was accepted"
+
+hdr "a label the card rejected is not reported as written"
+cat > "$BIN/opensc-explorer" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_ARGV:?}"
+cat >> "${STUB_STDIN:?}"
+# SELECT ok, INITIALIZE ok, label write refused — the shape measured when the write lands in a
+# second session.
+printf 'Received (SW1=0x90, SW2=0x00)\nReceived (SW1=0x90, SW2=0x00)\nReceived (SW1=0x69, SW2=0x82)\n'
+STUB
+chmod +x "$BIN/opensc-explorer"
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --label regalia)"
+rc=$?
+if grep -q 'does NOT carry the label' <<<"$out"; then
+  P "a 6982 on the TokenInfo write is fatal, and says the posture was still set"
+else
+  F "a refused label write was reported as a complete init"
+fi
+
+hdr "the child does not inherit the PINs it does not need"
+# The APDU on stdin already carries both PINs; a child that also has them in its environment can
+# leak them through /proc/<pid>/environ, a core dump or a crash reporter.
+cat > "$BIN/opensc-explorer" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_ARGV:?}"
+{ printf 'SO=%s USER=%s\n' "${HSM_SO_PIN:-<unset>}" "${HSM_USER_PIN:-<unset>}"; cat; } >> "${STUB_STDIN:?}"
+printf 'Received (SW1=0x90, SW2=0x00)\nReceived (SW1=0x90, SW2=0x00)\nReceived (SW1=0x90, SW2=0x00)\n'
+STUB
+chmod +x "$BIN/opensc-explorer"
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0)"
+if grep -q 'SO=<unset> USER=<unset>' "$BIN/stdin.txt"; then
+  P "neither PIN is in the child's environment"
+else
+  F "the child inherited a PIN: $(grep -o 'SO=.* USER=.*' "$BIN/stdin.txt" | head -1)"
+fi
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1
