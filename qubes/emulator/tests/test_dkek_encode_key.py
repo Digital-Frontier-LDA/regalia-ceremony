@@ -151,5 +151,109 @@ class DkekBlobTests(unittest.TestCase):
             enc.decrypt_share(b"not a share at all", b"pw")
 
 
+
+
+class OpenScPasswordShares(unittest.TestCase):
+    """Reconstructing the DKEK-share password from OpenSC's 4-of-6 shares (regalia#486).
+
+    WHY THIS MATTERS. `sc-hsm-tool --create-dkek-share --pwd-shares-threshold t --pwd-shares-total
+    n` does not take a password: it generates 8 random bytes, splits them with Shamir over a 64-bit
+    prime, prints only the shares, and never writes the password anywhere. Every real ceremony uses
+    that path. Without reconstruction the JVM-free import could serve only the drill's
+    single-password shortcut — which is to say, not a ceremony.
+
+    THE FIXTURE IS REAL. Prime and shares below came from `sc-hsm-tool --create-dkek-share
+    --pwd-shares-threshold 4 --pwd-shares-total 6` on 2026-09-21, and the expected password is the
+    one the card confirmed: fed shares 1-4, the Nitrokey reported DKEK KCV EDE4B653C8280D28, and
+    the key check value derived from THIS reconstructed password is the same value.
+    """
+
+    PRIME = 0xE28C4E2A93CCA877
+    SHARES = {
+        1: 0xBED92AF69643C441,
+        2: 0x8DD49D6982048A5B,
+        3: 0x083ECBCE3E4AD6B6,
+        4: 0x845D7A40863E4C32,
+        5: 0xB0D1825C59A0944A,
+        6: 0x1EC80BE84C0000F0,
+    }
+    PASSWORD = bytes.fromhex("2792fe8453ad89ff")
+
+    def _file(self, ids):
+        out = []
+        for i in ids:
+            out.append("Prime       : " + ":".join("%02x" % b for b in self.PRIME.to_bytes(8, "big")))
+            out.append("Share ID    : %d" % i)
+            value = self.SHARES[i]
+            out.append("Share value : " + ":".join("%02x" % b for b in
+                                                   value.to_bytes((value.bit_length() + 7) // 8, "big")))
+            out.append("")
+        return "\n".join(out)
+
+    def test_any_quorum_of_four_recovers_the_same_password(self):
+        # Not just the quorum that was fed to the card. If only one combination worked, the
+        # interpolation would be wrong in a way a single happy-path test cannot see.
+        for quorum in ((1, 2, 3, 4), (2, 4, 5, 6), (1, 3, 5, 6), (3, 4, 5, 6), (1, 2, 5, 6)):
+            with self.subTest(quorum=quorum):
+                prime, shares = enc.parse_share_file(self._file(quorum), list(quorum))
+                self.assertEqual(enc.reconstruct_share_password(prime, shares), self.PASSWORD)
+
+    def test_three_shares_do_not_recover_it(self):
+        # Below the threshold must not reconstruct. A scheme that leaked at t-1 would be broken.
+        prime, shares = enc.parse_share_file(self._file((1, 2, 3)), [1, 2, 3])
+        self.assertNotEqual(enc.reconstruct_share_password(prime, shares), self.PASSWORD)
+
+    def test_the_leading_zero_drop_is_preserved(self):
+        # OpenSC converts with BN_bn2bin, which emits no leading zero byte, so a secret whose top
+        # byte is zero comes back SEVEN bytes and the share file decrypts under those seven.
+        # Padding it back to eight would rebuild a password the real tool never used (regalia#460).
+        self.assertEqual(enc._minimal_bytes(0x00FFEEDDCCBBAA99), bytes.fromhex("ffeeddccbbaa99"))
+        self.assertEqual(len(enc._minimal_bytes(0x00FFEEDDCCBBAA99)), 7)
+
+    def test_a_file_mixing_two_ceremonies_is_refused(self):
+        # Interpolating across two primes yields a confident WRONG password rather than an error.
+        text = self._file((1, 2)) + "\n" + self._file((3, 4)).replace("e2:8c", "e3:8c")
+        with self.assertRaises(ValueError) as caught:
+            enc.parse_share_file(text)
+        self.assertIn("two ceremonies", str(caught.exception))
+
+    def test_duplicate_share_ids_are_refused_by_NAME(self):
+        # ASSERT THE MESSAGE, not merely that something raised. Without the explicit check,
+        # pow(0, -1, prime) raises ValueError("base is not invertible…") on its own — so a bare
+        # assertRaises passes whether the guard exists or not, and the mutation that removes it
+        # goes uncaught. That is a test measuring the interpreter, not the code.
+        prime, _ = enc.parse_share_file(self._file((1,)), [1])
+        with self.assertRaises(ValueError) as caught:
+            enc.reconstruct_share_password(prime, [(1, self.SHARES[1]), (1, self.SHARES[1])])
+        self.assertIn("same ID", str(caught.exception))
+
+    def test_a_missing_share_is_named(self):
+        with self.assertRaises(ValueError) as caught:
+            enc.parse_share_file(self._file((1, 2)), [1, 5])
+        self.assertIn("5", str(caught.exception))
+
+    def test_a_repeated_share_id_in_the_FILE_is_refused(self):
+        # dict(shares) would keep the last value silently, and selecting by ID would then bypass
+        # the duplicate check in reconstruct_share_password altogether.
+        text = self._file((1, 2, 3)) + self._file((1,))
+        with self.assertRaises(ValueError) as caught:
+            enc.parse_share_file(text)
+        self.assertIn("more than once", str(caught.exception))
+
+    def test_a_repeated_id_is_refused_even_when_selecting_by_id(self):
+        text = self._file((1, 2, 3, 4)) + self._file((1,))
+        with self.assertRaises(ValueError) as caught:
+            enc.parse_share_file(text, [1, 2, 3, 4])
+        self.assertIn("more than once", str(caught.exception))
+
+    def test_a_file_with_no_prime_is_refused(self):
+        with self.assertRaises(ValueError):
+            enc.parse_share_file("Share ID    : 1\nShare value : aa:bb\n")
+
+    def test_a_share_value_before_its_id_is_refused(self):
+        with self.assertRaises(ValueError):
+            enc.parse_share_file("Prime       : e2:8c\nShare value : aa:bb\n")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

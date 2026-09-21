@@ -38,6 +38,10 @@ trap 'rm -rf "$FAKE" "$STATE" "${WORK:-}"' EXIT
 cat > "$FAKE/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
 S="${STATE:?}"
+# EVERY INVOCATION IS RECORDED. run() prints commands through show(), which this suite silences,
+# so the step's output cannot tell a row which label or slot a proof addressed. The argv can.
+printf '%s
+' "$*" >> "$S/p11-args.txt"
 case "$*" in
   *--list-objects*)
     # A blank card enumerates SUCCESSFULLY with empty output; an unreadable one exits NON-ZERO.
@@ -127,14 +131,44 @@ open(S+"/oncard.der","wb").write(b"\x30"+bytes([len(body)])+body)
 open(S+"/oncard.key","w").write(hex(k))
 PY
 }
-reset(){ rm -f "$WORK/funding.p12" "$WORK/p12.pw" "$WORK/imported-pub.der" "$STATE"/oncard.*; \
-         printf '%s' "$MNEMONIC" > "$WORK/funding.mnemonic"; }
+# THE IMPORT IS MODELLED, LIKE THE CARD. This suite places a key on a modelled card out of band
+# and tests the guards and the proofs around it; the step itself now performs a real import
+# (regalia#486 — no Smart Card Shell), which needs a DKEK and a card. The stub stands in for that
+# one action and RECORDS its arguments, so these rows can assert the step actually attempted an
+# import. Before the step drove the import, nothing here could tell whether one had happened.
+export HSM_IMPORTER="$STATE/import-stub.sh"
+export IMPORT_STUB_LOG="$STATE/import-args.txt"
+cat > "$HSM_IMPORTER" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${IMPORT_STUB_LOG:?}"
+[ "${STUB_IMPORT_FAIL:-0}" = 1 ] && { echo "import stub: refusing on purpose" >&2; exit 1; }
+exit 0
+STUB
+chmod +x "$HSM_IMPORTER"
+
+reset(){ rm -f "$WORK/funding.p12" "$WORK/p12.pw" "$WORK/imported-pub.der" "$STATE"/oncard.* \
+               "$IMPORT_STUB_LOG" "$STATE/p11-args.txt"; \
+         printf '%s' "$MNEMONIC" > "$WORK/funding.mnemonic"
+         # The DKEK and its share file are the step's inputs, not its outputs: it refuses without
+         # them because there would be nothing to wrap the key under.
+         printf 'Salted__01234567' > "$WORK/dkek.pbe"
+         printf 'Prime       : e2:8c:4e:2a:93:cc:a8:77\nShare ID    : 1\nShare value : be:d9:2a:f6:96:43:c4:41\n' \
+           > "$WORK/dkek-shares.txt"
+         printf '648219' > "$WORK/hsm-user.pin"; }
 
 # =====================================================================================
 hdr "HAPPY PATH: container built, card holds the seed's key, address matches, signing proven"
 reset; place_on_card "$MNEMONIC"
 out="$(step_hsm_import 2>&1)"
 [ -s "$WORK/funding.p12" ] && P "PKCS#12 container built from the seed" || F "no container produced"
+[ -s "$IMPORT_STUB_LOG" ] && P "the step ATTEMPTED an import — it no longer hands the card work to an operator" \
+  || F "no import was attempted; the step only built a container"
+grep -q -- '--dkek-shares' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "…passing the DKEK share file, so the password is reconstructed and never typed" \
+  || F "the importer was called without --dkek-shares: $(cat "$IMPORT_STUB_LOG" 2>/dev/null)"
+grep -q -- '--pin-file' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "…and the PIN as a FILE, never in argv where ps would see it" \
+  || F "the PIN was not passed as a file"
 grep -qi "ADDRESS MATCH" <<< "$out" && P "card address matches the seed derivation" \
                                        || F "address-match proof did not run or failed"
 grep -qi "SIGN PROOF PASSED" <<< "$out" && P "card proven able to SIGN with the imported key" \
@@ -244,6 +278,70 @@ grep -qi "would ERASE it" <<< "$(echo "$out")" \
 grep -qi "IMPORT COMPLETE AND PROVEN" <<< "$(echo "$out")" \
   && F "BUG: declared success after refusing the hand-off" || P "no success claim after refusal"
 
+hdr "A CUSTOM HSM_KEY_LABEL reaches the import AND both proofs"
+# The label used to be a literal in the read-back and the sign proof while the importer took
+# ${HSM_KEY_LABEL:-akash-funding}. A custom label therefore imported successfully and then failed
+# both verifications — an operator would see a good import reported as an unproven one.
+reset; place_on_card "$MNEMONIC"
+out="$(HSM_KEY_LABEL=custom-funding step_hsm_import 2>&1)"; rc=$?
+grep -q -- '--label custom-funding' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "the importer is given the custom label" \
+  || F "the importer did not get the custom label: $(cat "$IMPORT_STUB_LOG" 2>/dev/null)"
+grep -q -- '--read-object.*--label custom-funding' "$STATE/p11-args.txt" 2>/dev/null \
+  && P "…and the read-back proof asks for that label" \
+  || F "the read-back used a different label: $(grep -- '--read-object' "$STATE/p11-args.txt" 2>/dev/null | head -1)"
+grep -q -- '--sign.*--label custom-funding' "$STATE/p11-args.txt" 2>/dev/null \
+  && P "…and so does the sign proof" \
+  || F "the sign proof used a different label: $(grep -- '--sign' "$STATE/p11-args.txt" 2>/dev/null | head -1)"
+grep -q 'akash-funding' "$STATE/p11-args.txt" 2>/dev/null \
+  && F "the literal 'akash-funding' still reaches the card under a custom label" \
+  || P "…with the literal gone from every card command"
+[ "$rc" -eq 0 ] && P "and the step still completes under a custom label" || F "the step failed with a custom label (rc=$rc)"
+
+hdr "A non-default HSM_SLOT reaches the guards and the proofs, not just the importer"
+# The hazard this closes: the importer writes to the configured card while the blank check, the
+# read-back and the sign proof inspect whichever token PKCS#11 enumerated first. The step would
+# then approve, write, and "prove" across two different devices — the same failure
+# test-fleet-device-selection.sh guards hsm-import-key.sh against, arriving from the other side.
+reset; place_on_card "$MNEMONIC"
+out="$(HSM_SLOT=4 step_hsm_import 2>&1)"; rc=$?
+grep -q -- '--slot 4' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "the importer targets slot 4" || F "the importer did not get the slot"
+for op in --list-objects --read-object --sign; do
+  # NO PIPE INTO grep -q. grep -q exits on its first match, the producer takes SIGPIPE, and under
+  # pipefail the pipeline status is 141 — so the branch would NOT be taken and a call that missed
+  # the slot would read as clean. The producer finishes into a variable first.
+  # (tools/hsm-lint-predicates.sh flags exactly this shape.)
+  calls="$(grep -- "$op" "$STATE/p11-args.txt" 2>/dev/null)"
+  unslotted="$(grep -v -- '--slot 4' <<<"$calls")"
+  if [ -n "$calls" ] && [ -n "$unslotted" ]; then
+    F "a $op call did not name slot 4: $(head -1 <<<"$unslotted")"
+  elif [ -z "$calls" ]; then
+    F "no $op call was made at all, so this row proves nothing about the slot"
+  else
+    P "…and every $op call names slot 4 too"
+  fi
+done
+[ "$rc" -eq 0 ] && P "and the step completes against the named slot" || F "the step failed with HSM_SLOT set (rc=$rc)"
+
+hdr "A FAILED IMPORT STOPS THE STEP — the proofs must not run against a stale card"
+# The card is modelled, so its state does not change when the import fails. If the step carried on
+# it would read the key that was already there and print ADDRESS MATCH and SIGN PROOF PASSED for
+# an import that did not happen — the most convincing possible false pass.
+reset; place_on_card "$MNEMONIC"
+out="$(STUB_IMPORT_FAIL=1 step_hsm_import 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && P "a failed import is a failed step (exit $rc)" || F "the step returned 0 after a failed import"
+grep -qi 'the import failed' <<<"$out" && P "…saying so" || F "the failure is not reported: $(tail -2 <<<"$out")"
+grep -qi 'ADDRESS MATCH' <<<"$out" \
+  && F "it printed ADDRESS MATCH after a failed import — proving a card state it did not create" \
+  || P "…and does NOT print the proofs, which would describe the card as it was before"
+
+hdr "MISSING DKEK: the step refuses rather than importing under nothing"
+reset; place_on_card "$MNEMONIC"; rm -f "$WORK/dkek.pbe"
+out="$(step_hsm_import 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -qi 'dkek' <<<"$out" \
+  && P "no DKEK is a refusal that names it" || F "ran with no DKEK: $(tail -2 <<<"$out")"
+
 hdr "DESTRUCTIVE-PROCEDURE GUARD: an unreadable target is not treated as blank"
 reset; place_on_card "$MNEMONIC"
 out="$(STUB_ENUM_FAIL=1 step_hsm_import 2>&1)"
@@ -278,7 +376,9 @@ grep -qi "IMPORT COMPLETE AND PROVEN" <<< "$(echo "$out")" \
 
 hdr "DEVICE-IDENTITY GUARD: an unreadable reader is not assumed to be the right device"
 reset; place_on_card "$MNEMONIC"
-out="$(STUB_ATR= step_hsm_import 2>&1)"
+# shellcheck disable=SC1007  # DELIBERATE: STUB_ATR is set to EMPTY for this one call, which is
+# the case under test — a reader that reports no ATR at all. It is not a missing assignment.
+out="$(STUB_ATR='' step_hsm_import 2>&1)"
 grep -qiE "no ATR from the reader|unidentified card" <<< "$out" \
   && P "fails closed when no ATR can be read" \
   || F "BUG: proceeded without identifying the card"

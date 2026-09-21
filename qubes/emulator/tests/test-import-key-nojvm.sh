@@ -180,6 +180,77 @@ leftovers="$(find "$T/tmp" -type f 2>/dev/null)"
 [ -n "$leftovers" ] && F "the work directory was left behind: $leftovers" \
   || P "the work directory is gone, blob with it"
 
+# THE HEALTHY CARD STUB IS BACK. The row above deliberately installed one that takes the
+# certificate write and then does not enumerate it; leaving that in place would fail every row
+# after it for a reason that has nothing to do with what those rows test.
+cat > "$BIN/pkcs11-tool" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_P11:?}"
+case "$*" in
+  *--write-object*) exit 0;;
+  *--list-objects*) printf 'Private Key Object; EC\n  label:      akash-funding\nCertificate Object; type = X.509 cert\n  label:      akash-funding\n'; exit 0;;
+esac
+exit 0
+STUB
+chmod +x "$BIN/pkcs11-tool"
+
+hdr "a ceremony's DKEK has no typed password — the shares are the password"
+# `--create-dkek-share --pwd-shares-threshold/-total` generates 8 random bytes, splits them with
+# Shamir over a 64-bit prime, prints only the shares, and never writes the password anywhere.
+# Every real ceremony uses that path, so an importer that can only take --dkek-pw serves the drill
+# and not the ceremony. The prime and shares here are REAL output from sc-hsm-tool on 2026-09-21.
+cat > "$T/shares.txt" <<'X'
+Prime       : e2:8c:4e:2a:93:cc:a8:77
+Share ID    : 1
+Share value : be:d9:2a:f6:96:43:c4:41
+Prime       : e2:8c:4e:2a:93:cc:a8:77
+Share ID    : 2
+Share value : 8d:d4:9d:69:82:04:8a:5b
+Prime       : e2:8c:4e:2a:93:cc:a8:77
+Share ID    : 3
+Share value : 08:3e:cb:ce:3e:4a:d6:b6
+Prime       : e2:8c:4e:2a:93:cc:a8:77
+Share ID    : 4
+Share value : 84:5d:7a:40:86:3e:4c:32
+X
+# A share file whose password (2792fe8453ad89ff) encrypts a known DKEK, built here so the import
+# can be driven end to end without a card.
+python3 - "$T" <<'PY'
+import sys, os, hashlib
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+T = sys.argv[1]
+salt = os.urandom(8); pw = bytes.fromhex("2792fe8453ad89ff")
+d = b""; out = b""
+for _ in range(3):
+    d = d + pw + salt
+    for _ in range(10_000_000):
+        d = hashlib.md5(d).digest()
+    out += d
+body = os.urandom(32) + bytes([0x10]) * 16
+enc = Cipher(algorithms.AES(out[:32]), modes.CBC(out[32:48])).encryptor()
+open(f"{T}/dkek-shares.pbe", "wb").write(b"Salted__" + salt + enc.update(body) + enc.finalize())
+PY
+: > "$T/stdin.txt"
+out5="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 4 --label akash-funding --dkek "$T/dkek-shares.pbe" \
+        --dkek-shares "$T/shares.txt" --pin-file "$T/pin.txt" --reader 0 \
+        --cert "$T/funding.crt" --module /dev/null 2>&1)"; rc5=$?
+[ "$rc5" -eq 0 ] && P "a shares-only DKEK imports: the password is reconstructed, never typed" \
+  || F "the shares path failed (exit $rc5): $(tail -4 <<<"$out5")"
+grep -q 'IMPORT-OK' <<<"$out5" && P "…reporting IMPORT-OK like the password path" || F "no IMPORT-OK"
+
+hdr "the certificate comes out of the container when none is given"
+# A PKCS#12 IS a key and a certificate. Demanding a separate --cert adds a way to hand over a
+# certificate belonging to a different key, and a way to fail for no reason.
+: > "$T/stdin.txt"; : > "$STUB_P11"
+out6="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 5 --label akash-funding --dkek "$T/dkek-shares.pbe" \
+        --dkek-shares "$T/shares.txt" --pin-file "$T/pin.txt" --reader 0 --module /dev/null 2>&1)"; rc6=$?
+[ "$rc6" -eq 0 ] && P "no --cert is not an error: the certificate is lifted from the PKCS#12" \
+  || F "it required --cert (exit $rc6): $(tail -3 <<<"$out6")"
+grep -q -- '--write-object' "$STUB_P11" \
+  && P "…and that certificate is still written to the card" || F "no certificate was written"
+
 hdr "refusals"
 out="$(bash "$IMPORT" --p12 "$T/funding.p12" --pw-file "$T/p12.pw" --id 3 --label x \
         --cert "$T/funding.crt" --module /dev/null \
@@ -193,6 +264,19 @@ out="$(bash "$IMPORT" --p12 "$T/nope.p12" --pw-file "$T/p12.pw" --id 3 --label x
         --dkek "$T/dkek.pbe" --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 2>&1)"
 grep -q 'not readable' <<<"$out" && P "a missing PKCS#12 is refused before anything runs" \
   || F "a missing PKCS#12 was not refused: $(tail -2 <<<"$out")"
+out="$(bash "$IMPORT" --p12 "$T/funding.p12" --pw-file "$T/p12.pw" --id 3 --label x \
+        --cert "$T/funding.crt" --module /dev/null --dkek "$T/dkek.pbe" \
+        --dkek-pw "$T/dkek.pw" --dkek-shares "$T/shares.txt" \
+        --pin-file "$T/pin.txt" --reader 0 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'not both' <<<"$out" \
+  && P "--dkek-pw and --dkek-shares together are refused (a reconstructed password is never also typed)" \
+  || F "both DKEK sources were accepted at once: $(tail -2 <<<"$out")"
+out="$(bash "$IMPORT" --p12 "$T/funding.p12" --pw-file "$T/p12.pw" --id 3 --label x \
+        --cert "$T/funding.crt" --module /dev/null --dkek "$T/dkek.pbe" \
+        --pin-file "$T/pin.txt" --reader 0 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && grep -q 'missing --dkek-pw or --dkek-shares' <<<"$out" \
+  && P "neither DKEK source is refused, naming both options" \
+  || F "it ran with no DKEK source: $(tail -2 <<<"$out")"
 
 printf '\n\033[1m### RESULT\033[0m\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
