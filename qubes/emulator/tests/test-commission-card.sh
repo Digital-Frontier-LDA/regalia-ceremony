@@ -238,9 +238,12 @@ rc="$(cc_reg "$REG_ABSENT")"
 [ "$rc" = 0 ] && P "a card the registry does not list passes the interlock" \
               || { F "a card outside the registry was refused"; sed 's/^/      /' "$FAKE/out9"; }
 rc="$(cc_reg /nonexistent/registry.json)"
-grep -qi 'interlock could not run' "$FAKE/out9" \
-  && P "no registry at all says so, rather than implying the card is clear" \
-  || F "a missing registry was silently treated as 'not listed'"
+[ "$rc" != 0 ] \
+  && P "no readable registry is a REFUSAL — the card cannot show it left the wipe list" \
+  || F "a missing registry let the card be commissioned without proving it is off the wipe list"
+grep -qi 'CANNOT BE EVALUATED' "$FAKE/out9" \
+  && P "…and says so, rather than implying the card is clear" \
+  || F "a missing registry was reported as something other than unevaluable"
 
 hdr "B3 at the rack: found and could-not-scan are DIFFERENT failures"
 # Collapsing them sends an operator hunting for a share that does not exist while the real fault —

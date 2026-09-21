@@ -95,7 +95,11 @@ _sr_rs="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/tools/hsm-reader-select
 if command -v hsm_assert_staging_card >/dev/null 2>&1; then
     hsm_assert_staging_card "$RESTORE_SERIAL" || exit 1
 elif command -v hsm_assert_staging >/dev/null 2>&1; then
-    hsm_assert_staging "$RESTORE_SERIAL" || exit 1
+    # A serial-only check would accept a substituted card reporting a registered serial, so the
+    # older resolver is a refusal rather than a weaker gate.
+    echo "REFUSING: hsm_assert_staging_card is unavailable — this resolver cannot check the card" >&2
+    echo "  against the certificate the registry pins. Update tools/hsm-reader-select.sh." >&2
+    exit 1
 else
     die "the role registry gate is unavailable (tools/hsm-reader-select.sh did not source) — a wipe script does not run without it"
 fi

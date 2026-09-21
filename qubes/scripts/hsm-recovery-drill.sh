@@ -168,11 +168,15 @@ assert_safe_to_wipe(){ # $1=slot $2=name
   # be wiped, and a serial is self-reported. For a registered Nitrokey the card must also match the
   # C.DevAut digest the registry pins, which covers the device public key (regalia#481). A Pico entry
   # has no pin and passes straight through — its identity is proven over SWD instead.
-    if command -v hsm_assert_staging_card >/dev/null 2>&1; then
-      hsm_assert_staging_card "$_ser" || return 1
-    else
-      hsm_assert_staging "$_ser" || return 1
-    fi
+    # NO SERIAL-ONLY FALLBACK. An older resolver without hsm_assert_staging_card would silently
+    # degrade identity to a self-reported serial, which is precisely what a substituted genuine
+    # Nitrokey reproduces. Missing gate, missing run.
+    command -v hsm_assert_staging_card >/dev/null 2>&1 || {
+      echo "REFUSING: this resolver has no hsm_assert_staging_card, so the card cannot be checked" >&2
+      echo "  against the certificate the registry pins. Update tools/hsm-reader-select.sh." >&2
+      return 1
+    }
+    hsm_assert_staging_card "$_ser" || return 1
   fi
   objs="$(pkcs11-tool --module "$P11" --slot "$slot" --list-objects 2>/dev/null)" || {
     err "$name (slot $slot): could not enumerate objects."

@@ -107,8 +107,15 @@ fi
 if [ -z "$EXPECT_SERIAL" ]; then
   : # already failed above; nothing to look up
 elif [ -z "$_cc_reg" ] || [ ! -r "$_cc_reg" ]; then
-  printf '  \033[33mNOTE\033[0m no staging registry found, so the "still wipeable" interlock could not run.\n'
-  printf '        Point HSM_STAGING_REGISTRY_FILE at the fleet registry to enforce it here.\n'
+  # CANNOT-EVALUATE IS A FAILURE HERE TOO. A note let a normal run certify a card without ever
+  # proving it had left the wipe list — and "the registry was not on this host" is exactly the
+  # state a card is in when nobody checked. The friction is the point: commissioning is the one
+  # moment that can still stop a production key landing on a card automation may erase.
+  F "no staging registry found, so 'has this card left the wipe list' CANNOT BE EVALUATED"
+  printf '     Point HSM_STAGING_REGISTRY_FILE at the fleet registry (the copy the batteries diff\n'
+  printf '     against the runner). If this fleet keeps no staging registry at all, pass an empty\n'
+  printf '     one — {"schema":"regalia.staging-hardware/v1","environment":"staging","devices":[]}\n'
+  printf '     — so the answer is recorded rather than assumed.\n'
 elif ! command -v python3 >/dev/null; then
   F "a staging registry is present but python3 is not — the wipeable interlock CANNOT BE EVALUATED"
 else
