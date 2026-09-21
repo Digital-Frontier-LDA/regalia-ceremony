@@ -104,7 +104,7 @@ common=(--p12 "$ROOT/x.p12" --pw-file "$ROOT/pw" --cert "$ROOT/x.crt" --id 33 --
 # =================================================================================================
 hdr "TWO tokens attached and no --slot: the import must REFUSE"
 out="$(TOKENS=2 "$IMPORT" "${common[@]}" 2>&1)"; rc=$?
-if [ "$rc" = 2 ] && grep -qi "REFUSING" <<<"$out"; then
+if [ "$rc" = 2 ] && grep -qi "the default target is whichever" <<<"$out"; then
   P "refuses with exit 2 rather than picking a card"
 else
   F "did NOT refuse (rc=$rc) — provisioning the standby could re-provision the primary"
@@ -115,10 +115,15 @@ grep -qE 'Slot|serial' <<<"$out" \
   && P "…and lists the attached slots so the operator can choose" \
   || F "refuses without showing the choices, so the operator has to go hunting"
 
+# MATCHED ON THE GUARD'S OWN SENTENCE, not on the word "REFUSING". Every refusal in a careful
+# script says something like "refusing", so a bare word match identifies no particular guard: when
+# hsm-import-key.sh grew a second, unrelated refusal (no Smart Card Shell on a CI runner), these
+# rows reported that the slot flag did not work. The sentence below belongs to the slot guard and
+# to nothing else.
 hdr "ONE token and no --slot: unambiguous, so it must NOT refuse"
 # The guard must not become a nuisance on the single-card case, or it gets removed.
 out1="$(TOKENS=1 "$IMPORT" "${common[@]}" 2>&1)"; rc1=$?
-if [ "$rc1" = 2 ] && grep -qi "REFUSING" <<<"$out1"; then
+if [ "$rc1" = 2 ] && grep -qi "the default target is whichever" <<<"$out1"; then
   F "refused with only ONE token attached — the guard cries wolf and will be deleted"
 else
   P "proceeds past slot selection with a single token"
@@ -126,7 +131,7 @@ fi
 
 hdr "An explicit --slot is honoured even with two attached"
 out2="$(TOKENS=2 "$IMPORT" "${common[@]}" --slot 1 2>&1)"; rc2=$?
-if [ "$rc2" = 2 ] && grep -qi "REFUSING" <<<"$out2"; then
+if [ "$rc2" = 2 ] && grep -qi "the default target is whichever" <<<"$out2"; then
   F "refused despite an explicit --slot — the flag does not work"
 else
   P "an explicit --slot resolves the ambiguity"
@@ -137,6 +142,17 @@ grep -q "slot: 1" <<<"$out2" && P "echoes which slot it will write to" \
 hdr "A non-numeric --slot is rejected, not silently coerced"
 out3="$(TOKENS=2 "$IMPORT" "${common[@]}" --slot "0; rm -rf /" 2>&1)"; rc3=$?
 [ "$rc3" = 2 ] && P "rejects a non-numeric slot" || F "accepted a non-numeric slot (rc=$rc3)"
+# THE CAPTURED OUTPUT WAS NEVER READ, so this row passed on ANY exit-2 — including one from a
+# later, unrelated refusal that never examined --slot at all. Assert it failed for the stated
+# reason, and that the injected text did not reach a shell.
+grep -qi 'slot' <<<"$out3" && P "…and says it was the slot, so the rejection is the one this row means" \
+  || F "exit 2 with nothing about the slot: $(tail -2 <<<"$out3")"
+# NOT "[ -d /home ]" — that is true whatever the script did, and a PASS that cannot fail is
+# noise. What is actually checkable here is that the injected text was treated as DATA: it is
+# echoed back inside the rejection rather than having been word-split into a command.
+grep -qF -- '0; rm -rf /' <<<"$out3" \
+  && P "…quoting the rejected value back whole, so it was carried as data and never split" \
+  || F "the rejected slot value is not echoed back intact: $(tail -2 <<<"$out3")"
 
 # =================================================================================================
 hdr "The fleet drill refuses to run against ONE card twice"

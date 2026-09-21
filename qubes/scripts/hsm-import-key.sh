@@ -133,7 +133,12 @@ if [ ! -x "$SCSH/scriptrunner" ]; then
     printf '  Point SCSH_HOME at the directory that CONTAINS scriptrunner — note the tarball\n' >&2
     printf '  unpacks as scsh-3.18.77/scsh-3.18.77/, so it is usually the inner one:\n\n' >&2
     printf '      export SCSH_HOME=$HOME/tools/scsh-3.18.77/scsh-3.18.77\n\n' >&2
-    printf '  Refusing rather than reporting this as a failed import — the card is not at fault.\n' >&2
+    printf '  Stopping here rather than reporting this as a failed import — the card is not at fault.\n' >&2
+    # NOT the word "REFUSING". In this script that word belongs to the destructive-card-selection
+    # guard above, and test-fleet-device-selection.sh identifies that guard by it. A second,
+    # unrelated refusal wearing the same word made a CI runner without Smart Card Shell look like
+    # the slot guard firing — and two different refusals sharing a signature is confusing to a
+    # reader long before it is confusing to a test.
     exit 2
 fi
 
