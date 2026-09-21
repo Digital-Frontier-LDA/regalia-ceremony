@@ -162,12 +162,14 @@ cat >> "${STUB_STDIN:?}"
 printf 'Received (SW1=0x90, SW2=0x00)\nReceived (SW1=0x90, SW2=0x00)\nReceived (SW1=0x69, SW2=0x82)\n'
 STUB
 chmod +x "$BIN/opensc-explorer"
-out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --label regalia)"
-rc=$?
-if grep -q 'does NOT carry the label' <<<"$out"; then
-  P "a 6982 on the TokenInfo write is fatal, and says the posture was still set"
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --label regalia)"; rc=$?
+# THE STATUS AS WELL AS THE MESSAGE. A caller — hsm-staging-restore.sh, which now stops on a
+# non-zero init — sees only the exit code, so a fatal message with a zero status would be read as
+# success by everything downstream of the words.
+if [ "$rc" -ne 0 ] && grep -q 'does NOT carry the label' <<<"$out"; then
+  P "a 6982 on the TokenInfo write exits non-zero AND says the posture was still set"
 else
-  F "a refused label write was reported as a complete init"
+  F "a refused label write was reported as a complete init (rc=$rc)"
 fi
 
 hdr "the child does not inherit the PINs it does not need"
