@@ -427,10 +427,16 @@ hsm_assert_staging() {
     return 0
 }
 
-# The C.DevAut digest the registry pins for token serial $1, or empty. Read from HSM_DEVAUT_MAP,
-# which hsm_staging_registry_load exports for `nitrokey-hsm2` entries.
+# The C.DevAut digest the registry pins for token serial $1, or empty.
+#
+# READ FROM THE REGISTRY, LIKE hsm_role_of DOES. HSM_DEVAUT_MAP is a fast path that
+# hsm_staging_registry_load exports, but most callers never invoke that loader — the recovery
+# drill sources this resolver and asks about a card, exactly as it does for the role. Depending on
+# the map alone made the pin look ABSENT on those paths, and an absent pin for a Nitrokey is a
+# refusal: the drill stopped on "the registry pins no devaut_sha256" for a serial the registry
+# pins. Same file, same answer, whichever entry point asked.
 hsm_devaut_pin_for() {
-    local want="${1:-}" pair
+    local want="${1:-}" pair f
     [ -n "$want" ] || return 1
     while IFS= read -r pair; do
         [ -n "$pair" ] || continue
@@ -440,7 +446,31 @@ hsm_devaut_pin_for() {
     done <<EOF
 $(printf '%s' "${HSM_DEVAUT_MAP:-}" | tr ' \t' '\n\n')
 EOF
-    return 1
+    f="$(_hsm_roles_path 2>/dev/null)" || f=""
+    [ -n "$f" ] && [ -r "$f" ] && command -v python3 >/dev/null 2>&1 || return 1
+    python3 -c '
+import json, re, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+    if not (isinstance(data, dict) and data.get("schema") == "regalia.staging-hardware/v1"):
+        raise ValueError("not a regalia.staging-hardware/v1 registry")
+    devices = data.get("devices")
+    if not isinstance(devices, list):
+        raise ValueError("devices is not a list")
+    matches = [d for d in devices
+               if isinstance(d, dict) and d.get("token_serial") == sys.argv[2]]
+    # Listed twice is ambiguous, and ambiguity never arms a wipe — the same rule hsm_role_of uses.
+    if len(matches) != 1:
+        raise SystemExit(1)
+    pin = matches[0].get("devaut_sha256")
+    if not (isinstance(pin, str) and re.fullmatch(r"[0-9a-f]{64}", pin)):
+        raise SystemExit(1)
+    print(pin)
+except SystemExit:
+    raise
+except Exception:
+    raise SystemExit(1)
+' "$f" "$want" 2>/dev/null
 }
 
 # THE CARD MUST PROVE IT IS THE ONE THE REGISTRY NAMED, BEFORE IT IS WIPED.
