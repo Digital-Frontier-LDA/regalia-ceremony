@@ -395,11 +395,22 @@ if [ "${#missing_tools[@]}" -gt 0 ]; then
   printf '  Install them and re-run:\n\n      sudo %s --install-deps\n\n' "$0" >&2
   printf '  or, for just these:      sudo apt-get install -y %s\n\n' "${missing_tools[*]}" >&2
   printf '  (The host-runnable suites above ran and their results stand.)\n' >&2
-  suite_failed "daemon-backed tier (missing: ${missing_tools[*]})"
-  printf '\n\033[1;35m========== RESULT ==========\033[0m\n' >&2
-  printf 'SOME SUITES FAILED:\n'
-  for s in "${FAILED_SUITES[@]}"; do printf '  - %s\n' "$s"; done
-  exit 1
+  # REFUSED, NOT FAILED — and exit 2, not 1. A suite that ran and disagreed with the code is a
+  # different fact from a tier that never ran, and the repo already separates them this way
+  # (assert-no-dkek.sh: 0 clean, 1 found, 2 cannot-evaluate). Calling this a failed suite would
+  # put "SOME SUITES FAILED" on a host where nothing failed, and hide the real failures if any.
+  # It stays NONZERO: a tier that could not be evaluated is not a pass.
+  printf '\n\033[1;35m========== RESULT ==========\033[0m\n'
+  if [ "${#FAILED_SUITES[@]}" -gt 0 ]; then
+    printf 'SOME SUITES FAILED:\n'
+    for s in "${FAILED_SUITES[@]}"; do printf '  - %s\n' "$s"; done
+    printf 'AND the daemon-backed tier was REFUSED (missing: %s) — it did not run.\n' "${missing_tools[*]}"
+    exit 1
+  fi
+  printf 'Every suite that could run PASSED.\n'
+  printf 'The daemon-backed tier was REFUSED (missing: %s) — it did not run, so this is\n' "${missing_tools[*]}"
+  printf 'INCONCLUSIVE, not a pass. Exit 2.\n'
+  exit 2
 fi
 
 say "ROUTE COVERAGE — every hardware route vs the emulators"

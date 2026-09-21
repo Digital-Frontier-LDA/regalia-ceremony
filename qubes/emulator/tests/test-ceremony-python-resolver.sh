@@ -15,6 +15,9 @@ F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 [ -r "$RES" ] || { echo "no ceremony-python.sh at $RES" >&2; exit 1; }
 
+# The program text passed to `bash -c` is FIXED and the path arrives as $1. Splicing $RES into the
+# program means a checkout path containing a quote rewrites what runs — the assertions would then
+# be measuring a different program than the one they describe.
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 # Two fake venvs: one whose interpreter imports the module, one whose interpreter does not.
 mkvenv(){  # mkvenv <dir> <yes|no>
@@ -29,16 +32,16 @@ mkvenv "$T/bad" no
 mkdir -p "$T/home/.local/share"; mkvenv "$T/home/.local/share/akash-hsm-venv" yes
 
 hdr "a venv is accepted on what it can IMPORT, not on existing"
-out="$(HOME="$T/nohome" CEREMONY_VENV="$T/bad" bash -c ". '$RES'; ceremony_python_find definitely_not_a_module" 2>&1)"
+out="$(HOME="$T/nohome" CEREMONY_VENV="$T/bad" bash -c '. "$1"; ceremony_python_find definitely_not_a_module' _ "$RES" 2>&1)"
 case "$out" in
   "$T/bad/bin") F "a venv whose interpreter cannot import the module was accepted anyway";;
   *) P "an interpreter that fails the import is passed over";;
 esac
-out="$(HOME="$T/nohome" CEREMONY_VENV="$T/good" bash -c ". '$RES'; ceremony_python_find anything" 2>&1)"
+out="$(HOME="$T/nohome" CEREMONY_VENV="$T/good" bash -c '. "$1"; ceremony_python_find anything' _ "$RES" 2>&1)"
 [ "$out" = "$T/good/bin" ] && P "the one that imports it is chosen" || F "did not choose the good venv: $out"
 
 hdr "every historical location is still searched"
-out="$(HOME="$T/home" bash -c "unset CEREMONY_VENV; . '$RES'; ceremony_python_find anything" 2>&1)"
+out="$(HOME="$T/home" bash -c 'unset CEREMONY_VENV; . "$1"; ceremony_python_find anything' _ "$RES" 2>&1)"
 [ "$out" = "$T/home/.local/share/akash-hsm-venv/bin" ] \
   && P "the old hard-coded path .local/share/akash-hsm-venv is found with no CEREMONY_VENV set" \
   || F "the historical path was not searched: $out"
@@ -46,18 +49,18 @@ out="$(HOME="$T/home" bash -c "unset CEREMONY_VENV; . '$RES'; ceremony_python_fi
 hdr "under sudo, the INVOKING user's venv is searched too"
 # $HOME is /root under sudo. Without SUDO_USER the developer's venv is unreachable and the tier
 # runs against the system interpreter — which is exactly how this failed on the qualification box.
-out="$(HOME="$T/nohome" SUDO_USER="$(id -un)" bash -c "unset CEREMONY_VENV; . '$RES'; declare -f ceremony_python_find" 2>&1)"
+out="$(HOME="$T/nohome" SUDO_USER="$(id -un)" bash -c 'unset CEREMONY_VENV; . "$1"; declare -f ceremony_python_find' _ "$RES" 2>&1)"
 grep -q 'SUDO_USER' <<<"$out" && P "the search consults SUDO_USER's home" || F "SUDO_USER is not consulted"
 
 hdr "when nothing can import them, it REFUSES and says how to build one"
-out="$(HOME="$T/nohome" bash -c "unset CEREMONY_VENV; . '$RES'; ceremony_python_require definitely_not_a_module" 2>&1)"; rc=$?
+out="$(HOME="$T/nohome" bash -c 'unset CEREMONY_VENV; . "$1"; ceremony_python_require definitely_not_a_module' _ "$RES" 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && P "require fails (exit $rc) rather than continuing against a python that cannot run the suites" \
   || F "require returned 0 with no usable interpreter — the tier would report environment failures as code failures"
 grep -q 'pip install --require-hashes -r qubes/requirements.txt' <<<"$out" \
   && P "…and the refusal carries the exact command that fixes it" || F "the refusal does not say how to fix it"
 grep -q '/opt/dev-bin/regalia-venv' <<<"$out" \
   && P "…naming the path the installer actually creates" || F "the refusal does not name the installer's venv"
-out="$(HOME="$T/nohome" bash -c "unset CEREMONY_VENV; . '$RES'; ceremony_python_prefer definitely_not_a_module; echo rc=\$?" 2>&1)"
+out="$(HOME="$T/nohome" bash -c 'unset CEREMONY_VENV; . "$1"; ceremony_python_prefer definitely_not_a_module; echo rc=$?' _ "$RES" 2>&1)"
 grep -q 'rc=0' <<<"$out" && P "prefer stays quiet and succeeds (callers with their own errors keep theirs)" \
   || F "prefer failed: $out"
 

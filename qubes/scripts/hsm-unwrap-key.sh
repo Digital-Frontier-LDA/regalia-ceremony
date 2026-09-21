@@ -63,9 +63,30 @@ KEY_SIZE=$(( 10#$KEY_SIZE ))
 [ "$KEY_ID" -ge 1 ] && [ "$KEY_ID" -le 255 ] || die "--key-id must be between 1 and 255"
 [ "$KEY_SIZE" -ge 8 ] && [ "$KEY_SIZE" -le 65535 ] || die "--key-size must be between 8 and 65535 bits"
 grep -qE '^[0-9]{6,16}$' <<< "$USER_PIN" || die "HSM_USER_PIN must be 6-16 digits"
+# VALID UTF-8, NOT MERELY A BYTE COUNT. The PrKD encodes this as a DER UTF8String, so $'\xFF'
+# passes a length check and produces a string no consumer can decode — and the card may reject the
+# PrKD write AFTER UNWRAP KEY has already stored the key, leaving the key on the card with no
+# PKCS#15 description and therefore invisible to every PKCS#11 consumer. That is the exact failure
+# mode this script exists to prevent, arrived at from the other side.
+_valid_utf8() {
+  if command -v iconv >/dev/null 2>&1; then
+    printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$1" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' >/dev/null 2>&1
+  else
+    return 2     # cannot evaluate: the caller refuses rather than guessing
+  fi
+}
+
 # Bytes, not characters: ascii_hex encodes bytes, so a 100-character emoji label is a 400-byte
 # UTF8String and both the TLV length and Lc overflow — after UNWRAP KEY has already stored the key.
 _label_bytes="$(LC_ALL=C printf '%s' "$LABEL" | wc -c | tr -d ' ')"
+_valid_utf8 "$LABEL"; _u8=$?
+case "$_u8" in
+  0) :;;
+  2) die "cannot check whether --label is valid UTF-8 (no iconv and no python3) — refusing rather than encoding bytes that may not be a UTF8String";;
+  *) die "--label is not valid UTF-8; the PrKD write encodes it as a DER UTF8String";;
+esac
 [ "$_label_bytes" -le 100 ] || die "--label encodes to $_label_bytes bytes; keep it under 100 so the PrKD write stays a short APDU"
 
 ascii_hex(){ printf '%s' "$1" | od -An -tx1 | tr -d ' \n' | tr 'a-f' 'A-F'; }

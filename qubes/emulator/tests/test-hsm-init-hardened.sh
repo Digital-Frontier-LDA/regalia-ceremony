@@ -148,6 +148,11 @@ done
 out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --retries 0)"
 grep -q 'at least 1' <<<"$out" && P "--retries 0 is refused (it would lock the card on one wrong PIN)" \
   || F "--retries 0 was accepted"
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --label "$(printf 'ok\xffbad')")"
+grep -q 'not valid UTF-8' <<<"$out" \
+  && P "a label that is not valid UTF-8 is refused before the card is wiped" \
+  || F "an invalid UTF-8 label was encoded into the TokenInfo write: $(tail -2 <<<"$out")"
+
 # BYTES, NOT CHARACTERS. 60 emoji are 60 characters and 240 bytes: the character count passes,
 # the TLV length byte and the Lc are then both computed from the wrong number, and the card has
 # already been wiped by the time the label write is malformed.

@@ -73,10 +73,31 @@ for n in "$DKEK_SHARES" "$RETRIES" "$PKA_KEYS" "$PKA_REQUIRED"; do
   [ "$n" -le 255 ] || die "$n does not fit in the single byte its TLV encodes (max 255)"
 done
 [ "$RETRIES" -ge 1 ] || die "--retries must be at least 1; 0 would lock the card on its first wrong PIN"
+# VALID UTF-8, NOT MERELY A BYTE COUNT. The PrKD encodes this as a DER UTF8String, so $'\xFF'
+# passes a length check and produces a string no consumer can decode — and the card may reject the
+# PrKD write AFTER UNWRAP KEY has already stored the key, leaving the key on the card with no
+# PKCS#15 description and therefore invisible to every PKCS#11 consumer. That is the exact failure
+# mode this script exists to prevent, arrived at from the other side.
+_valid_utf8() {
+  if command -v iconv >/dev/null 2>&1; then
+    printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+  elif command -v python3 >/dev/null 2>&1; then
+    printf '%s' "$1" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' >/dev/null 2>&1
+  else
+    return 2     # cannot evaluate: the caller refuses rather than guessing
+  fi
+}
+
 # BYTES, NOT CHARACTERS. ${#LABEL} counts characters in a UTF-8 locale, so a 200-character label
 # can encode to far more than 200 bytes — and then the one-byte TLV length and the short-APDU Lc
 # are both wrong, after the card has already been wiped.
 _label_bytes="$(LC_ALL=C printf '%s' "$LABEL" | wc -c | tr -d ' ')"
+_valid_utf8 "$LABEL"; _u8=$?
+case "$_u8" in
+  0) :;;
+  2) die "cannot check whether --label is valid UTF-8 (no iconv and no python3) — refusing rather than encoding bytes that may not be a UTF8String";;
+  *) die "--label is not valid UTF-8; the TokenInfo write encodes it as a DER UTF8String";;
+esac
 [ "$_label_bytes" -le 200 ] || die "--label encodes to $_label_bytes bytes; keep it under 200 so the TokenInfo write stays a short APDU"
 
 # The published pico-hsm example values must never reach a card that will hold anything. The same

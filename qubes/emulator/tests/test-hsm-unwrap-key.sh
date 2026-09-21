@@ -109,6 +109,8 @@ head -c 20 /dev/urandom > "$BIN/tiny.bin"
 refuses "a 20-byte blob is refused — that is not a key blob"         "not a key blob" --reader 0 --key-id 2 --blob "$BIN/tiny.bin" --label akash-funding
 head -c 70000 /dev/urandom > "$BIN/huge.bin"
 refuses "a 70000-byte blob is refused — extended Lc tops out at 65535"         "tops out at 65535" --reader 0 --key-id 2 --blob "$BIN/huge.bin" --label akash-funding
+refuses "a label that is not valid UTF-8 is refused (the PrKD encodes a DER UTF8String)" \
+        "not valid UTF-8" --reader 0 --key-id 2 --blob "$BIN/blob.bin" --label "$(printf 'ok\xffbad')"
 EMOJI="$(printf '\xf0\x9f\x94\x91%.0s' $(seq 1 30))"   # 30 emoji = 30 chars, 120 bytes
 refuses "a 30-character / 120-byte emoji label is refused on BYTES, not characters"         "encodes to 120 bytes" --reader 0 --key-id 2 --blob "$BIN/blob.bin" --label "$EMOJI"
 

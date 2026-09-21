@@ -20,6 +20,17 @@
 # A search alone is not enough: a path can EXIST and its interpreter still be missing a module, so
 # candidates are accepted only after they import what the caller asked for.
 
+# Can this interpreter import these modules? The names go in as ARGV, never spliced into a program
+# text: a module list joined through the field separator is one odd name away from changing what
+# runs, and touching that variable at all inside a sourced file is a trap for whatever sources it
+# next.
+_ceremony_python_imports() {
+  local py="$1"; shift
+  [ "$#" -eq 0 ] && return 0
+  "$py" -c 'import importlib,sys
+for m in sys.argv[1:]: importlib.import_module(m)' "$@" >/dev/null 2>&1
+}
+
 # ceremony_python_find [module]... -> prints the bin dir of the first interpreter that imports them
 ceremony_python_find() {
   local mods=("$@") c py
@@ -41,13 +52,13 @@ ceremony_python_find() {
   for c in "${cands[@]}"; do
     py="$c/bin/python3"
     [ -x "$py" ] || continue
-    if [ "${#mods[@]}" -eq 0 ] || "$py" -c "import $(IFS=,; echo "${mods[*]}")" >/dev/null 2>&1; then
+    if _ceremony_python_imports "$py" ${mods[@]+"${mods[@]}"}; then
       printf '%s\n' "$c/bin"; return 0
     fi
   done
   # The system interpreter counts as a candidate when it genuinely has them (CI installs them there).
   py="$(command -v python3 2>/dev/null)" || return 1
-  if [ "${#mods[@]}" -eq 0 ] || "$py" -c "import $(IFS=,; echo "${mods[*]}")" >/dev/null 2>&1; then
+  if _ceremony_python_imports "$py" ${mods[@]+"${mods[@]}"}; then
     printf '%s\n' "$(dirname "$py")"; return 0
   fi
   return 1
