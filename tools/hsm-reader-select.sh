@@ -427,6 +427,90 @@ hsm_assert_staging() {
     return 0
 }
 
+# The C.DevAut digest the registry pins for token serial $1, or empty. Read from HSM_DEVAUT_MAP,
+# which hsm_staging_registry_load exports for `nitrokey-hsm2` entries.
+hsm_devaut_pin_for() {
+    local want="${1:-}" pair
+    [ -n "$want" ] || return 1
+    while IFS= read -r pair; do
+        [ -n "$pair" ] || continue
+        [ "${pair%%:*}" = "$want" ] || continue
+        printf '%s\n' "${pair#*:}"
+        return 0
+    done <<EOF
+$(printf '%s' "${HSM_DEVAUT_MAP:-}" | tr ' \t' '\n\n')
+EOF
+    return 1
+}
+
+# THE CARD MUST PROVE IT IS THE ONE THE REGISTRY NAMED, BEFORE IT IS WIPED.
+#
+# `hsm_assert_staging` answers "may a card with this serial be wiped". It cannot answer "is the
+# card in front of me that card": a serial is self-reported, and a substituted genuine Nitrokey
+# reports whatever its issuer put there. The registry therefore pins the SHA-256 of C.DevAut for
+# every Nitrokey entry — the certificate covers the device public key — and this reads EF 2F02
+# from the card and compares (regalia#481, decision 2026-09-21).
+#
+# FAILS CLOSED in every direction that is not a match: no pin, no reader, no readable certificate,
+# or a different digest. A Pico entry has no pin and returns 0 — its identity is proven over SWD by
+# hsm_verify_board_over_probe, which is the same idea one bus over.
+hsm_assert_devaut_pinned() {
+    local want="${1:-}" pin got reader devaut_sh here
+    [ -n "$want" ] || { echo "REFUSING: no token serial for the DevAut check" >&2; return 1; }
+    pin="$(hsm_devaut_pin_for "$want" 2>/dev/null)" || pin=""
+    if [ -z "$pin" ]; then
+        case "$want" in
+            DENK*)
+                echo "REFUSING: $want looks like a Nitrokey HSM 2 but the registry pins no" >&2
+                echo "  devaut_sha256 for it, so the card cannot prove it is the device that was" >&2
+                echo "  registered. Add the pin (qubes/scripts/hsm-devaut-read.sh prints it)." >&2
+                return 1 ;;
+            *) return 0 ;;   # not a pinned kind: SWD board identity covers it
+        esac
+    fi
+    here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    devaut_sh="${HSM_DEVAUT_READ_SH:-}"
+    if [ -z "$devaut_sh" ]; then
+        for c in "$here/../qubes/scripts/hsm-devaut-read.sh" "$here/../ceremony/qubes/scripts/hsm-devaut-read.sh"; do
+            [ -r "$c" ] && { devaut_sh="$c"; break; }
+        done
+    fi
+    [ -n "$devaut_sh" ] && [ -r "$devaut_sh" ] || {
+        echo "REFUSING: hsm-devaut-read.sh not found, so the DevAut pin for $want CANNOT BE" >&2
+        echo "  EVALUATED — and an unevaluated identity check is not a passed one." >&2
+        return 1
+    }
+    reader="$(hsm_reader_for "$want" 2>/dev/null)" || reader=""
+    [ -n "$reader" ] || {
+        echo "REFUSING: $want does not resolve to exactly one reader, so its certificate cannot" >&2
+        echo "  be read from the card it names." >&2
+        return 1
+    }
+    got="$(bash "$devaut_sh" --reader "$reader" --expect-serial "$want" 2>/dev/null \
+           | sed -n 's/^DEVAUT_SHA256=//p' | head -1)"
+    [ -n "$got" ] || {
+        echo "REFUSING: could not read C.DevAut from $want at reader $reader — the identity the" >&2
+        echo "  registry pins CANNOT BE EVALUATED." >&2
+        return 1
+    }
+    [ "$got" = "$pin" ] || {
+        echo "REFUSING: DEVAUT DIGEST MISMATCH for $want." >&2
+        echo "  registry pins $pin" >&2
+        echo "  card reports  $got" >&2
+        echo "  This is a DIFFERENT DEVICE reporting a registered serial. Nothing is wiped." >&2
+        return 1
+    }
+    return 0
+}
+
+# Role gate AND identity, in the order a destructive step needs them: may this serial be wiped,
+# and is the card in front of us that device. Destructive tools call this one.
+hsm_assert_staging_card() {
+    hsm_assert_staging "${1:-}" || return 1
+    hsm_assert_devaut_pinned "${1:-}" || return 1
+    return 0
+}
+
 # The token serial pinned to board id $1 by HSM_BOARD_MAP, or empty with a refusal on stderr.
 #
 # WHY IT IS SHARED. Tools that flash a board over SWD also have to TALK to its card over PC/SC —

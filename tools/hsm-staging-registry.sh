@@ -12,7 +12,7 @@ _hsm_registry_pairs() {
 
 hsm_staging_registry_load() {
     local registry="${HSM_STAGING_REGISTRY_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hsm-staging-registry.json}"
-    local maps probes raw token board probe
+    local maps probes devauts raw
     [ -r "$registry" ] || { echo "registry unavailable: $registry" >&2; return 1; }
     raw="$(python3 - "$registry" <<'PY'
 import json, re, sys
@@ -33,31 +33,64 @@ try:
          f"schema is {data.get('schema')!r}, expected 'regalia.staging-hardware/v1'")
     need(data.get('environment') == 'staging', f"environment is {data.get('environment')!r}, expected 'staging'")
     need(isinstance(devices, list) and devices, 'devices is empty or not a list')
+    # TWO KINDS, IDENTIFIED BY WHAT EACH CARD CAN ACTUALLY PROVE.
+    #
+    # A Pico HSM is an RP2350 board: it has an OTP chip id readable over SWD and a debug probe, and
+    # those are what the flash tools address it by. A Nitrokey HSM 2 has neither — its hardware
+    # identity is C.DevAut in EF 2F02, verifiable to the CardContact root. Requiring board_id and
+    # debug_probe of EVERY device is why the authorised Nitrokey units could not be listed at all,
+    # and an unlistable card is one every drill refuses (regalia#481).
+    #
+    # The fields are required per kind and REFUSED where they do not belong: a board_id on a
+    # Nitrokey entry is a copy-paste from the Pico rows, and accepting it would let the flash tools
+    # aim SWD at a card that has no debug port.
     seen = set()
     for d in devices:
         need(isinstance(d, dict), 'a device entry is not an object')
-        need(d.get('role') == 'staging', f"device {d.get('token_serial')!r} has role {d.get('role')!r}, expected 'staging'")
-        need(d.get('kind') == 'pico-hsm2', f"device {d.get('token_serial')!r} has kind {d.get('kind')!r}, expected 'pico-hsm2'")
-        t, b = d.get('token_serial'), d.get('board_id')
-        p = (d.get('debug_probe') or {}).get('serial')
-        need(isinstance(t, str) and re.fullmatch(r'ESP[0-9A-F]{8}', t), f'token_serial {t!r} is malformed')
-        need(isinstance(b, str) and re.fullmatch(r'[0-9A-F]{16}', b), f'board_id {b!r} is malformed')
-        need(isinstance(p, str) and re.fullmatch(r'[0-9A-F]{16}', p), f'debug_probe.serial {p!r} is malformed')
-        need(not ({t, b, p} & seen), f'{t} reuses an identifier already claimed by another device')
-        seen.update((t, b, p))
-        print(f'{t}\t{b}\t{p}')
+        t = d.get('token_serial')
+        need(d.get('role') == 'staging', f"device {t!r} has role {d.get('role')!r}, expected 'staging'")
+        kind = d.get('kind')
+        need(kind in ('pico-hsm2', 'nitrokey-hsm2'),
+             f"device {t!r} has kind {kind!r}, expected 'pico-hsm2' or 'nitrokey-hsm2'")
+        if kind == 'pico-hsm2':
+            b = d.get('board_id')
+            p = (d.get('debug_probe') or {}).get('serial')
+            need(isinstance(t, str) and re.fullmatch(r'ESP[0-9A-F]{8}', t), f'token_serial {t!r} is malformed')
+            need(isinstance(b, str) and re.fullmatch(r'[0-9A-F]{16}', b), f'board_id {b!r} is malformed')
+            need(isinstance(p, str) and re.fullmatch(r'[0-9A-F]{16}', p), f'debug_probe.serial {p!r} is malformed')
+            need(not ({t, b, p} & seen), f'{t} reuses an identifier already claimed by another device')
+            seen.update((t, b, p))
+            print(f'pico\t{t}\t{b}\t{p}')
+        else:
+            chr_, sha = d.get('devaut_chr'), d.get('devaut_sha256')
+            need(isinstance(t, str) and re.fullmatch(r'DENK[0-9]{7}', t), f'token_serial {t!r} is malformed for a Nitrokey HSM 2')
+            need(isinstance(chr_, str) and re.fullmatch(r'[A-Z0-9]{8,16}', chr_),
+                 f'devaut_chr {chr_!r} is malformed (the certificate holder reference from EF 2F02)')
+            need(isinstance(sha, str) and re.fullmatch(r'[0-9a-f]{64}', sha),
+                 f'devaut_sha256 {sha!r} is not a lowercase sha256 of C.DevAut')
+            need('board_id' not in d and 'debug_probe' not in d,
+                 f'{t} is a Nitrokey HSM 2 and has no board id or debug probe; remove those fields')
+            need(not ({t, sha} & seen), f'{t} reuses an identifier already claimed by another device')
+            seen.update((t, sha))
+            print(f'nitrokey\t{t}\t{chr_}\t{sha}')
 except Exception as exc:
     print(f'registry invalid: {exc}', file=sys.stderr)
     raise SystemExit(1)
 PY
     )" || return 1
-    maps=""; probes=""
-    while IFS=$'\t' read -r token board probe; do
-        [ -n "$token" ] || continue
-        maps="${maps:+$maps }$token:$board"
-        probes="${probes:+$probes }$probe:$board"
+    # The board and probe maps stay PICO-ONLY: they exist for tools that drive a board over SWD,
+    # and a Nitrokey has no board to name. Its pin goes into HSM_DEVAUT_MAP, which is what a
+    # destructive step checks the card against before it wipes anything.
+    maps=""; probes=""; devauts=""
+    local kind a b c
+    while IFS=$'\t' read -r kind a b c; do
+        [ -n "$kind" ] || continue
+        case "$kind" in
+            pico)     maps="${maps:+$maps }$a:$b"; probes="${probes:+$probes }$c:$b" ;;
+            nitrokey) devauts="${devauts:+$devauts }$a:$c" ;;
+        esac
     done <<< "$raw"
-    [ -n "$maps" ] || { echo "registry contains no devices: $registry" >&2; return 1; }
+    [ -n "$maps$devauts" ] || { echo "registry contains no devices: $registry" >&2; return 1; }
     # An override is compared as a SET of pairs, not as a string. Both maps are lists of independent
     # token:board / probe:board pairs whose order carries no meaning, and an exact string comparison
     # refused the CI repo variables for listing the same correct pairs in a different order than the
@@ -70,5 +103,8 @@ PY
     if [ -n "${HSM_CI_PROBE_MAP:-}" ] && [ "$(_hsm_registry_pairs "$HSM_CI_PROBE_MAP")" != "$(_hsm_registry_pairs "$probes")" ]; then
         echo "HSM_CI_PROBE_MAP disagrees with registry; refusing override" >&2; return 1
     fi
-    export HSM_BOARD_MAP="$maps" HSM_CI_PROBE_MAP="$probes"
+    if [ -n "${HSM_DEVAUT_MAP:-}" ] && [ "$(_hsm_registry_pairs "$HSM_DEVAUT_MAP")" != "$(_hsm_registry_pairs "$devauts")" ]; then
+        echo "HSM_DEVAUT_MAP disagrees with registry; refusing override" >&2; return 1
+    fi
+    export HSM_BOARD_MAP="$maps" HSM_CI_PROBE_MAP="$probes" HSM_DEVAUT_MAP="$devauts"
 }

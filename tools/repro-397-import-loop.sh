@@ -150,7 +150,13 @@ SLOTID="${SLOTID:-$(hsm_slot_id_for "$PINNED_SERIAL" || true)}"
 # otherwise erased on the operator's typo.
 command -v hsm_assert_staging >/dev/null 2>&1 \
   || die "the role registry gate is unavailable (tools/hsm-reader-select.sh) — refusing to run a loop that re-initialises a card"
-hsm_assert_staging "$PINNED_SERIAL" || die "the registry does not list $PINNED_SERIAL as staging — refusing to wipe it"
+# hsm_assert_staging_card, not hsm_assert_staging: the role gate says a card with this SERIAL may
+# be wiped, and a serial is self-reported. For a registered Nitrokey the card must also match the
+# C.DevAut digest the registry pins, which covers the device public key (regalia#481). A Pico entry
+# has no pin and passes straight through — its identity is proven over SWD instead.
+command -v hsm_assert_staging_card >/dev/null 2>&1 \
+  || die "hsm_assert_staging_card is unavailable: this resolver cannot check the card against the certificate the registry pins, and a serial-only check accepts a substituted card reporting a registered serial"
+hsm_assert_staging_card "$PINNED_SERIAL" || die "$PINNED_SERIAL did not pass the registry and identity gate — refusing to wipe it"
 P11="${HSM_PKCS11_MODULE:-${P11:-}}"
 [ -n "$P11" ] || die "HSM_PKCS11_MODULE (or P11) unset — the drill needs the PKCS#11 module path"
 

@@ -21,6 +21,34 @@ export HSM_STAGING_REGISTRY_FILE=/etc/regalia/hsm-staging-registry.json
 
 Never add a production device to the copy in this repository.
 
+### Two kinds, identified by what each card can prove
+
+`pico-hsm2` entries carry `board_id` (the RP2350 OTP chip id, read over SWD) and `debug_probe`,
+because that is how the flash tools address the board. A Nitrokey HSM 2 has neither: its hardware
+identity is **C.DevAut in EF 2F02**, so `nitrokey-hsm2` entries carry `devaut_chr` and
+`devaut_sha256` instead, and are refused if they carry a board id.
+
+```json
+{ "id": "nitrokey-hsm2-a", "role": "staging", "kind": "nitrokey-hsm2",
+  "token_serial": "DENK0404144", "devaut_chr": "DENK040414400000",
+  "devaut_sha256": "1b7763b7…9aa4" }
+```
+
+`qubes/scripts/hsm-devaut-read.sh` prints that digest, with `opensc-tool` alone.
+
+**The pin is checked against the CARD before a wipe.** `hsm_assert_staging` answers "may a card
+with this serial be wiped"; it cannot answer "is the card in front of me that card", because a
+serial is self-reported and a substituted genuine Nitrokey reports whatever its issuer put there.
+`hsm_assert_staging_card` does both — the role gate, then `hsm_assert_devaut_pinned`, which reads
+EF 2F02 and compares. No pin, no reader, no readable certificate and a different digest are all
+refusals. A Pico entry has no pin and passes through: its identity is proven over SWD by
+`hsm_verify_board_over_probe`, the same idea one bus over.
+
+**Leaving the list is enforced, not remembered.** Registering a future-production unit means
+automation may erase it on schedule, so `hsm-host-role/files/commission-card.sh` refuses to
+commission a card the registry still lists as `staging`. The last step of qualifying a unit is
+removing its entry in a reviewed change.
+
 ## What the scripts reach for
 
 They call each other by path. Four that this repository originally shipped without — and that
