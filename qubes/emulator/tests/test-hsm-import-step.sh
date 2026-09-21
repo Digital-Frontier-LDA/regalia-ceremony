@@ -38,6 +38,10 @@ trap 'rm -rf "$FAKE" "$STATE" "${WORK:-}"' EXIT
 cat > "$FAKE/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
 S="${STATE:?}"
+# EVERY INVOCATION IS RECORDED. run() prints commands through show(), which this suite silences,
+# so the step's output cannot tell a row which label or slot a proof addressed. The argv can.
+printf '%s
+' "$*" >> "$S/p11-args.txt"
 case "$*" in
   *--list-objects*)
     # A blank card enumerates SUCCESSFULLY with empty output; an unreadable one exits NON-ZERO.
@@ -143,7 +147,7 @@ STUB
 chmod +x "$HSM_IMPORTER"
 
 reset(){ rm -f "$WORK/funding.p12" "$WORK/p12.pw" "$WORK/imported-pub.der" "$STATE"/oncard.* \
-               "$IMPORT_STUB_LOG"; \
+               "$IMPORT_STUB_LOG" "$STATE/p11-args.txt"; \
          printf '%s' "$MNEMONIC" > "$WORK/funding.mnemonic"
          # The DKEK and its share file are the step's inputs, not its outputs: it refuses without
          # them because there would be nothing to wrap the key under.
@@ -273,6 +277,52 @@ grep -qi "would ERASE it" <<< "$(echo "$out")" \
   || F "BUG: would have sent the operator to wipe a card holding a live key"
 grep -qi "IMPORT COMPLETE AND PROVEN" <<< "$(echo "$out")" \
   && F "BUG: declared success after refusing the hand-off" || P "no success claim after refusal"
+
+hdr "A CUSTOM HSM_KEY_LABEL reaches the import AND both proofs"
+# The label used to be a literal in the read-back and the sign proof while the importer took
+# ${HSM_KEY_LABEL:-akash-funding}. A custom label therefore imported successfully and then failed
+# both verifications — an operator would see a good import reported as an unproven one.
+reset; place_on_card "$MNEMONIC"
+out="$(HSM_KEY_LABEL=custom-funding step_hsm_import 2>&1)"; rc=$?
+grep -q -- '--label custom-funding' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "the importer is given the custom label" \
+  || F "the importer did not get the custom label: $(cat "$IMPORT_STUB_LOG" 2>/dev/null)"
+grep -q -- '--read-object.*--label custom-funding' "$STATE/p11-args.txt" 2>/dev/null \
+  && P "…and the read-back proof asks for that label" \
+  || F "the read-back used a different label: $(grep -- '--read-object' "$STATE/p11-args.txt" 2>/dev/null | head -1)"
+grep -q -- '--sign.*--label custom-funding' "$STATE/p11-args.txt" 2>/dev/null \
+  && P "…and so does the sign proof" \
+  || F "the sign proof used a different label: $(grep -- '--sign' "$STATE/p11-args.txt" 2>/dev/null | head -1)"
+grep -q 'akash-funding' "$STATE/p11-args.txt" 2>/dev/null \
+  && F "the literal 'akash-funding' still reaches the card under a custom label" \
+  || P "…with the literal gone from every card command"
+[ "$rc" -eq 0 ] && P "and the step still completes under a custom label" || F "the step failed with a custom label (rc=$rc)"
+
+hdr "A non-default HSM_SLOT reaches the guards and the proofs, not just the importer"
+# The hazard this closes: the importer writes to the configured card while the blank check, the
+# read-back and the sign proof inspect whichever token PKCS#11 enumerated first. The step would
+# then approve, write, and "prove" across two different devices — the same failure
+# test-fleet-device-selection.sh guards hsm-import-key.sh against, arriving from the other side.
+reset; place_on_card "$MNEMONIC"
+out="$(HSM_SLOT=4 step_hsm_import 2>&1)"; rc=$?
+grep -q -- '--slot 4' "$IMPORT_STUB_LOG" 2>/dev/null \
+  && P "the importer targets slot 4" || F "the importer did not get the slot"
+for op in --list-objects --read-object --sign; do
+  # NO PIPE INTO grep -q. grep -q exits on its first match, the producer takes SIGPIPE, and under
+  # pipefail the pipeline status is 141 — so the branch would NOT be taken and a call that missed
+  # the slot would read as clean. The producer finishes into a variable first.
+  # (tools/hsm-lint-predicates.sh flags exactly this shape.)
+  calls="$(grep -- "$op" "$STATE/p11-args.txt" 2>/dev/null)"
+  unslotted="$(grep -v -- '--slot 4' <<<"$calls")"
+  if [ -n "$calls" ] && [ -n "$unslotted" ]; then
+    F "a $op call did not name slot 4: $(head -1 <<<"$unslotted")"
+  elif [ -z "$calls" ]; then
+    F "no $op call was made at all, so this row proves nothing about the slot"
+  else
+    P "…and every $op call names slot 4 too"
+  fi
+done
+[ "$rc" -eq 0 ] && P "and the step completes against the named slot" || F "the step failed with HSM_SLOT set (rc=$rc)"
 
 hdr "A FAILED IMPORT STOPS THE STEP — the proofs must not run against a stale card"
 # The card is modelled, so its state does not change when the import fails. If the step carried on

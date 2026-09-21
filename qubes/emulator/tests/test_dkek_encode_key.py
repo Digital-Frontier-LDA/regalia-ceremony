@@ -232,6 +232,20 @@ class OpenScPasswordShares(unittest.TestCase):
             enc.parse_share_file(self._file((1, 2)), [1, 5])
         self.assertIn("5", str(caught.exception))
 
+    def test_a_repeated_share_id_in_the_FILE_is_refused(self):
+        # dict(shares) would keep the last value silently, and selecting by ID would then bypass
+        # the duplicate check in reconstruct_share_password altogether.
+        text = self._file((1, 2, 3)) + self._file((1,))
+        with self.assertRaises(ValueError) as caught:
+            enc.parse_share_file(text)
+        self.assertIn("more than once", str(caught.exception))
+
+    def test_a_repeated_id_is_refused_even_when_selecting_by_id(self):
+        text = self._file((1, 2, 3, 4)) + self._file((1,))
+        with self.assertRaises(ValueError) as caught:
+            enc.parse_share_file(text, [1, 2, 3, 4])
+        self.assertIn("more than once", str(caught.exception))
+
     def test_a_file_with_no_prime_is_refused(self):
         with self.assertRaises(ValueError):
             enc.parse_share_file("Share ID    : 1\nShare value : aa:bb\n")

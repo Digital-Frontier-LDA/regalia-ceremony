@@ -107,14 +107,19 @@ feed_dkek_shares() {
 # $1 = human label. $2 = expected marker (default THSM1). Set CEREMONY_EXPECT_ATR to pin an
 # EXACT full ATR when you want this device and not merely this model.
 assert_expected_device() {
-  local what="$1" marker="${2:-THSM1}" atr ascii tmo=""
+  # $3 = PC/SC reader index. WITHOUT IT THIS FINGERPRINTS THE WRONG CARD: `opensc-tool --atr` with
+  # no -r reads whichever reader enumerated first, so on a bench with two tokens the guard could
+  # approve device 0 while the step that follows writes to device 1. Callers that name a reader
+  # must pass it here, or the check and the write are about different cards.
+  local what="$1" marker="${2:-THSM1}" rdr="${3:-}" atr ascii tmo="" rsel=()
+  [ -n "$rdr" ] && rsel=(-r "$rdr")
   command -v opensc-tool >/dev/null 2>&1 || { warn "opensc-tool missing — cannot fingerprint $what"; return 0; }
   # `timeout` is coreutils and is ABSENT on macOS. Calling it unconditionally made this guard
   # return an empty ATR on any non-Linux host, which — being fail-closed — aborted every step
   # that uses it. Use it when present (a wedged reader must not hang the ceremony) and fall
   # back to a plain call when not.
   command -v timeout >/dev/null 2>&1 && tmo="timeout 8"
-  atr="$($tmo opensc-tool --atr 2>/dev/null | tr -d ' \n' | grep -oiE '[0-9a-f:]{20,}' | tr -d ':' | tr 'A-F' 'a-f')"
+  atr="$($tmo opensc-tool ${rsel[@]+"${rsel[@]}"} --atr 2>/dev/null | tr -d ' \n' | grep -oiE '[0-9a-f:]{20,}' | tr -d ':' | tr 'A-F' 'a-f')"
   if [ -z "$atr" ]; then
     err "no ATR from the reader — cannot confirm WHICH device is attached to $what."
     err "Refusing a destructive step against an unidentified card."
@@ -1225,10 +1230,19 @@ step_hsm_import() {
   warn "The documented SCSH import procedure INITIALISES (ERASES) the target device — Nitrokey:"
   warn "\"ensure nothing on the used Nitrokey HSM 2 is needed, it will be erased during the"
   warn "procedure\". Use a SCRATCH device, never one already in service."
-  assert_expected_device "the import target" || return 1
-  assert_hsm_blank "the import target" "pkcs11-tool" || {
-    err "Refusing to hand off to Smart Card Shell: the target already holds a funding key and"
-    err "the documented import procedure would ERASE it."
+  # ONE LABEL AND ONE DEVICE, DECIDED HERE AND USED EVERYWHERE BELOW. The import, the blank
+  # check, the ATR fingerprint, the read-back and the sign proof must all name the same key on the
+  # same card. A custom HSM_KEY_LABEL that reached only the importer would import successfully and
+  # then fail both proofs against the literal 'akash-funding'; a non-default HSM_SLOT that reached
+  # only the importer would write to one card while the guards inspected another — which is the
+  # hazard test-fleet-device-selection.sh exists for, arriving from the other direction.
+  local klabel="${HSM_KEY_LABEL:-akash-funding}"
+  local reader="${HSM_READER:-0}"
+  local p11sel=()
+  [ -n "${HSM_SLOT:-}" ] && p11sel=(--slot "$HSM_SLOT")
+  assert_expected_device "the import target" THSM1 "$reader" || return 1
+  assert_hsm_blank "the import target" "pkcs11-tool ${p11sel[*]}" || {
+    err "Refusing to import: the target already holds a funding key and the procedure would ERASE it."
     return 1
   }
   warn "The device must hold a DKEK domain — the SmartCard-HSM supports ONLY encrypted import."
@@ -1266,10 +1280,10 @@ step_hsm_import() {
   [ -s "$pinf" ] || { err "no HSM user PIN available for the import (set HSM_USER_PIN)"; return 1; }
   info "Importing the container onto the card (no Smart Card Shell, no JRE)…"
   if ! "$importer" --p12 "$p12" --pw-file "$pwfile" --id "${HSM_KEY_ID:-1}" \
-        --label "${HSM_KEY_LABEL:-akash-funding}" \
+        --label "$klabel" \
         --dkek "$pbe" --dkek-shares "$shares" \
         ${HSM_DKEK_SHARES_USE:+--dkek-shares-use "$HSM_DKEK_SHARES_USE"} \
-        --pin-file "$pinf" --reader "${HSM_READER:-0}" ${HSM_SLOT:+--slot "$HSM_SLOT"}; then
+        --pin-file "$pinf" --reader "$reader" ${HSM_SLOT:+--slot "$HSM_SLOT"}; then
     err "the import failed — see the status words above. The card was NOT left with a usable key."
     return 1
   fi
@@ -1280,7 +1294,7 @@ step_hsm_import() {
   # key produces a DIFFERENT address; funding that address loses the money to a key nobody can
   # reconstruct. The card's own public key is the authority, so read it back and compare.
   info "Verifying the CARD now holds the seed's key…"
-  run "pkcs11-tool --read-object --type pubkey --label akash-funding -o '$WORK/imported-pub.der'" \
+  run "pkcs11-tool ${p11sel[*]} --read-object --type pubkey --label '$klabel' -o '$WORK/imported-pub.der'" \
     || { err "could not read the imported public key from the card — import unproven."; return 1; }
   [ -s "$WORK/imported-pub.der" ] || { err "empty public key read from the card — do NOT fund."; return 1; }
   local oncard
@@ -1305,7 +1319,7 @@ step_hsm_import() {
   info "Proving the card can SIGN with the imported key…"
   head -c 32 /dev/urandom > "$WORK/imp.digest" && chmod 600 "$WORK/imp.digest"
   local proven=0
-  if run "pkcs11-tool --login --sign --label akash-funding -m ECDSA -i '$WORK/imp.digest' -o '$WORK/imp.sig'" \
+  if run "pkcs11-tool ${p11sel[*]} --login --sign --label '$klabel' -m ECDSA -i '$WORK/imp.digest' -o '$WORK/imp.sig'" \
      && [ -s "$WORK/imp.sig" ] \
      && python3 "$HERE/verify-hsm-control.py" --der "$WORK/imported-pub.der" \
           --digest "$WORK/imp.digest" --sig "$WORK/imp.sig" >/dev/null 2>&1; then

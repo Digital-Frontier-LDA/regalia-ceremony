@@ -173,6 +173,16 @@ def parse_share_file(text: str, use: list[int] | None = None) -> tuple[int, list
         raise ValueError("the shares disagree about the prime; this file mixes two ceremonies")
     if not shares:
         raise ValueError("no shares in the file")
+    # DUPLICATES ARE REFUSED HERE, BEFORE `use` IS APPLIED. dict(shares) silently keeps the last
+    # value for a repeated ID, so a file listing share 1 twice with different values would be
+    # collapsed without a word — and selecting by ID would then bypass the duplicate check in
+    # reconstruct_share_password entirely. A share file with a repeated ID is a file somebody
+    # assembled by hand, and interpolating whatever survived the collapse yields a confident wrong
+    # password rather than an error.
+    ids = [n for n, _ in shares]
+    repeated = sorted({n for n in ids if ids.count(n) > 1})
+    if repeated:
+        raise ValueError(f"share ID(s) {repeated} appear more than once in this file")
     if use is not None:
         by_id = dict(shares)
         missing = [n for n in use if n not in by_id]
