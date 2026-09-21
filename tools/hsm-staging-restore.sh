@@ -13,7 +13,8 @@
 #   * D3: RRC OFF (no "User PIN reset with SO-PIN enabled" tell) via hsm-init-hardened.js
 #   * the staging user PIN, with the documented retry count
 #   * the staging DKEK domain
-#   * the deterministic BIP39-vector key hsm-auto-import.sh installs, at id 31
+#   * the deterministic BIP39-vector key hsm-auto-import.sh installs, at the first free key id
+#     (1 on a freshly initialised card) and labelled akash-funding
 #   * $STAGING/expected-pub.der pinned to THAT key (delegated to hsm-staging-pin.sh)
 #
 # NEVER POINT THIS AT A CEREMONY CARD. It wipes the device and installs a key derived from a
@@ -219,9 +220,26 @@ say "4. re-pin expected-pub.der to the key provisioning actually installs"
 
 say "5. verify the posture"
 sc-hsm-tool -r "$READER" 2>&1 | grep -iE 'version|reset with SO-PIN|tries left|DKEK shares' | sed 's/^/    /'
+# SIGN WITH THE KEY THAT WAS JUST INSTALLED, NOT WITH A REMEMBERED ID.
+#
+# This signed `--id 31`, and hsm-auto-import.js installs at `determineFreeKeyId()` — which is 1 on
+# a card the step above has just wiped. So this check could not pass on a freshly restored card: it
+# reported "the card does not sign/verify against the pin — posture NOT restored" after a restore
+# that had worked, on a Nitrokey HSM 2 (DENK0404144) 2026-09-21. 31 was a bench artefact from a
+# card whose low ids were already taken; the header of this file repeated it as if it were the
+# contract. The id is read back from the card by the LABEL the import writes.
 W=$(mktemp -d); head -c 32 /dev/urandom > "$W/d"
+KEY_LABEL="${HSM_RESTORE_KEY_LABEL:-akash-funding}"
+KEY_ID="$(perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" \
+            --login --pin "$PIN" --list-objects --type privkey 2>/dev/null \
+          | awk -v want="$KEY_LABEL" '/^ *label:/{l=$2} /^ *ID:/{if (l==want) {print $2; exit}}')"
+if [ -z "$KEY_ID" ]; then
+    rm -rf "$W"
+    die "no private key labelled '$KEY_LABEL' on $RESTORE_SERIAL after the import — there is nothing to verify"
+fi
+say "    key '$KEY_LABEL' is at id $KEY_ID"
 if perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --sign \
-     --mechanism ECDSA --id 31 --input-file "$W/d" --output-file "$W/s" >/dev/null 2>&1 \
+     --mechanism ECDSA --id "$KEY_ID" --input-file "$W/d" --output-file "$W/s" >/dev/null 2>&1 \
    && python3 "$SCRIPTS/verify-hsm-control.py" --der "$STAGING/expected-pub.der" \
         --digest "$W/d" --sig "$W/s" >/dev/null 2>&1; then
     say "OK: signs with the staging PIN and verifies against the pin"

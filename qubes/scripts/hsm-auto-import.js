@@ -143,6 +143,35 @@ var sharePW = new ByteString(DKEK_PW, ASCII);
 // one is rebuilt from this same share file either way.
 var shareAccepted = false;
 var outstanding;
+
+// ASK BEFORE PUSHING. A domain that is already complete refuses a further share, and on a Pico HSM
+// the REFUSAL ITSELF is the problem: SW=6985 after `sc-hsm-tool --import-dkek-share` had completed
+// the domain left the session unable to UNWRAP (SW=6982), while the same card unwraps fine when
+// the redundant import is never attempted (SW=6986 from a JS-completed domain is harmless).
+// MEASURED 2026-09-21 on ESP41D722E2, fw 6.6 — the "seed-key import fails on a Pico" half of
+// regalia#483, which had been read as an applet defect for four days.
+//
+// queryKeyDomainStatus answers with shares/outstanding, so the question is askable rather than
+// discoverable by attempting the write. A card that will not answer it falls through to the import
+// exactly as before.
+var domainComplete = false;
+try {
+  var st = sc.queryKeyDomainStatus(KEY_DOMAIN);
+  if (st && typeof st.outstanding !== "undefined") {
+    domainComplete = (st.outstanding == 0) && (st.shares > 0);
+    print("STEP dkek: domain status shares=" + st.shares + " outstanding=" + st.outstanding +
+          (domainComplete ? " — already complete, not importing again" : ""));
+  }
+} catch (e) {
+  print("STEP dkek: key domain status unavailable (" + e + ") — importing the share as usual");
+}
+
+if (domainComplete) {
+  // The card holds a DKEK. The unwrap below only needs the LOCAL one to equal it, and the local
+  // one is rebuilt from this same share file either way.
+  shareAccepted = false;
+  outstanding = 0;
+} else {
 try {
   var r = sc.importEncryptedKeyShare(share, sharePW, KEY_DOMAIN);
   print(
@@ -159,6 +188,7 @@ try {
   shareAccepted = true;
 } catch (e) {
   print("STEP dkek: card refused the share (" + e + ") — assuming the domain is already complete with THIS share");
+}
 }
 
 // FAIL CLOSED, and deliberately OUTSIDE the catch above. A partially-satisfied domain must abort
