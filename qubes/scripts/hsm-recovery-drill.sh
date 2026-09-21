@@ -110,6 +110,14 @@ esac; shift; done
 # kcv_of() — the same parse ceremony.sh uses, sourced from it so the two cannot drift. It is the
 # only thing needed from that file here, and ceremony.sh is a library at the top.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ceremony-kcv.sh"
+# THE CEREMONY VENV, resolved rather than assumed. The hash-pinned dependencies (mnemonic,
+# shamir_mnemonic, pycvc, pycryptodome) live in a venv, and a drill run from a shell that does not
+# have it on PATH reported "python 'mnemonic'/'shamir-mnemonic' packages missing — SLIP-39 arm
+# skipped": an UNVERIFIED on the recovery drill's B5 arm, caused by nothing but PATH. Measured
+# 2026-09-21. prefer, not require: this drill has plenty to say without python, and its own probes
+# report honestly when a package is genuinely absent.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/ceremony-python.sh"
+ceremony_python_prefer mnemonic shamir_mnemonic
 hsm_bench_lock_acquire wait || exit $?
 
 # Two handles, derived after parsing so --reader is actually visible. --reader wins; otherwise

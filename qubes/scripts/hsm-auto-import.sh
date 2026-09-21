@@ -39,7 +39,13 @@ CEREMONY_VENV="${CEREMONY_VENV:-$HOME/.local/share/akash-hsm-venv}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE}"
 WORK="${HSM_AUTO_DIR:-${TMPDIR:-/tmp}/hsm-auto-import}"
+# The tarball unpacks as scsh-3.18.77/scsh-3.18.77/ and scriptrunner is in the INNER directory,
+# so this default named a directory that does not contain it. cmd_check catches that and says so;
+# the import path did not, and produced `./scriptrunner: No such file or directory` on stderr while
+# the caller reported "key import failed" with an empty reason. Accept either layout.
 SCSH_HOME="${SCSH_HOME:-$HOME/tools/scsh-3.18.77}"
+[ -x "$SCSH_HOME/scriptrunner" ] || [ ! -x "$SCSH_HOME/scsh-3.18.77/scriptrunner" ] \
+  || SCSH_HOME="$SCSH_HOME/scsh-3.18.77"
 # NOTE ON NAMES. HSM_READER is the repo's pre-existing handle and it is a reader NAME — scsh's
 # `new Card()` takes a name, not a number (hsm-import-key.sh:104, measured 2026-08-02). The PC/SC
 # index that `sc-hsm-tool -r` wants is a DIFFERENT thing, so it travels as HSM_PCSC_INDEX. Using

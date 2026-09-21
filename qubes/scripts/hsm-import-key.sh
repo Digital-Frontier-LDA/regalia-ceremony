@@ -30,7 +30,14 @@ DKEK_PW="${HSM_DKEK_PW_IN:-}"
 PIN_FILE="${HSM_USER_PIN_FILE:-}"
 SLOT="${HSM_SLOT:-}"
 READER="${HSM_READER:-}"
+# THE DEFAULT POINTED AT THE WRONG DIRECTORY. The tarball unpacks as scsh-3.18.77/scsh-3.18.77/,
+# and scriptrunner is in the INNER one — so this default produced `./scriptrunner: No such file or
+# directory` from inside a `cd`, on stderr, while the drill reported only "key import failed:" with
+# an empty reason. Measured 2026-09-21 mid-drill. Accept either layout, and REFUSE with the reason
+# named when neither has it: a missing interpreter is not an import failure, and reporting it as
+# one sends whoever reads the transcript looking at the card.
 SCSH="${SCSH_HOME:-$HOME/tools/scsh-3.18.77}"
+[ -x "$SCSH/scriptrunner" ] || [ ! -x "$SCSH/scsh-3.18.77/scriptrunner" ] || SCSH="$SCSH/scsh-3.18.77"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [ $# -gt 0 ]; do
@@ -58,6 +65,18 @@ inf() { printf '   %s\n' "$1"; }
 for v in P12 PW_FILE KEY_ID LABEL CERT DKEK_SHARE DKEK_PW PIN_FILE; do
     [ -n "${!v}" ] || { err "missing --${v,,} (or its env equivalent)"; exit 2; }
 done
+# BEFORE ANY CARD IS TOUCHED. Discovering there is no interpreter after probing (or worse,
+# after writing to) a card is a bad order to fail in, and it is how this failure first appeared:
+# the drill had already initialised the card when the import died on a missing ./scriptrunner.
+if [ ! -x "$SCSH/scriptrunner" ]; then
+    err "no Smart Card Shell at $SCSH (no executable scriptrunner there)"
+    printf '  The DKEK-wrapped import path runs hsm-auto-import.js under Smart Card Shell.\n' >&2
+    printf '  Point SCSH_HOME at the directory that CONTAINS scriptrunner — note the tarball\n' >&2
+    printf '  unpacks as scsh-3.18.77/scsh-3.18.77/, so it is usually the inner one:\n\n' >&2
+    printf '      export SCSH_HOME=$HOME/tools/scsh-3.18.77/scsh-3.18.77\n\n' >&2
+    printf '  Refusing rather than reporting this as a failed import — the card is not at fault.\n' >&2
+    exit 2
+fi
 [ -r "$P12" ] || { err "PKCS#12 not readable: $P12"; exit 2; }
 [ -r "$CERT" ] || { err "certificate not readable: $CERT"; exit 2; }
 
