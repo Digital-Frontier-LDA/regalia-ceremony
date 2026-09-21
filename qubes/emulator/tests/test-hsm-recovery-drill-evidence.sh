@@ -77,5 +77,38 @@ else
   P "no unredacted use of \$out in the rc=0 branch"
 fi
 
+hdr "the transcript names the device it actually ran on"
+# THE TRANSCRIPT IS EVIDENCE. It is pasted into doc/drills and read later by someone deciding
+# whether a requirement is met, so a line asserting the wrong device is worse than no line: the
+# closing caveat said "This is a Pico standing in for the Nitrokey HSM 2" unconditionally, which on
+# a Nitrokey run throws away exactly what that run was worth (regalia#481 made such a run possible,
+# and the first one passed 25/0/2 on DENK0404144).
+eval "$(sed -n '/^device_kind(){/,/^}/p' "$DRILL")"
+slot_serial(){ printf '%s\n' "${FAKE_SERIAL:-}"; }
+SLOT=0
+
+for pair in "DENK0404144:nitrokey-hsm2" "ESP41D722E2:pico-hsm2" ":unknown" "XYZ123:unknown"; do
+  FAKE_SERIAL="${pair%%:*}"; want="${pair##*:}"
+  got="$(device_kind)"
+  if [ "$got" = "$want" ]; then P "serial '${FAKE_SERIAL:-<none>}' reads as $want"
+  else F "serial '${FAKE_SERIAL:-<none>}' read as '$got', wanted '$want'"; fi
+done
+unset FAKE_SERIAL
+
+# The claim itself: one branch per kind, and the Pico caveat may not be printed unconditionally.
+if grep -q 'D1 IS STILL OPEN' "$DRILL" && grep -q 'nitrokey-hsm2)' "$DRILL"; then
+  P "the closing caveat is branched on the device kind"
+else
+  F "the closing caveat does not branch on the device kind"
+fi
+if grep -qE "^printf .*D1 IS STILL OPEN" "$DRILL"; then
+  F "the Pico caveat is still printed unconditionally"
+else
+  P "the Pico caveat is not printed unconditionally"
+fi
+grep -q 'DEVICE UNIDENTIFIED' "$DRILL" \
+  && P "an unidentified device is said to be unidentified, not assumed" \
+  || F "a card whose serial does not identify it is silently attributed"
+
 printf '\n  %s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]
