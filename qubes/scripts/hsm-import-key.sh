@@ -65,18 +65,6 @@ inf() { printf '   %s\n' "$1"; }
 for v in P12 PW_FILE KEY_ID LABEL CERT DKEK_SHARE DKEK_PW PIN_FILE; do
     [ -n "${!v}" ] || { err "missing --${v,,} (or its env equivalent)"; exit 2; }
 done
-# BEFORE ANY CARD IS TOUCHED. Discovering there is no interpreter after probing (or worse,
-# after writing to) a card is a bad order to fail in, and it is how this failure first appeared:
-# the drill had already initialised the card when the import died on a missing ./scriptrunner.
-if [ ! -x "$SCSH/scriptrunner" ]; then
-    err "no Smart Card Shell at $SCSH (no executable scriptrunner there)"
-    printf '  The DKEK-wrapped import path runs hsm-auto-import.js under Smart Card Shell.\n' >&2
-    printf '  Point SCSH_HOME at the directory that CONTAINS scriptrunner — note the tarball\n' >&2
-    printf '  unpacks as scsh-3.18.77/scsh-3.18.77/, so it is usually the inner one:\n\n' >&2
-    printf '      export SCSH_HOME=$HOME/tools/scsh-3.18.77/scsh-3.18.77\n\n' >&2
-    printf '  Refusing rather than reporting this as a failed import — the card is not at fault.\n' >&2
-    exit 2
-fi
 [ -r "$P12" ] || { err "PKCS#12 not readable: $P12"; exit 2; }
 [ -r "$CERT" ] || { err "certificate not readable: $CERT"; exit 2; }
 
@@ -131,6 +119,22 @@ else
     # Left UNSET rather than set to an empty array: `"${a[@]}"` on an empty array is an
     # unbound-variable error under `set -u` on bash 3.2, which is still /bin/bash on macOS.
     inf "slot: (single token attached)"
+fi
+
+# AFTER THE ARGUMENTS AND THE CARD CHOICE, BEFORE ANYTHING IS WRITTEN. Discovering there is no
+# interpreter after writing to a card is a bad order to fail in — the drill had already initialised
+# the card when the import died on a missing ./scriptrunner. But it must come AFTER the slot guard
+# above, not before it: placed first, this refused on a CI runner with no Smart Card Shell before
+# --slot was ever considered, and test-fleet-device-selection.sh read the word "Refusing" as the
+# slot guard firing. Checking the interpreter is not a reason to skip checking which card.
+if [ ! -x "$SCSH/scriptrunner" ]; then
+    err "no Smart Card Shell at $SCSH (no executable scriptrunner there)"
+    printf '  The DKEK-wrapped import path runs hsm-auto-import.js under Smart Card Shell.\n' >&2
+    printf '  Point SCSH_HOME at the directory that CONTAINS scriptrunner — note the tarball\n' >&2
+    printf '  unpacks as scsh-3.18.77/scsh-3.18.77/, so it is usually the inner one:\n\n' >&2
+    printf '      export SCSH_HOME=$HOME/tools/scsh-3.18.77/scsh-3.18.77\n\n' >&2
+    printf '  Refusing rather than reporting this as a failed import — the card is not at fault.\n' >&2
+    exit 2
 fi
 
 WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT

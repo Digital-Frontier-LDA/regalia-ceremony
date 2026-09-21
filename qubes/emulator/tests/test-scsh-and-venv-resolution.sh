@@ -52,11 +52,15 @@ got="$(bash -c '
 
 hdr "a missing Smart Card Shell is REFUSED, with the reason and the fix"
 # Every required argument is present and readable, so the ONLY thing missing is the interpreter.
-: > "$T/f.p12"; : > "$T/f.crt"; : > "$T/f.pbe"
+: > "$T/f.p12"; : > "$T/f.crt"; : > "$T/f.pbe"; : > "$T/fake-module.so"
 printf 'x' > "$T/pw"; printf 'x' > "$T/dkekpw"; printf '648219' > "$T/pin"
+# --slot IS GIVEN. The interpreter check sits after the slot guard — deliberately, so that a
+# missing Smart Card Shell cannot pre-empt the question of WHICH card is about to be written to —
+# so a bench with two tokens attached refuses on the slot before it ever looks for scriptrunner.
 out="$(SCSH_HOME="$T/nothing-here" bash "$SCRIPTS/hsm-import-key.sh" \
         --p12 "$T/f.p12" --pw-file "$T/pw" --id 1 --label x --cert "$T/f.crt" \
-        --dkek "$T/f.pbe" --dkek-pw "$T/dkekpw" --pin-file "$T/pin" --reader 0 2>&1)"; rc=$?
+        --dkek "$T/f.pbe" --dkek-pw "$T/dkekpw" --pin-file "$T/pin" \
+        --reader 0 --slot 0 --module "$T/fake-module.so" 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && P "it fails (exit $rc) rather than running ./scriptrunner from the wrong place" \
   || F "it continued without an interpreter"
 grep -q 'no Smart Card Shell at' <<<"$out" && P "…naming what is missing and where it looked" \
