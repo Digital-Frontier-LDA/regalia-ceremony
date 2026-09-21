@@ -243,6 +243,23 @@ EOF
   printf '  %s (slot %s): holds only drill throwaways (safe)\n' "$name" "$slot"
 }
 
+# WHAT DEVICE IS THIS, ACTUALLY. The transcript is evidence: it gets pasted into doc/drills and
+# read later by someone deciding whether a requirement is met. Two of its lines asserted "Pico"
+# unconditionally — including the closing "D1 IS STILL OPEN. This is a Pico standing in for the
+# Nitrokey HSM 2", which is simply false on a run against a Nitrokey, and false in the direction
+# that discards the evidence the run just produced (regalia#481 made such a run possible).
+#
+# SmartCard-HSM serials name the vendor: DENK… is a Nitrokey HSM 2, ESP… a Pico HSM.
+# No argument: every caller asks about the slot this run is driving, and an optional one that is
+# never passed is a parameter nobody maintains (SC2120). $SLOT is the drill's target throughout.
+device_kind(){
+  case "$(slot_serial "$SLOT")" in
+    DENK*) printf 'nitrokey-hsm2\n' ;;
+    ESP*)  printf 'pico-hsm2\n' ;;
+    *)     printf 'unknown\n' ;;
+  esac
+}
+
 confirm_wipe(){
   if [ "$AUTO" = 1 ]; then
     printf '  \033[1;31mAUTO: wiping slot %s (serial %s)%s — pre-authorised by --auto, not prompting.\033[0m\n' \
@@ -384,7 +401,12 @@ PIN_FILE="$WORK/pin"; printf '%s' "$PIN" > "$PIN_FILE"; chmod 600 "$PIN_FILE"
 init_scratch(){ # ${1..}=extra init flags (PKA for the rotation phases)
   sc-hsm-tool --reader "$READER" --initialize --so-pin "$SO_PIN" --pin "$PIN" \
       --dkek-shares 1 --label recovery-drill "$@" > "$WORK/init.log" 2>&1 || true
-  printf '  (init exit status ignored — the Pico drops off the USB bus; verifying by behaviour)\n'
+  # Why the status is ignored depends on the device, and saying "the Pico" on a Nitrokey run is a
+  # false statement in a transcript. The verification is behavioural either way.
+  case "$(device_kind)" in
+    pico-hsm2) printf '  (init exit status ignored — the Pico drops off the USB bus; verifying by behaviour)\n' ;;
+    *)         printf '  (init exit status ignored on principle — it reports the transport, not the card; verifying by behaviour)\n' ;;
+  esac
   wait_card "$SLOT" "scratch device" || return 1
 
   # "THE CARD CAME BACK" IS NOT "THE CARD WAS WIPED". The exit status is unusable here (the Pico
@@ -962,6 +984,20 @@ if [ "${_reenum_recovered:-0}" = 1 ]; then
   printf '  It stopped re-enumerating on its own after an INITIALIZE and was recovered out of band.\n'
   printf '  The verdicts above stand, but this run did NOT demonstrate unattended re-provisioning.\n'
 fi
-printf '\n  \033[1mD1 IS STILL OPEN.\033[0m This is a Pico standing in for the Nitrokey HSM 2.\n'
+# The closing caveat has to match the device. Claiming a Pico stand-in on a Nitrokey run throws
+# away the one thing that run is worth; claiming the opposite would be worse.
+case "$(device_kind)" in
+  nitrokey-hsm2)
+    printf '\n  \033[1mThis ran on a Nitrokey HSM 2 (%s) — not a Pico stand-in.\033[0m\n' "$(slot_serial "$SLOT")"
+    printf '  The recovery paths above are therefore measured on production-class hardware, which is\n'
+    printf '  what requirement D1 asks of any Pico measurement before it informs a decision. D1 is not\n'
+    printf '  closed by this run alone: it covers every Pico-derived claim in REQUIREMENTS.md, and this\n'
+    printf '  drill answers the recovery ones (break-glass DKEK restore, re-provision, A4 key identity).\n' ;;
+  pico-hsm2)
+    printf '\n  \033[1mD1 IS STILL OPEN.\033[0m This is a Pico standing in for the Nitrokey HSM 2.\n' ;;
+  *)
+    printf '\n  \033[1mDEVICE UNIDENTIFIED.\033[0m The transcript cannot say which card produced these\n'
+    printf '  results, so treat them as unattributed until the serial is recorded by hand.\n' ;;
+esac
 printf '  Transcript: %s — paste into doc/drills/YYYY-MM-DD-recovery-drill.md.\n' "$TRANSCRIPT"
 [ "$fail" -eq 0 ] || exit 1
