@@ -1231,16 +1231,45 @@ step_hsm_import() {
     err "the documented import procedure would ERASE it."
     return 1
   }
-  info "Now import the container with Smart Card Shell (the card-side step this cannot drive):"
-  show "scsh3gui   # Key Manager -> right-click SmartCard-HSM -> Import from PKCS#12"
-  info "  container : $p12"
-  info "  password  : in $pwfile (cat it into the dialog; do not retype from screen)"
   warn "The device must hold a DKEK domain — the SmartCard-HSM supports ONLY encrypted import."
   warn "Under this custody model the DKEK is just transport: losing it costs a re-import from"
   warn "the seed, not the funds."
+
+  # THE IMPORT IS DRIVEN HERE NOW, WITH NO JVM (regalia#486). This step used to print
+  # "scsh3gui # Key Manager -> Import from PKCS#12" and hand the card-side work to an operator
+  # driving a Java GUI — which is why the ceremony image was expected to carry a JRE and an
+  # unsigned vendor zip on the machine that mints keys. hsm-import-key-nojvm.sh does the same two
+  # APDUs directly (UNWRAP KEY, then the PKCS#15 description) and writes the certificate with
+  # pkcs11-tool, so nothing Java-shaped is needed on this host at all.
+  #
+  # The DKEK's password is RECONSTRUCTED from the share file, never typed: --create-dkek-share
+  # --pwd-shares-threshold/-total generates it, splits it, and prints only the shares. Verified on
+  # DENK0404144 (2026-09-21): a password rebuilt from shares 2,4,5,6 produced the same key check
+  # value the card reported after being fed shares 1,2,3,4 — EDE4B653C8280D28.
+  local importer="$HERE/hsm-import-key-nojvm.sh"
+  if [ ! -r "$importer" ]; then
+    err "hsm-import-key-nojvm.sh is missing next to this script — cannot import without it."
+    err "Do NOT fall back to Smart Card Shell here: this image is not built to carry a JRE."
+    return 1
+  fi
+  local shares="$WORK/dkek-shares.txt" pbe="$WORK/dkek.pbe" pinf="$WORK/hsm-user.pin"
+  for f in "$pbe" "$shares"; do
+    [ -s "$f" ] || { err "no $f — run the DKEK step first; the import has nothing to wrap under."; return 1; }
+  done
+  # The user PIN reaches the importer as a FILE, never argv: argv leaks to ps and shell history.
+  [ -s "$pinf" ] || { ( umask 077; printf '%s' "${HSM_USER_PIN:-}" > "$pinf" ); }
+  [ -s "$pinf" ] || { err "no HSM user PIN available for the import (set HSM_USER_PIN)"; return 1; }
+  info "Importing the container onto the card (no Smart Card Shell, no JRE)…"
+  if ! "$importer" --p12 "$p12" --pw-file "$pwfile" --id "${HSM_KEY_ID:-1}" \
+        --label "${HSM_KEY_LABEL:-akash-funding}" \
+        --dkek "$pbe" --dkek-shares "$shares" \
+        ${HSM_DKEK_SHARES_USE:+--dkek-shares-use "$HSM_DKEK_SHARES_USE"} \
+        --pin-file "$pinf" --reader "${HSM_READER:-0}" ${HSM_SLOT:+--slot "$HSM_SLOT"}; then
+    err "the import failed — see the status words above. The card was NOT left with a usable key."
+    return 1
+  fi
   info "Nitrokey's own post-import check lists the object; this step then proves it cryptographically:"
   show "pkcs15-tool -D"
-  pause
 
   # ADDRESS-MATCH PROOF — the whole reason this step exists. An import that lands a DIFFERENT
   # key produces a DIFFERENT address; funding that address loses the money to a key nobody can

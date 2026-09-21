@@ -12,7 +12,13 @@
 # SAME ARGUMENTS as hsm-import-key.sh, so a caller can switch paths without rewriting its call.
 #
 #   hsm-import-key-nojvm.sh --p12 funding.p12 --pw-file p12.pw --id 1 --label akash-funding \
-#       --dkek dkek.pbe --dkek-pw dkek.pw --pin-file pin.txt --reader 0 [--slot 0]
+#       --dkek dkek.pbe --dkek-pw dkek.pw --pin-file pin.txt --reader 0 [--slot 0] [--cert c.pem]
+#
+# A REAL CEREMONY HAS NO TYPED DKEK PASSWORD. `--create-dkek-share --pwd-shares-threshold/-total`
+# generates one, splits it, and prints only the shares. Pass the share file instead and the
+# password is reconstructed from any threshold-sized quorum:
+#
+#       --dkek-shares dkek-shares.txt [--dkek-shares-use 2,4,5,6]
 #
 # THE CERTIFICATE IS NOT OPTIONAL, and it needs no JVM either — hsm-import-key.sh writes it with
 # `pkcs11-tool --write-object`, and so does this. Learned the hard way there: gnupg-pkcs11-scd
@@ -31,6 +37,8 @@ P12="" PW_FILE="" KEY_ID="" LABEL="" CERT=""
 MODULE="${HSM_PKCS11_MODULE:-}"
 DKEK_SHARE="${HSM_DKEK_SHARE_IN:-}"
 DKEK_PW="${HSM_DKEK_PW_IN:-}"
+DKEK_SHARES="${HSM_DKEK_SHARES_IN:-}"
+DKEK_SHARES_USE="${HSM_DKEK_SHARES_USE:-}"
 PIN_FILE="${HSM_USER_PIN_FILE:-}"
 SLOT="${HSM_SLOT:-}"
 READER="${HSM_READER:-}"
@@ -45,6 +53,12 @@ while [ $# -gt 0 ]; do
         --label)    LABEL="$2"; shift 2;;
         --dkek)     DKEK_SHARE="$2"; shift 2;;
         --dkek-pw)  DKEK_PW="$2"; shift 2;;
+        # A REAL CEREMONY HAS NO TYPED DKEK PASSWORD. `--create-dkek-share
+        # --pwd-shares-threshold/-total` generates 8 random bytes, splits them, and prints only
+        # the shares; the password itself is never written down. Without this the JVM-free path
+        # could serve only the drill's single-password shortcut, which is not how a ceremony runs.
+        --dkek-shares)     DKEK_SHARES="$2"; shift 2;;
+        --dkek-shares-use) DKEK_SHARES_USE="$2"; shift 2;;
         --pin-file) PIN_FILE="$2"; shift 2;;
         --slot)     SLOT="$2"; shift 2;;
         --reader)   READER="$2"; shift 2;;
@@ -60,10 +74,15 @@ err() { printf '   \033[31mFAIL\033[0m %s\n' "$1" >&2; }
 ok()  { printf '   \033[32mOK\033[0m   %s\n' "$1"; }
 inf() { printf '   %s\n' "$1"; }
 
-for v in P12 PW_FILE KEY_ID LABEL CERT DKEK_SHARE DKEK_PW PIN_FILE READER; do
+for v in P12 PW_FILE KEY_ID LABEL DKEK_SHARE PIN_FILE READER; do
     [ -n "${!v}" ] || { err "missing --${v,,} (or its env equivalent)"; exit 2; }
 done
-for f in "$P12" "$PW_FILE" "$CERT" "$DKEK_SHARE" "$DKEK_PW" "$PIN_FILE"; do
+if [ -n "$DKEK_PW" ] && [ -n "$DKEK_SHARES" ]; then
+    err "give --dkek-pw OR --dkek-shares, not both — a share file's password is reconstructed, never also typed"
+    exit 2
+fi
+[ -n "$DKEK_PW" ] || [ -n "$DKEK_SHARES" ] || { err "missing --dkek-pw or --dkek-shares"; exit 2; }
+for f in "$P12" "$PW_FILE" ${CERT:+"$CERT"} "$DKEK_SHARE" "${DKEK_PW:-$DKEK_SHARES}" "$PIN_FILE"; do
     [ -r "$f" ] || { err "not readable: $f"; exit 2; }
 done
 
@@ -102,8 +121,15 @@ chmod 700 "$WORK"
 BLOB="$WORK/key.blob"
 
 inf "encoding $(basename "$P12") under the DKEK (no JVM)"
+DKEK_ARGS=()
+if [ -n "$DKEK_SHARES" ]; then
+    DKEK_ARGS=(--dkek-shares-file "$DKEK_SHARES")
+    [ -n "$DKEK_SHARES_USE" ] && DKEK_ARGS+=(--dkek-shares-use "$DKEK_SHARES_USE")
+else
+    DKEK_ARGS=(--dkek-pw-file "$DKEK_PW")
+fi
 if ! python3 "$ENCODE" --p12 "$P12" --p12-pass-file "$PW_FILE" \
-        --dkek-share "$DKEK_SHARE" --dkek-pw-file "$DKEK_PW" \
+        --dkek-share "$DKEK_SHARE" "${DKEK_ARGS[@]}" \
         --out "$BLOB" --print-kcv > "$WORK/encode.log" 2>&1; then
     err "could not build the key blob"
     sed 's/^/     /' "$WORK/encode.log" >&2
@@ -135,11 +161,28 @@ ok "key unwrapped onto the card"
 # ---- the certificate, and the proof that BOTH landed -----------------------------------------
 [ -n "$MODULE" ] || MODULE=/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so
 [ -r "$MODULE" ] || { err "PKCS#11 module not readable: $MODULE (set HSM_PKCS11_MODULE or --module)"; exit 1; }
-case "$CERT" in
-    *.der|*.cer) cp "$CERT" "$WORK/cert.der";;
-    *) openssl x509 -in "$CERT" -outform DER -out "$WORK/cert.der" 2>/dev/null \
-         || { err "could not convert $CERT to DER"; exit 1; };;
-esac
+# THE CERTIFICATE IS ALREADY IN THE PKCS#12. A key container is a key AND a certificate, so
+# demanding a separate --cert file adds a way for the caller to pass a certificate belonging to a
+# different key — and a way for a caller that has only the container to fail for no reason. When
+# --cert is omitted it is lifted from the same container the key came from, which is the one
+# certificate guaranteed to match.
+if [ -z "$CERT" ]; then
+    if ! openssl pkcs12 -in "$P12" -clcerts -nokeys -passin "file:$PW_FILE" \
+            -out "$WORK/cert.pem" 2>"$WORK/cert-extract.log"; then
+        err "no --cert given and the certificate could not be read out of $(basename "$P12")"
+        sed 's/^/     /' "$WORK/cert-extract.log" >&2
+        exit 1
+    fi
+    [ -s "$WORK/cert.pem" ] || { err "the PKCS#12 carries no certificate; pass --cert"; exit 1; }
+    openssl x509 -in "$WORK/cert.pem" -outform DER -out "$WORK/cert.der" 2>/dev/null \
+      || { err "the certificate in $(basename "$P12") is not readable as X.509"; exit 1; }
+else
+    case "$CERT" in
+        *.der|*.cer) cp "$CERT" "$WORK/cert.der";;
+        *) openssl x509 -in "$CERT" -outform DER -out "$WORK/cert.der" 2>/dev/null \
+             || { err "could not convert $CERT to DER"; exit 1; };;
+    esac
+fi
 SLOT_ARGS=()
 [ -n "$SLOT" ] && SLOT_ARGS=(--slot "$SLOT")
 PIN="$(cat "$PIN_FILE")"

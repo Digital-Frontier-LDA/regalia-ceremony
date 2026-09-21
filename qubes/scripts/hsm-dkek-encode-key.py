@@ -99,6 +99,89 @@ def decrypt_share(blob: bytes, password: bytes) -> bytes:
     return plain[:32]
 
 
+def _minimal_bytes(n: int) -> bytes:
+    """OpenSC prints and rebuilds these as MINIMAL big-endian byte strings.
+
+    THE LEADING-ZERO DROP IS PART OF THE FORMAT, not a bug to correct here. OpenSC's
+    recreate_password_from_shares converts the reconstructed integer with BN_bn2bin, which emits no
+    leading zero byte — so a password whose first byte happened to be zero comes back SEVEN bytes
+    long, and the share file decrypts under those seven bytes. Padding it back to eight would
+    reconstruct a password the real tool never used. (This is the 1-in-128 asymmetry recorded in
+    regalia#460.)
+    """
+    return n.to_bytes((n.bit_length() + 7) // 8, "big")
+
+
+def reconstruct_share_password(prime: int, shares: list[tuple[int, int]]) -> bytes:
+    """Lagrange interpolation at x=0 over GF(prime), as OpenSC does it.
+
+    `sc-hsm-tool --create-dkek-share --pwd-shares-threshold t --pwd-shares-total n` does not use a
+    typed password at all: it generates 8 random bytes (with the top bit of the first cleared, so
+    the secret stays below the 64-bit prime), splits them with Shamir over that prime, and prints
+    only the shares. The password itself is never written down. So reconstructing it from the
+    shares is the ONLY way to open such a share file without the card in the loop -- and without it
+    the JVM-free import path cannot serve a ceremony that used the share ceremony, which is every
+    real one.
+    """
+    if prime < 2:
+        raise ValueError("the prime is not usable")
+    ids = [x for x, _ in shares]
+    if len(set(ids)) != len(ids):
+        raise ValueError("two shares carry the same ID; they cannot be interpolated")
+    secret = 0
+    for i, (xi, yi) in enumerate(shares):
+        numerator, denominator = 1, 1
+        for j, (xj, _) in enumerate(shares):
+            if i != j:
+                numerator = numerator * -xj % prime
+                denominator = denominator * (xi - xj) % prime
+        inverse = pow(denominator, -1, prime)
+        secret = (secret + yi * numerator % prime * inverse) % prime
+    return _minimal_bytes(secret)
+
+
+def parse_share_file(text: str, use: list[int] | None = None) -> tuple[int, list[tuple[int, int]]]:
+    """Read the prime and shares out of what `--create-dkek-share` printed.
+
+        Prime       : ab:cd:...
+        Share ID    : 1
+        Share value : 12:34:...
+
+    The prime is printed once per share and must agree everywhere: a file whose shares disagree on
+    it is a file assembled from two different ceremonies, and interpolating across them would yield
+    a confident wrong password rather than an error.
+    """
+    primes: list[int] = []
+    shares: list[tuple[int, int]] = []
+    pending_id: int | None = None
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        key = key.strip()
+        value = value.strip()
+        if key == "Prime":
+            primes.append(int(value.replace(":", ""), 16))
+        elif key == "Share ID":
+            pending_id = int(value)
+        elif key == "Share value":
+            if pending_id is None:
+                raise ValueError("a share value appears before its share ID")
+            shares.append((pending_id, int(value.replace(":", ""), 16)))
+            pending_id = None
+    if not primes:
+        raise ValueError("no 'Prime' line in the share file")
+    if len(set(primes)) != 1:
+        raise ValueError("the shares disagree about the prime; this file mixes two ceremonies")
+    if not shares:
+        raise ValueError("no shares in the file")
+    if use is not None:
+        by_id = dict(shares)
+        missing = [n for n in use if n not in by_id]
+        if missing:
+            raise ValueError(f"share(s) {missing} are not in this file")
+        shares = [(n, by_id[n]) for n in use]
+    return primes[0], shares
+
+
 def dkek_keys(dkek: bytes) -> tuple[bytes, bytes, bytes]:
     kcv = hashlib.sha256(dkek).digest()[:8]
     kenc = hashlib.sha256(dkek + bytes.fromhex("00000001")).digest()
@@ -182,14 +265,42 @@ def main() -> int:
     ap.add_argument("--p12", required=True, help="PKCS#12 holding the key to wrap")
     ap.add_argument("--p12-pass-file", required=True, help="file holding the PKCS#12 password")
     ap.add_argument("--dkek-share", required=True, help="the .pbe share the card also imported")
-    ap.add_argument("--dkek-pw-file", required=True, help="file holding that share's password")
+    ap.add_argument("--dkek-pw-file", help="file holding that share's password")
+    ap.add_argument("--dkek-shares-file",
+                    help="what `--create-dkek-share --pwd-shares-threshold/-total` printed; the "
+                         "password is reconstructed from its shares instead of being typed")
+    ap.add_argument("--dkek-shares-use",
+                    help="comma-separated share IDs to interpolate (default: the first threshold "
+                         "many in the file). Give exactly as many as the threshold.")
     ap.add_argument("--out", required=True, help="where to write the key blob")
     ap.add_argument("--print-kcv", action="store_true",
                     help="also print the DKEK's key check value, which the card reports after import")
     args = ap.parse_args()
 
+    if bool(args.dkek_pw_file) == bool(args.dkek_shares_file):
+        return fail("give exactly one of --dkek-pw-file and --dkek-shares-file "
+                    "(a share file's password is reconstructed, never also typed)")
+    if args.dkek_shares_use and not args.dkek_shares_file:
+        return fail("--dkek-shares-use only means something with --dkek-shares-file")
+    if args.dkek_shares_file:
+        try:
+            use = None
+            if args.dkek_shares_use:
+                use = [int(n) for n in args.dkek_shares_use.split(",") if n.strip()]
+                if len(use) != len(set(use)):
+                    return fail("--dkek-shares-use names the same share twice; "
+                                "interpolation needs distinct IDs")
+            prime, shares = parse_share_file(open(args.dkek_shares_file).read(), use)
+            password = reconstruct_share_password(prime, shares)
+        except (OSError, ValueError) as exc:
+            return fail(f"cannot rebuild the share password: {exc}")
+    else:
+        try:
+            password = read_secret(args.dkek_pw_file)
+        except OSError as exc:
+            return fail(f"cannot read the DKEK password: {exc}")
     try:
-        share = decrypt_share(open(args.dkek_share, "rb").read(), read_secret(args.dkek_pw_file))
+        share = decrypt_share(open(args.dkek_share, "rb").read(), password)
     except (OSError, ValueError) as exc:
         return fail(f"cannot read the DKEK share: {exc}")
     # One share, XORed into a zero DKEK, exactly as DKEK.importDKEKShare does. A domain built from
