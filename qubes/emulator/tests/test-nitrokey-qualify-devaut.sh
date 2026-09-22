@@ -106,5 +106,30 @@ grep -q '#448 device certificate: none exposed' <<<"$out" \
   && P "ID AB and id ab are the same id — the pairing is case-insensitive" \
   || F "a case difference made a key certificate look like a device certificate"
 
+hdr "#447 prints the MAPPING, not just a count"
+# "2 total, 1 report CKA_LOCAL=true" reads as "the generated one is local", which is what a correct
+# implementation would do and is NOT what these cards do — measured on both devices 2026-09-22,
+# the IMPORTED key's public object reports local and the card-generated one does not. A count
+# invited that inference and got one, out of this repository.
+cat > "$T/pubkeys.txt" <<'X'
+Public Key Object; EC
+  label:      imported-key
+  ID:         31
+  Access:     local
+Public Key Object; EC
+  label:      generated-key
+  ID:         01
+  Access:     none
+X
+cat > "$T/certs.txt" <<'X'
+X
+out="$(run)"
+grep -qE 'imported-key +CKA_LOCAL=true' <<<"$out" \
+  && P "each public key is named with its own CKA_LOCAL" \
+  || F "the mapping is not printed: $(grep -A3 '#447' <<<"$out")"
+grep -qE 'generated-key +CKA_LOCAL=false' <<<"$out" \
+  && P "…so a reader can see WHICH key the count referred to" \
+  || F "the second key's value is missing"
+
 printf '\n\033[1m### RESULT\033[0m\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
