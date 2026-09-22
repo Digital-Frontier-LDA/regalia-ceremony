@@ -471,5 +471,130 @@ class GoldenNitrokeyDevautTest(unittest.TestCase):
         self.assertNotIn("Traceback", r.stderr)
 
 
+
+
+# A REAL SELF-SIGNED DEVICE CERTIFICATE, read from Pico HSM ESP41D722E2 on 2026-09-22.
+# CHR == CAR == ESP41D722E200001: the card vouches for itself, which is the staging posture the
+# Pico ships in. It is here because it is the only fixture that exercises the walk's TERMINAL
+# case with a certificate that came off a card.
+GOLDEN_PICO_SELF_SIGNED_EF2F02 = (
+    "7f218201b67f4e82016e5f2901004210455350343144373232453230303030317f4982011d060a04007f000702020202"
+    "038120fffffffffffffffffffffffffffffffffffffffffffffffffffffffefffffc2f82200000000000000000000000"
+    "000000000000000000000000000000000000000000832000000000000000000000000000000000000000000000000000"
+    "0000000000000784410479be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798483ada7726a3"
+    "c4655da4fbfc0e1108a8fd17b448a68554199c47d08ffb10d4b88520fffffffffffffffffffffffffffffffebaaedce6"
+    "af48a03bbfd25e8cd0364141864104066bfffb5aa1279ef2c93637b330196be00b54e1939571b0dda2b456643916fce8"
+    "cfdf7faa566dc6c34788e4de742118dd9c6c354831732c38407e5dc6b3fec08701015f20104553503431443732324532"
+    "30303030317f4c0e060904007f0007030102025301005f25060203000302015f24060700010203015f3740bfecc5d5f8"
+    "d1a64a1d90e4cd5fd095f07bba17a3607d3d14e16fa4672eaebd2403edaec65ea628d77d00a1166f3b74d086330f4f29"
+    "d22d2cd83e557763ba7328"
+)
+
+
+class CardCarriedIssuerTest(unittest.TestCase):
+    """EF 2F02 holds the device certificate FOLLOWED BY ITS ISSUER'S, and the verifier now uses
+    that second element instead of demanding a file for it.
+
+    WHY THIS ROW EXISTS. The trust-anchor README says plainly "Do not add the Device Issuer CA
+    here. DEDINK0400001 travels on the card itself, in EF 2F02 after the device certificate" —
+    and nothing acted on it. Against a real DENK0404144 the verifier reported
+
+        [Warning: File DEDINK0400001 not found]
+        CVC_CHAIN=failed
+
+    GoldenNitrokeyDevautTest passed only because the TEST extracts that element itself and writes
+    it into a temporary trust directory. So the path exercised by the tests was not the path a
+    card takes, and the production one failed closed in a way that reads as a chain problem.
+
+    THE ANCHOR IS STILL THE OPERATOR'S. A self-signed certificate that verified against itself
+    proves only that whoever made it held the private key; if it could come off the card, a card
+    could carry its own root and the walk would return true having consulted no anchor at all.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp()
+        cls.blob = bytes.fromhex(GOLDEN_NITROKEY_EF2F02)
+        cls.cert = os.path.join(cls.tmp, "devaut.bin")
+        with open(cls.cert, "wb") as f:
+            f.write(cls.blob)
+        with open(os.path.join(TRUST_ANCHORS, "DESRCACC100001"), "rb") as f:
+            cls.root = f.read()
+        # A trust directory holding ONLY the root — the posture the README describes.
+        cls.root_only = os.path.join(cls.tmp, "root-only")
+        os.mkdir(cls.root_only)
+        with open(os.path.join(cls.root_only, "DESRCACC100001"), "wb") as f:
+            f.write(cls.root)
+        # And one holding nothing at all.
+        cls.empty = os.path.join(cls.tmp, "empty")
+        os.mkdir(cls.empty)
+        # The issuer as the card carries it, for the no-root case below.
+        n = cls.blob[3] + 3 + 1
+        cls.issuer_only = os.path.join(cls.tmp, "issuer-only")
+        os.mkdir(cls.issuer_only)
+        with open(os.path.join(cls.issuer_only, "DEDINK0400001"), "wb") as f:
+            f.write(cls.blob[n:])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp)
+
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+
+    def test_the_issuer_on_the_card_completes_the_chain(self):
+        r = self.run_cli("--cert", self.cert, "--trust-dir", self.root_only)
+        self.assertIn("CVC_CHAIN=verified", r.stdout,
+                      "the issuer travels in EF 2F02 and the trust dir holds the root; that is "
+                      "the documented posture and it must verify\n" + r.stdout + r.stderr[:400])
+        self.assertNotIn("not found", r.stdout + r.stderr)
+
+    def test_the_card_cannot_supply_the_anchor(self):
+        # No root anywhere. The card still carries its issuer, and that issuer still chains to a
+        # root the operator does not have — so there is nothing to terminate on.
+        r = self.run_cli("--cert", self.cert, "--trust-dir", self.empty)
+        self.assertIn("CVC_CHAIN=failed", r.stdout,
+                      "a chain completed with no anchor from the operator at all")
+
+    def test_a_self_signed_card_certificate_is_not_its_own_anchor(self):
+        """THE HOLE THIS CLOSES, AND IT PRE-DATES THE CARRIED-ISSUER CHANGE.
+
+        The walk terminated on `car == chr_` — a self-signed certificate that verified against
+        itself — and returned success without consulting the trust directory at all. Measured on
+        the committed version with a real Pico HSM certificate (CHR == CAR == ESP41D722E200001)
+        and an EMPTY --trust-dir:
+
+            CVC_CHAIN=verified
+
+        A card vouching for itself is not a chain. `--require-external-car` refuses CHR == CAR
+        when a caller asks for it, but a caller that passed a trust directory and read
+        CVC_CHAIN=verified was told its card chained to an anchor it had never seen.
+        """
+        blob = bytes.fromhex(GOLDEN_PICO_SELF_SIGNED_EF2F02)
+        path = os.path.join(self.tmp, "pico-self-signed.bin")
+        with open(path, "wb") as f:
+            f.write(blob)
+        r = self.run_cli("--cert", path, "--trust-dir", self.empty)
+        self.assertIn("CVC_CHAIN=failed", r.stdout,
+                      "a self-signed card certificate verified against an EMPTY trust directory")
+        # And it must still fail when the directory holds an unrelated anchor, rather than
+        # succeeding because *something* was there.
+        r = self.run_cli("--cert", path, "--trust-dir", self.root_only)
+        self.assertIn("CVC_CHAIN=failed", r.stdout)
+
+    def test_an_issuer_without_its_root_is_not_enough(self):
+        # The intermediate alone must not terminate the walk: it is not self-signed, and its own
+        # issuer is absent.
+        r = self.run_cli("--cert", self.cert, "--trust-dir", self.issuer_only)
+        self.assertIn("CVC_CHAIN=failed", r.stdout)
+
+    def test_the_golden_expectations_still_hold_with_only_the_root(self):
+        r = self.run_cli("--cert", self.cert, "--trust-dir", self.root_only,
+                         "--require-external-car", "--expect-chr", "DENK040414400000",
+                         "--expect-car", "DEDINK0400001")
+        self.assertEqual(r.returncode, 0, r.stderr[:400])
+        self.assertIn("CVC_CHAIN=verified", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
