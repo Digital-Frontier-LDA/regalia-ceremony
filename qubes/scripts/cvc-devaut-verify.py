@@ -41,6 +41,9 @@ import argparse
 import binascii
 import hashlib
 import os
+import pathlib
+import tempfile
+import shutil
 import sys
 
 try:
@@ -118,10 +121,74 @@ def top_level_elements(blob):
     return out
 
 
+def carried_certificates(blob):
+    """The CVC elements the blob carries after the leaf, keyed by CHR.
+
+    EF 2F02 holds the device certificate FOLLOWED BY ITS ISSUER'S — the trust-anchor README says
+    so and says not to copy the issuer into the trust directory because of it. Nothing acted on
+    that: the walk below looked the issuer up as a FILE and failed with
+    "[Warning: File DEDINK0400001 not found] CVC_CHAIN=failed" on a genuine card. The golden test
+    passed only because the TEST extracts this element itself and writes it into a temporary trust
+    directory, so the production path was the untested one.
+    """
+    out = {}
+    off = 0
+    for tag, length in top_level_elements(blob):
+        # Recompute the header length the same way top_level_elements did, so the slice is exact.
+        start = off
+        hdr = 1
+        t = blob[off]
+        if t & 0x1F == 0x1F:
+            hdr += 1
+        lb = blob[off + hdr]
+        hdr += 1
+        if lb & 0x80:
+            hdr += lb & 0x7F
+        element = blob[start:start + hdr + length]
+        off = start + hdr + length
+        if tag != 0x7F21:
+            continue
+        try:
+            out.setdefault(bytes(CVC().decode(element).chr()), element)
+        except Exception:
+            continue
+    return out
+
+
 def verify_chain(blob, cert_dir):
     """Walk leaf -> issuer -> ... -> self-signed root, verifying each signature, the way
     cvc-print does but with a boolean result. Every certificate in the directory is named by
-    its CHR; a missing issuer file is a FAILURE (the chain cannot be evaluated), never a skip."""
+    its CHR; a missing issuer file is a FAILURE (the chain cannot be evaluated), never a skip.
+
+    An issuer CARRIED ON THE CARD is used when the trust directory does not have it — that is
+    where a SmartCard-HSM keeps it. THE ANCHOR IS NOT: the walk terminates on a self-signed
+    certificate, so accepting a card-supplied one there would let a card present its own root and
+    verify against itself, which is not a PKI. The terminating certificate must come from
+    cert_dir, and that is asserted after the walk rather than assumed.
+    """
+    # pycvc's own verify() resolves the issuer by filename inside cert_dir, so the carried
+    # certificates have to be somewhere it will look. They go into a throwaway directory together
+    # with the real anchors, and the REAL directory is what the terminal check below consults —
+    # the merged view is a lookup path, not a trust store.
+    carried = carried_certificates(blob)
+    work = tempfile.mkdtemp(prefix="cvc-chain-")
+    try:
+        for name, element in carried.items():
+            try:
+                (pathlib.Path(work) / name.decode("ascii")).write_bytes(element)
+            except (UnicodeDecodeError, OSError):
+                continue
+        for entry in os.listdir(cert_dir):                 # anchors win over anything carried
+            src = os.path.join(cert_dir, entry)
+            if os.path.isfile(src):
+                shutil.copyfile(src, os.path.join(work, entry))
+        return _walk_chain(blob, work, cert_dir)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def _walk_chain(blob, lookup_dir, anchor_dir):
+    cert_dir = lookup_dir
     cert_dir_b = os.fsencode(cert_dir)
     cur = blob
     seen = set()
@@ -141,7 +208,17 @@ def verify_chain(blob, cert_dir):
         if not verified:
             return False, car, chr_
         if car == chr_:
-            return True, car, chr_  # reached a self-signed root that verified against itself
+            # THE ANCHOR MUST BE THE OPERATOR'S, NOT THE CARD'S. A self-signed certificate that
+            # verified against itself proves only that whoever made it held its private key. If it
+            # came off the card, a card could carry its own "root" and this walk would return
+            # true having consulted no anchor at all.
+            try:
+                anchor = os.path.join(anchor_dir, chr_.decode("ascii"))
+            except UnicodeDecodeError:
+                return False, car, chr_
+            if not os.path.isfile(anchor):
+                return False, car, chr_
+            return True, car, chr_
         if car in seen:
             return False, car, chr_  # cycle — a constructed chain, not a PKI
         seen.add(car)
