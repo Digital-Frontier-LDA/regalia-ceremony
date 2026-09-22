@@ -50,9 +50,28 @@ try:
         t = d.get('token_serial')
         need(d.get('role') == 'staging', f"device {t!r} has role {d.get('role')!r}, expected 'staging'")
         kind = d.get('kind')
-        need(kind in ('pico-hsm2', 'nitrokey-hsm2'),
-             f"device {t!r} has kind {kind!r}, expected 'pico-hsm2' or 'nitrokey-hsm2'")
-        if kind == 'pico-hsm2':
+        need(kind in ('pico-hsm2', 'nitrokey-hsm2', 'yubikey-piv'),
+             f"device {t!r} has kind {kind!r}, expected 'pico-hsm2', 'nitrokey-hsm2' or 'yubikey-piv'")
+        if kind == 'yubikey-piv':
+            # A YubiKey is not a SmartCard-HSM: it has no DKEK, no C.DevAut and no board to flash.
+            # Its identity is the PIV serial, and what governs a destructive step is the SLOT and
+            # the fingerprint of the public key in it — `ykman piv reset` is the wipe here, and it
+            # takes the whole PIV application, not one object. The slot is recorded so a tool can
+            # say which slot it is authorised to touch.
+            slot = d.get('piv_slot')
+            fp = d.get('piv_9a_sha256')
+            need(isinstance(t, str) and re.fullmatch(r'[0-9]{6,10}', t),
+                 f'token_serial {t!r} is malformed for a YubiKey (expected the decimal PIV serial)')
+            need(isinstance(slot, str) and re.fullmatch(r'9[ade]', slot, re.I),
+                 f'piv_slot {slot!r} is malformed (expected a PIV slot such as 9a)')
+            need(isinstance(fp, str) and re.fullmatch(r'[0-9a-f]{64}', fp),
+                 f'piv_9a_sha256 {fp!r} is not a lowercase sha256 of the slot public key (DER)')
+            need('board_id' not in d and 'debug_probe' not in d and 'devaut_chr' not in d,
+                 f'{t} is a YubiKey and has no board id, debug probe or C.DevAut; remove those fields')
+            need(not ({t, fp} & seen), f'{t} reuses an identifier already claimed by another device')
+            seen.update((t, fp))
+            print(f'yubikey\t{t}\t{slot}\t{fp}')
+        elif kind == 'pico-hsm2':
             b = d.get('board_id')
             p = (d.get('debug_probe') or {}).get('serial')
             need(isinstance(t, str) and re.fullmatch(r'ESP[0-9A-F]{8}', t), f'token_serial {t!r} is malformed')
@@ -81,16 +100,18 @@ PY
     # The board and probe maps stay PICO-ONLY: they exist for tools that drive a board over SWD,
     # and a Nitrokey has no board to name. Its pin goes into HSM_DEVAUT_MAP, which is what a
     # destructive step checks the card against before it wipes anything.
-    maps=""; probes=""; devauts=""
+    maps=""; probes=""; devauts=""; yubikeys=""
     local kind a b c
     while IFS=$'\t' read -r kind a b c; do
         [ -n "$kind" ] || continue
         case "$kind" in
             pico)     maps="${maps:+$maps }$a:$b"; probes="${probes:+$probes }$c:$b" ;;
             nitrokey) devauts="${devauts:+$devauts }$a:$c" ;;
+            # serial:slot:pubkey-sha — what a destructive PIV step checks before `ykman piv reset`.
+            yubikey)  yubikeys="${yubikeys:+$yubikeys }$a:$b:$c" ;;
         esac
     done <<< "$raw"
-    [ -n "$maps$devauts" ] || { echo "registry contains no devices: $registry" >&2; return 1; }
+    [ -n "$maps$devauts$yubikeys" ] || { echo "registry contains no devices: $registry" >&2; return 1; }
     # An override is compared as a SET of pairs, not as a string. Both maps are lists of independent
     # token:board / probe:board pairs whose order carries no meaning, and an exact string comparison
     # refused the CI repo variables for listing the same correct pairs in a different order than the
@@ -106,5 +127,5 @@ PY
     if [ -n "${HSM_DEVAUT_MAP:-}" ] && [ "$(_hsm_registry_pairs "$HSM_DEVAUT_MAP")" != "$(_hsm_registry_pairs "$devauts")" ]; then
         echo "HSM_DEVAUT_MAP disagrees with registry; refusing override" >&2; return 1
     fi
-    export HSM_BOARD_MAP="$maps" HSM_CI_PROBE_MAP="$probes" HSM_DEVAUT_MAP="$devauts"
+    export HSM_BOARD_MAP="$maps" HSM_CI_PROBE_MAP="$probes" HSM_DEVAUT_MAP="$devauts" HSM_YUBIKEY_MAP="$yubikeys"
 }

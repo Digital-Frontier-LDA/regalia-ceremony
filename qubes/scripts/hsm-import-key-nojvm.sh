@@ -100,16 +100,36 @@ _cp="$(cd "$HERE/../.." && pwd)/tools/ceremony-python.sh"
     printf '   (no tools/ceremony-python.sh beside this checkout; using PATH python3)\n'
 }
 
-# THE CARD IS NAMED BEFORE IT IS WRITTEN TO. hsm-unwrap-key.sh verifies a PIN and stores a key;
-# doing that to the wrong card is not recoverable by apologising. When --slot names a card whose
-# serial we can read, it is passed down as the expectation.
+# --reader AND --slot MUST BE THE SAME PHYSICAL CARD. They are different addressing schemes:
+# --reader is a PC/SC index, used for the APDUs that store the key; --slot is a PKCS#11 slot id,
+# used for the certificate write and the enumeration proof. Nothing makes them agree. On this
+# bench they do not even have the same values — installing vsmartcard-vpcd put two Virtual PCD
+# readers in front of the real ones, so DENK0404144 is PC/SC 2 and PKCS#11 slot id 8.
+#
+# Getting them crossed would unwrap a key onto one card and then "verify" it on another, reporting
+# success for an import that landed somewhere nobody looked. So when both are given and the serials
+# are readable, they are compared, and a disagreement is a refusal before anything is written.
+#
+# (An earlier version passed --expect-serial down to hsm-unwrap-key.sh, which has no such option;
+# the call simply failed. It only surfaced once the resolver started working on Linux at all —
+# tools/hsm-reader-select.sh defaulted to a macOS module path, so this branch had never run here.)
 EXPECT_SERIAL=""
 _rs="$(cd "$HERE/../.." && pwd)/tools/hsm-reader-select.sh"
 if [ -n "$SLOT" ] && [ -r "$_rs" ]; then
     # shellcheck source=/dev/null
     . "$_rs"
     EXPECT_SERIAL="$(hsm_serial_at_slot_id "$SLOT" 2>/dev/null)" || EXPECT_SERIAL=""
-    [ -n "$EXPECT_SERIAL" ] && inf "expecting card $EXPECT_SERIAL at slot $SLOT"
+    if [ -n "$EXPECT_SERIAL" ]; then
+        inf "slot $SLOT is card $EXPECT_SERIAL"
+        _reader_serial="$(hsm_serial_at_reader "$READER" 2>/dev/null)" || _reader_serial=""
+        if [ -n "$_reader_serial" ] && [ "$_reader_serial" != "$EXPECT_SERIAL" ]; then
+            err "reader $READER is card $_reader_serial but slot $SLOT is card $EXPECT_SERIAL"
+            printf '   The key would be unwrapped onto one card and verified on another, and this\n' >&2
+            printf '   would report success for an import nobody looked at. Refusing.\n' >&2
+            exit 2
+        fi
+        [ -n "$_reader_serial" ] && inf "reader $READER is the same card — writing to $EXPECT_SERIAL"
+    fi
 fi
 
 WORK="$(mktemp -d)"
@@ -152,7 +172,7 @@ inf "unwrapping onto the card at reader $READER (key id $KEY_ID, label $LABEL)"
 # immediately; it never appears in argv.
 if ! HSM_USER_PIN="$(cat "$PIN_FILE")" bash "$UNWRAP" \
         --reader "$READER" --key-id "$KEY_ID" --key-size "$KEY_SIZE" \
-        --blob "$BLOB" --label "$LABEL" ${EXPECT_SERIAL:+--expect-serial "$EXPECT_SERIAL"}; then
+        --blob "$BLOB" --label "$LABEL"; then
     err "UNWRAP KEY or the PrKD write failed — see the status words above"
     exit 1
 fi
@@ -183,11 +203,26 @@ else
              || { err "could not convert $CERT to DER"; exit 1; };;
     esac
 fi
+# THE SAME NUMBER IN TWO BASES IS TWO NUMBERS. --key-id here is a SmartCard-HSM key reference, a
+# DECIMAL 1..255, and that is what UNWRAP KEY and the EF C4xx file name use. `pkcs11-tool --id`
+# takes HEX. Passing "$KEY_ID" to both meant every id that is not the same in both bases produced
+# a key and a certificate with DIFFERENT CKA_IDs — measured on ESP41D722E2 with --id 31:
+#
+#     Private Key Object   ID: 1f      (decimal 31 -> key reference 0x1F)
+#     Certificate Object   ID: 31      (pkcs11-tool read "31" as hex)
+#
+# Two consequences, and the second is worse. A certificate that does not share its id with the key
+# is not associated with it, which is the whole reason the certificate is written. And an UNPAIRED
+# certificate is exactly what the KMS identity probe treats as a DEVICE certificate
+# (regalia-kms#17), so this would have handed the daemon a key's certificate as a device identity.
+#
+# Every earlier import used 1, 2, 3 or 5 — the same in both bases — so nothing showed it.
+CERT_ID="$(printf '%02x' "$KEY_ID")"
 SLOT_ARGS=()
 [ -n "$SLOT" ] && SLOT_ARGS=(--slot "$SLOT")
 PIN="$(cat "$PIN_FILE")"
 if ! pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" \
-        --write-object "$WORK/cert.der" --type cert --id "$KEY_ID" --label "$LABEL" \
+        --write-object "$WORK/cert.der" --type cert --id "$CERT_ID" --label "$LABEL" \
         > "$WORK/cert.log" 2>&1; then
     err "certificate write failed — the key is on the card but INVISIBLE to gpg and ssh"
     grep -iE "CKR_|error" "$WORK/cert.log" | head -3 >&2
@@ -199,7 +234,40 @@ ok "certificate written"
 objs="$(pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" --list-objects 2>/dev/null)"
 grep -q "Private Key Object" <<< "$objs" || { err "no private key enumerates after the unwrap"; exit 1; }
 grep -q "Certificate Object" <<< "$objs" || { err "no certificate enumerates"; exit 1; }
-ok "verified: key and certificate both present"
+# THIS KEY AND THIS CERTIFICATE MUST SHARE AN ID — not every object on the token. A card that
+# already holds other keys lists them too, and requiring one id across the whole listing would
+# refuse a perfectly good second import. What matters is that the pair just written is a pair:
+# present-but-unpaired is the state the base confusion above produced, and it looks identical to
+# success in a plain object listing.
+_pairs="$(awk '
+    /^[A-Za-z].*Object[;,]/ { kind = ""
+                              if ($0 ~ /Private Key Object/)  kind = "key"
+                              if ($0 ~ /Certificate Object/)  kind = "cert"
+                              next }
+    /^[[:space:]]*ID:[[:space:]]*[0-9a-fA-F]+[[:space:]]*$/ {
+        if (kind != "") { id = $NF; print kind " " tolower(id) } }
+  ' <<< "$objs")"
+if [ -z "$_pairs" ]; then
+    # NO PARSEABLE ID IS NOT A MATCH. An empty parse would otherwise satisfy any "they agree"
+    # test trivially — the silent-instrument shape: it reports clean precisely when it is blind.
+    err "no object IDs could be read back from the token, so the key and its certificate cannot"
+    # NOT THE WORD "IMPORT-OK" IN A FAILURE MESSAGE. That token is how callers detect success —
+    # hsm-import-key.sh does `grep -q "IMPORT-OK"` on this output — so printing it here would make
+    # a refusal read as a successful import to the very code that checks.
+    err "be shown to be a pair. Refusing on an unreadable listing."
+    exit 1
+fi
+if ! grep -qx "key $CERT_ID" <<< "$_pairs"; then
+    err "no private key with id $CERT_ID enumerates (found: $(tr '\n' ' ' <<< "$_pairs"))"
+    exit 1
+fi
+if ! grep -qx "cert $CERT_ID" <<< "$_pairs"; then
+    err "the certificate did not land on id $CERT_ID (found: $(tr '\n' ' ' <<< "$_pairs"))"
+    err "a certificate that does not share the key's CKA_ID is not associated with it, and reads"
+    err "to a device-identity probe as an unpaired certificate."
+    exit 1
+fi
+ok "verified: key and certificate both present, sharing id $CERT_ID"
 inf "keys on card: $(printf '%s' "$objs" | grep -c 'Private Key Object')"
 inf "certs on card: $(printf '%s' "$objs" | grep -c 'Certificate Object')"
 ok "IMPORT-OK"

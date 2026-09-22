@@ -219,7 +219,9 @@ cmd_run() {
   rc=$?
   printf '%s\n' "$out" | sed 's/^/   /'
   if [ "$rc" -ne 0 ] || ! grep -q "IMPORT-OK" <<< "$out"; then
-    err "scriptrunner import did not report IMPORT-OK (exit $rc)"
+    # The success token is deliberately NOT repeated here: a caller that greps this script's
+    # output for it would read the failure as a success.
+    err "the scriptrunner import did not report success (exit $rc)"
     return 1
   fi
   ok "import reported IMPORT-OK"

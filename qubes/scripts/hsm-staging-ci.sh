@@ -190,8 +190,17 @@ if [ -z "${HSM_CI_NO_AUTOTARGET:-}" ] && [ -n "$EXPECT_SERIAL" ]; then
   # every two-card code path below becomes unreachable while still reporting a clean run. The
   # single-card defaults then look like successful targeting. Same shape as the repo's other seams
   # (internal/backend/yubikey's pivCards, entropyReader): a var that production never sets.
-  _rs="${HSM_READER_SELECT:-$HERE/../../../tools/hsm-reader-select.sh}"
-  [ -f "$_rs" ] || _rs="$(cd "$HERE/../../.." 2>/dev/null && pwd)/tools/hsm-reader-select.sh"
+  # ../../ — NOT ../../../. $HERE is qubes/scripts, so two levels up is the repository root and
+  # three is its PARENT. Both fallbacks pointed one level too high and the resolver was never
+  # found by default: on 2026-09-22 a gate run reported "the reader resolver is unavailable, so no
+  # bench-wide census was taken", and the targeting below silently fell back to single-card
+  # defaults on a bench with two cards attached.
+  #
+  # The seam is why nobody noticed. test-hsm-staging-ci.sh always passes HSM_READER_SELECT, so
+  # every test exercised the injected path and none exercised the default — a seam that makes the
+  # code testable can also make its production path untested, which is worse than having neither.
+  _rs="${HSM_READER_SELECT:-$HERE/../../tools/hsm-reader-select.sh}"
+  [ -f "$_rs" ] || _rs="$(cd "$HERE/../.." 2>/dev/null && pwd)/tools/hsm-reader-select.sh"
   if [ -f "$_rs" ]; then
     # shellcheck source=/dev/null
     . "$_rs"
@@ -989,10 +998,21 @@ if tier_admits hw_devaut; then
     dlog="$RUN_DIR/devaut.txt"
     DHEX=""; DSHA=""
     _devaut_src=""
-    if command -v opensc-explorer >/dev/null 2>&1; then
+    # hsm-devaut-read.sh FIRST. A bare `get 2F02` does not select the SmartCard-HSM application, so
+    # it read nothing on both benches — measured 2026-09-22, where this step then fell through and
+    # failed for want of a Smart Card Shell that the ceremony image deliberately does not carry
+    # (regalia#486). That script does the SELECT and the odd-INS READ BINARY, handles the P2 form a
+    # Pico needs, and prints the DEVAUT_HEX= / DEVAUT_SHA256= lines this step already parses.
+    if [ -x "$HERE/hsm-devaut-read.sh" ] || [ -r "$HERE/hsm-devaut-read.sh" ]; then
+      bash "$HERE/hsm-devaut-read.sh" --reader "$READER" 2>&1 | "$REDACT" > "$dlog"
+      DHEX="$(grep -a '^DEVAUT_HEX=' "$dlog" | head -1 | cut -d= -f2-)"
+      DSHA="$(grep -a '^DEVAUT_SHA256=' "$dlog" | head -1 | cut -d= -f2-)"
+      [ -n "$DHEX" ] && _devaut_src="hsm-devaut-read.sh -r $READER (OpenSC only, no JVM)"
+    fi
+    if [ -z "$DHEX" ] && command -v opensc-explorer >/dev/null 2>&1; then
       _bin="$RUN_DIR/devaut.bin"
       printf 'get 2F02 %s\nquit\n' "$_bin" > "$RUN_DIR/devaut.explorer.in"
-      opensc-explorer -r "$READER" < "$RUN_DIR/devaut.explorer.in" 2>&1 | "$REDACT" > "$dlog"
+      opensc-explorer -r "$READER" < "$RUN_DIR/devaut.explorer.in" 2>&1 | "$REDACT" >> "$dlog"
       if [ -s "$_bin" ]; then
         DHEX="$(xxd -p "$_bin" | tr -d '\n' | tr 'a-f' 'A-F')"
         DSHA="$(shasum -a 256 "$_bin" | awk '{print $1}')"
@@ -1002,7 +1022,7 @@ if tier_admits hw_devaut; then
     if [ -z "$DHEX" ]; then
       SCSH="${SCSH_HOME:-$HOME/tools/scsh-3.18.77}"
       if [ ! -x "$SCSH/scriptrunner" ]; then
-        fail hw_devaut "opensc-explorer could not read EF 2F02 and there is no Smart Card Shell at $SCSH — device identity CANNOT BE EVALUATED"
+        fail hw_devaut "neither hsm-devaut-read.sh nor opensc-explorer could read EF 2F02, and there is no Smart Card Shell at $SCSH — device identity CANNOT BE EVALUATED"
         _devaut_done=1
       else
         _scsh_reader=""
@@ -1130,6 +1150,18 @@ fi
 # requires the literal `--- PASS: TestPIVPhysicalReadOnlyQualification` line.
 if tier_admits hw_yubikey_piv; then
   hdr "hw_yubikey_piv — $(step_desc hw_yubikey_piv)"
+  # Resolved once: the message that names it and the directory that is entered must agree, or a
+  # failure sends someone to look at a path the run never used.
+  # AN EXPLICIT HSM_CI_KMS_DIR IS NOT A HINT. If the caller named a directory, that is the one
+  # checked and the one reported — silently redirecting a wrong explicit path to somewhere that
+  # happens to have a go.mod would run the qualification against a module nobody asked for.
+  # The fallback exists only for the DEFAULT, which the repo split invalidated.
+  if [ -n "${HSM_CI_KMS_DIR:-}" ]; then
+    _yk_kms="$HSM_CI_KMS_DIR"
+  else
+    _yk_kms="$REPO/../regalia-kms"
+    [ -f "$_yk_kms/go.mod" ] || [ ! -f "$REPO/kms/go.mod" ] || _yk_kms="$REPO/kms"
+  fi
   _yk_serial="${HSM_CI_YUBIKEY_SERIAL:-}"
   if [ "$ALLOW_NO_HW" = 1 ]; then
     skip hw_yubikey_piv "NO-HARDWARE: --allow-no-hardware — the YubiKey PIV qualification was not run"
@@ -1137,12 +1169,17 @@ if tier_admits hw_yubikey_piv; then
     skip hw_yubikey_piv "no YubiKey is pinned — set HSM_CI_YUBIKEY_SERIAL to the staging YubiKey's serial to schedule its PIV qualification"
   elif ! command -v go >/dev/null 2>&1; then
     fail hw_yubikey_piv "a YubiKey is pinned ($_yk_serial) but go is not on PATH — the PIV qualification CANNOT BE EVALUATED"
-  elif [ ! -f "${HSM_CI_KMS_DIR:-$REPO/kms}/go.mod" ]; then
+  # $REPO/kms HAS NOT EXISTED SINCE THE SPLIT. The KMS Go module lives in its own repository
+  # (regalia#487/#488), so this default named a directory that was deleted — and the step then
+  # reported "no Go module at …/kms — the PIV qualification CANNOT BE EVALUATED", which reads as a
+  # missing toolchain rather than a stale path. Default to a sibling checkout, which is the layout
+  # REGALIA_CEREMONY_DIR already implies from the other direction.
+  elif [ ! -f "$_yk_kms/go.mod" ]; then
     # A seam for the same reason HSM_READER_SELECT has one: the harness runs this file from a copied
     # tree. Without the explicit check a missing module dir surfaced as "rc=1" with no reason at all.
-    fail hw_yubikey_piv "a YubiKey is pinned ($_yk_serial) but no Go module at ${HSM_CI_KMS_DIR:-$REPO/kms} — the PIV qualification CANNOT BE EVALUATED"
+    fail hw_yubikey_piv "a YubiKey is pinned ($_yk_serial) but no Go module at $_yk_kms — the PIV qualification CANNOT BE EVALUATED (set HSM_CI_KMS_DIR to a regalia-kms checkout)"
   else
-    _yk_out="$( (cd "${HSM_CI_KMS_DIR:-$REPO/kms}" && env -u REGALIA_PIV_PIN REGALIA_PIV_SERIAL="$_yk_serial" \
+    _yk_out="$( (cd "$_yk_kms" && env -u REGALIA_PIV_PIN REGALIA_PIV_SERIAL="$_yk_serial" \
                   go test -count=1 -tags piv -v -run '^TestPIVPhysicalReadOnlyQualification$' ./internal/backend/yubikey/) 2>&1 | "$REDACT")"
     _yk_rc=$?
     if [ "$_yk_rc" = 0 ] && grep -qE '^--- PASS: TestPIVPhysicalReadOnlyQualification( |$)' <<< "$_yk_out"; then

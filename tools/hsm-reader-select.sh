@@ -16,7 +16,46 @@
 #
 # It also refuses to answer when the serial matches more than one reader, rather than picking one.
 
-HSM_P11_MODULE="${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}"
+# THE DEFAULT WAS A macOS HOMEBREW PATH, so on Linux it named a file that does not exist and every
+# PKCS#11 lookup here returned NOTHING — silently, because pkcs11-tool's failure goes to
+# /dev/null and the awk finds no match either way. Measured 2026-09-22: hsm_reader_for resolved
+# ESP41D722E2 to reader 3 correctly (it uses opensc-tool, which needs no module) while
+# hsm_slot_index_for returned empty, and the staging battery fell back to slot 0 — a Virtual PCD —
+# then reported "serial 'DENK0404144' != pinned 'ESP41D722E2'" and refused. It refused for the
+# right reason about the wrong card.
+#
+# Search the usual locations, the way preflight.sh and nitrokey-qualify.sh already do, so the
+# resolver works on the Linux bench and the macOS one without either having to be told.
+if [ -z "${HSM_PKCS11_MODULE:-}" ]; then
+  for _c in /usr/lib/*/opensc-pkcs11.so /usr/lib/opensc-pkcs11.so \
+            /usr/local/lib/opensc-pkcs11.so /opt/homebrew/lib/opensc-pkcs11.so; do
+    [ -f "$_c" ] && { HSM_P11_MODULE="$_c"; break; }
+  done
+  unset _c
+  # No module anywhere is not "no such serial". Leaving the variable at a path that does not exist
+  # would make every lookup return empty, which is the answer a caller reads as "that card is not
+  # here" — the silent-instrument failure this file exists to prevent.
+  : "${HSM_P11_MODULE:=}"
+else
+  HSM_P11_MODULE="$HSM_PKCS11_MODULE"
+fi
+
+# Refuse a PKCS#11 lookup with no module, rather than answering it emptily.
+#
+# AN EXPLICIT HSM_PKCS11_MODULE IS THE CALLER'S BUSINESS. This used to require the file to EXIST,
+# which refused every harness that stubs pkcs11-tool on PATH and has no real module on disk —
+# test-hsm-staging-restore.sh does exactly that, and the row asserting the slot id comes from the
+# slot table went red for it. What this guard is actually for is the case where NOTHING was set
+# and the search found nothing: then a lookup can only answer emptily, and an empty answer reads
+# as "that card is not attached".
+_hsm_need_p11() {
+  [ -n "${HSM_PKCS11_MODULE:-}" ] && return 0
+  [ -n "$HSM_P11_MODULE" ] && [ -f "$HSM_P11_MODULE" ] && return 0
+  printf 'hsm-reader-select: no PKCS#11 module found (looked for opensc-pkcs11.so in the usual\n' >&2
+  printf '  places). Set HSM_PKCS11_MODULE. Without it a slot lookup cannot answer, and an EMPTY\n' >&2
+  printf '  answer would read as "that card is not attached".\n' >&2
+  return 1
+}
 
 _hsm_run() { perl -e 'alarm shift; exec @ARGV' "$@"; }
 
@@ -76,6 +115,7 @@ hsm_reader_for() {
 hsm_slot_index_for() {
     local want="$1"
     [ -n "$want" ] || { echo "hsm_slot_index_for: no serial given" >&2; return 1; }
+    _hsm_need_p11 || return 1
     _hsm_run 60 pkcs11-tool --module "$HSM_P11_MODULE" --list-token-slots 2>/dev/null \
       | awk -v want="$want" '
           /^Slot [0-9]+/ { ix++ }
@@ -92,6 +132,7 @@ hsm_slot_index_for() {
 # would have read as "no such slot".
 hsm_slot_table() {
     local line id cur=""
+    _hsm_need_p11 || return 1
     _hsm_run 60 pkcs11-tool --module "$HSM_P11_MODULE" --list-token-slots 2>/dev/null |
     while IFS= read -r line; do
         case "$line" in

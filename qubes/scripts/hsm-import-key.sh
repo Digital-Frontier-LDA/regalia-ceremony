@@ -182,7 +182,9 @@ out="$( cd "$SCSH" && \
     ./scriptrunner "$HERE/hsm-auto-import.js" 2>&1 )"
 printf '%s\n' "$out" | grep -E "STEP (wrap|unwrap)|RESULT" | sed 's/^/     /'
 if ! grep -q "IMPORT-OK" <<< "$out"; then
-    err "key import did not report IMPORT-OK"
+    # Not the success token itself — see hsm-import-key-nojvm.sh: printing it in a failure
+    # message makes a refusal read as success to anything that greps for it.
+    err "the key import did not report success"
     printf '%s\n' "$out" | tail -5 >&2
     exit 1
 fi

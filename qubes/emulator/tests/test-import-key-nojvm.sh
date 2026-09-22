@@ -71,12 +71,24 @@ PY
 # The card: record every APDU, answer 9000 to all four.
 BIN="$T/bin"; mkdir -p "$BIN"
 # pkcs11-tool: record the certificate write, and enumerate both objects afterwards.
+# A FAITHFUL LISTING CARRIES IDs. The first version of this stub printed object headers and
+# labels and no ID lines at all, so it could not tell a caller that checks the key and its
+# certificate share an id from one that does not look.
 cat > "$BIN/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STUB_P11:?}"
 case "$*" in
-  *--write-object*) exit 0;;
-  *--list-objects*) printf 'Private Key Object; EC\n  label:      akash-funding\nCertificate Object; type = X.509 cert\n  label:      akash-funding\n'; exit 0;;
+  *--write-object*)
+    # Remember the id the certificate was written with, so the listing can report it.
+    prev=""; for a in "$@"; do [ "$prev" = "--id" ] && printf '%s' "$a" > "${STUB_P11%.txt}.certid"; prev="$a"; done
+    exit 0;;
+  *--list-objects*)
+    certid="$(cat "${STUB_P11%.txt}.certid" 2>/dev/null || echo 1f)"
+    # The KEY's id is the one the unwrap used: key reference 31 decimal is 0x1f. The stub is told
+    # which to claim through STUB_KEY_ID so a row can model the mismatched state.
+    printf 'Private Key Object; EC\n  label:      akash-funding\n  ID:         %s\n' "${STUB_KEY_ID:-$certid}"
+    printf 'Certificate Object; type = X.509 cert\n  label:      akash-funding\n  ID:         %s\n' "$certid"
+    exit 0;;
 esac
 exit 0
 STUB
@@ -133,6 +145,89 @@ grep -q '02020100' <<<"$apdu4" \
   && P "…and the key size the ENCODER measured (256), not one this script assumed" \
   || F "the PrKD key size is not 256: $apdu4"
 
+hdr "the key and its certificate land on the SAME id, in one base"
+# --key-id is a SmartCard-HSM key reference (DECIMAL 1..255); `pkcs11-tool --id` takes HEX. Passing
+# the same string to both gave a key at 0x1f and its certificate at 0x31 for --id 31, measured on
+# ESP41D722E2. A certificate that does not share the key's CKA_ID is not associated with it — and
+# an UNPAIRED certificate is what a device-identity probe treats as the DEVICE's (regalia-kms#17).
+# Every earlier import used 1, 2, 3 or 5, which are the same in both bases, so nothing showed it.
+: > "$T/stdin.txt"; : > "$STUB_P11"
+out7="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 31 --label akash-funding --dkek "$T/dkek.pbe" \
+        --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 \
+        --cert "$T/funding.crt" --module /dev/null 2>&1)"
+# key reference 31 decimal is 0x1F: the PrKD goes to EF C41F and the certificate must be written
+# with --id 1f, not --id 31.
+apdu_prkd="$(grep -oE '^apdu [0-9A-Fa-f]+' "$T/stdin.txt" | awk '{print $2}' | grep -i '^00D7C4' | head -1 | tr 'a-f' 'A-F')"
+case "$apdu_prkd" in
+  00D7C41F*) P "the PrKD goes to EF C41F — --id 31 is the DECIMAL key reference";;
+  *) F "the PrKD did not target EF C41F: $apdu_prkd";;
+esac
+grep -qE -- '--type cert .*--id 1f|--id 1f .*--type cert' "$STUB_P11" \
+  && P "…and the certificate is written with --id 1f, the same id in hex" \
+  || F "the certificate id does not match the key's: $(grep -- '--write-object' "$STUB_P11" | head -1)"
+grep -qE -- '--id 31' "$STUB_P11" \
+  && F "the certificate was written with --id 31, which pkcs11-tool reads as hex 0x31" \
+  || P "…and 31 is never passed to pkcs11-tool, where it would mean 0x31"
+
+hdr "present-but-unpaired is caught, not reported as success"
+# The state the base confusion produced looks identical to success in a plain object listing.
+: > "$T/stdin.txt"; : > "$STUB_P11"
+out8="$(STUB_KEY_ID=aa STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 31 --label akash-funding --dkek "$T/dkek.pbe" \
+        --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 \
+        --cert "$T/funding.crt" --module /dev/null 2>&1)"; rc8=$?
+[ "$rc8" -ne 0 ] && P "a key and certificate on different ids is a FAILURE" \
+  || F "it reported success with the certificate on a different id than the key"
+# Either half of the pair can be the one that does not match, and the message names whichever it
+# noticed — with the ids it actually found, which is what an operator needs to see.
+grep -qE 'no private key with id|did not land on id' <<<"$out8" \
+  && P "…naming the id that does not match" || F "the failure does not name it: $(tail -2 <<<"$out8")"
+grep -q 'found: key aa cert 1f' <<<"$out8" \
+  && P "…and listing what it did find, so the mismatch is visible" \
+  || F "the failure does not show the ids it found: $(tail -2 <<<"$out8")"
+grep -q 'IMPORT-OK' <<<"$out8" && F "it printed IMPORT-OK anyway" || P "…and does not print IMPORT-OK"
+cat > "$BIN/pkcs11-tool" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_P11:?}"
+case "$*" in
+  *--write-object*) exit 0;;
+  *--list-objects*) printf 'Private Key Object; EC\n  ID:         1f\nCertificate Object; type = X.509 cert\n  ID:         1f\n'; exit 0;;
+esac
+exit 0
+STUB
+chmod +x "$BIN/pkcs11-tool"
+
+hdr "a listing with no parseable ID is refused, not read as agreement"
+# An empty parse satisfies any "they agree" test trivially — the silent-instrument shape, where
+# the check reports clean precisely when it is blind. This is the listing the FIRST version of
+# this suite's own stub produced: object headers, labels, and no ID lines at all.
+cat > "$BIN/pkcs11-tool" <<'STUB'
+#!/usr/bin/env bash
+printf '%s
+' "$*" >> "${STUB_P11:?}"
+case "$*" in
+  *--list-objects*) printf 'Private Key Object; EC
+  label:      akash-funding
+Certificate Object; type = X.509 cert
+  label:      akash-funding
+'; exit 0;;
+esac
+exit 0
+STUB
+chmod +x "$BIN/pkcs11-tool"
+: > "$T/stdin.txt"; : > "$STUB_P11"
+out9="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 31 --label akash-funding --dkek "$T/dkek.pbe" \
+        --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 \
+        --cert "$T/funding.crt" --module /dev/null 2>&1)"; rc9=$?
+[ "$rc9" -ne 0 ] && P "an unreadable listing is a FAILURE" \
+  || F "it reported success from a listing with no object IDs in it"
+grep -q 'no object IDs could be read back' <<<"$out9" \
+  && P "…saying the pair could not be shown, rather than claiming it was" \
+  || F "the refusal does not say why: $(tail -2 <<<"$out9")"
+grep -q 'IMPORT-OK' <<<"$out9" && F "it printed IMPORT-OK on an unreadable listing" || P "…and prints no IMPORT-OK"
+
 hdr "the certificate — without which most of the stack cannot see the key"
 grep -q -- '--write-object' "$STUB_P11" && P "a certificate is written with pkcs11-tool (no JVM needed for it either)" \
   || F "no certificate was written — gpg and ssh would not see this key"
@@ -152,7 +247,7 @@ cat > "$BIN/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STUB_P11:?}"
 case "$*" in
-  *--list-objects*) printf 'Private Key Object; EC\n  label:      akash-funding\n'; exit 0;;
+  *--list-objects*) printf 'Private Key Object; EC\n  label:      akash-funding\n  ID:         1f\n'; exit 0;;
 esac
 exit 0
 STUB
@@ -183,12 +278,24 @@ leftovers="$(find "$T/tmp" -type f 2>/dev/null)"
 # THE HEALTHY CARD STUB IS BACK. The row above deliberately installed one that takes the
 # certificate write and then does not enumerate it; leaving that in place would fail every row
 # after it for a reason that has nothing to do with what those rows test.
+# A FAITHFUL LISTING CARRIES IDs. The first version of this stub printed object headers and
+# labels and no ID lines at all, so it could not tell a caller that checks the key and its
+# certificate share an id from one that does not look.
 cat > "$BIN/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${STUB_P11:?}"
 case "$*" in
-  *--write-object*) exit 0;;
-  *--list-objects*) printf 'Private Key Object; EC\n  label:      akash-funding\nCertificate Object; type = X.509 cert\n  label:      akash-funding\n'; exit 0;;
+  *--write-object*)
+    # Remember the id the certificate was written with, so the listing can report it.
+    prev=""; for a in "$@"; do [ "$prev" = "--id" ] && printf '%s' "$a" > "${STUB_P11%.txt}.certid"; prev="$a"; done
+    exit 0;;
+  *--list-objects*)
+    certid="$(cat "${STUB_P11%.txt}.certid" 2>/dev/null || echo 1f)"
+    # The KEY's id is the one the unwrap used: key reference 31 decimal is 0x1f. The stub is told
+    # which to claim through STUB_KEY_ID so a row can model the mismatched state.
+    printf 'Private Key Object; EC\n  label:      akash-funding\n  ID:         %s\n' "${STUB_KEY_ID:-$certid}"
+    printf 'Certificate Object; type = X.509 cert\n  label:      akash-funding\n  ID:         %s\n' "$certid"
+    exit 0;;
 esac
 exit 0
 STUB
