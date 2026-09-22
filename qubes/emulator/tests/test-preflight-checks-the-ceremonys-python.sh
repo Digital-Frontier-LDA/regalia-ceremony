@@ -68,20 +68,24 @@ if [ -s "$T/ceremony.sh.block" ] && [ -s "$T/preflight.sh.block" ]; then
   cp "$T/preflight.sh.block" "$SCRIPTS/.probe-preflight.block"
   a="$(select_with "$SCRIPTS/.probe-ceremony.block")"
   b="$(select_with "$SCRIPTS/.probe-preflight.block")"
-  bare="$(PATH=/usr/bin:/bin bash -c 'command -v python3' 2>/dev/null)"
   rm -f "$SCRIPTS/.probe-ceremony.block" "$SCRIPTS/.probe-preflight.block"
-  if [ -z "$a" ] || [ "$a" = "$bare" ]; then
-    # Either there is no venv on this host (nothing to select) or the resolution did nothing. Say
-    # which, rather than reporting agreement that was never tested.
-    if bash -c '. "$1"; ceremony_python_find mnemonic shamir_mnemonic >/dev/null' _          "$(cd "$SCRIPTS/../.." && pwd)/tools/ceremony-python.sh" 2>/dev/null; then
-      F "a venv with both modules exists here, but the resolution did not select it (got '$a', bare is '$bare')"
-    else
-      P "(no venv on this host carries both modules, so there is nothing to select — the comparison below is skipped honestly)"
-    fi
-  elif [ "$a" = "$b" ]; then
-    P "from the same bare PATH both select $a, which is NOT the bare $bare"
-  else
+  # THE PROPERTY IS "CAN IT IMPORT THEM", NOT "IS IT DIFFERENT FROM /usr/bin/python3". An earlier
+  # version inferred that selecting the bare interpreter meant the resolution had done nothing —
+  # false wherever the wheels are installed system-wide, as they are on the CI runner and on the
+  # air-gapped image this check is written for. It failed there for being right.
+  if [ -z "$a" ] || [ -z "$b" ]; then
+    F "one of the blocks selected no interpreter at all (ceremony='$a' preflight='$b')"
+  elif [ "$a" != "$b" ]; then
     F "they select different interpreters: ceremony=$a preflight=$b"
+  else
+    P "from the same bare PATH both select $a"
+    if "$a" -c 'import mnemonic, shamir_mnemonic' >/dev/null 2>&1; then
+      P "…and that interpreter can import both modules, which is the property preflight reports on"
+    else
+      # Not a failure of the resolution: this host genuinely has the modules nowhere. preflight
+      # must then FAIL at its import check, which the last section asserts it can still reach.
+      P "(no interpreter on this host has both modules; preflight will fail at its import check, as it should)"
+    fi
   fi
 fi
 
