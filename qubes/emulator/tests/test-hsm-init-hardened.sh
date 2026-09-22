@@ -49,6 +49,7 @@ run_init(){   # run_init <env assignments...> -- <args...>
 apdus(){ grep -oE '^apdu [0-9A-Fa-f]+' "$BIN/stdin.txt" | awk '{print $2}'; }
 init_apdu(){ apdus | grep -iE '^805000' | head -1 | tr 'a-f' 'A-F'; }
 label_apdu(){ apdus | grep -iE '^00D72F03' | head -1 | tr 'a-f' 'A-F'; }
+select_apdu(){ apdus | grep -iE '^00A4' | head -1 | tr 'a-f' 'A-F'; }
 
 PINS=(HSM_SO_PIN=0011223344556677 HSM_USER_PIN=123456)
 
@@ -132,6 +133,22 @@ out="$(run_init "${PINS[@]}" HSM_EXPECT_BOARD=DEADBEEFDEADBEEF HSM_BOARD_VERIFIE
 grep -q 'does not end in the bytes' <<<"$out" \
   && P "a board id that disagrees with the serial is a refusal, not a preference" \
   || F "accepted a board id and a serial that describe different devices"
+
+hdr "the SELECT form is the one BOTH devices accept"
+# P2=0C answers 9000 on a Nitrokey HSM 2 and 6A86 on a Pico HSM (measured on both benches
+# 2026-09-22), so a P2=0C SELECT makes this script Nitrokey-only — and it is the script that runs
+# FIRST, before anything else can be attempted on the card.
+# A SUCCESSFUL run, so there are APDUs to look at: the rows just above are refusals, which send
+# none, and reading their empty stdin.txt would report "not the SmartCard-HSM AID" for a script
+# that had simply not been asked to do anything.
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0)"
+sel="$(select_apdu)"
+case "$sel" in
+  00A404000BE82B0601040181C31F020100)
+    P "SELECT is 00 A4 04 00 with an Le byte — a Pico HSM accepts it too";;
+  00A4040C*) F "SELECT uses P2=0C, which a Pico HSM rejects with 6A86: $sel";;
+  *)         F "SELECT is not the SmartCard-HSM AID: $sel";;
+esac
 
 hdr "values that do not fit their field are refused, not encoded badly"
 # printf '%02X' 256 is "100": three hex digits, an odd-length TLV value, and every byte after it in

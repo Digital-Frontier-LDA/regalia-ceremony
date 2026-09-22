@@ -133,6 +133,63 @@ grep -q '02020100' <<<"$apdu4" \
   && P "…and the key size the ENCODER measured (256), not one this script assumed" \
   || F "the PrKD key size is not 256: $apdu4"
 
+hdr "the key and its certificate land on the SAME id, in one base"
+# --key-id is a SmartCard-HSM key reference (DECIMAL 1..255); `pkcs11-tool --id` takes HEX. Passing
+# the same string to both gave a key at 0x1f and its certificate at 0x31 for --id 31, measured on
+# ESP41D722E2. A certificate that does not share the key's CKA_ID is not associated with it — and
+# an UNPAIRED certificate is what a device-identity probe treats as the DEVICE's (regalia-kms#17).
+# Every earlier import used 1, 2, 3 or 5, which are the same in both bases, so nothing showed it.
+: > "$T/stdin.txt"; : > "$STUB_P11"
+out7="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 31 --label akash-funding --dkek "$T/dkek.pbe" \
+        --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 \
+        --cert "$T/funding.crt" --module /dev/null 2>&1)"
+# key reference 31 decimal is 0x1F: the PrKD goes to EF C41F and the certificate must be written
+# with --id 1f, not --id 31.
+apdu_prkd="$(grep -oE '^apdu [0-9A-Fa-f]+' "$T/stdin.txt" | awk '{print $2}' | grep -i '^00D7C4' | head -1 | tr 'a-f' 'A-F')"
+case "$apdu_prkd" in
+  00D7C41F*) P "the PrKD goes to EF C41F — --id 31 is the DECIMAL key reference";;
+  *) F "the PrKD did not target EF C41F: $apdu_prkd";;
+esac
+grep -qE -- '--type cert .*--id 1f|--id 1f .*--type cert' "$STUB_P11" \
+  && P "…and the certificate is written with --id 1f, the same id in hex" \
+  || F "the certificate id does not match the key's: $(grep -- '--write-object' "$STUB_P11" | head -1)"
+grep -qE -- '--id 31' "$STUB_P11" \
+  && F "the certificate was written with --id 31, which pkcs11-tool reads as hex 0x31" \
+  || P "…and 31 is never passed to pkcs11-tool, where it would mean 0x31"
+
+hdr "present-but-unpaired is caught, not reported as success"
+# The state the base confusion produced looks identical to success in a plain object listing.
+cat > "$BIN/pkcs11-tool" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_P11:?}"
+case "$*" in
+  *--list-objects*) printf 'Private Key Object; EC\n  ID:         1f\nCertificate Object; type = X.509 cert\n  ID:         31\n'; exit 0;;
+esac
+exit 0
+STUB
+chmod +x "$BIN/pkcs11-tool"
+: > "$T/stdin.txt"; : > "$STUB_P11"
+out8="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+        --pw-file "$T/p12.pw" --id 31 --label akash-funding --dkek "$T/dkek.pbe" \
+        --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 \
+        --cert "$T/funding.crt" --module /dev/null 2>&1)"; rc8=$?
+[ "$rc8" -ne 0 ] && P "a key and certificate on different ids is a FAILURE" \
+  || F "it reported success with the certificate on a different id than the key"
+grep -q 'did not land on one id' <<<"$out8" && P "…saying exactly that" || F "the failure does not name it: $(tail -2 <<<"$out8")"
+grep -q 'IMPORT-OK' <<<"$out8" && F "it printed IMPORT-OK anyway" || P "…and does not print IMPORT-OK"
+# restore the healthy stub for anything after this
+cat > "$BIN/pkcs11-tool" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${STUB_P11:?}"
+case "$*" in
+  *--write-object*) exit 0;;
+  *--list-objects*) printf 'Private Key Object; EC\n  ID:         1f\nCertificate Object; type = X.509 cert\n  ID:         1f\n'; exit 0;;
+esac
+exit 0
+STUB
+chmod +x "$BIN/pkcs11-tool"
+
 hdr "the certificate — without which most of the stack cannot see the key"
 grep -q -- '--write-object' "$STUB_P11" && P "a certificate is written with pkcs11-tool (no JVM needed for it either)" \
   || F "no certificate was written — gpg and ssh would not see this key"

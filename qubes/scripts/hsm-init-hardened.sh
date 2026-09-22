@@ -190,7 +190,11 @@ send_init(){
   # `env -u`: the PINs are already inside the APDU on stdin, so the child has no use for them —
   # and a child that inherits them can leak them through its own /proc/<pid>/environ, a core dump
   # or a crash reporter. The variables are removed for the whole exec chain (perl included).
-  printf 'apdu 00A4040C0B%s\napdu %s\napdu %s\nquit\n' "$AID" "$apdu" "$lapdu" \
+  # P2=00 WITH AN Le BYTE — the form BOTH devices accept. P2=0C answers 9000 on a Nitrokey HSM 2
+  # and 6A86 on a Pico HSM (measured on both benches 2026-09-22), so the P2=0C form made this
+  # script Nitrokey-only, silently: the same defect hsm-unwrap-key.sh had, in the script that runs
+  # FIRST. An initialisation that cannot select the application wipes nothing and says 6A86.
+  printf 'apdu 00A404000B%s00\napdu %s\napdu %s\nquit\n' "$AID" "$apdu" "$lapdu" \
     | env -u HSM_SO_PIN -u HSM_USER_PIN perl -e 'alarm 120; exec @ARGV' -- \
         opensc-explorer -r "$READER" 2>&1
 }

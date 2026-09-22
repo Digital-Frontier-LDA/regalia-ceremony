@@ -217,6 +217,8 @@ say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine car
 "$HERE/tests/test-nitrokey-qualify-devaut.sh" || suite_failed "test-nitrokey-qualify-devaut.sh"
 "$HERE/tests/test-preflight-checks-the-ceremonys-python.sh" || suite_failed "test-preflight-checks-the-ceremonys-python.sh"
 "$HERE/tests/test-pcscd-diagnosis.sh" || suite_failed "test-pcscd-diagnosis.sh"
+"$HERE/tests/test-reader-select-module-default.sh" || suite_failed "test-reader-select-module-default.sh"
+"$HERE/tests/test-staging-ci-finds-its-resolver.sh" || suite_failed "test-staging-ci-finds-its-resolver.sh"
 python3 "$HERE/tests/test_dkek_encode_key.py" || suite_failed "test_dkek_encode_key.py"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"
