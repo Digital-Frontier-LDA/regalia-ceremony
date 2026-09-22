@@ -93,6 +93,19 @@ pubkeys="$("${P11[@]}" --list-objects --type pubkey 2>/dev/null)"
 total="$(grep -c 'Public Key Object' <<< "$pubkeys" || true)"
 local_yes="$(grep -c 'Access:[[:space:]]*local' <<< "$pubkeys" || true)"
 printf '#447 public keys: %s total, %s report CKA_LOCAL=true\n' "${total:-0}" "${local_yes:-0}"
+# A COUNT INVITES THE WRONG INFERENCE, and it got one. "2 total, 1 report CKA_LOCAL=true" reads as
+# "the generated one is local and the imported one is not", which is what a correct implementation
+# would do — and it is not what these cards do. Measured 2026-09-22 on DENK0404144 AND on
+# ESP41D722E2, with provenance controlled rather than guessed from object ids:
+#
+#     IMPORTED key's public object   -> CKA_LOCAL = true
+#     card-GENERATED key's public    -> CKA_LOCAL = false
+#
+# Exactly inverted, on both devices. So print the MAPPING, label by label: a reader must not have
+# to infer which key the count referred to.
+printf '%s\n' "$pubkeys" | awk '
+    /label:/  { l = $2 }
+    /Access:/ { printf "     %-28s CKA_LOCAL=%s\n", (l == "" ? "(unlabelled)" : l), ($0 ~ /local/ ? "true" : "false"); l = "" }'
 if [ "${total:-0}" -eq 0 ]; then
   printf '     (no keys on the card yet; run with --provision to generate one and measure #447 on it)\n'
 fi
