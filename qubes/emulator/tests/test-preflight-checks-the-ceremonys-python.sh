@@ -43,7 +43,12 @@ hdr "they pick the SAME interpreter, run the same way"
 # The real assertion: source each script's resolution in a shell whose PATH does NOT have the
 # venv, and compare what `command -v python3` becomes. Sourcing the whole of ceremony.sh is not
 # possible here (it is a wizard), so the resolution block is extracted and run.
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"
+# The probe copies live in $SCRIPTS (they resolve tools/ceremony-python.sh relative to their own
+# location), so they cannot go in $T — and must therefore be cleaned up even on an interrupt.
+PROBES=()
+cleanup(){ rm -rf "$T"; rm -f ${PROBES[@]+"${PROBES[@]}"}; }
+trap cleanup EXIT INT TERM
 extract(){ sed -n '/^_cp="\$(cd "\$(dirname "\${BASH_SOURCE\[0\]}")\/\.\.\/\.\."/,/^unset _cp$/p' "$1"; }
 for f in ceremony.sh preflight.sh; do
   extract "$SCRIPTS/$f" > "$T/$f.block"
@@ -64,11 +69,19 @@ if [ -s "$T/ceremony.sh.block" ] && [ -s "$T/preflight.sh.block" ]; then
   select_with(){ # select_with <block file placed in $SCRIPTS>
     PATH=/usr/bin:/bin bash -c 'source "$1"; command -v python3' _ "$1" 2>/dev/null
   }
-  cp "$T/ceremony.sh.block"  "$SCRIPTS/.probe-ceremony.block"
-  cp "$T/preflight.sh.block" "$SCRIPTS/.probe-preflight.block"
-  a="$(select_with "$SCRIPTS/.probe-ceremony.block")"
-  b="$(select_with "$SCRIPTS/.probe-preflight.block")"
-  rm -f "$SCRIPTS/.probe-ceremony.block" "$SCRIPTS/.probe-preflight.block"
+  # UNIQUE NAMES, AND REMOVED BY THE TRAP. Two things go wrong with a fixed path here. Concurrent
+  # invocations would overwrite, source or delete each other's copy — and, far worse, an
+  # interrupted run would leave a file behind in qubes/scripts, which salt deploys to the ceremony
+  # image WHOLE (vault-tools.sls excludes only the named test harnesses). A stray probe file in a
+  # test directory is litter; the same file in the image is shipped.
+  probe_ceremony="$(mktemp "$SCRIPTS/.probe-ceremony.XXXXXX")"
+  probe_preflight="$(mktemp "$SCRIPTS/.probe-preflight.XXXXXX")"
+  PROBES+=("$probe_ceremony" "$probe_preflight")
+  cat "$T/ceremony.sh.block"  > "$probe_ceremony"
+  cat "$T/preflight.sh.block" > "$probe_preflight"
+  a="$(select_with "$probe_ceremony")"
+  b="$(select_with "$probe_preflight")"
+  rm -f "$probe_ceremony" "$probe_preflight"
   # THE PROPERTY IS "CAN IT IMPORT THEM", NOT "IS IT DIFFERENT FROM /usr/bin/python3". An earlier
   # version inferred that selecting the bare interpreter meant the resolution had done nothing —
   # false wherever the wheels are installed system-wide, as they are on the CI runner and on the
