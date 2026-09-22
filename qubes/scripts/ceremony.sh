@@ -62,6 +62,28 @@ run_tee() {
 # parse and a second copy of it would be free to drift.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ceremony-kcv.sh"
 
+# THE CEREMONY'S INTERPRETER, RESOLVED ONCE — and by preflight.sh too, or the two disagree.
+#
+# Every python step here runs bare `python3`, so the interpreter is whatever PATH happens to give.
+# preflight.sh proves `import mnemonic` and `import shamir_mnemonic` resolve BEFORE keys are in
+# RAM, precisely so step 3c cannot fail mid-ceremony with the money exposed — but it proved it for
+# ITS python3, which is not necessarily this one. On the air-gapped image they coincide because
+# the wheels are installed system-wide. Anywhere the dependencies live in a venv they do not, and
+# then preflight either green-lights a ceremony whose python cannot import the module, or refuses
+# one that would have worked. A readiness check about a different interpreter than the one that
+# runs is not a readiness check.
+#
+# prefer, not require: this script does far more than the python steps, and the preflight check is
+# where a genuinely missing module must stop things.
+_cp="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/ceremony-python.sh"
+if [ -r "$_cp" ]; then
+  # shellcheck source=/dev/null
+  . "$_cp"
+  ceremony_python_prefer mnemonic shamir_mnemonic
+fi
+unset _cp
+
+
 # Feed captured --create-dkek-share output to `sc-hsm-tool --import-dkek-share … --pwd-shares-total N`
 # in the order OpenSC 0.27.1 reads it: the prime once, then for each share one blank line (its
 # "Press <enter>"), the share ID and the share value. The same protocol hsm-recovery-drill.sh's

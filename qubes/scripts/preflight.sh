@@ -90,6 +90,24 @@ else
   printf '%s\n' "$profile_out" | grep '^WARN ' | sed 's/^/       /' || true
 fi
 
+# THE SAME INTERPRETER THE CEREMONY WILL USE. ceremony.sh resolves the ceremony venv through
+# tools/ceremony-python.sh; without doing the same here, this check reports on whichever python3
+# happened to be on PATH when preflight ran — a different interpreter than the one that runs step
+# 3c. It would then either green-light a ceremony whose python cannot import the module (the exact
+# mid-ceremony failure this check exists to prevent, with the money already exposed) or refuse one
+# that would have worked. Measured 2026-09-22: under `sudo`, secure_path drops the venv and this
+# reported both modules missing on a host where the ceremony would have found them.
+#
+# prefer, not require: a host with no venv anywhere must still reach the import check below and
+# fail THERE, with the message that says what to do about it.
+_cp="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/ceremony-python.sh"
+if [ -r "$_cp" ]; then
+  # shellcheck source=/dev/null
+  . "$_cp"
+  ceremony_python_prefer mnemonic shamir_mnemonic
+fi
+unset _cp
+
 echo "== Tools =="
 for t in ip age sops age-plugin-yubikey pkcs11-tool sc-hsm-tool ykman ssss-split shamir qrencode zbarimg gpg sha256sum python3; do
   if command -v "$t" >/dev/null 2>&1; then ok "$t"; else bad "$t not found (check the template build)"; fi
