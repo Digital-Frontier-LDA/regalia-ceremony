@@ -219,6 +219,7 @@ say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine car
 "$HERE/tests/test-pcscd-diagnosis.sh" || suite_failed "test-pcscd-diagnosis.sh"
 "$HERE/tests/test-reader-select-module-default.sh" || suite_failed "test-reader-select-module-default.sh"
 "$HERE/tests/test-staging-ci-finds-its-resolver.sh" || suite_failed "test-staging-ci-finds-its-resolver.sh"
+"$HERE/tests/test-success-token-hygiene.sh" || suite_failed "test-success-token-hygiene.sh"
 python3 "$HERE/tests/test_dkek_encode_key.py" || suite_failed "test_dkek_encode_key.py"
 
 say "PKA THRESHOLD — 2-of-3, auth dies on power-off, a revoked custodian stops counting (B8, C5)"

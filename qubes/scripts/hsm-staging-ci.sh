@@ -1150,6 +1150,18 @@ fi
 # requires the literal `--- PASS: TestPIVPhysicalReadOnlyQualification` line.
 if tier_admits hw_yubikey_piv; then
   hdr "hw_yubikey_piv — $(step_desc hw_yubikey_piv)"
+  # Resolved once: the message that names it and the directory that is entered must agree, or a
+  # failure sends someone to look at a path the run never used.
+  # AN EXPLICIT HSM_CI_KMS_DIR IS NOT A HINT. If the caller named a directory, that is the one
+  # checked and the one reported — silently redirecting a wrong explicit path to somewhere that
+  # happens to have a go.mod would run the qualification against a module nobody asked for.
+  # The fallback exists only for the DEFAULT, which the repo split invalidated.
+  if [ -n "${HSM_CI_KMS_DIR:-}" ]; then
+    _yk_kms="$HSM_CI_KMS_DIR"
+  else
+    _yk_kms="$REPO/../regalia-kms"
+    [ -f "$_yk_kms/go.mod" ] || [ ! -f "$REPO/kms/go.mod" ] || _yk_kms="$REPO/kms"
+  fi
   _yk_serial="${HSM_CI_YUBIKEY_SERIAL:-}"
   if [ "$ALLOW_NO_HW" = 1 ]; then
     skip hw_yubikey_piv "NO-HARDWARE: --allow-no-hardware — the YubiKey PIV qualification was not run"
@@ -1157,12 +1169,17 @@ if tier_admits hw_yubikey_piv; then
     skip hw_yubikey_piv "no YubiKey is pinned — set HSM_CI_YUBIKEY_SERIAL to the staging YubiKey's serial to schedule its PIV qualification"
   elif ! command -v go >/dev/null 2>&1; then
     fail hw_yubikey_piv "a YubiKey is pinned ($_yk_serial) but go is not on PATH — the PIV qualification CANNOT BE EVALUATED"
-  elif [ ! -f "${HSM_CI_KMS_DIR:-$REPO/kms}/go.mod" ]; then
+  # $REPO/kms HAS NOT EXISTED SINCE THE SPLIT. The KMS Go module lives in its own repository
+  # (regalia#487/#488), so this default named a directory that was deleted — and the step then
+  # reported "no Go module at …/kms — the PIV qualification CANNOT BE EVALUATED", which reads as a
+  # missing toolchain rather than a stale path. Default to a sibling checkout, which is the layout
+  # REGALIA_CEREMONY_DIR already implies from the other direction.
+  elif [ ! -f "$_yk_kms/go.mod" ]; then
     # A seam for the same reason HSM_READER_SELECT has one: the harness runs this file from a copied
     # tree. Without the explicit check a missing module dir surfaced as "rc=1" with no reason at all.
-    fail hw_yubikey_piv "a YubiKey is pinned ($_yk_serial) but no Go module at ${HSM_CI_KMS_DIR:-$REPO/kms} — the PIV qualification CANNOT BE EVALUATED"
+    fail hw_yubikey_piv "a YubiKey is pinned ($_yk_serial) but no Go module at $_yk_kms — the PIV qualification CANNOT BE EVALUATED (set HSM_CI_KMS_DIR to a regalia-kms checkout)"
   else
-    _yk_out="$( (cd "${HSM_CI_KMS_DIR:-$REPO/kms}" && env -u REGALIA_PIV_PIN REGALIA_PIV_SERIAL="$_yk_serial" \
+    _yk_out="$( (cd "$_yk_kms" && env -u REGALIA_PIV_PIN REGALIA_PIV_SERIAL="$_yk_serial" \
                   go test -count=1 -tags piv -v -run '^TestPIVPhysicalReadOnlyQualification$' ./internal/backend/yubikey/) 2>&1 | "$REDACT")"
     _yk_rc=$?
     if [ "$_yk_rc" = 0 ] && grep -qE '^--- PASS: TestPIVPhysicalReadOnlyQualification( |$)' <<< "$_yk_out"; then

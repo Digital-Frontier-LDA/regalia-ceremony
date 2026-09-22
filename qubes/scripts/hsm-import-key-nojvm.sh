@@ -234,16 +234,40 @@ ok "certificate written"
 objs="$(pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" --list-objects 2>/dev/null)"
 grep -q "Private Key Object" <<< "$objs" || { err "no private key enumerates after the unwrap"; exit 1; }
 grep -q "Certificate Object" <<< "$objs" || { err "no certificate enumerates"; exit 1; }
-# AND THEY MUST SHARE AN ID. Present-but-unpaired is the state the base confusion above produced,
-# and it looks identical to success in a plain object listing.
-_ids="$(grep -oiE '^[[:space:]]*ID:[[:space:]]*[0-9a-f]+' <<< "$objs" | grep -oiE '[0-9a-f]+$' | tr 'A-F' 'a-f' | sort -u)"
-if [ "$(wc -l <<< "$_ids")" -ne 1 ]; then
-    err "the key and its certificate did not land on one id: $(tr '\n' ' ' <<< "$_ids")"
+# THIS KEY AND THIS CERTIFICATE MUST SHARE AN ID — not every object on the token. A card that
+# already holds other keys lists them too, and requiring one id across the whole listing would
+# refuse a perfectly good second import. What matters is that the pair just written is a pair:
+# present-but-unpaired is the state the base confusion above produced, and it looks identical to
+# success in a plain object listing.
+_pairs="$(awk '
+    /^[A-Za-z].*Object[;,]/ { kind = ""
+                              if ($0 ~ /Private Key Object/)  kind = "key"
+                              if ($0 ~ /Certificate Object/)  kind = "cert"
+                              next }
+    /^[[:space:]]*ID:[[:space:]]*[0-9a-fA-F]+[[:space:]]*$/ {
+        if (kind != "") { id = $NF; print kind " " tolower(id) } }
+  ' <<< "$objs")"
+if [ -z "$_pairs" ]; then
+    # NO PARSEABLE ID IS NOT A MATCH. An empty parse would otherwise satisfy any "they agree"
+    # test trivially — the silent-instrument shape: it reports clean precisely when it is blind.
+    err "no object IDs could be read back from the token, so the key and its certificate cannot"
+    # NOT THE WORD "IMPORT-OK" IN A FAILURE MESSAGE. That token is how callers detect success —
+    # hsm-import-key.sh does `grep -q "IMPORT-OK"` on this output — so printing it here would make
+    # a refusal read as a successful import to the very code that checks.
+    err "be shown to be a pair. Refusing on an unreadable listing."
+    exit 1
+fi
+if ! grep -qx "key $CERT_ID" <<< "$_pairs"; then
+    err "no private key with id $CERT_ID enumerates (found: $(tr '\n' ' ' <<< "$_pairs"))"
+    exit 1
+fi
+if ! grep -qx "cert $CERT_ID" <<< "$_pairs"; then
+    err "the certificate did not land on id $CERT_ID (found: $(tr '\n' ' ' <<< "$_pairs"))"
     err "a certificate that does not share the key's CKA_ID is not associated with it, and reads"
     err "to a device-identity probe as an unpaired certificate."
     exit 1
 fi
-ok "verified: key and certificate both present, sharing id $_ids"
+ok "verified: key and certificate both present, sharing id $CERT_ID"
 inf "keys on card: $(printf '%s' "$objs" | grep -c 'Private Key Object')"
 inf "certs on card: $(printf '%s' "$objs" | grep -c 'Certificate Object')"
 ok "IMPORT-OK"

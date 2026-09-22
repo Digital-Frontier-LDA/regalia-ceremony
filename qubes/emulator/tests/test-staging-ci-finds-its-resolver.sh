@@ -63,5 +63,52 @@ else
   F "the census would always skip, and 'no card was found to be low' would be indistinguishable from 'no card was looked at'"
 fi
 
+hdr "the SCRIPT itself finds it — not an expression copied out of the script"
+# The rows above read the default out of the file and evaluate it, which is a re-implementation
+# and can agree with a broken original. This runs the real battery with NO HSM_READER_SELECT and
+# card tools stubbed, so the resolver has something to resolve without hardware, and asserts the
+# "resolver is unavailable" bail-out never appears.
+T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+FAKE="$T/bin"; mkdir -p "$FAKE"
+cat > "$FAKE/opensc-tool" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *-l*) printf '# Detected readers (pcsc)
+Nr.  Card  Features  Name
+0    Yes             Pico Key [Pico Key CCID Interface] (AAAA) 00 00
+1    Yes             Pico Key [Pico Key CCID Interface] (BBBB) 01 00
+';;
+  *--atr*) printf '3b:fe:18:00:00:81:31:fe:45:80:31:81:54:48:53:4d:31:73:80:21:40:81:07:fa
+';;
+esac
+exit 0
+STUB
+cat > "$FAKE/pkcs11-tool" <<'STUB'
+#!/usr/bin/env bash
+case "$*" in
+  *--list-token-slots*|*--list-slots*)
+    printf 'Available slots:
+Slot 0 (0x0): Pico Key (AAAA) 00 00
+  serial num         : ESPAAAA
+Slot 1 (0x4): Pico Key (BBBB) 01 00
+  serial num         : ESPBBBB
+';;
+esac
+exit 0
+STUB
+cat > "$FAKE/pkcs15-tool" <<'STUB'
+#!/usr/bin/env bash
+printf 'Serial number  : ESPAAAA
+'
+exit 0
+STUB
+for f in opensc-tool pkcs11-tool pkcs15-tool; do chmod +x "$FAKE/$f"; done
+out="$(cd "$SCRIPTS" && env -u HSM_READER_SELECT PATH="$FAKE:$PATH" HSM_CI_SERIAL=ESPBBBB         HSM_PKCS11_MODULE=/dev/null timeout 180 bash ./hsm-staging-ci.sh --tier gate --allow-no-hardware 2>&1)" || true
+if grep -q 'reader resolver is unavailable' <<<"$out"; then
+  F "the battery still reports 'the reader resolver is unavailable' when run for real"
+else
+  P "a real run never reports the resolver missing"
+fi
+
 printf '\n\033[1m### RESULT\033[0m\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
