@@ -673,10 +673,15 @@ hsm_ensure_readers() {
   [ -n "$readers" ] && return 0
   {
     printf 'NO PC/SC READERS ARE VISIBLE.\n'
-    if command -v lsusb >/dev/null 2>&1 && lsusb 2>/dev/null \
-         | grep -qiE 'nitrokey|pico key|smart ?card'; then
+    # NO PIPE INTO grep -q. grep -q exits on its first match, lsusb takes SIGPIPE, and under
+    # pipefail the pipeline status is 141 — so the branch is NOT taken and the USB evidence that
+    # rules out the hardware is silently dropped, in a message whose whole job is to rule it out.
+    # (tools/hsm-lint-predicates.sh flags exactly this shape, and flagged this line.)
+    local usb=""
+    command -v lsusb >/dev/null 2>&1 && usb="$(lsusb 2>/dev/null | grep -iE 'nitrokey|pico key|smart ?card')"
+    if [ -n "$usb" ]; then
       printf '  A card IS on the USB bus:\n'
-      lsusb 2>/dev/null | grep -iE 'nitrokey|pico key|smart ?card' | sed 's/^/    /'
+      sed 's/^/    /' <<< "$usb"
       printf '  so this is the daemon, not the hardware.\n'
     fi
     printf '  Debian runs pcscd with --auto-exit; it leaves about a minute after the last client\n'
