@@ -41,7 +41,15 @@ else
 fi
 
 # Refuse a PKCS#11 lookup with no module, rather than answering it emptily.
+#
+# AN EXPLICIT HSM_PKCS11_MODULE IS THE CALLER'S BUSINESS. This used to require the file to EXIST,
+# which refused every harness that stubs pkcs11-tool on PATH and has no real module on disk —
+# test-hsm-staging-restore.sh does exactly that, and the row asserting the slot id comes from the
+# slot table went red for it. What this guard is actually for is the case where NOTHING was set
+# and the search found nothing: then a lookup can only answer emptily, and an empty answer reads
+# as "that card is not attached".
 _hsm_need_p11() {
+  [ -n "${HSM_PKCS11_MODULE:-}" ] && return 0
   [ -n "$HSM_P11_MODULE" ] && [ -f "$HSM_P11_MODULE" ] && return 0
   printf 'hsm-reader-select: no PKCS#11 module found (looked for opensc-pkcs11.so in the usual\n' >&2
   printf '  places). Set HSM_PKCS11_MODULE. Without it a slot lookup cannot answer, and an EMPTY\n' >&2

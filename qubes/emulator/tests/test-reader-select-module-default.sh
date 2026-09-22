@@ -41,16 +41,27 @@ hdr "an explicit HSM_PKCS11_MODULE still wins"
 got="$(HSM_PKCS11_MODULE=/tmp/explicit.so bash -c '. "$1"; printf "%s" "$HSM_P11_MODULE"' _ "$RESOLVER")"
 [ "$got" = /tmp/explicit.so ] && P "an explicit module is used verbatim" || F "explicit module ignored: $got"
 
-hdr "no module is a REFUSAL, not an empty answer"
-# An empty answer is the one a caller reads as "that card is not attached", which is how a battery
-# ends up targeting slot 0.
-out="$(HSM_PKCS11_MODULE=/nonexistent.so bash -c '. "$1"; hsm_slot_index_for SOMESERIAL' _ "$RESOLVER" 2>&1)"; rc=$?
-[ "$rc" -ne 0 ] && P "hsm_slot_index_for fails (exit $rc) with no module" \
+hdr "NOTHING set and NOTHING found is a REFUSAL, not an empty answer"
+# The case the guard is for. An explicit HSM_PKCS11_MODULE is the caller's business — harnesses
+# stub pkcs11-tool on PATH and have no module on disk, and refusing those was wrong. What cannot
+# be allowed is a lookup that CAN only answer emptily, because an empty answer is the one a caller
+# reads as "that card is not attached", which is how a battery ends up targeting slot 0.
+nomod='unset HSM_PKCS11_MODULE; . "$1"; HSM_P11_MODULE=""'
+out="$(bash -c "$nomod"'; hsm_slot_index_for SOMESERIAL' _ "$RESOLVER" 2>&1)"; rc=$?
+[ "$rc" -ne 0 ] && P "hsm_slot_index_for fails (exit $rc) when no module could be found" \
   || F "it returned success with no module — a caller cannot tell that from 'no such card'"
 grep -q 'no PKCS#11 module found' <<<"$out" && P "…saying what is missing" || F "no explanation: $out"
 grep -q 'would read as' <<<"$out" && P "…and why an empty answer would be worse" || F "the consequence is not stated"
-out="$(HSM_PKCS11_MODULE=/nonexistent.so bash -c '. "$1"; hsm_slot_table' _ "$RESOLVER" 2>&1)"; rc=$?
+out="$(bash -c "$nomod"'; hsm_slot_table' _ "$RESOLVER" 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && P "hsm_slot_table refuses too" || F "hsm_slot_table returned success with no module"
+
+hdr "an explicit module is NOT second-guessed"
+# A harness that stubs pkcs11-tool has no module on disk and must still be able to look things up;
+# refusing it broke test-hsm-staging-restore.sh's slot-table row for a reason unrelated to slots.
+out="$(HSM_PKCS11_MODULE=/nonexistent.so bash -c '. "$1"; hsm_slot_index_for SOMESERIAL' _ "$RESOLVER" 2>&1)"
+grep -q 'no PKCS#11 module found' <<<"$out" \
+  && F "an explicitly named module was refused for not existing on disk" \
+  || P "an explicit module is taken at face value, stub or not"
 
 hdr "the serial-based lookups agree with each other on this bench"
 # Only meaningful with cards attached; skipped honestly otherwise.
