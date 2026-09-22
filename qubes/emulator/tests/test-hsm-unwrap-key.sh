@@ -80,6 +80,26 @@ case "$(apdu_at 4)" in
   *) F "the key size is missing or encoded negative: $(apdu_at 4)";;
 esac
 
+hdr "the SELECT form is the one BOTH devices accept"
+# Both forms select the same application, but only one works everywhere. Measured on the benches
+# 2026-09-22:
+#
+#     00A4040C0B<AID>      Nitrokey HSM 2  9000    Pico HSM  6A86
+#     00A404000B<AID>00    Nitrokey HSM 2  9000    Pico HSM  9000
+#
+# The first version of this script sent P2=0C, so the whole JVM-free import worked on one device
+# and not the other — and on the Pico it failed AFTER the PrKD write had already landed, which is
+# the confusing order to fail in.
+sel="$(apdu_at 1)"
+case "$sel" in
+  00A404000BE82B0601040181C31F020100)
+    P "SELECT is 00 A4 04 00 with an Le byte — the form a Pico HSM accepts too";;
+  00A4040C*)
+    F "SELECT uses P2=0C, which a Pico HSM rejects with 6A86: $sel";;
+  *)
+    F "SELECT is not the SmartCard-HSM AID: $sel";;
+esac
+
 hdr "the PIN reaches the card but not the process table"
 grep -q '313233343536' "$BIN/stdin.txt" && P "the VERIFY APDU carries the PIN" || F "the PIN never reached the card"
 grep -q '123456' "$BIN/argv.txt" && F "the PIN appears in the child's argv" || P "no PIN in the child's argv"

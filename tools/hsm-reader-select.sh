@@ -649,3 +649,47 @@ hsm_verify_board_over_probe() {
     printf '%s\n' "$got"
     return 0
 }
+
+# hsm_ensure_readers — make sure PC/SC can see at least one reader, or say exactly why not.
+#
+# WHY. Debian runs pcscd with `--foreground --auto-exit`, so it leaves about a minute after the
+# last client disconnects, and pcscd.socket is what starts it again on the next request. With that
+# socket inactive, every tool here reports
+#
+#     No smart card readers found.
+#
+# with the cards plainly on the USB bus — and it reads as a card fault. Measured 2026-09-22: it had
+# to be restarted by hand three times in one session before the cause was noticed, and each time
+# the first suspicion was the hardware.
+#
+# This does NOT restart anything by itself: a drill that silently fixes the host hides the
+# condition from the transcript, and on a shared bench restarting pcscd under another operator's
+# session is not this script's decision. It reports, with the two commands that fix it.
+#
+#   hsm_ensure_readers            # 0 = at least one reader, 1 = none (message on stderr)
+hsm_ensure_readers() {
+  local readers
+  readers="$(hsm_reader_indices 2>/dev/null)"
+  [ -n "$readers" ] && return 0
+  {
+    printf 'NO PC/SC READERS ARE VISIBLE.\n'
+    # NO PIPE INTO grep -q. grep -q exits on its first match, lsusb takes SIGPIPE, and under
+    # pipefail the pipeline status is 141 — so the branch is NOT taken and the USB evidence that
+    # rules out the hardware is silently dropped, in a message whose whole job is to rule it out.
+    # (tools/hsm-lint-predicates.sh flags exactly this shape, and flagged this line.)
+    local usb=""
+    command -v lsusb >/dev/null 2>&1 && usb="$(lsusb 2>/dev/null | grep -iE 'nitrokey|pico key|smart ?card')"
+    if [ -n "$usb" ]; then
+      printf '  A card IS on the USB bus:\n'
+      sed 's/^/    /' <<< "$usb"
+      printf '  so this is the daemon, not the hardware.\n'
+    fi
+    printf '  Debian runs pcscd with --auto-exit; it leaves about a minute after the last client\n'
+    printf '  disconnects, and pcscd.socket is what starts it again. If that socket is inactive,\n'
+    printf '  nothing does.\n\n'
+    printf '      systemctl is-active pcscd.socket        # expect: active\n'
+    printf '      sudo systemctl enable --now pcscd.socket\n\n'
+    printf '  For one session without touching the unit:  sudo setsid pcscd\n'
+  } >&2
+  return 1
+}

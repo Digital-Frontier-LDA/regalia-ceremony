@@ -129,6 +129,18 @@ if len({len(v) for v in arrays.values()}) != 1:
 open(p, 'w').write(s)
 print("libccid: registered Pico HSM 0x2E8A:0x10FD")
 PICO
+  # RESTART IS NOT ENOUGH, AND ON ITS OWN IT IS THE WRONG THING. Debian runs pcscd with
+  # `--foreground --auto-exit`, so the daemon leaves about a minute after the last client
+  # disconnects. Restarting the SERVICE therefore buys one minute; what keeps the readers
+  # available is pcscd.socket, which starts it again on the next request. With that socket
+  # inactive — the state this box was in — a drill run any time after the last one reports
+  #
+  #     No smart card readers found.
+  #
+  # with two cards plainly on the USB bus, and the only way back is to start pcscd by hand.
+  # Measured 2026-09-22: it had to be restarted three times in one session before this was
+  # noticed, and each time it looked like a card fault.
+  systemctl enable --now pcscd.socket 2>/dev/null || true
   systemctl restart pcscd 2>/dev/null || true
 fi
 
