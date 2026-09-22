@@ -120,14 +120,29 @@ prkd_data="54020000$(tlv 53 "$prkd")"
 prkd_apdu="00D7C4$(printf '%02X' "$KEY_ID")$(printf '%02X' "$(( ${#prkd_data} / 2 ))")$prkd_data"
 
 say "unwrapping $blob_len bytes into key id $KEY_ID as '$LABEL'"
-out="$(printf 'apdu 00A4040C0B%s\napdu %s\napdu %s\napdu %s\nquit\n' \
+# P2=00 WITH AN Le BYTE, NOT P2=0C. Both forms select the same application, and the first version
+# of this script sent P2=0C ("no response data") because that is what a Nitrokey HSM 2 answers.
+# A Pico HSM rejects it with 6A86, so the whole JVM-free import worked on one device and not the
+# other — and the failure landed AFTER the PrKD write had already succeeded in an earlier attempt,
+# which is the confusing order to fail in.
+#
+# Measured 2026-09-22 on both benches:
+#
+#     00A4040C0B<AID>      Nitrokey 9000   Pico 6A86
+#     00A404000B<AID>00    Nitrokey 9000   Pico 9000
+#
+# hsm-devaut-read.sh already knew this and tried both; this script was written afterwards and did
+# not carry the lesson across. One form that works on both is better than a fallback: the four
+# APDUs share one opensc-explorer session on purpose (a second session answers 6982 for the label
+# write), so a retry here would mean splitting the session.
+out="$(printf 'apdu 00A404000B%s00\napdu %s\napdu %s\napdu %s\nquit\n' \
         "$AID" "$verify_apdu" "$unwrap_apdu" "$prkd_apdu" \
        | perl -e 'alarm 120; exec @ARGV' -- opensc-explorer -r "$READER" 2>&1)" || true
 mapfile -t SW < <(sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$out" | tr 'a-f' 'A-F')
 
 # Four answers, in order, and each one is named: a run that reports success while the PIN was
 # refused or the description never landed is the failure this whole path keeps producing.
-[ "${SW[0]:-}" = "9000" ] || { printf '%s\n' "$out" | tail -4 >&2; die "could not select the SmartCard-HSM application (${SW[0]:-no answer})"; }
+[ "${SW[0]:-}" = "9000" ] || { printf '%s\n' "$out" | tail -4 >&2; die "could not select the SmartCard-HSM application (${SW[0]:-no answer}) — is this a SmartCard-HSM?"; }
 case "${SW[1]:-}" in
   9000) say "user PIN verified" ;;
   63C*) die "the user PIN was REFUSED (${SW[1]}) — ${SW[1]#63C} attempt(s) left. Nothing was written." ;;
