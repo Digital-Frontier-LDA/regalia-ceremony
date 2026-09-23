@@ -194,6 +194,14 @@ PINS_LINE = re.compile(r"^MANIFEST_BINDING_PINS (\{.*\})\s*$")
 # digest but not the id, and a Nitrokey holds several keys, so without it a pin cannot be put on the
 # right binding. If the pins JSON ever carries "object_id" itself, the two must agree.
 KEK_LINE = re.compile(r"KEK public_key_sha256 = (sha256:[0-9a-f]{64}) \(SubjectPublicKeyInfo of ID ([0-9A-Fa-f]+)\)")
+# commission-card.sh's own markers, present in EVERY transcript it prints — passing or not. The pins
+# line appears only when commissioning passed, so recognising a transcript by it alone (as record once
+# did) turned a failed run into "unrecognised evidence": true, and useless to an operator holding the
+# transcript of a card that failed B3 and B6 (bench, 2026-09-23). The RESULT block and its tally are
+# printed unconditionally, and the section headers name checks only this script makes.
+RESULT_TALLY = re.compile(r"^\s*(\d+) passed, (\d+) failed\s*$")
+COMMISSION_HEADERS = ("### B7 — this is OUR card", "### KEK provenance", "### B6 — the card has RESET RETRY COUNTER")
+FAIL_LINE = re.compile(r"^\s*FAIL (.+?)\s*$")
 
 
 class Refusal(Exception):
@@ -533,8 +541,27 @@ class Evidence:
         return out
 
 
+def is_commission_transcript(text: str) -> bool:
+    plain = ANSI.sub("", text)
+    lines = plain.splitlines()
+    has_result = any(line.strip() == "### RESULT" for line in lines) and any(RESULT_TALLY.match(line) for line in lines)
+    return ("MANIFEST_BINDING_PINS" in plain or "KEK public_key_sha256" in plain or "Commissioning" in plain
+            or (has_result and any(h in plain for h in COMMISSION_HEADERS)))
+
+
 def parse_commission_transcript(text: str, source: str) -> Evidence:
     lines = [ANSI.sub("", line) for line in text.splitlines()]
+    # A RUN THAT FAILED ISSUED NO PIN, AND SAYS SO FIRST. Checked before the pins line is looked for, so
+    # the refusal names the real state — "this card failed commissioning, here is why" — instead of the
+    # generic "no pins line". A failed tally refuses even if a pins line were somehow present: the
+    # script never prints one for a failed run, so such a transcript has been edited or pasted together.
+    tallies = [m for m in (RESULT_TALLY.match(line) for line in lines) if m]
+    failed = sum(int(m.group(2)) for m in tallies)
+    if failed:
+        fails = [m.group(1) for m in (FAIL_LINE.match(line) for line in lines) if m]
+        shown = "; ".join(f"FAIL {f}" for f in fails[:3]) + (f"; … and {len(fails) - 3} more" if len(fails) > 3 else "")
+        raise Refusal(f"{source}: commission-card.sh transcript from a run that did NOT pass ({failed} failed) — "
+                      f"no pins were issued; fix the failures it lists and re-commission. {shown}")
     pins = [m.group(1) for m in (PINS_LINE.match(line) for line in lines) if m]
     if not pins:
         raise Refusal(f"{source}: no MANIFEST_BINDING_PINS line — commissioning did not pass, or ran without "
@@ -874,7 +901,7 @@ def parse_evidence(path: Path) -> Evidence | OperationProof:
         if isinstance(record, dict) and record.get("evidence") == OPERATION_PROOF_SCHEMA:
             return parse_operation_proof(record, source)
         return parse_yubikey_record(record, source)
-    if "MANIFEST_BINDING_PINS" in text or "Commissioning" in text or "KEK public_key_sha256" in text:
+    if is_commission_transcript(text):
         return parse_commission_transcript(text, source)
     raise Refusal(f"{source}: unrecognised evidence — expected a commission-card.sh transcript or a "
                   f"{YUBIKEY_EVIDENCE_SCHEMA} record")
