@@ -36,6 +36,7 @@ import select
 import shutil
 import subprocess
 import sys
+import termios
 import time
 
 PROMPT = r"Enter PIN for YubiKey with serial (\d+)(?=\D)"  # the lookahead: never a serial cut by a read boundary
@@ -85,6 +86,11 @@ def run_pty(argv, env, timeout=120):
         buffer += chunk.decode("utf-8", "replace")
         prompts = list(re.finditer(PROMPT, buffer))
         while answered < len(prompts):
+            # Type only once the prompt has turned echo off: input typed earlier can be flushed by
+            # the prompt, and would be echoed into this buffer (ykman hangs on exactly that).
+            until = time.monotonic() + 5
+            while termios.tcgetattr(fd)[3] & termios.ECHO and time.monotonic() < until:
+                time.sleep(0.02)
             os.write(fd, (pin_for(prompts[answered].group(1)) + "\n").encode())
             answered += 1
     _, status = os.waitpid(pid, 0)
