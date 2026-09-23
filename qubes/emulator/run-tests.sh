@@ -346,6 +346,10 @@ python3 "$HERE/tests/test_preflight_environment.py" || suite_failed "test_prefli
 say "TEARDOWN residue proof (workdir removal, mount inventory, retained-artifact canary)"
 python3 "$HERE/tests/test_ceremony_teardown.py" || suite_failed "test_ceremony_teardown.py"
 
+say "CUSTODY MANIFEST ceremony (regalia#28): plan/record on a mixed fleet, every refusal by message, vendored validator pinned"
+python3 "$HERE/tests/test_ceremony_manifest.py" || suite_failed "test_ceremony_manifest.py"
+"$HERE/tests/test-ceremony-manifest.sh" || suite_failed "test-ceremony-manifest.sh"
+
 say "OFFLINE BUNDLE metadata, complete hash coverage, and centralized release signature verification"
 python3 "$HERE/../../debian/offline-bundle/test_bundle.py" || suite_failed "test_bundle.py"
 

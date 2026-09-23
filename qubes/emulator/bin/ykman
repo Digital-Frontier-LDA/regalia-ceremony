@@ -5,8 +5,71 @@
 #
 # The age identity itself is handled by the age-plugin-yubikey shim (real age key); this
 # only covers the management/inspection calls.
+#
+# PIV KEY GENERATION (regalia#28, the manifest-driven step). `--device SERIAL` selects one of any
+# number of emulated tokens, each with its own state under $EMU_YKMAN_STATE/<serial>/<slot>/.
+# `piv keys generate` makes a REAL key with openssl and records the algorithm and the policies it was
+# asked for; `piv keys info` and `piv keys export` report them back in ykman 5.6's exact layout. So
+# the evidence the wizard captures is a report of what was generated, with the same failure modes: a
+# slot never generated is "No key stored", and a policy passed wrongly is reported wrongly.
+# EMU_YKMAN_ORIGIN=IMPORTED makes the token claim an imported key, to prove the ceremony refuses it.
 set -euo pipefail
 SERIAL="${EMU_YKMAN_SERIAL:-12345678}"
+STATE="${EMU_YKMAN_STATE:-${TMPDIR:-/tmp}/emu-ykman}"
+
+if [ "${1:-}" = "--device" ] || [ "${1:-}" = "-d" ]; then
+  SERIAL="${2:?--device needs a serial}"; shift 2
+fi
+
+slot_name(){
+  case "$1" in
+    9a) echo AUTHENTICATION;; 9c) echo SIGNATURE;; 9d) echo KEY_MANAGEMENT;; 9e) echo CARD_AUTH;;
+    8[2-9]|9[0-5]) echo "RETIRED$(( 16#$1 - 16#81 ))";;
+    *) echo "unknown slot $1" >&2; exit 2;;
+  esac
+}
+
+piv_keys(){
+  local verb="$1"; shift
+  local alg=RSA2048 pin=DEFAULT touch=DEFAULT fmt=PEM args=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -a|--algorithm) alg="$2"; shift 2;;
+      --pin-policy) pin="$2"; shift 2;;
+      --touch-policy) touch="$2"; shift 2;;
+      -F|--format) fmt="$2"; shift 2;;
+      -m|--management-key|-P|--pin) shift 2;;
+      *) args+=("$1"); shift;;
+    esac
+  done
+  local slot; slot="$(printf '%s' "${args[0]:?slot}" | tr 'A-F' 'a-f')"
+  slot_name "$slot" >/dev/null
+  local d="$STATE/$SERIAL/$slot"
+  case "$verb" in
+    generate)
+      mkdir -p "$d"
+      case "$alg" in
+        ECCP256) openssl ecparam -genkey -name prime256v1 -noout -out "$d/key.pem" 2>/dev/null ;;
+        ECCP384) openssl ecparam -genkey -name secp384r1 -noout -out "$d/key.pem" 2>/dev/null ;;
+        RSA2048) openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$d/key.pem" 2>/dev/null ;;
+        *) echo "Error: unsupported algorithm $alg [EMULATED]" >&2; exit 2 ;;
+      esac
+      printf '%s\n%s\n%s\n%s\n' "$alg" "$(printf '%s' "$pin" | tr a-z A-Z)" \
+        "$(printf '%s' "$touch" | tr a-z A-Z)" "${EMU_YKMAN_ORIGIN:-GENERATED}" > "$d/meta"
+      openssl pkey -in "$d/key.pem" -pubout -out "${args[1]:--}" ;;
+    info|export)
+      [ -f "$d/meta" ] || { echo "Error: No key stored in slot $slot." >&2; exit 1; }
+      if [ "$verb" = info ]; then
+        { read -r alg; read -r pin; read -r touch; read -r origin; } < "$d/meta"
+        printf 'Key slot:               %s (%s)\n' "$(printf '%s' "$slot" | tr a-f A-F)" "$(slot_name "$slot")"
+        printf 'Algorithm:              %s\nOrigin:                 %s\n' "$alg" "$origin"
+        printf 'PIN required for use:   %s\nTouch required for use: %s\n' "$pin" "$touch"
+      else
+        openssl pkey -in "$d/key.pem" -pubout -outform "$fmt" -out "${args[1]:--}"
+      fi ;;
+    *) echo "[EMULATED] ykman piv keys $verb $*" ;;
+  esac
+}
 
 case "${1:-}" in
   list|"--version")
@@ -29,6 +92,8 @@ PIN tries remaining: ${EMU_YKMAN_PIV_RETRIES:-3}
 Slot 9a (AUTHENTICATION): occupied (P-256, touch policy: ALWAYS)
 EOF
         ;;
+      keys)
+        piv_keys "${3:-}" "${@:4}" ;;
       *) echo "[EMULATED] ykman piv ${*:2}" ;;
     esac
     ;;

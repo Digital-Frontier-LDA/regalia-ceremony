@@ -416,6 +416,111 @@ step_yubikey_ops() {
   warn "register a SECOND YubiKey the same way before retiring it (loss resilience)."
 }
 
+# ---- custody manifest (regalia#28) --------------------------------------------
+# OPTIONAL, AND INERT WHEN ABSENT. With CEREMONY_MANIFEST unset every function below returns at its
+# first line and the menu is the one it always was. With it set, the ceremony is driven by the
+# manifest at both ends:
+#
+#   start  `ceremony-manifest.py plan` — refuse, BEFORE any key exists, a manifest asking for
+#          something this ceremony cannot honour, and print every planned provisioning step;
+#   m)     generate each planned YubiKey PIV key with the policies the MANIFEST names (never typed
+#          here), and capture the device's own report of it as evidence;
+#   end    `ceremony-manifest.py record` — fill the bindings from the evidence and advance them to
+#          qualified, or refuse by name and write nothing.
+#
+#   CEREMONY_MANIFEST               the custody manifest (regalia-kms format) — enables all of this
+#   CEREMONY_MANIFEST_EVIDENCE_DIR  REQUIRED with it: where evidence is kept. On persistent storage,
+#                                   NOT the RAM workdir, which is shredded on exit — the evidence is
+#                                   public (serials, public-key digests, ykman reports) and it is the
+#                                   record of the ceremony. commission-card.sh transcripts go here too.
+#   CEREMONY_MANIFEST_OUT           where record writes (default: <evidence dir>/custody-manifest.qualified.json);
+#                                   the input manifest is never rewritten by the wizard
+#   CEREMONY_MANIFEST_SITE          restrict plan/record to one site
+#   CEREMONY_MANIFEST_BACKEND       restrict plan/record to one backend, e.g. yubikey-piv when the
+#                                   Nitrokeys are commissioned later at the rack
+CEREMONY_MANIFEST="${CEREMONY_MANIFEST:-}"
+manifest_tool(){ python3 "$HERE/ceremony-manifest.py" "$@"; }
+manifest_scope() {
+  MANIFEST_SCOPE=()
+  [ -n "${CEREMONY_MANIFEST_SITE:-}" ] && MANIFEST_SCOPE+=(--site "$CEREMONY_MANIFEST_SITE")
+  [ -n "${CEREMONY_MANIFEST_BACKEND:-}" ] && MANIFEST_SCOPE+=(--backend "$CEREMONY_MANIFEST_BACKEND")
+  return 0
+}
+manifest_out(){ printf '%s' "${CEREMONY_MANIFEST_OUT:-$CEREMONY_MANIFEST_EVIDENCE_DIR/custody-manifest.qualified.json}"; }
+
+manifest_plan() {
+  [ -n "$CEREMONY_MANIFEST" ] || return 0
+  b "Custody manifest — plan (regalia#28)"
+  # Both preconditions are checked HERE, at the start, and not when record runs at the end: a
+  # ceremony that learns only after generating keys that it has nowhere to put the proof of them has
+  # already produced keys without a record.
+  [ -r "$CEREMONY_MANIFEST" ] || { err "CEREMONY_MANIFEST=$CEREMONY_MANIFEST is not readable"; return 1; }
+  if [ -z "${CEREMONY_MANIFEST_EVIDENCE_DIR:-}" ]; then
+    err "CEREMONY_MANIFEST is set but CEREMONY_MANIFEST_EVIDENCE_DIR is not — refusing to generate keys"
+    err "with nowhere to keep the evidence that proves them. Point it at persistent storage, not /dev/shm."
+    return 1
+  fi
+  mkdir -p "$CEREMONY_MANIFEST_EVIDENCE_DIR" || { err "cannot create $CEREMONY_MANIFEST_EVIDENCE_DIR"; return 1; }
+  manifest_scope
+  if ! manifest_tool plan "$CEREMONY_MANIFEST" "${MANIFEST_SCOPE[@]}"; then
+    err "the manifest asks for something this ceremony cannot honour (reason above) — refusing"
+    err "before any key is generated. Fix the manifest, not the ceremony."
+    return 1
+  fi
+  info "evidence for these steps goes to $CEREMONY_MANIFEST_EVIDENCE_DIR; record runs when you quit."
+}
+
+step_manifest_yubikey() {
+  b "Manifest — generate a planned YubiKey PIV key and capture its evidence"
+  info "The slot, algorithm, PIN policy and touch policy come from the manifest; you choose only"
+  info "WHICH token this is. The key is GENERATED ON THE TOKEN and never imported (ADR-0002 D5)."
+  local device serial steps slot alg pin touch path ev
+  read -r -p "   manifest device_id of the token in the reader > " device || return 1
+  read -r -p "   its serial (ykman list --serials) > " serial || return 1
+  case "$serial" in ''|*[!0-9]*) err "a YubiKey serial is digits only"; return 1 ;; esac
+  steps="$(manifest_tool piv-steps "$CEREMONY_MANIFEST" --device-id "$device" \
+            ${CEREMONY_MANIFEST_SITE:+--site "$CEREMONY_MANIFEST_SITE"})" || { err "nothing to do for $device (reason above)"; return 1; }
+  while IFS=$'\t' read -r slot alg pin touch path; do
+    [ -n "$slot" ] || continue
+    info "$path: slot $slot $alg pin=$pin touch=$touch on $device (serial $serial)"
+    run "ykman --device '$serial' piv keys generate --algorithm '$alg' --pin-policy '$pin' --touch-policy '$touch' '$slot' '$WORK/yk-$serial-$slot.pem'" \
+      || { warn "not generated — no evidence captured for $path"; continue; }
+    # Everything below is READ from the token, after generation. The evidence is the token's own
+    # report, so a policy mistyped anywhere would show up here rather than be recorded.
+    ykman --device "$serial" info > "$WORK/yk-$serial.info" \
+      && ykman --device "$serial" piv keys info "$slot" > "$WORK/yk-$serial-$slot.keys" \
+      && ykman --device "$serial" piv keys export "$slot" --format DER "$WORK/yk-$serial-$slot.der" \
+      || { err "could not read the key back from $serial slot $slot — no evidence for $path"; return 1; }
+    ev="$CEREMONY_MANIFEST_EVIDENCE_DIR/yubikey-$device-$slot.json"
+    manifest_tool yubikey-evidence --device-id "$device" --slot "$slot" --info "$WORK/yk-$serial.info" \
+      --keys-info "$WORK/yk-$serial-$slot.keys" --public-key "$WORK/yk-$serial-$slot.der" --out "$ev" \
+      || { err "the token's own report was refused (reason above) — $path is NOT provisioned as planned"; return 1; }
+  done <<< "$steps"
+}
+
+manifest_record() {
+  [ -n "$CEREMONY_MANIFEST" ] || return 0
+  b "Custody manifest — record (regalia#28)"
+  local out f evidence=()
+  out="$(manifest_out)"
+  for f in "$CEREMONY_MANIFEST_EVIDENCE_DIR"/*.json "$CEREMONY_MANIFEST_EVIDENCE_DIR"/*.txt; do
+    [ -f "$f" ] || continue
+    [ "$(realpath "$f")" = "$(realpath -m "$out")" ] && continue
+    evidence+=("$f")
+  done
+  if [ "${#evidence[@]}" -eq 0 ]; then
+    err "no evidence in $CEREMONY_MANIFEST_EVIDENCE_DIR — nothing planned was proven; the manifest is unchanged"
+    return 1
+  fi
+  manifest_scope
+  if ! manifest_tool record "$CEREMONY_MANIFEST" --evidence "${evidence[@]}" "${MANIFEST_SCOPE[@]}" --out "$out"; then
+    err "record REFUSED (reason above) — nothing was written. The evidence is kept in"
+    err "$CEREMONY_MANIFEST_EVIDENCE_DIR; resolve the named binding and re-run ceremony-manifest.py record."
+    return 1
+  fi
+  info "qualified manifest: $out — review it, then commit it to regalia-kms."
+}
+
 step_hsm_funding() {
   b "Nitrokey HSM 2 — cold funding wallet (secp256k1, DKEK threshold backup)"
   # ── UNSUPPORTED PATH — OFF BY DEFAULT ───────────────────────────────────────────────────
@@ -1657,6 +1762,7 @@ main() {
   info "CEREMONY_MODE=$CEREMONY_MODE (this is logged)"
   require_airgap_and_tools
   init_work
+  manifest_plan || return 1
   pick_printer || true
   while true; do
     b "Choose a step"
@@ -1671,8 +1777,9 @@ main() {
    9) Import the seed-derived funding key into the HSM (supported custody path)
    5) Recovery drill
    6) Print break-glass recovery instruction card (DVD-case sized)
-   q) quit (workdir is shredded)
 MENU
+    [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence\n'
+    printf '   q) quit (workdir is shredded)\n'
     # Break on EOF (Ctrl-D, or an exhausted piped stdin) so the menu never spins forever on
     # empty reads — a non-interactive run must terminate, not hang.
     read -r -p "   > " choice || break
@@ -1687,11 +1794,13 @@ MENU
       7) step_payload;;
       8) step_chipcard;;
       9) step_hsm_import;;
+      m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
       q|Q) break;;
       *) warn "pick 1-9 or q";;
     esac
     pause
   done
+  manifest_record || return 1
   b "Done — workdir shredded on exit. Seal your media, clear the printer memory, power off the qube."
 }
 
