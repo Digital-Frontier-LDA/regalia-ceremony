@@ -417,13 +417,41 @@ step_yubikey_ops() {
   # Only acted on when ykman reports a real card; a stub that prints no management-key line is left alone.
   local info rc
   info="$(ykman piv info 2>/dev/null || true)"
-  if grep -q "Using default PIN" <<< "$info"; then
-    warn "This YubiKey still has the default PIN. Set the PIN, then a DIFFERENT PUK, before generating."
-    run "ykman piv access change-pin"; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 100 ] || { err "PIN change failed"; return 1; }
-    run "ykman piv access change-puk"; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 100 ] || { err "PUK change failed"; return 1; }
+  # The card's PIN and PUK are set to the values step 0 loaded for ESCROW (pins.env →
+  # yubikey_piv_pin / yubikey_piv_puk → the tier-0 payload), never to values typed at a prompt:
+  # otherwise the payload can hold a PIN this card does not answer to, discovered on recovery day.
+  # The commands are shown redacted and run directly, because run() would print the PIN.
+  if grep -q "Using default PIN" <<< "$info" || grep -q "Using default PUK" <<< "$info"; then
+    if [ -z "${yubikey_piv_pin:-}" ] || [ -z "${yubikey_piv_puk:-}" ]; then
+      err "This YubiKey still has a factory PIN or PUK, and step 0 has not loaded yubikey_piv_pin and"
+      err "yubikey_piv_puk. Run step 0 first: the values set on the card must be the ones escrowed."
+      return 1
+    fi
+    [ "$yubikey_piv_pin" != "$yubikey_piv_puk" ] || { err "yubikey_piv_pin and yubikey_piv_puk are equal; the ceremony keeps them apart"; return 1; }
+    if grep -q "Using default PIN" <<< "$info"; then
+      show "ykman piv access change-pin -P <factory PIN> -n <yubikey_piv_pin from step 0>"
+      ask "set the card's PIN to the escrowed value?" || { err "the factory PIN was kept, so age-plugin-yubikey would replace it with an unescrowed one"; return 1; }
+      ykman piv access change-pin -P 123456 -n "$yubikey_piv_pin" >/dev/null || { err "PIN change failed"; return 1; }
+    fi
+    if grep -q "Using default PUK" <<< "$info"; then
+      show "ykman piv access change-puk -p <factory PUK> -n <yubikey_piv_puk from step 0>"
+      ask "set the card's PUK to the escrowed value?" || { err "the factory PUK was kept"; return 1; }
+      ykman piv access change-puk -p 12345678 -n "$yubikey_piv_puk" >/dev/null || { err "PUK change failed"; return 1; }
+    fi
+  fi
+  # PIN-BINDING PROOF, as for the HSM in step_payload: present the escrowed PIN to the card now,
+  # while both are known. Changing the PIN to itself verifies it; a wrong value costs one try here
+  # instead of one on recovery day.
+  if [ -n "${yubikey_piv_pin:-}" ] && grep -q "Management key algorithm" <<< "$info"; then
+    ykman piv access change-pin -P "$yubikey_piv_pin" -n "$yubikey_piv_pin" >/dev/null 2>&1 \
+      || { err "PIN BINDING FAILED: the escrowed yubikey_piv_pin does not open this YubiKey"; return 1; }
+    info "   PIN BINDING PROVEN — the escrowed yubikey_piv_pin opens this YubiKey."
+  else
+    warn "yubikey_piv_pin not loaded (step 0), or no real card: the PIN-binding proof was SKIPPED, not passed."
   fi
   if grep -q "Management key algorithm" <<< "$info" && ! grep -q "protected by PIN" <<< "$info"; then
-    warn "age-plugin-yubikey needs a PIN-protected TDES management key; this card's is not."
+    warn "age-plugin-yubikey needs a PIN-protected TDES management key; this card's is not. It becomes a"
+    warn "random key stored on the card behind the PIN, so the escrowed PIN also recovers it."
     run "ykman piv access change-management-key -a TDES --protect"; rc=$?
     [ "$rc" = 0 ] || { err "the management key was not changed, so age-plugin-yubikey would refuse this card"; return 1; }
   fi

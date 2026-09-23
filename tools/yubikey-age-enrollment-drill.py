@@ -122,13 +122,22 @@ def main():
             sys.exit(f"{tool} is required on PATH")
     work = os.path.abspath(args.workdir)
     os.chdir(work)
-    env = dict(os.environ)
+    # Only the SOPS_AGE_KEY_FILE set per call may supply an identity. sops also loads SOPS_AGE_KEY(_CMD),
+    # SSH keys and <config>/sops/age/keys.txt, and an operator's own YubiKey stub there would make
+    # a "decrypts on its own" row pass on the wrong key and a refusal row fail. An inherited
+    # SOPS_AGE_RECIPIENTS would change what `sops -e` encrypts to.
+    env = {k: v for k, v in os.environ.items() if not k.startswith("SOPS_")}
+    isolated_home = os.path.join(work, "empty-home")
+    os.makedirs(isolated_home, exist_ok=True)
+    env.update(HOME=isolated_home, XDG_CONFIG_HOME=os.path.join(isolated_home, ".config"))
     transcript = []
 
     def parse(spec):
         name, _, rest = spec.partition("=")
         serial, _, slot = rest.partition(":")
-        if not (name and serial.isdigit() and slot.isdigit()):
+        # The name becomes a file name in the work directory: no path, and never the break-glass key's.
+        if not (re.fullmatch(r"[A-Za-z0-9_-]+", name) and name not in ("bg", "break-glass")
+                and serial.isdigit() and slot.isdigit()):
             sys.exit(f"bad token spec {spec!r}; want NAME=SERIAL:SLOT")
         return name, serial, slot
 
@@ -140,6 +149,10 @@ def main():
     if len(kept) != 1:
         sys.exit(f"--withdraw {withdrawn!r} does not name one of the tokens")
     repl_name, repl_serial, repl_slot = parse(args.replacement)
+    # A replacement that reuses a token's name or slot would overwrite that token's stub or key, and
+    # the rows after it would test the wrong key while reporting PASS.
+    if repl_name in {t[0] for t in tokens} or (repl_serial, repl_slot) in {(t[1], t[2]) for t in tokens}:
+        sys.exit("--replacement must use a new NAME and a slot no --token uses")
 
     identities = {}
     for name, serial, slot in tokens:
@@ -172,9 +185,17 @@ def main():
             # A refusal counts only when SOPS says no key it holds matched. A card that is absent, a
             # wrong PIN or a plugin crash is also a non-zero exit, and would make the negative
             # control pass for the wrong reason.
-            reason = re.search(r"no identity matched any of the recipients|no master key was able to decrypt the file", output)
-            return False, reason.group(0) if reason else "UNEXPECTED ERROR: " + " | ".join(
-                l.strip() for l in output.replace("\r", "").splitlines() if l.strip())[-300:]
+            # sops wraps each key's error over "| "-prefixed lines, and ends every failure, whatever
+            # its cause, with the same generic trailer. So unwrap, split per master key, and count a
+            # refusal only when EVERY key that failed says the identity did not match it.
+            # On a terminal (this pty) sops also colours "FAILED" with ANSI codes: strip them first.
+            plain = re.sub(r"\x1b\[[0-9;]*m", "", output.replace("\r", ""))
+            flat = re.sub(r"\n\s*\|\s*", " ", plain)
+            blocks = re.split(r"\n\s*age1[0-9a-z]+: FAILED", flat)[1:]
+            if blocks and all("did not match any of the recipients" in b and "failed to load age identities" not in b
+                              for b in blocks):
+                return False, f"identity did not match any of the {len(blocks)} recipients"
+            return False, "UNEXPECTED ERROR: " + " | ".join(l.strip() for l in flat.splitlines() if l.strip())[-300:]
         with open("out.yaml", "rb") as f:
             same = hashlib.sha256(f.read()).hexdigest() == plain_sha
         os.remove("out.yaml")
@@ -195,55 +216,64 @@ def main():
             log(transcript, output)
             sys.exit(f"sops {' '.join(args_)} failed (exit {status})")
 
-    # ---- STEP 1 ---------------------------------------------------------------------------------
-    log(transcript, "STEP 1 — encrypt to both tokens and break-glass; each decrypts alone")
-    secret = f"drill_secret: {os.urandom(24).hex()}\n"
-    plain_sha = hashlib.sha256(secret.encode()).hexdigest()
-    with open("secret.yaml", "w") as f:
-        f.write(secret)
-    set_rule([t[0] for t in tokens] + ["break-glass"])
-    subprocess.run(["sops", "-e", "-i", "secret.yaml"], check=True, env=env)
-    log(transcript, f"  plaintext sha256 {plain_sha[:16]}…; {open('secret.yaml').read().count('recipient: age1')} age stanzas")
-    for name in [t[0] for t in tokens] + ["break-glass"]:
-        expect(name, True)
+    # Any exit — a sops failure, a failed generation, a missing PIN — still deletes the break-glass key
+    # and keeps the record of how far the drill got.
+    def write_transcript():
+        with open("transcript.log", "w") as f:
+            f.write("\n".join(transcript) + "\n")
 
-    # ---- STEP 2 ---------------------------------------------------------------------------------
-    log(transcript, f"STEP 2 — withdraw {withdrawn}: remove its recipient, rotate the data key")
-    set_rule([kept[0][0], "break-glass"])
-    manage(["updatekeys", "-y", "secret.yaml"], kept[0][0])
-    manage(["rotate", "-i", "secret.yaml"], kept[0][0])
-    log(transcript, f"  {open('secret.yaml').read().count('recipient: age1')} age stanzas after updatekeys + rotate")
-    expect(kept[0][0], True)
-    expect("break-glass", True)
-    expect(withdrawn, False)
+    try:
+        # ---- STEP 1 ---------------------------------------------------------------------------------
+        log(transcript, "STEP 1 — encrypt to both tokens and break-glass; each decrypts alone")
+        secret = f"drill_secret: {os.urandom(24).hex()}\n"
+        plain_sha = hashlib.sha256(secret.encode()).hexdigest()
+        with open("secret.yaml", "w") as f:
+            f.write(secret)
+        set_rule([t[0] for t in tokens] + ["break-glass"])
+        subprocess.run(["sops", "-e", "-i", "secret.yaml"], check=True, env=env)
+        log(transcript, f"  plaintext sha256 {plain_sha[:16]}…; {open('secret.yaml').read().count('recipient: age1')} age stanzas")
+        for name in [t[0] for t in tokens] + ["break-glass"]:
+            expect(name, True)
 
-    # ---- STEP 3 ---------------------------------------------------------------------------------
-    log(transcript, f"STEP 3 — generate {repl_name} ON YubiKey {repl_serial} slot {repl_slot}, enroll it")
-    status, output = run_pty(["age-plugin-yubikey", "--generate", "--serial", repl_serial, "--slot", repl_slot,
-                              "--pin-policy", "once", "--touch-policy", "never", "--name", f"regalia-k17-{repl_name}"], env)
-    if status != 0:
-        log(transcript, output)
-        sys.exit("replacement generation failed")
-    with open(f"{repl_name}.id", "w") as f:
-        f.write("\n".join(l for l in output.replace("\r", "").splitlines() if l.startswith("#") or l.startswith("AGE-PLUGIN-YUBIKEY-")) + "\n")
-    identities[repl_name] = (f"{repl_name}.id", recipient_of(f"{repl_name}.id"))
-    log(transcript, f"  {repl_name}: recipient {identities[repl_name][1]} (a new on-device key)")
-    set_rule([kept[0][0], repl_name, "break-glass"])
-    manage(["updatekeys", "-y", "secret.yaml"], kept[0][0])
-    expect(repl_name, True)
-    expect(kept[0][0], True)
-    expect("break-glass", True)
-    expect(withdrawn, False)
+        # ---- STEP 2 ---------------------------------------------------------------------------------
+        log(transcript, f"STEP 2 — withdraw {withdrawn}: remove its recipient, rotate the data key")
+        set_rule([kept[0][0], "break-glass"])
+        manage(["updatekeys", "-y", "secret.yaml"], kept[0][0])
+        manage(["rotate", "-i", "secret.yaml"], kept[0][0])
+        log(transcript, f"  {open('secret.yaml').read().count('recipient: age1')} age stanzas after updatekeys + rotate")
+        expect(kept[0][0], True)
+        expect("break-glass", True)
+        expect(withdrawn, False)
 
-    os.remove("bg.id")
-    log(transcript, "break-glass identity deleted")
+        # ---- STEP 3 ---------------------------------------------------------------------------------
+        log(transcript, f"STEP 3 — generate {repl_name} ON YubiKey {repl_serial} slot {repl_slot}, enroll it")
+        status, output = run_pty(["age-plugin-yubikey", "--generate", "--serial", repl_serial, "--slot", repl_slot,
+                                  "--pin-policy", "once", "--touch-policy", "never", "--name", f"regalia-k17-{repl_name}"], env)
+        if status != 0:
+            log(transcript, output)
+            sys.exit("replacement generation failed")
+        with open(f"{repl_name}.id", "w") as f:
+            f.write("\n".join(l for l in output.replace("\r", "").splitlines() if l.startswith("#") or l.startswith("AGE-PLUGIN-YUBIKEY-")) + "\n")
+        identities[repl_name] = (f"{repl_name}.id", recipient_of(f"{repl_name}.id"))
+        log(transcript, f"  {repl_name}: recipient {identities[repl_name][1]} (a new on-device key)")
+        set_rule([kept[0][0], repl_name, "break-glass"])
+        manage(["updatekeys", "-y", "secret.yaml"], kept[0][0])
+        expect(repl_name, True)
+        expect(kept[0][0], True)
+        expect("break-glass", True)
+        expect(withdrawn, False)
+
+    finally:
+        if os.path.exists("bg.id"):
+            os.remove("bg.id")
+            log(transcript, "break-glass identity deleted")
+        write_transcript()
     if failures:
         log(transcript, "DRILL FAILED: " + "; ".join(failures))
     else:
         log(transcript, "DRILL PASSED: enrolled on two tokens + break-glass → one withdrawn and refused → "
                         "replacement generated on-device and enrolled; every current recipient decrypted at every step")
-    with open("transcript.log", "w") as f:
-        f.write("\n".join(transcript) + "\n")
+    write_transcript()
     sys.exit(1 if failures else 0)
 
 
