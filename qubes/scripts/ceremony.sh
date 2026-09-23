@@ -408,7 +408,57 @@ step_yubikey_ops() {
   info "and unattended decrypts use PIN policy $pin_policy with touch policy $touch_policy."
   info "The default is touch=never; set CEREMONY_YUBI_TOUCH_POLICY=always for an interactive ceremony."
   command -v age-plugin-yubikey >/dev/null || { err "age-plugin-yubikey missing"; return 1; }
-  run "age-plugin-yubikey --generate --pin-policy $pin_policy --touch-policy $touch_policy" || return 0
+  # Two things age-plugin-yubikey 0.5.0 does to a factory card, measured on YubiKey 5.7.4
+  # (regalia doc/drills/2026-09-23-yubikey-multi-enrollment.md):
+  #   - it REFUSES the firmware-5.7 default management key (AES192): "Custom unprotected non-TDES
+  #     management keys are not supported". It needs a PIN-protected TDES key.
+  #   - on the default PIN it forces a new PIN AND SETS THE PUK TO IT, merging two credentials the
+  #     ceremony keeps apart (regalia#28). So the PIN and a distinct PUK are set here, first.
+  # Only acted on when ykman reports a real card; a stub that prints no management-key line is left alone.
+  local info rc
+  info="$(ykman piv info 2>/dev/null || true)"
+  # The card's PIN and PUK are set to the values step 0 loaded for ESCROW (pins.env →
+  # yubikey_piv_pin / yubikey_piv_puk → the tier-0 payload), never to values typed at a prompt:
+  # otherwise the payload can hold a PIN this card does not answer to, discovered on recovery day.
+  # The commands are shown redacted and run directly, because run() would print the PIN.
+  if grep -q "Using default PIN" <<< "$info" || grep -q "Using default PUK" <<< "$info"; then
+    if [ -z "${yubikey_piv_pin:-}" ] || [ -z "${yubikey_piv_puk:-}" ]; then
+      err "This YubiKey still has a factory PIN or PUK, and step 0 has not loaded yubikey_piv_pin and"
+      err "yubikey_piv_puk. Run step 0 first: the values set on the card must be the ones escrowed."
+      return 1
+    fi
+    [ "$yubikey_piv_pin" != "$yubikey_piv_puk" ] || { err "yubikey_piv_pin and yubikey_piv_puk are equal; the ceremony keeps them apart"; return 1; }
+    if grep -q "Using default PIN" <<< "$info"; then
+      show "ykman piv access change-pin -P <factory PIN> -n <yubikey_piv_pin from step 0>"
+      ask "set the card's PIN to the escrowed value?" || { err "the factory PIN was kept, so age-plugin-yubikey would replace it with an unescrowed one"; return 1; }
+      ykman piv access change-pin -P 123456 -n "$yubikey_piv_pin" >/dev/null || { err "PIN change failed"; return 1; }
+    fi
+    if grep -q "Using default PUK" <<< "$info"; then
+      show "ykman piv access change-puk -p <factory PUK> -n <yubikey_piv_puk from step 0>"
+      ask "set the card's PUK to the escrowed value?" || { err "the factory PUK was kept"; return 1; }
+      ykman piv access change-puk -p 12345678 -n "$yubikey_piv_puk" >/dev/null || { err "PUK change failed"; return 1; }
+    fi
+  fi
+  # PIN-BINDING PROOF, as for the HSM in step_payload: present the escrowed PIN to the card now,
+  # while both are known. Changing the PIN to itself verifies it; a wrong value costs one try here
+  # instead of one on recovery day.
+  if [ -n "${yubikey_piv_pin:-}" ] && grep -q "Management key algorithm" <<< "$info"; then
+    ykman piv access change-pin -P "$yubikey_piv_pin" -n "$yubikey_piv_pin" >/dev/null 2>&1 \
+      || { err "PIN BINDING FAILED: the escrowed yubikey_piv_pin does not open this YubiKey"; return 1; }
+    info "   PIN BINDING PROVEN — the escrowed yubikey_piv_pin opens this YubiKey."
+  else
+    warn "yubikey_piv_pin not loaded (step 0), or no real card: the PIN-binding proof was SKIPPED, not passed."
+  fi
+  if grep -q "Management key algorithm" <<< "$info" && ! grep -q "protected by PIN" <<< "$info"; then
+    warn "age-plugin-yubikey needs a PIN-protected TDES management key; this card's is not. It becomes a"
+    warn "random key stored on the card behind the PIN, so the escrowed PIN also recovers it."
+    run "ykman piv access change-management-key -a TDES --protect"; rc=$?
+    [ "$rc" = 0 ] || { err "the management key was not changed, so age-plugin-yubikey would refuse this card"; return 1; }
+  fi
+  # A declined step (100) is the operator's choice; a FAILED generation is not a success.
+  run "age-plugin-yubikey --generate --pin-policy $pin_policy --touch-policy $touch_policy"; rc=$?
+  [ "$rc" = 100 ] && return 0
+  [ "$rc" = 0 ] || { err "age-plugin-yubikey --generate failed (exit $rc): no identity was created"; return 1; }
   warn "Copy the printed  age1yubikey1…  recipient into every repo's .sops.yaml as the"
   warn "ops recipient, then on a NETWORKED admin box run:"
   show "git ls-files '*.sops.*' | grep -vE '(^|/)\\.sops\\.yaml\$' | while read -r f; do sops updatekeys -y \"\$f\"; done"
