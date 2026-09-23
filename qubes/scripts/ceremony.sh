@@ -408,7 +408,29 @@ step_yubikey_ops() {
   info "and unattended decrypts use PIN policy $pin_policy with touch policy $touch_policy."
   info "The default is touch=never; set CEREMONY_YUBI_TOUCH_POLICY=always for an interactive ceremony."
   command -v age-plugin-yubikey >/dev/null || { err "age-plugin-yubikey missing"; return 1; }
-  run "age-plugin-yubikey --generate --pin-policy $pin_policy --touch-policy $touch_policy" || return 0
+  # Two things age-plugin-yubikey 0.5.0 does to a factory card, measured on YubiKey 5.7.4
+  # (regalia doc/drills/2026-09-23-yubikey-multi-enrollment.md):
+  #   - it REFUSES the firmware-5.7 default management key (AES192): "Custom unprotected non-TDES
+  #     management keys are not supported". It needs a PIN-protected TDES key.
+  #   - on the default PIN it forces a new PIN AND SETS THE PUK TO IT, merging two credentials the
+  #     ceremony keeps apart (regalia#28). So the PIN and a distinct PUK are set here, first.
+  # Only acted on when ykman reports a real card; a stub that prints no management-key line is left alone.
+  local info rc
+  info="$(ykman piv info 2>/dev/null || true)"
+  if grep -q "Using default PIN" <<< "$info"; then
+    warn "This YubiKey still has the default PIN. Set the PIN, then a DIFFERENT PUK, before generating."
+    run "ykman piv access change-pin"; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 100 ] || { err "PIN change failed"; return 1; }
+    run "ykman piv access change-puk"; rc=$?; [ "$rc" = 0 ] || [ "$rc" = 100 ] || { err "PUK change failed"; return 1; }
+  fi
+  if grep -q "Management key algorithm" <<< "$info" && ! grep -q "protected by PIN" <<< "$info"; then
+    warn "age-plugin-yubikey needs a PIN-protected TDES management key; this card's is not."
+    run "ykman piv access change-management-key -a TDES --protect"; rc=$?
+    [ "$rc" = 0 ] || { err "the management key was not changed, so age-plugin-yubikey would refuse this card"; return 1; }
+  fi
+  # A declined step (100) is the operator's choice; a FAILED generation is not a success.
+  run "age-plugin-yubikey --generate --pin-policy $pin_policy --touch-policy $touch_policy"; rc=$?
+  [ "$rc" = 100 ] && return 0
+  [ "$rc" = 0 ] || { err "age-plugin-yubikey --generate failed (exit $rc): no identity was created"; return 1; }
   warn "Copy the printed  age1yubikey1…  recipient into every repo's .sops.yaml as the"
   warn "ops recipient, then on a NETWORKED admin box run:"
   show "git ls-files '*.sops.*' | grep -vE '(^|/)\\.sops\\.yaml\$' | while read -r f; do sops updatekeys -y \"\$f\"; done"
