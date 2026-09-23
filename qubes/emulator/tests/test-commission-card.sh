@@ -155,6 +155,16 @@ rc="$(two_cards SER123 OTHER999)"
   && P "two cards and no --slot is refused as AMBIGUOUS rather than guessed" \
   || F "two cards with no --slot was not refused (rc=$rc)"
 
+hdr "A flag with no value is refused — not an infinite loop, not a swallowed flag"
+rc="$(timeout 20 bash "$CC" --expect-serial --expect-devaut-sha AABBCC >"$FAKE/outnv" 2>&1; echo $?)"
+{ [ "$rc" = 2 ] && grep -q -- '--expect-serial needs a value' "$FAKE/outnv"; } \
+  && P "--expect-serial followed by another flag is refused by name (it used to pin the serial to that flag)" \
+  || F "a flag missing its value was not refused (rc=$rc)"
+rc="$(timeout 20 bash "$CC" --kek-ref >"$FAKE/outnv" 2>&1; echo $?)"
+{ [ "$rc" = 2 ] && grep -q -- '--kek-ref needs a value' "$FAKE/outnv"; } \
+  && P "a trailing --kek-ref is refused, not an infinite loop" \
+  || F "a trailing flag was not refused (rc=$rc; 124 means it hung)"
+
 hdr "IDENTITY: a swapped genuine card must be caught"
 # The attack colocation introduces. Any genuine Nitrokey passes every policy check ever written;
 # only the pinned CHR and serial distinguish OURS.

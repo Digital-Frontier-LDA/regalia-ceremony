@@ -103,6 +103,28 @@ class KeyAttestationReadTest(unittest.TestCase):
         self.assertEqual(f["ATTEST_HEX"].upper(), CE01_KEY_0A.upper())
         self.assertEqual(f["ATTEST_SHA256"], hashlib.sha256(BLOB).hexdigest())
 
+    def test_a_final_chunk_that_is_one_short_row_of_hex_looking_ascii_is_read_exactly(self):
+        """The bug CodeRabbit found (regalia-ceremony#35). opensc-tool does NOT pad a response that
+        is one short row, so its ASCII sits inside the first 48 columns — and a fixed 48-column slice
+        read 'AB12' as four more hex digits. 256 bytes then 6 whose ASCII is hex-looking: the second
+        READ BINARY returns exactly that one short row."""
+        tail = b"AB12 C"
+        blob = bytes(range(256)) + tail
+        r = self.run_reader("--key-ref", "1", FIXTURE_HEX=blob.hex())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        f = self.fields(r)
+        self.assertEqual(f["ATTEST_HEX"].upper(), blob.hex().upper(),
+                         "the reader returned bytes the card did not send")
+        self.assertEqual(int(f["ATTEST_BYTES"]), len(blob))
+
+    def test_a_flag_with_no_value_is_refused_not_an_infinite_loop(self):
+        """`VAR="${2:-}"; shift 2` on a trailing flag never shifted and looped forever (review of
+        regalia-ceremony#35). A flag followed by another flag must not swallow it either."""
+        for args in (["--key-ref"], ["--key-ref", "--expect-serial", "X"]):
+            r = self.run_reader(*args)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("--key-ref needs a value", r.stderr)
+
     def test_the_key_reference_names_the_file(self):
         # Ref 10 is EF CE0A — not CE10, and not the CKA_ID 0a's file (that is CE01 on this card).
         r = self.run_reader("--key-ref", "10", FIXTURE_FID="CE0A")
@@ -229,12 +251,18 @@ fid = os.environ.get("FIXTURE_FID", "CE01").upper()
 mode = os.environ.get("STUB_SELECT", "ok")
 
 def dump(data):
+    # FAITHFUL TO OPENSC, including the case that bit: a response that is ONE short row is NOT padded
+    # (the ASCII follows the hex after one space), while a short last row of a longer dump is padded
+    # to column 48. Measured on DENK0404144, 2026-09-23. A stub that always padded is why nothing
+    # caught the fixed-width parser reading ASCII 0-9/A-F as data.
     out = []
     for i in range(0, len(data), 16):
         row = data[i:i+16]
         h = " ".join("%02X" % b for b in row)
         a = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-        out.append(h + " " + (" " * (16 - len(row)) if i else "") + a)
+        # A short LATER row is padded so its ASCII starts at column 49 — measured on the card
+        # (`44 49 … 7F` then spaces to column 48, then `DINK0400001.`), not one space per missing byte.
+        out.append(("%s %s" % (h, a)) if len(data) <= 16 else ("%-47s %s" % (h, a)))
     return "\n".join(out)
 
 args = sys.argv[1:]

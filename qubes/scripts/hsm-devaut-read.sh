@@ -25,11 +25,12 @@ AID="E82B0601040181C31F0201"      # SmartCard-HSM application identifier
 CHUNK=255                         # Le=FF
 
 die() { printf 'hsm-devaut-read: %s\n' "$*" >&2; exit 2; }
+need_val() { [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || die "$1 needs a value"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --reader)        READER="${2:-}"; shift 2;;
-    --expect-serial) EXPECT_SERIAL="${2:-}"; shift 2;;
+    --reader)        need_val "$1" "${2-}"; READER="$2"; shift 2;;
+    --expect-serial) need_val "$1" "${2-}"; EXPECT_SERIAL="$2"; shift 2;;
     -h|--help)       sed -n '2,24p' "$0"; exit 0;;
     *) die "unknown argument: $1";;
   esac
@@ -74,8 +75,16 @@ apdu_data() {
   out="$(opensc-tool ${RARGS[@]+"${RARGS[@]}"} -s "$1" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
   sw="$(sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$out" | tail -1)"
   sw="${sw^^}"
-  data="$(awk '/^Received/ {buf=""; want=1; next}
-               want && /^[0-9A-F][0-9A-F] / { s=substr($0,1,48); gsub(/[^0-9A-F]/,"",s); buf = buf s }
+  data="$(awk '/^Received/ {buf=""; want=1; row=0; next}
+               want && /^[0-9A-F][0-9A-F] / {
+                 # opensc-tool does not pad a one-row response (its ASCII follows the hex after one
+                 # space), so the first row is 4 chars a byte; later rows are padded to column 48.
+                 # Same parse as hsm-key-attestation-read.sh; a fixed 48-column slice read ASCII
+                 # 0-9/A-F as data (review of regalia-ceremony#35).
+                 row++
+                 n = (row == 1) ? int(length($0) / 4) : int((length($0) - 16) / 3)
+                 s=substr($0,1,3*n); gsub(/[^0-9A-F]/,"",s); buf = buf s
+               }
                END { printf "%s", buf }' <<< "$out")"
   printf '%s %s' "${sw:-????}" "$data"
   case "$sw" in
