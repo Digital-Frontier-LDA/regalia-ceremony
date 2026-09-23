@@ -210,9 +210,24 @@ if [ -z "$EXPECT_SERIAL" ] || [ -z "$EXPECT_DEVAUT_SHA" ]; then
   printf '     a substituted genuine card: the serial is self-reported and the CHR is a name, while\n'
   printf '     only the digest covers the device public key.\n'
 else
-  serial="$(perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} \
-              --list-slots 2>/dev/null | grep -oE 'serial num *: *[A-Za-z0-9]+' | awk '{print $NF}' | head -1)"
-  if [ -z "$serial" ]; then
+  # THE SERIAL OF THE SELECTED SLOT, NOT THE FIRST ONE LISTED. `--list-slots` lists EVERY slot
+  # whatever --slot says, and this used to take the first serial it printed — so with two cards
+  # attached (the bench has a Pico beside the Nitrokey) B7 could compare the WRONG card's serial and
+  # pass. The block for --slot's id is the one read; with no --slot, more than one token present is
+  # refused as ambiguous rather than guessed.
+  slots="$(perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" --list-slots 2>/dev/null)"
+  # Slot ids are compared as canonical lowercase hex STRINGS: strtonum is gawk-only, and a Debian
+  # rack host runs mawk.
+  want_hex=""
+  [ -n "${SLOT:-}" ] && want_hex="$(printf '0x%x' "$SLOT" 2>/dev/null)"
+  serial="$(awk -v want="$want_hex" -v selected="${SLOT:-}" '
+      /^Slot [0-9]+ \(0x[0-9a-fA-F]+\)/ { match($0, /\(0x[0-9a-fA-F]+\)/); id = tolower(substr($0, RSTART + 1, RLENGTH - 2)); next }
+      /serial num *:/ { v = $NF; if (selected == "") { n++; last = v } else if (id == want) { print v; exit } }
+      END { if (selected == "" && n == 1) print last; else if (selected == "" && n > 1) print "AMBIGUOUS" }' <<< "$slots")"
+  if [ "$serial" = "AMBIGUOUS" ]; then
+    F "more than one token is attached and no --slot was given — WHICH card is being commissioned CANNOT BE EVALUATED"
+    printf '     Pass --slot <id> (and --reader) for the card under commissioning.\n'
+  elif [ -z "$serial" ]; then
     F "could not read a token serial — identity CANNOT BE EVALUATED"
   elif [ "$serial" != "$EXPECT_SERIAL" ]; then
     F "SERIAL MISMATCH — expected '$EXPECT_SERIAL', card reports '$serial'. This is a DIFFERENT DEVICE."

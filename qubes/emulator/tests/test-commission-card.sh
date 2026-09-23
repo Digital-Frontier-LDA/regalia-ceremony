@@ -44,7 +44,15 @@ case "$*" in
     [ "$id" = "${FAKE_KEK_ID:-0a}" ] && [ -n "${FAKE_KEK_DER_HEX:-}" ] || exit 1
     python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes.fromhex(sys.argv[2]))' "$outf" "$FAKE_KEK_DER_HEX"
     ;;
-  *--list-slots*) printf 'Slot 0 (0x0): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}";;
+  *--list-slots*)
+    # FAKE_OTHER_SERIAL puts a SECOND card in the listing, FIRST, the way the bench lists a Pico next
+    # to the Nitrokey: the card under commissioning is then slot id 0x8, not the first one printed.
+    if [ -n "${FAKE_OTHER_SERIAL:-}" ]; then
+      printf 'Slot 0 (0x0): Other reader\n  token label        : o\n  serial num         : %s\n' "$FAKE_OTHER_SERIAL"
+      printf 'Slot 2 (0x8): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}"
+    else
+      printf 'Slot 0 (0x0): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}"
+    fi;;
   *"--type pubkey"*)
     printf 'Public Key Object; EC  EC_POINT 256 bits\n'
     printf '  EC_POINT:   0441042e3986e7ff710e3a8b8d2e4c1fbab63ee23d7cf92a691906250b4ab6d8c723d35f432bcbd2a7f5e24cb6329cbba4379b990c1b1811179ee3fba9193a61458840\n'
@@ -126,6 +134,26 @@ rc="$(run_cc disabled)"
 grep -q 'RRC is disabled' "$FAKE/out" \
   && P "an RRC-disabled card passes that check" \
   || F "a compliant card failed the RRC check — the gate cries wolf and will be bypassed"
+
+hdr "IDENTITY: with two cards attached, the SELECTED slot's serial is the one checked"
+# The old B7 took the FIRST serial --list-slots printed, whatever --slot said. Here the OTHER card is
+# listed first and carries the expected serial, while the card in the selected slot does not — the
+# old code passed this. It must be a mismatch.
+two_cards(){ RRC_STATE=disabled FAKE_SERIAL="$1" FAKE_OTHER_SERIAL="$2" \
+  SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" \
+  bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC "${@:3}" >"$FAKE/out2c" 2>&1; echo $?; }
+rc="$(two_cards SUBSTITUTE SER123 --slot 8)"
+{ [ "$rc" != 0 ] && grep -q 'SERIAL MISMATCH' "$FAKE/out2c"; } \
+  && P "the selected slot (0x8) holds another card: refused, although the first-listed card has the expected serial" \
+  || F "B7 read the first-listed card's serial instead of the selected slot's (rc=$rc)"
+rc="$(two_cards SER123 OTHER999 --slot 8)"
+grep -q 'token serial matches' "$FAKE/out2c" \
+  && P "the selected slot holding the expected card passes B7, with another card listed first" \
+  || F "the right card in the selected slot failed B7 — the check cannot pass on a two-card host"
+rc="$(two_cards SER123 OTHER999)"
+{ [ "$rc" != 0 ] && grep -q 'more than one token is attached' "$FAKE/out2c"; } \
+  && P "two cards and no --slot is refused as AMBIGUOUS rather than guessed" \
+  || F "two cards with no --slot was not refused (rc=$rc)"
 
 hdr "IDENTITY: a swapped genuine card must be caught"
 # The attack colocation introduces. Any genuine Nitrokey passes every policy check ever written;
