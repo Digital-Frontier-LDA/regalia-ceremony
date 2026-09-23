@@ -51,7 +51,7 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1
 # --- ceremony toolchain (mirrors packages.txt) + emulator stack ---------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
       # ceremony toolchain
-      age opensc pcscd libccid pcsc-tools yubikey-manager ssss qrencode zbar-tools \
+      age opensc pcscd libccid pcsc-tools yubikey-manager ykcs11 ssss qrencode zbar-tools \
       gnupg scdaemon secure-delete python3 python3-pip python3-dev build-essential xxd \
       # PKCS#11 HSM emulator
       softhsm2 opensc-pkcs11 \

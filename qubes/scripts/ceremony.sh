@@ -424,7 +424,8 @@ step_yubikey_ops() {
 #   start  `ceremony-manifest.py plan` — refuse, BEFORE any key exists, a manifest asking for
 #          something this ceremony cannot honour, and print every planned provisioning step;
 #   m)     generate each planned YubiKey PIV key with the policies the MANIFEST names (never typed
-#          here), and capture the device's own report of it as evidence;
+#          here), capture the device's own report of it as evidence, and prove the key signs with the
+#          PIN (operation-proof.sh; Nitrokeys run the same script at the rack after commission-card.sh);
 #   end    `ceremony-manifest.py record` — fill the bindings from the evidence and advance them to
 #          qualified, or refuse by name and write nothing.
 #
@@ -432,7 +433,8 @@ step_yubikey_ops() {
 #   CEREMONY_MANIFEST_EVIDENCE_DIR  REQUIRED with it: where evidence is kept. On persistent storage,
 #                                   NOT the RAM workdir, which is shredded on exit — the evidence is
 #                                   public (serials, public-key digests, ykman reports) and it is the
-#                                   record of the ceremony. commission-card.sh transcripts go here too.
+#                                   record of the ceremony. commission-card.sh transcripts and the
+#                                   Nitrokeys' operation-proof.sh records go here too.
 #   CEREMONY_MANIFEST_OUT           where record writes (default: <evidence dir>/custody-manifest.qualified.json);
 #                                   the input manifest is never rewritten by the wizard
 #   CEREMONY_MANIFEST_SITE          restrict plan/record to one site
@@ -474,13 +476,17 @@ step_manifest_yubikey() {
   b "Manifest — generate a planned YubiKey PIV key and capture its evidence"
   info "The slot, algorithm, PIN policy and touch policy come from the manifest; you choose only"
   info "WHICH token this is. The key is GENERATED ON THE TOKEN and never imported (ADR-0002 D5)."
-  local device serial steps slot alg pin touch path ev
+  info "Each key then signs a fresh challenge with the token's PIN — you are asked for it once per key."
+  local device serial steps slot alg pin touch path ev op
   read -r -p "   manifest device_id of the token in the reader > " device || return 1
   read -r -p "   its serial (ykman list --serials) > " serial || return 1
   case "$serial" in ''|*[!0-9]*) err "a YubiKey serial is digits only"; return 1 ;; esac
   steps="$(manifest_tool piv-steps "$CEREMONY_MANIFEST" --device-id "$device" \
             ${CEREMONY_MANIFEST_SITE:+--site "$CEREMONY_MANIFEST_SITE"})" || { err "nothing to do for $device (reason above)"; return 1; }
-  while IFS=$'\t' read -r slot alg pin touch path; do
+  # The step list is read on fd 9, NOT stdin: operation-proof.sh below asks for the PIN on stdin, and
+  # inside a `while … done <<< "$steps"` loop stdin IS the step list — the PIN prompt would read the
+  # next step's line (or EOF) instead of the operator's keyboard.
+  while IFS=$'\t' read -r -u 9 slot alg pin touch path; do
     [ -n "$slot" ] || continue
     info "$path: slot $slot $alg pin=$pin touch=$touch on $device (serial $serial)"
     run "ykman --device '$serial' piv keys generate --algorithm '$alg' --pin-policy '$pin' --touch-policy '$touch' '$slot' '$WORK/yk-$serial-$slot.pem'" \
@@ -495,7 +501,19 @@ step_manifest_yubikey() {
     manifest_tool yubikey-evidence --device-id "$device" --slot "$slot" --info "$WORK/yk-$serial.info" \
       --keys-info "$WORK/yk-$serial-$slot.keys" --public-key "$WORK/yk-$serial-$slot.der" --out "$ev" \
       || { err "the token's own report was refused (reason above) — $path is NOT provisioned as planned"; return 1; }
-  done <<< "$steps"
+    # THE OPERATION PROOF (regalia#28 criterion 3), while the token is still in the reader. Everything
+    # above is the token's REPORT of the key; this is the key WORKING: it signs a fresh challenge with
+    # the PIN the operator types (into operation-proof.sh, echo off — the wizard never sees it), and the
+    # signature is verified against the key just exported. record refuses the binding without it.
+    # Not behind run(): typing the PIN is the operator's consent, and a skipped proof is not a choice
+    # this step offers — it only leaves the binding unqualifiable.
+    op="$CEREMONY_MANIFEST_EVIDENCE_DIR/opproof-yubikey-$device-$slot.json"
+    show "operation-proof.sh --backend yubikey-piv --serial '$serial' --object-id '$slot' --device-id '$device' --out '$op'"
+    "$HERE/operation-proof.sh" --backend yubikey-piv --serial "$serial" --object-id "$slot" \
+        --device-id "$device" --out "$op" \
+      || { err "no operation proof for $path (reason above) — record will refuse it. Re-run the command shown"; \
+           err "once the cause is fixed — if it was a wrong PIN, that attempt already spent one of the token's retries."; return 1; }
+  done 9<<< "$steps"
 }
 
 manifest_record() {
@@ -1778,7 +1796,7 @@ main() {
    5) Recovery drill
    6) Print break-glass recovery instruction card (DVD-case sized)
 MENU
-    [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence\n'
+    [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
     printf '   q) quit (workdir is shredded)\n'
     # Break on EOF (Ctrl-D, or an exhausted piped stdin) so the menu never spins forever on
     # empty reads — a non-interactive run must terminate, not hang.

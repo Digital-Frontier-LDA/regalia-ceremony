@@ -13,6 +13,10 @@ pcsc-tools
 
 # YubiKey management (PIV slots, touch policy, reset)
 yubikey-manager
+# Yubico's PKCS#11 module for PIV. The ceremony's operation proof (scripts/operation-proof.sh,
+# regalia#28 criterion 3) signs a challenge with each new YubiKey key through it, with the same
+# pkcs11-tool it uses for the Nitrokey: ykman has no command that signs caller-chosen data.
+ykcs11
 
 # Shamir's Secret Sharing for arbitrary secrets (breakglass age key)
 ssss

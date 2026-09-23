@@ -7,6 +7,9 @@ what the ceremony proved (regalia#28).
     ceremony-manifest.py piv-steps MANIFEST --device-id ID [--site S]
     ceremony-manifest.py yubikey-evidence --slot SLOT --info FILE --keys-info FILE --public-key FILE
                                           [--device-id ID] --out OUT
+    ceremony-manifest.py proof-prepare --public-key FILE --challenge-out FILE --to-sign-out FILE
+    ceremony-manifest.py operation-proof --backend B --serial S --object-id ID [--device-id ID]
+                                         --challenge FILE --signature FILE --public-key FILE --out OUT
 
 WHY THIS EXISTS. The 2026-09-03 audit of regalia#28 found the separation rules documented but nothing
 manifest-driven: the seal registry is hand-edited, and no tool fills a binding from ceremony output.
@@ -26,14 +29,21 @@ retyping in both directions:
     DEVICE reported, advances planned -> qualified, re-validates the whole result with regalia-kms's
     own validator, and only then writes. Anything it cannot account for is a named refusal and
     NOTHING is written: a half-recorded manifest is worse than an untouched one, because it looks
-    finished.
+    finished. A binding is qualified only with an OPERATION PROOF for exactly its key — a fresh
+    challenge the device signed with the PIN, whose signature `record` re-verifies itself against the
+    key being pinned (regalia#28 criterion 3; see SIGNATURE_OPERATIONS below).
 
   * `yubikey-evidence` packages the raw ykman output for one PIV slot into the evidence record
     `record` consumes. It keeps the RAW text, not conclusions drawn from it, so `record` re-derives
     every value itself instead of trusting a summary somebody could have edited.
 
-WHAT IT DOES NOT DO. It performs no hardware operation. It never runs pkcs11-tool, ykman or
-commission-card.sh; it reads what they printed. The Nitrokey pin comes from commission-card.sh
+  * `proof-prepare` / `operation-proof` are the two halves of the proof operation-proof.sh drives:
+    draw the challenge and name the mechanism for the key the token exported, then package the
+    token's signature — verified on the spot, with the same code `record` re-runs.
+
+WHAT IT DOES NOT DO. It performs no hardware operation. It never runs pkcs11-tool, ykman,
+operation-proof.sh or commission-card.sh; it reads what they printed (and runs openssl, which touches
+no device, to verify signatures). The Nitrokey pin comes from commission-card.sh
 --kek-id/--kek-ref, whose MANIFEST_BINDING_PINS line is printed only after the card's attestation
 proved the key was generated on that genuine card (ADR-0002 D1). This tool does not repeat any of
 those checks — it cannot, it has no card — and it does not accept a Nitrokey pin from anywhere else.
@@ -53,6 +63,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -64,6 +75,32 @@ sys.path.insert(0, str(HERE / "vendor" / "regalia_kms" / "tools"))
 import custody_manifest  # noqa: E402  (vendored; see vendor/regalia_kms/PINS.json)
 
 YUBIKEY_EVIDENCE_SCHEMA = "regalia.yubikey-piv-evidence/v1"
+OPERATION_PROOF_SCHEMA = "regalia.operation-proof/v1"
+
+# THE OPERATION-BEHAVIOUR CONTROL (regalia#28 criterion 3). Everything else `record` checks — serial,
+# slot, algorithm, origin, PIN and touch policy, the public-key digest — is what the device SAYS about
+# the key. None of it shows the key WORKS: that the private half is in the slot the export came from,
+# that the operator's PIN unlocks it, and that the card will perform the operation the manifest
+# plans for it. A slot whose key was regenerated after the export, a card whose PIN is not the one
+# the custodian holds, or an object PKCS#11 will not sign with would all qualify on the reports alone,
+# and the daemon would discover it at its first request in production.
+#
+# So a binding reaches `qualified` only with an operation proof: a fresh random challenge signed ON THE
+# DEVICE with the operator's PIN, and `record` ITSELF re-verifying that signature with openssl against
+# the public key the binding is being pinned to. No verdict is carried in the proof, because a boolean
+# is exactly what an edited file would say; `record` recomputes the only verdict it accepts.
+#
+# ONLY SIGNATURES ARE PROVABLE THIS WAY, and the ceremony says so rather than qualifying what it cannot
+# prove. A signature is checkable later by anyone holding the public key, and forgeable by nobody who
+# lacks the private one. A decrypt or ECDH round trip is not: the party that made the ciphertext or the
+# ephemeral key already knows the answer the card is supposed to produce, so a file claiming "the card
+# returned X" is exactly as forgeable as the verdict boolean refused above. An object whose operations
+# include unwrap, wrap, key-agreement, release-secret or seal-envelope therefore has no proof `record`
+# can re-verify, and `plan` refuses it before any key is generated for it.
+SIGNATURE_OPERATIONS = frozenset(("sign", "certificate-sign"))
+# 256 bits: a challenge the operator could have signed earlier, or reused from another proof, proves
+# the key worked THEN, not that the key being pinned works now.
+CHALLENGE_BYTES = 32
 
 # Only these custody modes are provisioned by a key ceremony. fido-multi-enrollment credentials are
 # enrolled at the relying party (tools/fido_continuity.py in regalia-kms owns them) and an `exception`
@@ -100,10 +137,22 @@ OID_EC_PUBLIC_KEY = bytes.fromhex("06072a8648ce3d0201")
 OID_P256 = bytes.fromhex("06082a8648ce3d030107")
 OID_P384 = bytes.fromhex("06052b81040022")
 OID_RSA = bytes.fromhex("06092a864886f70d010101")
+OID_SECP256K1 = bytes.fromhex("06052b8104000a")
 SPKI_FAMILY = {
     "ECCP256": (OID_EC_PUBLIC_KEY, OID_P256),
     "ECCP384": (OID_EC_PUBLIC_KEY, OID_P384),
     "RSA2048": (OID_RSA,),
+}
+# manifest algorithm -> (SPKI OIDs, RSA modulus bits or None, the digest the operation proof signs).
+# The digest matches the curve size so a raw-ECDSA token signs a full-width input on every curve:
+# a 32-byte digest on P-384 is legal ECDSA but a PIV applet is free to reject or pad it.
+PROOF_KEY = {
+    "p256": ((OID_EC_PUBLIC_KEY, OID_P256), None, "sha256"),
+    "p384": ((OID_EC_PUBLIC_KEY, OID_P384), None, "sha384"),
+    "secp256k1": ((OID_EC_PUBLIC_KEY, OID_SECP256K1), None, "sha256"),
+    "rsa2048": ((OID_RSA,), 2048, "sha256"),
+    "rsa3072": ((OID_RSA,), 3072, "sha256"),
+    "rsa4096": ((OID_RSA,), 4096, "sha256"),
 }
 
 FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -258,6 +307,14 @@ def check_route(route: Route) -> str:
                       f"plan the key as yubikey-piv or provision it outside the ceremony")
     if route.backend not in PROVISIONED_BACKENDS:
         raise Refusal(f"{route.path}: backend {route.backend} is not provisioned by this ceremony")
+    # Refused HERE, at plan, and not only when record finds no proof: a ceremony that generates a key it
+    # can never qualify has made a key it now has to account for (see SIGNATURE_OPERATIONS).
+    unprovable = sorted(set(obj["operations"]) - SIGNATURE_OPERATIONS)
+    if unprovable:
+        raise Refusal(f"{route.path}: operation(s) {', '.join(unprovable)} have no operation proof record can "
+                      f"re-verify — only a signature is checkable against the public key afterwards; a "
+                      f"decrypt or key-agreement result is known to whoever made its input, so this ceremony "
+                      f"will not mark the binding operation-verified")
     algorithm = key_algorithm(route)
     if route.backend == "yubikey-piv":
         if route.object_id not in PIV_SLOTS:
@@ -351,6 +408,11 @@ def describe(route: Route, serials: dict[str, str]) -> list[str]:
             f"--out {route.device_id}-{route.object_id}.json",
             f"  proves     serial, slot, algorithm, origin=GENERATED, PIN/touch policy as the DEVICE reports them, "
             f"public_key_sha256 of the exported SubjectPublicKeyInfo",
+            f"  operation  operation-proof.sh --backend yubikey-piv --serial {dev} --object-id {route.object_id} "
+            f"--device-id {route.device_id} --out opproof-{route.device_id}-{route.object_id}.json "
+            f"(the wizard's m) step runs it right after generation; the token's PIN is asked for)",
+            f"  proves     the key in the slot signs a fresh challenge with the PIN, re-verified by record against "
+            f"the exported key (regalia#28 criterion 3)",
         ]
     else:
         lines += [
@@ -363,6 +425,12 @@ def describe(route: Route, serials: dict[str, str]) -> list[str]:
             f"--kek-id {route.object_id} --kek-ref <key ref> > commission-{route.device_id}-{route.object_id}.txt",
             f"  proves     the MANIFEST_BINDING_PINS line: serial and public_key_sha256, printed only after the "
             f"attestation proved the key was generated on this genuine card (ADR-0002 D1)",
+            f"  operation  operation-proof.sh --backend nitrokey-pkcs11 --serial {serial or '<serial>'} "
+            f"--object-id {route.object_id} --device-id {route.device_id} "
+            f"--out opproof-{route.device_id}-{route.object_id}.json (right after commissioning; the card's "
+            f"user PIN is asked for)",
+            f"  proves     the pinned key signs a fresh challenge with the user PIN, re-verified by record against "
+            f"the key whose SubjectPublicKeyInfo hashes to the pin (regalia#28 criterion 3)",
         ]
     return lines
 
@@ -520,7 +588,141 @@ def parse_yubikey_record(record: Any, source: str) -> Evidence:
     )
 
 
-def parse_evidence(path: Path) -> Evidence:
+# -------------------------------------------------------------------------------------------------
+# Operation proofs (regalia#28 criterion 3; see SIGNATURE_OPERATIONS)
+# -------------------------------------------------------------------------------------------------
+
+@dataclass
+class OperationProof:
+    source: str
+    backend: str
+    object_id: str
+    device_serial: str
+    challenge: bytes
+    signature: bytes
+    public_key_der: bytes
+    device_id: str | None = None
+
+    @property
+    def public_key_sha256(self) -> str:
+        return "sha256:" + hashlib.sha256(self.public_key_der).hexdigest()
+
+
+def der_tlv(data: bytes, at: int) -> tuple[int, bytes, int]:
+    """One DER TLV at `at`: (tag, value, offset after it). Refuses indefinite or overrunning lengths."""
+    if at + 2 > len(data):
+        raise ValueError("truncated")
+    tag, length, at = data[at], data[at + 1], at + 2
+    if length & 0x80:
+        n = length & 0x7F
+        if n == 0 or n > 4 or at + n > len(data):
+            raise ValueError("bad length")
+        length, at = int.from_bytes(data[at:at + n], "big"), at + n
+    if at + length > len(data):
+        raise ValueError("overrun")
+    return tag, data[at:at + length], at + length
+
+
+def proof_key_algorithm(der: bytes, source: str) -> str:
+    """The manifest algorithm of a SubjectPublicKeyInfo, parsed structurally — the AlgorithmIdentifier's
+    OIDs and, for RSA, the modulus length — or a refusal. This is what decides the digest the proof was
+    signed over, so it is read from the key itself and never from anything the proof says about it."""
+    try:
+        tag, spki, end = der_tlv(der, 0)
+        if tag != 0x30 or end != len(der):
+            raise ValueError("not one SEQUENCE")
+        tag, algid, at = der_tlv(spki, 0)
+        tag2, bits, end = der_tlv(spki, at)
+        if tag != 0x30 or tag2 != 0x03 or end != len(spki) or not bits or bits[0] != 0:
+            raise ValueError("not an SPKI")
+        _, _, at = der_tlv(algid, 0)
+        oids = [algid[:at]]
+        if at < len(algid):
+            ptag, _, pend = der_tlv(algid, at)
+            if ptag == 0x06:
+                oids.append(algid[at:pend])
+        for name, (want, modulus_bits, _) in PROOF_KEY.items():
+            if tuple(oids[:len(want)]) != want:
+                continue
+            if modulus_bits is None:
+                return name
+            _, rsa, _ = der_tlv(bits[1:], 0)
+            _, n, _ = der_tlv(rsa, 0)
+            if int.from_bytes(n, "big").bit_length() == modulus_bits:
+                return name
+    except ValueError:
+        pass
+    raise Refusal(f"{source}: the operation proof's public key is not a SubjectPublicKeyInfo of any algorithm "
+                  f"this ceremony provisions")
+
+
+def signature_verifies(proof: OperationProof) -> bool:
+    """RE-VERIFY, with openssl, that `signature` is the proof key's signature over `challenge`. This is the
+    only verdict record accepts. Fails CLOSED: no openssl is a refusal, never a pass."""
+    digest = PROOF_KEY[proof_key_algorithm(proof.public_key_der, proof.source)][2]
+    pem = (b"-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(proof.public_key_der)
+           + b"-----END PUBLIC KEY-----\n")
+    with tempfile.TemporaryDirectory(prefix="opproof.") as work:
+        paths = {name: Path(work, name) for name in ("pub.pem", "challenge", "signature")}
+        paths["pub.pem"].write_bytes(pem)
+        paths["challenge"].write_bytes(proof.challenge)
+        paths["signature"].write_bytes(proof.signature)
+        try:
+            result = subprocess.run(["openssl", "dgst", f"-{digest}", "-verify", str(paths["pub.pem"]),
+                                     "-signature", str(paths["signature"]), str(paths["challenge"])],
+                                    capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise Refusal(f"{proof.source}: cannot re-verify the operation proof — openssl did not run "
+                          f"({error}); a proof that was not verified is not a proof") from None
+    # Both, not either: an openssl that exits 0 without saying so, or says so and exits non-zero, is not
+    # an answer this control can stand on.
+    return result.returncode == 0 and result.stdout.strip() == "Verified OK"
+
+
+def parse_operation_proof(record: Any, source: str) -> OperationProof:
+    required = {"evidence", "backend", "device_serial", "object_id", "operation", "challenge_b64",
+                "signature_b64", "public_key_der_b64"}
+    allowed = required | {"device_id"}
+    if not required <= record.keys() or not record.keys() <= allowed:
+        raise Refusal(f"{source}: an operation proof carries exactly {sorted(required)} (and optionally "
+                      f"device_id) — in particular no verdict: record re-verifies the signature itself")
+    for key in sorted(record.keys()):
+        if not isinstance(record[key], str):
+            raise Refusal(f"{source}: {key} must be a string")
+    if record["backend"] not in PROVISIONED_BACKENDS:
+        raise Refusal(f"{source}: operation proof for backend {record['backend']}, which this ceremony does not "
+                      f"provision")
+    if record["operation"] != "sign":
+        raise Refusal(f"{source}: operation {record['operation']!r} is not a proof record can re-verify; only "
+                      f"sign is (see SIGNATURE_OPERATIONS)")
+    if not SERIAL.fullmatch(record["device_serial"]):
+        raise Refusal(f"{source}: device_serial is not a serial")
+    object_id = norm_id(record["object_id"])
+    if (object_id not in PIV_SLOTS) if record["backend"] == "yubikey-piv" else not HEX_ID.fullmatch(object_id):
+        raise Refusal(f"{source}: object_id {record['object_id']} is not a {record['backend']} object id")
+    decoded = {}
+    for key in ("challenge_b64", "signature_b64", "public_key_der_b64"):
+        try:
+            decoded[key] = base64.b64decode(record[key], validate=True)
+        except ValueError:
+            raise Refusal(f"{source}: {key} is not base64") from None
+    challenge = decoded["challenge_b64"]
+    if not challenge:
+        raise Refusal(f"{source}: the operation proof's challenge is empty — a signature over nothing proves "
+                      f"nothing about the key")
+    if len(challenge) < CHALLENGE_BYTES:
+        raise Refusal(f"{source}: the operation proof's challenge is {len(challenge)} bytes; a fresh challenge "
+                      f"is at least {CHALLENGE_BYTES} random bytes")
+    if not decoded["signature_b64"]:
+        raise Refusal(f"{source}: the operation proof carries no signature")
+    proof = OperationProof(source, record["backend"], norm_id(record["object_id"]), record["device_serial"],
+                           challenge, decoded["signature_b64"], decoded["public_key_der_b64"],
+                           device_id=record.get("device_id"))
+    proof_key_algorithm(proof.public_key_der, source)
+    return proof
+
+
+def parse_evidence(path: Path) -> Evidence | OperationProof:
     source = str(path)
     try:
         text = path.read_text(encoding="utf-8")
@@ -532,6 +734,8 @@ def parse_evidence(path: Path) -> Evidence:
             record = json.loads(text)
         except json.JSONDecodeError:
             raise Refusal(f"{source}: evidence looks like JSON but does not parse") from None
+        if isinstance(record, dict) and record.get("evidence") == OPERATION_PROOF_SCHEMA:
+            return parse_operation_proof(record, source)
         return parse_yubikey_record(record, source)
     if "MANIFEST_BINDING_PINS" in text or "Commissioning" in text or "KEK public_key_sha256" in text:
         return parse_commission_transcript(text, source)
@@ -571,11 +775,73 @@ def match(ev: Evidence, manifest: dict[str, Any], serials: dict[str, str]) -> Ro
     return candidates[0]
 
 
+def match_operation_proofs(assigned: dict[str, tuple[Route, Evidence]],
+                           proofs: list[OperationProof]) -> dict[str, OperationProof]:
+    """Pair each binding being recorded with exactly one operation proof for exactly its key, and
+    RE-VERIFY every signature. Returns binding path -> proof, or refuses by name; the caller writes
+    nothing on a refusal.
+
+    Pairing is by the device and object the proof names (backend, serial, object id), and then the
+    proof's public key must hash to the digest the binding is being pinned to — for a YubiKey the
+    digest of the key ykman exported, for a Nitrokey the attested pin commission-card.sh printed. The
+    two are separate checks on purpose: a proof for the right slot over the WRONG key is the slot
+    regenerated after its evidence was captured, and a message that said "no proof" would send the
+    operator looking for a missing file instead of at the key that changed under them."""
+    challenges: dict[bytes, str] = {}
+    for proof in proofs:
+        if proof.challenge in challenges:
+            raise Refusal(f"{proof.source}: reused challenge — {challenges[proof.challenge]} signed the same "
+                          f"challenge; every proof signs its own fresh one, or a signature made once could be "
+                          f"presented for a second binding")
+        challenges[proof.challenge] = proof.source
+
+    by_device: dict[tuple[str, str, str], OperationProof] = {}
+    for proof in proofs:
+        key = (proof.backend, proof.device_serial, proof.object_id)
+        if key in by_device:
+            raise Refusal(f"two operation proofs for {proof.backend} serial {proof.device_serial} object "
+                          f"{proof.object_id}: {by_device[key].source} and {proof.source}; each binding takes "
+                          f"exactly one")
+        by_device[key] = proof
+
+    verified: dict[str, OperationProof] = {}
+    for route, ev in assigned.values():
+        proof = by_device.pop((ev.backend, ev.device_serial, ev.object_id), None)
+        if proof is None:
+            raise Refusal(f"no operation proof for {route.path} ({route.backend} serial {ev.device_serial} object "
+                          f"{ev.object_id}) — a binding reaches qualified only when its key has been seen to "
+                          f"sign a fresh challenge with the PIN (operation-proof.sh; regalia#28 criterion 3)")
+        if proof.device_id is not None and proof.device_id != route.device_id:
+            raise Refusal(f"{proof.source}: the operation proof names device {proof.device_id} but serial "
+                          f"{ev.device_serial} object {ev.object_id} is {route.device_id} ({route.path})")
+        if proof.public_key_sha256 != ev.public_key_sha256:
+            raise Refusal(f"{proof.source}: the operation proof is over a different key — it signed with "
+                          f"{proof.public_key_sha256}, but {route.path} is being pinned to "
+                          f"{ev.public_key_sha256} ({ev.source}). Was the slot regenerated after its evidence "
+                          f"was captured?")
+        algorithm = proof_key_algorithm(proof.public_key_der, proof.source)
+        if algorithm != key_algorithm(route):
+            raise Refusal(f"{proof.source}: {route.path} plans {key_algorithm(route)} but the key that signed is "
+                          f"{algorithm}")
+        if not signature_verifies(proof):
+            raise Refusal(f"{proof.source}: the operation proof's signature does not verify against the key "
+                          f"pinned for {route.path} — the key in the slot did not sign this challenge")
+        verified[route.path] = proof
+
+    if by_device:
+        stray = sorted(p.source for p in by_device.values())
+        raise Refusal(f"operation proof(s) for no binding recorded in this run: {', '.join(stray)} — a proof "
+                      f"is evidence too, and evidence nothing accounts for is refused, not ignored")
+    return verified
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
     routes = planned_routes(manifest, args.site, args.backend)
     serials = device_serials(manifest)
-    evidence = [parse_evidence(p) for p in args.evidence]
+    parsed = [parse_evidence(p) for p in args.evidence]
+    evidence = [e for e in parsed if isinstance(e, Evidence)]
+    proofs = [e for e in parsed if isinstance(e, OperationProof)]
 
     assigned: dict[str, tuple[Route, Evidence]] = {}
     for ev in evidence:
@@ -615,6 +881,10 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     check_fleet(result)
     validate(result, "the recorded manifest no longer validates")
+    # LAST, after every check on what the devices REPORTED: the operation proof is about the key those
+    # reports describe, so it is only meaningful once they are known to be consistent — and a report
+    # that is wrong keeps its own, more specific refusal instead of surfacing as a proof mismatch.
+    verified = match_operation_proofs(assigned, proofs)
 
     out = args.out or args.manifest
     text = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
@@ -630,6 +900,8 @@ def cmd_record(args: argparse.Namespace) -> int:
     for route, ev in assigned.values():
         print(f"QUALIFIED {route.path} {route.device_id} serial={ev.device_serial} "
               f"public_key_sha256={ev.public_key_sha256} <- {ev.source}")
+        print(f"  OPERATION VERIFIED {route.path}: signed a {len(verified[route.path].challenge)}-byte challenge, "
+              f"re-verified here against that key <- {verified[route.path].source}")
     print(f"RECORDED {len(assigned)} binding(s) -> {out}")
     return 0
 
@@ -684,6 +956,63 @@ def cmd_yubikey_evidence(args: argparse.Namespace) -> int:
     return 0
 
 
+# =================================================================================================
+# proof-prepare / operation-proof (the device side of the operation-behaviour control)
+# =================================================================================================
+
+def cmd_proof_prepare(args: argparse.Namespace) -> int:
+    """Draw the fresh challenge and say how the token must sign it. Decided HERE, from the key the token
+    exported, so operation-proof.sh holds no algorithm table of its own to drift from PROOF_KEY: raw
+    ECDSA over the curve-sized digest (the mechanism every SmartCard-HSM and PIV applet offers), or
+    SHA256-RSA-PKCS over the challenge itself. Prints the pkcs11-tool mechanism name."""
+    try:
+        der = read_public_key(args.public_key)
+    except (OSError, ValueError) as error:
+        raise Refusal(f"cannot read the token's public key {args.public_key}: {error}") from None
+    algorithm = proof_key_algorithm(der, str(args.public_key))
+    digest = PROOF_KEY[algorithm][2]
+    challenge = os.urandom(CHALLENGE_BYTES)
+    if PROOF_KEY[algorithm][1] is None:
+        mechanism, to_sign = "ECDSA", hashlib.new(digest, challenge).digest()
+    else:
+        mechanism, to_sign = "SHA256-RSA-PKCS", challenge
+    args.challenge_out.write_bytes(challenge)
+    args.to_sign_out.write_bytes(to_sign)
+    print(mechanism)
+    return 0
+
+
+def cmd_operation_proof(args: argparse.Namespace) -> int:
+    """Package one signature as the proof record, verifying it NOW, at the token, with the same code
+    `record` will run again later — so a PIN that unlocks the wrong key, or a token that returns garbage,
+    is refused while the token is still on the table."""
+    try:
+        record = {
+            "evidence": OPERATION_PROOF_SCHEMA,
+            "backend": args.backend,
+            "device_serial": args.serial,
+            "object_id": norm_id(args.object_id),
+            "operation": "sign",
+            "challenge_b64": base64.b64encode(args.challenge.read_bytes()).decode("ascii"),
+            "signature_b64": base64.b64encode(args.signature.read_bytes()).decode("ascii"),
+            "public_key_der_b64": base64.b64encode(read_public_key(args.public_key)).decode("ascii"),
+        }
+    except (OSError, ValueError) as error:
+        raise Refusal(f"cannot read the operation proof's inputs: {error}") from None
+    if args.device_id:
+        record["device_id"] = args.device_id
+    proof = parse_operation_proof(record, str(args.out))
+    if not signature_verifies(proof):
+        raise Refusal(f"{args.out}: the token's signature does not verify against the public key it exported "
+                      f"for object {proof.object_id} — the key in that slot did not sign this challenge. "
+                      f"NOTHING WRITTEN; this binding is not operation-verified")
+    Path(args.out).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    print(f"OPERATION PROOF {args.out}: {args.backend} serial={args.serial} object={proof.object_id} "
+          f"{proof_key_algorithm(proof.public_key_der, str(args.out))} signed a fresh {len(proof.challenge)}-byte "
+          f"challenge; verified against public_key_sha256={proof.public_key_sha256}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -706,9 +1035,23 @@ def main(argv: list[str] | None = None) -> int:
     y.add_argument("--public-key", type=Path, required=True, help="`ykman … piv keys export SLOT` (PEM or DER)")
     y.add_argument("--device-id", help="the manifest device_id this token is")
     y.add_argument("--out", type=Path, required=True)
+    pp = sub.add_parser("proof-prepare")
+    pp.add_argument("--public-key", type=Path, required=True, help="the token's public key (PEM or DER SPKI)")
+    pp.add_argument("--challenge-out", type=Path, required=True)
+    pp.add_argument("--to-sign-out", type=Path, required=True)
+    op = sub.add_parser("operation-proof")
+    op.add_argument("--backend", required=True, choices=sorted(PROVISIONED_BACKENDS))
+    op.add_argument("--serial", required=True)
+    op.add_argument("--object-id", required=True)
+    op.add_argument("--device-id")
+    op.add_argument("--challenge", type=Path, required=True)
+    op.add_argument("--signature", type=Path, required=True)
+    op.add_argument("--public-key", type=Path, required=True)
+    op.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "record": cmd_record, "piv-steps": cmd_piv_steps,
-               "yubikey-evidence": cmd_yubikey_evidence}[args.command]
+               "yubikey-evidence": cmd_yubikey_evidence, "proof-prepare": cmd_proof_prepare,
+               "operation-proof": cmd_operation_proof}[args.command]
     try:
         return handler(args)
     except Refusal as refusal:

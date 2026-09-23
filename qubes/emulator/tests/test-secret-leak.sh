@@ -494,6 +494,38 @@ else
 fi
 
 # =====================================================================================
+hdr "operation-proof.sh (regalia#28 criterion 3): the token PIN is never on argv, printed or stored"
+# The proof logs in to a freshly provisioned YubiKey / Nitrokey with the operator's PIN. The PIN must
+# reach pkcs11-tool only as an `env:` reference, never as a value on any command line (the emulator's
+# token model REFUSES a literal PIN, and logs every argv it is given), and must appear in none of the
+# script's output and none of the files it leaves behind. The emulator's token model is used and the
+# real OpenSC binary is a tripwire, so no attached card is touched.
+OPP="$SCRIPTS/operation-proof.sh"
+if [ -x "$OPP" ] && command -v openssl >/dev/null 2>&1; then
+  OW="$W/opproof"; mkdir -p "$OW/lib" "$OW/nk"; : > "$OW/lib/libykcs11.so.2"
+  printf '#!/bin/sh\necho "$*" >> "%s"\nexit 99\n' "$OW/real.log" > "$OW/lib/real"; chmod +x "$OW/lib/real"
+  OPIN="LeakCanary-$$"
+  opout="$(EMU_YKMAN_STATE="$OW/yk" EMU_P11_PIN="$OPIN" EMU_P11_ARGV_LOG="$OW/argv.log" EMU_PKCS11_REAL="$OW/lib/real" \
+    TMPDIR="$OW" bash -c '
+      ykman --device 36345471 piv keys generate --algorithm ECCP256 --pin-policy ONCE --touch-policy NEVER 9c "$1/gen.pem" >/dev/null
+      "$2" --backend yubikey-piv --serial 36345471 --object-id 9c --module "$1/lib/libykcs11.so.2" --out "$1/proof.json" <<< "$3"
+    ' _ "$OW" "$OPP" "$OPIN" 2>&1)"
+  if [ ! -s "$OW/proof.json" ]; then
+    F "operation-proof.sh produced no proof — the PIN checks below would pass on no evidence: $opout"
+  else
+    grep -qF -- "$OPIN" <<< "$opout" && F "operation-proof.sh PRINTED the token PIN" \
+                                     || P "operation-proof.sh never prints the token PIN"
+    grep -qF -- "$OPIN" "$OW/argv.log" && F "the token PIN was on a pkcs11-tool COMMAND LINE" \
+                                       || P "the token PIN is on no pkcs11-tool command line (env:REGALIA_OPPROOF_PIN only)"
+    grep -rqF --exclude=argv.log -- "$OPIN" "$OW" && F "the token PIN was written to a file" \
+                                                   || P "the token PIN is in no file the proof leaves behind"
+  fi
+  [ -e "$OW/real.log" ] && F "operation-proof.sh reached the REAL pkcs11-tool" || P "the proof never reached the real pkcs11-tool"
+else
+  S "operation-proof.sh or openssl not available — token-PIN leak check skipped"
+fi
+
+# =====================================================================================
 hdr "RESULT"
 printf '  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ] && { echo "  NO SECRET LEAK DETECTED across the tested paths"; exit 0; } || { echo "  SECRET LEAK(S) FOUND"; exit 1; }

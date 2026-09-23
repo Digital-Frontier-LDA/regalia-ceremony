@@ -18,6 +18,171 @@
 # into, so a clone target can never answer with the primary card's key.
 set -euo pipefail
 
+# ==================================================================================================
+# THE OPERATION-PROOF TOKEN MODEL (regalia#28 criterion 3). operation-proof.sh signs a challenge with
+# pkcs11-tool on a YubiKey (through Yubico's ykcs11 module) or a Nitrokey (through opensc-pkcs11).
+# Neither has a SoftHSM stand-in that knows about per-serial YubiKeys, so this branch IS the token,
+# with real openssl keys, and it is taken BEFORE the real binary is even looked up — nothing in it can
+# fall through to OpenSC and reach whatever card is attached to the machine running the tests.
+#
+#   --module …/libykcs11*   the YubiKeys the ykman shim generated: $EMU_YKMAN_STATE/<serial>/<slot>/,
+#                           addressed by ykcs11's fixed ids (9a=01 9c=02 9d=03 9e=04 82..95=05..18)
+#   EMU_P11_TOKENS=DIR      any other module: $EMU_P11_TOKENS/<serial>/<id>/, one dir per card
+#
+# PIN: default 123456 (YubiKey) / 648219 (Nitrokey), or <token>/pin. Three tries, tracked in
+# <token>/pin-tries; a wrong PIN spends one (CKR_PIN_INCORRECT), none left is CKR_PIN_LOCKED.
+# THE PIN MUST ARRIVE AS `--pin env:NAME`: a literal PIN on the command line is refused with a loud
+# error, so a regression that puts it on argv fails the suites instead of passing quietly.
+# ECDSA output is raw r||s unless --signature-format openssl, as in OpenSC — so dropping that flag
+# breaks verification here exactly as it would against a card.
+# EMU_P11_BAD_SIGNATURE=1 makes the token return a well-formed signature over OTHER data.
+# EMU_P11_ARGV_LOG=FILE appends every argv this model sees, for the secret-leak suite.
+# ==================================================================================================
+emu_module=""; _prev=""
+for _a in "$@"; do [ "$_prev" = "--module" ] && emu_module="$_a"; _prev="$_a"; done
+emu_model=""
+case "${emu_module##*/}" in libykcs11*) emu_model=ykcs11;; esac
+[ -z "$emu_model" ] && [ -n "${EMU_P11_TOKENS:-}" ] && emu_model=tokens
+
+emu_p11(){
+  [ -n "${EMU_P11_ARGV_LOG:-}" ] && printf '%s\n' "$*" >> "$EMU_P11_ARGV_LOG"
+  local root pin_default list=0 keygen=0 read_obj=0 sign=0 login=0 slot="" id="" out="" in="" mech="" keytype=""
+  local pin_arg="" fmt="" type=""
+  if [ "$emu_model" = ykcs11 ]; then root="${EMU_YKMAN_STATE:-${TMPDIR:-/tmp}/emu-ykman}"; pin_default=123456
+  else root="$EMU_P11_TOKENS"; pin_default=648219; fi
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --module) shift 2;;
+      -L|--list-slots|-T|--list-token-slots) list=1; shift;;
+      --keypairgen|-k) keygen=1; shift;;
+      --read-object|-r) read_obj=1; shift;;
+      --sign|-s) sign=1; shift;;
+      --login|-l) login=1; shift;;
+      --slot) slot="$2"; shift 2;;
+      --id|-d) id="$(printf '%s' "$2" | tr 'A-F' 'a-f')"; shift 2;;
+      --output-file|-o) out="$2"; shift 2;;
+      --input-file|-i) in="$2"; shift 2;;
+      --mechanism|-m) mech="$2"; shift 2;;
+      --key-type) keytype="$2"; shift 2;;
+      --type|-y) type="$2"; shift 2;;
+      --signature-format) fmt="$2"; shift 2;;
+      --pin|-p) pin_arg="$2"; shift 2;;
+      --label|-a) shift 2;;
+      *) echo "pkcs11-tool [EMULATED $emu_model]: unsupported argument $1" >&2; return 2;;
+    esac
+  done
+  local serials=() s
+  if [ -d "$root" ]; then
+    for s in "$root"/*/; do [ -d "$s" ] && serials+=("$(basename "$s")"); done
+  fi
+  # Slot ids step by 4 for the card model, the way OpenSC numbers readers (0x0, 0x4, …), so a caller
+  # that confuses a slot's POSITION with its ID addresses the wrong token here as it would on the bench.
+  local step=1; [ "$emu_model" = tokens ] && step=4
+  if [ "$list" = 1 ]; then
+    echo "Available slots:"
+    local i=0
+    for s in ${serials[@]+"${serials[@]}"}; do
+      if [ "$emu_model" = ykcs11 ]; then
+        printf 'Slot %d (0x%x): Yubico YubiKey OTP+FIDO+CCID 00 00\n  token label        : YubiKey PIV #%s\n' $((i*step)) $((i*step)) "$s"
+        printf '  token manufacturer : Yubico (www.yubico.com)\n  token model        : YubiKey YK5\n'
+      else
+        printf 'Slot %d (0x%x): Nitrokey Nitrokey HSM (%s) 00 00\n  token label        : SmartCard-HSM (UserPIN)\n' $((i*step)) $((i*step)) "$s"
+        printf '  token manufacturer : www.CardContact.de\n  token model        : PKCS#15 emulated\n'
+      fi
+      printf '  serial num         : %s\n' "$s"
+      i=$((i+1))
+    done
+    return 0
+  fi
+  # Resolve the token: --slot by ID, or the only one present.
+  local tok=""
+  if [ -n "$slot" ]; then
+    local want=$((slot)) i=0
+    for s in ${serials[@]+"${serials[@]}"}; do [ $((i*step)) -eq "$want" ] && tok="$s"; i=$((i+1)); done
+  elif [ "${#serials[@]}" -eq 1 ]; then tok="${serials[0]}"
+  fi
+  [ -n "$tok" ] || { echo "error: no token in slot '${slot:-<none>}' [EMULATED]" >&2; echo "Aborting." >&2; return 1; }
+  local tdir="$root/$tok" kdir
+  if [ "$emu_model" = ykcs11 ]; then
+    case "$id" in
+      01) kdir="$tdir/9a";; 02) kdir="$tdir/9c";; 03) kdir="$tdir/9d";; 04) kdir="$tdir/9e";;
+      0[5-9]|1[0-8]|0[a-f]) kdir="$tdir/$(printf '%02x' $(( 16#$id - 5 + 16#82 )))";;
+      *) kdir="$tdir/none-$id";;
+    esac
+  else
+    kdir="$tdir/$id"
+  fi
+  if [ "$login" = 1 ]; then
+    case "$pin_arg" in
+      env:?*) ;;
+      "") echo "pkcs11-tool [EMULATED]: --login without --pin would prompt; the ceremony must pass env:NAME" >&2; return 2;;
+      *) echo "pkcs11-tool [EMULATED]: A LITERAL PIN IS ON THE COMMAND LINE — refused; pass --pin env:NAME" >&2; return 3;;
+    esac
+    local var="${pin_arg#env:}" want_pin tries
+    want_pin="$(cat "$tdir/pin" 2>/dev/null || printf '%s' "${EMU_P11_PIN:-$pin_default}")"
+    tries="$(cat "$tdir/pin-tries" 2>/dev/null || echo 3)"
+    if [ "$tries" -le 0 ]; then
+      echo "error: PKCS11 function C_Login failed: rv = CKR_PIN_LOCKED (0xa4)" >&2; echo "Aborting." >&2; return 1
+    fi
+    if [ "${!var-}" != "$want_pin" ]; then
+      echo $((tries - 1)) > "$tdir/pin-tries"
+      echo "error: PKCS11 function C_Login failed: rv = CKR_PIN_INCORRECT (0xa0)" >&2; echo "Aborting." >&2; return 1
+    fi
+    echo 3 > "$tdir/pin-tries"
+  fi
+  if [ "$keygen" = 1 ]; then
+    [ "$login" = 1 ] || { echo "error: keypairgen needs --login [EMULATED]" >&2; return 1; }
+    mkdir -p "$kdir"
+    case "$keytype" in
+      EC:prime256v1|EC:secp384r1|EC:secp256k1) openssl ecparam -genkey -name "${keytype#EC:}" -noout -out "$kdir/key.pem" 2>/dev/null;;
+      rsa:*) openssl genpkey -algorithm RSA -pkeyopt "rsa_keygen_bits:${keytype#rsa:}" -out "$kdir/key.pem" 2>/dev/null;;
+      *) echo "error: unsupported key type $keytype [EMULATED]" >&2; return 1;;
+    esac
+    echo "Key pair generated [EMULATED]:"; return 0
+  fi
+  [ -f "$kdir/key.pem" ] || { echo "error: object with id $id not found [EMULATED]" >&2; echo "Aborting." >&2; return 1; }
+  if [ "$read_obj" = 1 ]; then
+    [ "$type" = pubkey ] && [ -n "$out" ] || { echo "error: only --type pubkey -o FILE is modelled" >&2; return 2; }
+    openssl pkey -in "$kdir/key.pem" -pubout -outform DER -out "$out" 2>/dev/null; return
+  fi
+  if [ "$sign" = 1 ]; then
+    [ "$login" = 1 ] || { echo "error: PKCS11 function C_Sign failed: rv = CKR_USER_NOT_LOGGED_IN (0x101)" >&2; return 1; }
+    [ -f "$in" ] && [ -n "$out" ] || { echo "error: --sign needs --input-file and --output-file" >&2; return 2; }
+    local data="$in"
+    if [ "${EMU_P11_BAD_SIGNATURE:-0}" = 1 ]; then
+      data="$out.other"; { cat "$in"; printf 'x'; } | openssl dgst -sha256 -binary > "$data"
+    fi
+    echo "Using signature algorithm $mech"
+    case "$mech" in
+      ECDSA)
+        openssl pkeyutl -sign -inkey "$kdir/key.pem" -in "$data" -out "$out.der" 2>/dev/null || return 1
+        if [ "$fmt" = openssl ]; then mv "$out.der" "$out"
+        else  # OpenSC's default: raw r||s, each padded to the field size
+          python3 - "$out.der" "$out" "$(openssl pkey -in "$kdir/key.pem" -text -noout 2>/dev/null | sed -n 's/.*(\([0-9]*\) bit).*/\1/p' | head -1)" <<'PY'
+import sys
+d = open(sys.argv[1], "rb").read(); n = (int(sys.argv[3]) + 7) // 8
+def tlv(b, i):
+    l = b[i + 1]; i += 2
+    if l & 0x80:
+        k = l & 0x7f; l = int.from_bytes(b[i:i + k], "big"); i += k
+    return b[i:i + l], i + l
+body, _ = tlv(d, 0); r, i = tlv(body, 0); s, _ = tlv(body, i)
+open(sys.argv[2], "wb").write(int.from_bytes(r, "big").to_bytes(n, "big") + int.from_bytes(s, "big").to_bytes(n, "big"))
+PY
+          rm -f "$out.der"
+        fi ;;
+      SHA256-RSA-PKCS) openssl dgst -sha256 -sign "$kdir/key.pem" -out "$out" "$data" 2>/dev/null || return 1 ;;
+      *) echo "error: mechanism $mech not modelled [EMULATED]" >&2; return 1;;
+    esac
+    rm -f "$out.other"
+    return 0
+  fi
+  echo "pkcs11-tool [EMULATED $emu_model]: nothing to do" >&2; return 2
+}
+if [ -n "$emu_model" ]; then
+  if emu_p11 "$@"; then exit 0; else exit $?; fi
+fi
+
 REAL=""
 # EMU_PKCS11_REAL lets the test harness point at a recorder/stub in place of the real
 # OpenSC binary (mirrors sc-hsm-tool's EMU_SCHSM_REAL); ignored in normal operation.
