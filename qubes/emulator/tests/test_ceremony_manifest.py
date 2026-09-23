@@ -212,6 +212,26 @@ class Plan(Case):
         self.assertIn("never imported (ADR-0002 D5)", out)
         self.assertIn("NOT THIS CEREMONY objects[1](github-org-admin-fido).bindings[0]", out)
 
+    def test_a_yubikey_pair_may_declare_multi_enrollment_recovery(self):
+        """ADR-0002 D5 made representable (regalia-kms#29): an object held ONLY on YubiKeys, generated
+        on each device, recovers by multi-enrollment, not Shamir. Before that fix the vendored
+        validator refused every such manifest, so the ceremony could not plan the D5 case at all."""
+        m = fleet_manifest()
+        signer = m["objects"][0]
+        signer["bindings"] = [b for b in signer["bindings"] if b["backend"] == "yubikey-piv"]
+        signer["recovery"] = {"mode": "multi-enrollment", "status": "planned"}
+        self.write_manifest(m)
+        result = self.run_tool("plan", self.manifest)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("2 binding(s) to provision", result.stdout)
+        self.assertIn("never imported (ADR-0002 D5)", result.stdout)
+
+    def test_multi_enrollment_does_not_excuse_a_nitrokey_from_shamir(self):
+        m = fleet_manifest()
+        m["objects"][0]["recovery"] = {"mode": "multi-enrollment", "status": "planned"}
+        self.write_manifest(m)
+        self.refuses(self.run_tool("plan", self.manifest), "only for YubiKey PIV keys generated on the device")
+
     def test_site_filter(self):
         result = self.run_tool("plan", self.manifest, "--site", "siteb")
         self.assertEqual(result.returncode, 0, result.stderr)
