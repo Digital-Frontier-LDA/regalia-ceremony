@@ -43,7 +43,7 @@ MODULE="${HSM_PKCS11_MODULE:-/usr/lib/x86_64-linux-gnu/opensc-pkcs11.so}"
 export HSM_PKCS11_MODULE="$MODULE"
 UART="${HSM_UART:-$(ls /dev/serial/by-id/*Debug_Probe*-if01 2>/dev/null | head -1)}"
 PYBIN="${HSM_PYSERIAL_PYTHON:-python3}"
-KEYGENS="${HSM_JCUT_KEYGENS:-4}"
+KEYGENS="${HSM_JCUT_KEYGENS:-8}"
 # A cut placed uniformly in this window (ms). MEASURED 2026-09-23 on upstream firmware: one EC P-256
 # keygen, login included, takes ~12.5 s. Starting the window after the first one completes means
 # every cut has at least one ACKNOWLEDGED write to lose; a window inside the first keygen (the old
@@ -54,15 +54,16 @@ VIDPID="${HSM_PICO_VIDPID:-2e8a:10fd}"
 
 say(){ printf '  %s\n' "$*"; }
 on_usb(){ lsusb -d "$VIDPID" >/dev/null 2>&1; }
-cue(){ printf '\a\n  >>>>>>>>>>  %s  <<<<<<<<<<\n\n' "$*" > /dev/tty 2>/dev/null || printf '  >>> %s\n' "$*"; }
+# The cue goes to stdout, always: the operator may be reading a relayed log, not this terminal.
+cue(){ printf '  >>> CUE: %s\n' "$*"; [ -t 1 ] && printf '\a'; return 0; }
 # manual: "off" returns once the device has LEFT USB, "on" once it is BACK on USB (re-attached).
 power(){
     if [ "$POWER_MODE" = qrexec ]; then qrexec-client-vm dom0 "regalia.PicoPower+$1"; return; fi
     case "$1" in
         status) on_usb && echo "manual: $VIDPID present on USB" || { echo "manual: $VIDPID not on USB"; return 1; } ;;
         off) cue "PULL THE PICO'S CABLE NOW"
-             for _ in $(seq 1 600); do on_usb || { echo OFF; return 0; }; sleep 0.1; done
-             echo "the Pico was still on USB 60s after the cue"; return 1 ;;
+             for _ in $(seq 1 3000); do on_usb || { echo OFF; return 0; }; sleep 0.1; done
+             echo "the Pico was still on USB 300s after the cue"; return 1 ;;
         on)  cue "PLUG IT BACK IN, THEN RE-ATTACH FROM DOM0 (qvm-usb attach dev-regalia sys-usb:<id>)"
              until on_usb; do sleep 0.5; done; echo "ATTACHED (manual)" ;;
     esac
