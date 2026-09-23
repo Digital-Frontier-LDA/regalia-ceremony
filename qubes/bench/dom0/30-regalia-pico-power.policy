@@ -1,0 +1,6 @@
+## Installed in dom0 as /etc/qubes/policy.d/30-regalia-pico-power.policy
+## Only the bench qube, only the three verbs. The service re-checks the caller against its own config.
+regalia.PicoPower  +off     dev-regalia  @adminvm  allow
+regalia.PicoPower  +on      dev-regalia  @adminvm  allow
+regalia.PicoPower  +status  dev-regalia  @adminvm  allow
+regalia.PicoPower  *        @anyvm       @anyvm    deny

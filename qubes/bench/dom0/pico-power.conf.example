@@ -1,0 +1,10 @@
+# Installed in dom0 as /etc/regalia/pico-power.conf. Fill in from `uhubctl` run IN THE USB QUBE:
+#   qvm-run --pass-io -u root sys-usb uhubctl
+# HUB_LOC is the "Current status for hub <LOC>" value; HUB_PORT is the port the Pico is on.
+# The device will then be re-attached as <USBVM>:<HUB_LOC>.<HUB_PORT> — check that matches what
+# `qvm-usb list` shows for the Pico before the first cut.
+USBVM=sys-usb
+HUB_LOC=
+HUB_PORT=
+TARGET=dev-regalia
+ATTACH_WAIT=45
