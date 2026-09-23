@@ -265,14 +265,18 @@ class BothKeyTypesTest(unittest.TestCase):
                            ("ce04", CE04_RSA_ID21), ("rsa.der", SPKI_RSA_ID21)):
             cls.paths[name] = cls.put(name, bytes.fromhex(hexs))
         # A DIFFERENT RSA-2048 key, fresh from openssl: same type and size, other modulus.
-        cls.paths["other-rsa.der"] = os.path.join(cls.tmp, "other-rsa.der")
-        subprocess.run("openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 2>/dev/null"
-                       f" | openssl pkey -pubout -outform DER -out '{cls.paths['other-rsa.der']}'",
-                       shell=True, check=True)
-        cls.paths["ed25519.der"] = os.path.join(cls.tmp, "ed25519.der")
-        subprocess.run("openssl genpkey -algorithm ED25519 2>/dev/null"
-                       f" | openssl pkey -pubout -outform DER -out '{cls.paths['ed25519.der']}'",
-                       shell=True, check=True)
+        cls.paths["other-rsa.der"] = cls.fresh_public_key("other-rsa", ["-algorithm", "RSA", "-pkeyopt", "rsa_keygen_bits:2048"])
+        cls.paths["ed25519.der"] = cls.fresh_public_key("ed25519", ["-algorithm", "ED25519"])
+
+    @classmethod
+    def fresh_public_key(cls, name, genpkey_args):
+        """A fresh key's SubjectPublicKeyInfo, via two argv-only openssl calls (no shell)."""
+        key = os.path.join(cls.tmp, name + ".key.pem")
+        der = os.path.join(cls.tmp, name + ".der")
+        subprocess.run(["openssl", "genpkey", *genpkey_args, "-out", key], check=True, capture_output=True)
+        subprocess.run(["openssl", "pkey", "-in", key, "-pubout", "-outform", "DER", "-out", der],
+                       check=True, capture_output=True)
+        return der
 
     @classmethod
     def put(cls, name, data):
@@ -344,10 +348,8 @@ class BothKeyTypesTest(unittest.TestCase):
                              "the attested RSA public exponent is not the token key's exponent")
 
     def test_an_ec_attestation_against_another_ec_key_is_no(self):
-        other = subprocess.run("openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 2>/dev/null"
-                               " | openssl pkey -pubout -outform DER", shell=True, check=True,
-                               capture_output=True).stdout
-        self.assert_mismatch(self.verify(self.paths["ce03"], "--expect-spki", self.put("other-ec.der", other)),
+        other = self.fresh_public_key("other-ec", ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"])
+        self.assert_mismatch(self.verify(self.paths["ce03"], "--expect-spki", other),
                              "the attested EC point is not the token key's point")
 
     def test_an_attested_generator_that_is_not_the_spki_curves_is_no(self):
