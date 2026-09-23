@@ -38,8 +38,10 @@ def have_openssl():
     return subprocess.run(["which", "openssl"], capture_output=True).returncode == 0
 
 
-def run(*args):
-    return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True)
+def run(*args, env=None):
+    base = {k: v for k, v in os.environ.items() if k != "BIP39_PASSPHRASE"}
+    return subprocess.run([sys.executable, SCRIPT, *args], capture_output=True, text=True,
+                          env={**base, **(env or {})})
 
 
 @unittest.skipUnless(have_openssl(), "openssl not installed")
@@ -139,6 +141,22 @@ class SeedToPkcs12Test(unittest.TestCase):
         with open(self.pwfile) as fh:
             pw = fh.read()
         self.assertNotIn(pw, r.stdout + r.stderr)
+
+    def test_refuses_an_ambient_bip39_passphrase(self):
+        """derive-akash-address.py honours BIP39_PASSPHRASE; this tool derives with the empty
+        passphrase. Ignoring it silently would give a container whose key is NOT the address the
+        auditor prints for the same seed. So it must refuse, and write nothing."""
+        r = run("--mnemonic-file", self.mfile, "--password-file", self.pwfile, "--out", self.out,
+                env={"BIP39_PASSPHRASE": "twenty-fifth-word"})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("BIP39_PASSPHRASE", r.stdout + r.stderr)
+        self.assertFalse(os.path.exists(self.out), "a refused run must not leave a container")
+        self.assertNotIn("twenty-fifth-word", r.stdout + r.stderr)
+
+    def test_an_empty_bip39_passphrase_is_the_default_not_a_refusal(self):
+        r = run("--mnemonic-file", self.mfile, "--password-file", self.pwfile, "--out", self.out,
+                env={"BIP39_PASSPHRASE": ""})
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_refuses_a_mnemonic_on_argv(self):
         """argv is visible in ps, /proc/<pid>/cmdline and shell history. The tool must have no

@@ -201,6 +201,16 @@ def main():
     if a.selftest:
         selftest()
         return
+    # A BIP39 PASSPHRASE IS REFUSED, NOT IGNORED. derive-akash-address.py honours BIP39_PASSPHRASE
+    # with highest priority; this tool never read it. With it set, the auditor would print the
+    # seed+passphrase address while this container silently carried the empty-passphrase key — two
+    # tools, one seed, two different keys, and nothing saying so. ceremony.sh unsets it first, so
+    # the ceremony path was safe; a standalone run was not. Supporting a passphrase here is a
+    # custody decision, so until one is made the only safe answer is to stop (regalia#36).
+    if os.environ.get("BIP39_PASSPHRASE"):
+        sys.exit("seed-to-pkcs12: BIP39_PASSPHRASE is set, and this tool derives with the EMPTY "
+                 "passphrase only — the container would not match what derive-akash-address.py "
+                 "reports. Unset it (the ceremony always does).")
     mnemonic = _read(a.mnemonic_file, "mnemonic")
     password = _read(a.password_file, "PKCS#12 password")
     build_p12(mnemonic, a.out, password, a.hd_path)
