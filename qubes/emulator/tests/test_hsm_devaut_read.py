@@ -94,6 +94,23 @@ class DevAutReadTest(unittest.TestCase):
         self.assertEqual(f["DEVAUT_HEX"].upper(), EF2F02.upper())
         self.assertEqual(f["DEVAUT_SHA256"], SHA)
 
+    def test_a_final_chunk_that_is_one_short_row_of_hex_looking_ascii_is_read_exactly(self):
+        """opensc-tool does not pad a one-row response, so a fixed 48-column slice read its ASCII
+        ('AB12') as hex. Found in review of regalia-ceremony#35; this reader had the same parser."""
+        blob = bytes(range(256)) + b"AB12 C"
+        r = self.run_reader(FIXTURE_HEX=blob.hex())
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.fields(r)["DEVAUT_HEX"].upper(), blob.hex().upper(),
+                         "the reader returned bytes the card did not send")
+
+    def test_a_flag_with_no_value_is_refused_not_an_infinite_loop(self):
+        """`VAR="${2:-}"; shift 2` on a trailing flag never shifted and looped forever (review of
+        regalia-ceremony#35). A flag followed by another flag must not swallow it either."""
+        for args in (["--reader"], ["--reader", "--expect-serial", "X"]):
+            r = self.run_reader(*args)
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("--reader needs a value", r.stderr)
+
     def test_the_digest_is_not_a_digest_of_the_first_chunk(self):
         # The exact defect: 255 bytes hashed and reported as the card's identity.
         prefix = hashlib.sha256(BLOB[:255]).hexdigest()
@@ -163,7 +180,8 @@ def dump(data):
         row = data[i:i+16]
         h = " ".join("%02X" % b for b in row)
         a = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-        out.append("%-47s %s" % (h, a))
+        # One short row is NOT padded by opensc-tool; a short last row of a longer dump is.
+        out.append(("%s %s" % (h, a)) if len(data) <= 16 else ("%-47s %s" % (h, a)))
     return "\n".join(out)
 
 args = sys.argv[1:]

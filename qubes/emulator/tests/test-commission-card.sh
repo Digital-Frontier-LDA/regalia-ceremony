@@ -36,7 +36,23 @@ cat > "$FAKE/pkcs11-tool" <<'STUB'
 # EC_POINT is a real secp256k1 point read off DENK0404144; EC_PARAMS 06052b8104000a is secp256k1.
 # FAKE_CURVE lets a test put a non-secp256k1 key at the wallet id.
 case "$*" in
-  *--list-slots*) printf 'Slot 0 (0x0): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}";;
+  *--read-object*)
+    # The KEK's SubjectPublicKeyInfo, written to -o the way the real tool writes it. Only the id in
+    # FAKE_KEK_ID (default 0a) exists; any other id is "object not found", i.e. no file.
+    id="" outf=""
+    while [ $# -gt 0 ]; do case "$1" in --id) id="$2"; shift 2;; -o) outf="$2"; shift 2;; *) shift;; esac; done
+    [ "$id" = "${FAKE_KEK_ID:-0a}" ] && [ -n "${FAKE_KEK_DER_HEX:-}" ] || exit 1
+    python3 -c 'import sys; open(sys.argv[1], "wb").write(bytes.fromhex(sys.argv[2]))' "$outf" "$FAKE_KEK_DER_HEX"
+    ;;
+  *--list-slots*)
+    # FAKE_OTHER_SERIAL puts a SECOND card in the listing, FIRST, the way the bench lists a Pico next
+    # to the Nitrokey: the card under commissioning is then slot id 0x8, not the first one printed.
+    if [ -n "${FAKE_OTHER_SERIAL:-}" ]; then
+      printf 'Slot 0 (0x0): Other reader\n  token label        : o\n  serial num         : %s\n' "$FAKE_OTHER_SERIAL"
+      printf 'Slot 2 (0x8): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}"
+    else
+      printf 'Slot 0 (0x0): Reader\n  token label        : t\n  serial num         : %s\n' "${FAKE_SERIAL:-SER123}"
+    fi;;
   *"--type pubkey"*)
     printf 'Public Key Object; EC  EC_POINT 256 bits\n'
     printf '  EC_POINT:   0441042e3986e7ff710e3a8b8d2e4c1fbab63ee23d7cf92a691906250b4ab6d8c723d35f432bcbd2a7f5e24cb6329cbba4379b990c1b1811179ee3fba9193a61458840\n'
@@ -70,6 +86,8 @@ cat > "$FAKE/devaut-read.sh" <<'STUB'
 printf 'DEVAUT_CHR=%s\n' "${FAKE_CHR:-DEVCHR001}"
 printf 'DEVAUT_CAR=%s\n' "${FAKE_CAR:-ISSUER-CA-01}"
 printf 'DEVAUT_SHA256=%s\n' "${FAKE_SHA:-AABBCC}"
+printf 'DEVAUT_HEX=%s\n' "${FAKE_DEVAUT_HEX:-}"
+printf '%s\n' "$*" > "${FAKE_ARGS_DIR:-/dev/null}/devaut.args" 2>/dev/null || :
 STUB
 chmod +x "$FAKE/devaut-read.sh"
 
@@ -116,6 +134,36 @@ rc="$(run_cc disabled)"
 grep -q 'RRC is disabled' "$FAKE/out" \
   && P "an RRC-disabled card passes that check" \
   || F "a compliant card failed the RRC check — the gate cries wolf and will be bypassed"
+
+hdr "IDENTITY: with two cards attached, the SELECTED slot's serial is the one checked"
+# The old B7 took the FIRST serial --list-slots printed, whatever --slot said. Here the OTHER card is
+# listed first and carries the expected serial, while the card in the selected slot does not — the
+# old code passed this. It must be a mismatch.
+two_cards(){ RRC_STATE=disabled FAKE_SERIAL="$1" FAKE_OTHER_SERIAL="$2" \
+  SCSH_HOME="$FAKE/scsh" HSM_DEVAUT_JS="$FAKE/devaut.js" HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" \
+  bash "$CC" --expect-serial SER123 --expect-devaut-sha AABBCC "${@:3}" >"$FAKE/out2c" 2>&1; echo $?; }
+rc="$(two_cards SUBSTITUTE SER123 --slot 8)"
+{ [ "$rc" != 0 ] && grep -q 'SERIAL MISMATCH' "$FAKE/out2c"; } \
+  && P "the selected slot (0x8) holds another card: refused, although the first-listed card has the expected serial" \
+  || F "B7 read the first-listed card's serial instead of the selected slot's (rc=$rc)"
+rc="$(two_cards SER123 OTHER999 --slot 8)"
+grep -q 'token serial matches' "$FAKE/out2c" \
+  && P "the selected slot holding the expected card passes B7, with another card listed first" \
+  || F "the right card in the selected slot failed B7 — the check cannot pass on a two-card host"
+rc="$(two_cards SER123 OTHER999)"
+{ [ "$rc" != 0 ] && grep -q 'more than one token is attached' "$FAKE/out2c"; } \
+  && P "two cards and no --slot is refused as AMBIGUOUS rather than guessed" \
+  || F "two cards with no --slot was not refused (rc=$rc)"
+
+hdr "A flag with no value is refused — not an infinite loop, not a swallowed flag"
+rc="$(timeout 20 bash "$CC" --expect-serial --expect-devaut-sha AABBCC >"$FAKE/outnv" 2>&1; echo $?)"
+{ [ "$rc" = 2 ] && grep -q -- '--expect-serial needs a value' "$FAKE/outnv"; } \
+  && P "--expect-serial followed by another flag is refused by name (it used to pin the serial to that flag)" \
+  || F "a flag missing its value was not refused (rc=$rc)"
+rc="$(timeout 20 bash "$CC" --kek-ref >"$FAKE/outnv" 2>&1; echo $?)"
+{ [ "$rc" = 2 ] && grep -q -- '--kek-ref needs a value' "$FAKE/outnv"; } \
+  && P "a trailing --kek-ref is refused, not an infinite loop" \
+  || F "a trailing flag was not refused (rc=$rc; 124 means it hung)"
 
 hdr "IDENTITY: a swapped genuine card must be caught"
 # The attack colocation introduces. Any genuine Nitrokey passes every policy check ever written;
@@ -257,6 +305,141 @@ rc="$(FAKE_DKEK=unknown run_cc disabled)"
 grep -q 'CANNOT BE EVALUATED' "$FAKE/out" \
   && P "…and is reported as unevaluable, not as material found" \
   || F "could-not-scan is reported as if a DKEK share had been found"
+
+hdr "KEK PIN (ADR-0002 D1): produced only from a verified attestation, and only on a passing card"
+# regalia-kms pins its KEK by device_serial + public_key_sha256 and CANNOT check provenance itself:
+# the device certificate and the key attestation are out of PKCS#11's reach (regalia#447/#448). So a
+# pin this prints is trusted as "generated on this genuine card" forever after. Every path that
+# cannot establish that must refuse — and must not print the MANIFEST_BINDING_PINS line anyway.
+#
+# The bytes are REAL, read from DENK0404144 on 2026-09-23 and pinned by
+# test_hsm_key_attestation_read.py: C.DevAut, EF CE01 (key ref 1) and the SPKI of PKCS#11 id 0a,
+# whose SHA-256 is the value regalia-kms measured from the daemon. The verifier is the real one,
+# against the real CardContact anchor. Only the card I/O is stubbed.
+. "$(cd "$HERE/../../.." && pwd)/tools/ceremony-python.sh" 2>/dev/null || true
+if ! ceremony_python_require cryptography cvc 2>/dev/null; then
+  F "no interpreter can import cryptography + pycvc — the KEK attestation rows CANNOT BE EVALUATED"
+else
+  fx(){ python3 -c 'import sys; sys.path.insert(0, sys.argv[1])
+import test_hsm_key_attestation_read as r, test_hsm_key_attestation_verify as v
+print({"devaut": r.EF2F02, "ce01": r.CE01_KEY_0A, "der": r.KEK_DER_0A, "pin": r.KEK_PIN_0A,
+       "old_ce01": v.CE01}[sys.argv[2]])' "$HERE" "$1"; }
+  DEVAUT_HEX_REAL="$(fx devaut)"; CE01_REAL="$(fx ce01)"; KEK_DER_REAL="$(fx der)"; PIN_REAL="$(fx pin)"
+  CE01_OTHER_KEY="$(fx old_ce01)"
+  DEVAUT_SHA_REAL="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(bytes.fromhex(sys.argv[1])).hexdigest())' "$DEVAUT_HEX_REAL")"
+  # A signature byte flipped: the structure still parses, only the device signature breaks.
+  CE01_BADSIG="${CE01_REAL:0:$(( ${#CE01_REAL} - 4 ))}$( [ "${CE01_REAL: -4:2}" = "00" ] && echo 01 || echo 00 )${CE01_REAL: -2}"
+  # C.DevAut with one byte of the device signature changed: its digest no longer matches the pin.
+  DEVAUT_HEX_OTHER="${DEVAUT_HEX_REAL:0:400}$( [ "${DEVAUT_HEX_REAL:400:2}" = "00" ] && echo 01 || echo 00 )${DEVAUT_HEX_REAL:402}"
+
+  # hsm-key-attestation-read.sh stub: prints the fixture, or fails the way the real reader fails on
+  # an EF that is not there (an imported key has none). Records its arguments.
+  cat > "$FAKE/attest-read.sh" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$FAKE_ARGS_DIR/attest.args"
+if [ -n "${FAKE_ATTEST_FAIL:-}" ]; then
+  echo "hsm-key-attestation-read: EF CE01 does not exist (SW 6A82) — no attestation at key reference 1: wrong --key-ref, no key there, or an IMPORTED key (only on-card generation leaves one)" >&2
+  exit 2
+fi
+printf 'ATTEST_KEY_REF=1\nATTEST_FID=CE01\nATTEST_HEX=%s\n' "${FAKE_ATTEST_HEX:-}"
+STUB
+  # A verifier that exits 0 WITHOUT saying what it verified — a truncated or edited verifier.
+  cat > "$FAKE/verify-silent.py" <<'STUB'
+#!/usr/bin/env python3
+print("DEVAUT_CHAIN=verified")
+STUB
+  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py"
+  mkdir -p "$FAKE/args" "$FAKE/empty-trust"
+  REG_NONE="$FAKE/reg-none.json"
+  printf '{"schema":"regalia.staging-hardware/v1","environment":"staging","devices":[]}\n' > "$REG_NONE"
+  FRAG="MANIFEST_BINDING_PINS {\"device_serial\":\"SER123\",\"public_key_sha256\":\"$PIN_REAL\"}"
+
+  cc_kek(){ RRC_STATE="${RRC:-disabled}" FAKE_SERIAL=SER123 FAKE_SHA="$DEVAUT_SHA_REAL" \
+    FAKE_DEVAUT_HEX="${DVHEX-$DEVAUT_HEX_REAL}" FAKE_ATTEST_HEX="${ATHEX-$CE01_REAL}" \
+    FAKE_KEK_DER_HEX="$KEK_DER_REAL" FAKE_ARGS_DIR="$FAKE/args" \
+    SCSH_HOME=/nonexistent HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" \
+    HSM_KEY_ATTEST_READ_SH="${ATTEST_READ:-$FAKE/attest-read.sh}" HSM_STAGING_REGISTRY_FILE="$REG_NONE" \
+    bash "$CC" --expect-serial SER123 --expect-devaut-sha "$DEVAUT_SHA_REAL" "$@" >"$FAKE/outk" 2>&1; echo $?; }
+  no_fragment(){ ! grep -q '^MANIFEST_BINDING_PINS' "$FAKE/outk"; }
+
+  rc="$(cc_kek --kek-id 0a --kek-ref 1 --reader 2)"
+  [ "$rc" = 0 ] && P "a generated, attested KEK on a genuine card passes" \
+                || { F "the real attestation for key 0a was refused"; sed 's/^/      /' "$FAKE/outk"; }
+  grep -qxF "$FRAG" "$FAKE/outk" \
+    && P "…and the manifest fragment carries the pin regalia-kms measured ($PIN_REAL)" \
+    || F "the MANIFEST_BINDING_PINS line is missing or carries the wrong serial/pin"
+  grep -q 'generated on this card' "$FAKE/outk" && P "…with a PASS line naming what was proven" \
+    || F "the attestation PASS line is missing"
+  grep -qx -- '--reader 2 --expect-serial SER123 --key-ref 1' "$FAKE/args/attest.args" \
+    && P "…the attestation was read from the named reader, for the named card, at --kek-ref" \
+    || F "the attestation reader was not given --reader/--expect-serial/--key-ref: $(cat "$FAKE/args/attest.args" 2>/dev/null)"
+  grep -q -- '--reader 2' "$FAKE/args/devaut.args" && P "…and so was C.DevAut" \
+    || F "--reader did not reach the C.DevAut reader"
+
+  rc="$(cc_kek)"
+  [ "$rc" = 0 ] && P "without --kek-id/--kek-ref commissioning still passes" || F "absent KEK flags failed the run"
+  grep -q 'KEK pin (public_key_sha256) was NOT' "$FAKE/outk" \
+    && P "…with a NOTE that the KEK pin was not produced" || F "absent KEK flags are not noted"
+  no_fragment && P "…and no MANIFEST_BINDING_PINS line" || F "a pin was printed with no KEK requested"
+
+  rc="$(cc_kek --kek-id 0a)"
+  { [ "$rc" != 0 ] && grep -q 'must be given TOGETHER' "$FAKE/outk" && no_fragment; } \
+    && P "--kek-id without --kek-ref is a FAILURE, not a note" || F "--kek-id alone was accepted"
+  rc="$(cc_kek --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'must be given TOGETHER' "$FAKE/outk" && no_fragment; } \
+    && P "--kek-ref without --kek-id is a FAILURE" || F "--kek-ref alone was accepted"
+  rc="$(cc_kek --kek-id zz --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'is not a hex PKCS#11 id' "$FAKE/outk"; } \
+    && P "a non-hex --kek-id is refused" || F "a malformed --kek-id was used"
+
+  # THE PAIRING ATTACK / MISTAKE: a real, valid attestation — for a DIFFERENT key. Only
+  # --expect-point catches it, so this proves the point is actually passed and compared.
+  rc="$(ATHEX="$CE01_OTHER_KEY" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'DID NOT VERIFY' "$FAKE/outk" && grep -q 'ATTESTED_POINT_MATCHES=no' "$FAKE/outk" && no_fragment; } \
+    && P "a genuine attestation of ANOTHER key (wrong --kek-ref for --kek-id) is refused, no pin printed" \
+    || { F "an attestation for a different key produced a pin"; sed 's/^/      /' "$FAKE/outk"; }
+  rc="$(ATHEX="$CE01_BADSIG" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'ATTEST_SIGNATURE=failed' "$FAKE/outk" && no_fragment; } \
+    && P "an attestation the device did not sign is refused" || F "a forged attestation produced a pin"
+  rc="$(HSM_TRUST_DIR="$FAKE/empty-trust" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'DEVAUT_CHAIN=failed' "$FAKE/outk" && no_fragment; } \
+    && P "a device certificate that does not chain to the anchor is refused (not a genuine card)" \
+    || F "an unanchored device produced a pin"
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-silent.py" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && no_fragment; } \
+    && P "a verifier that exits 0 without the signature and point verdicts is NOT a pass" \
+    || F "exit status alone was taken as verification"
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY=/nonexistent cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'hsm-key-attestation-verify.py not found' "$FAKE/outk" && no_fragment; } \
+    && P "no verifier -> CANNOT BE EVALUATED -> failure" || F "the attestation was skipped without a verifier"
+
+  rc="$(FAKE_ATTEST_FAIL=1 cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'could not read the attestation at key reference 1' "$FAKE/outk" && no_fragment; } \
+    && P "an unreadable attestation (e.g. an IMPORTED key has none) is a failure, no pin printed" \
+    || F "a key with no readable attestation produced a pin"
+  grep -q 'IMPORTED' "$FAKE/outk" && P "…and the reader's named reason reaches the operator" \
+    || F "the reason the attestation could not be read was swallowed"
+  rc="$(ATTEST_READ=/nonexistent cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'hsm-key-attestation-read.sh not found' "$FAKE/outk"; } \
+    && P "no attestation reader -> CANNOT BE EVALUATED -> failure" || F "no reader was treated as a pass"
+
+  rc="$(cc_kek --kek-id 0b --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'no public key with ID 0b' "$FAKE/outk" && no_fragment; } \
+    && P "a --kek-id the token does not hold is a failure" || F "a missing KEK produced a pin"
+
+  rc="$(DVHEX="" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'DEVAUT_HEX) were not obtained' "$FAKE/outk" && no_fragment; } \
+    && P "no C.DevAut bytes to verify against -> failure" || F "the attestation was 'verified' with no device certificate"
+  rc="$(DVHEX="$DEVAUT_HEX_OTHER" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'do not hash to the pinned digest' "$FAKE/outk" && no_fragment; } \
+    && P "C.DevAut bytes that are not the pinned device's are refused before verifying against them" \
+    || F "the attestation was checked against an unpinned device certificate"
+
+  rc="$(RRC=enabled cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && no_fragment && grep -q 'NO MANIFEST_BINDING_PINS line' "$FAKE/outk"; } \
+    && P "a verified KEK on a card that FAILS commissioning gets no manifest fragment" \
+    || F "a pin was printed for a card that must not go into service"
+fi
 
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"

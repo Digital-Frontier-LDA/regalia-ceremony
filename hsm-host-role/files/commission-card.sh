@@ -15,6 +15,22 @@
 #
 #   commission-card.sh --expect-serial <SERIAL> --expect-devaut-sha <SHA256>
 #                      [--expect-chr <CHR>] [--expect-address akash1… [--wallet-id 01]]
+#                      [--kek-id <PKCS#11 hex id> --kek-ref <SC-HSM key ref 1..255>]
+#                      [--reader <PC/SC reader index>] [--slot <PKCS#11 slot id>]
+#
+# --kek-id/--kek-ref PRODUCE THE CUSTODY PIN (ADR-0002 D1, regalia#447/#448). regalia-kms identifies
+# its KEK by device serial plus public_key_sha256 — the SHA-256 of the key's SubjectPublicKeyInfo —
+# because the daemon cannot read the card's device certificate or key attestation (PKCS#11 does not
+# reach those files). So the one moment "this key was GENERATED on THIS genuine card" can be proven
+# is here: the attestation in EF CE<kek-ref> is verified against C.DevAut, C.DevAut against the
+# CardContact root, and the attested point against the public key at --kek-id. Only then is a
+# MANIFEST_BINDING_PINS line printed for the custody manifest binding. Give both or neither: the id
+# names the key PKCS#11 sees, the ref names the file its attestation lives in, and the two numbers
+# are different (key id 0a is key ref 1 on DENK0404144 — `pkcs15-tool --list-keys` shows both).
+#
+# --reader names the PC/SC reader the OpenSC readers use, and --slot the PKCS#11 slot. Resolve both
+# BY SERIAL (tools/hsm-reader-select.sh: hsm_reader_for / hsm_slot_id_for), never by position. The
+# C.DevAut and attestation readers still refuse a reader holding any serial but --expect-serial.
 #
 # BOTH --expect-serial AND --expect-devaut-sha are required. A serial is self-reported by the card
 # and a CHR is only a name; the digest of C.DevAut covers the device public key, which is what a
@@ -29,7 +45,8 @@ set -uo pipefail
 
 P11="${HSM_PKCS11_MODULE:-/usr/lib/opensc-pkcs11.so}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-EXPECT_CHR="" EXPECT_SERIAL="" EXPECT_ADDR="" SLOT="" EXPECT_DEVAUT_SHA=""
+EXPECT_CHR="" EXPECT_SERIAL="" EXPECT_ADDR="" SLOT="" EXPECT_DEVAUT_SHA="" READER=""
+KEK_ID="" KEK_REF=""
 WALLET_ID="01"
 # Helpers live in qubes/scripts/ of the ceremony repo. The default used to name
 # ../../ceremony/qubes/scripts/, a path that exists only in the retired monorepo layout — so on the
@@ -44,31 +61,50 @@ find_helper() {
 DEVAUT_JS="${HSM_DEVAUT_JS:-$(find_helper hsm-devaut-id.js)}"
 DEVAUT_SH="${HSM_DEVAUT_READ_SH:-$(find_helper hsm-devaut-read.sh)}"
 DERIVE_PY="${HSM_DERIVE_ADDRESS_PY:-$(find_helper derive-akash-address.py)}"
+ATTEST_SH="${HSM_KEY_ATTEST_READ_SH:-$(find_helper hsm-key-attestation-read.sh)}"
+ATTEST_PY="${HSM_KEY_ATTEST_VERIFY_PY:-$(find_helper hsm-key-attestation-verify.py)}"
+# The CardContact root the device certificate must chain to. Not a helper script, so resolved here
+# the same two ways find_helper resolves them.
+TRUST_DIR="${HSM_TRUST_DIR:-}"
+if [ -z "$TRUST_DIR" ]; then
+  for c in "$HERE/../../qubes/trust-anchors/smartcard-hsm" "$HERE/../../ceremony/qubes/trust-anchors/smartcard-hsm"; do
+    [ -d "$c" ] && { TRUST_DIR="$(cd "$c" && pwd)"; break; }
+  done
+fi
 
+need_val() { [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || { echo "$1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --expect-chr)     EXPECT_CHR="${2:-}"; shift 2;;
-    --expect-devaut-sha) EXPECT_DEVAUT_SHA="${2:-}"; shift 2;;
-    --expect-serial)  EXPECT_SERIAL="${2:-}"; shift 2;;
-    --expect-address) EXPECT_ADDR="${2:-}"; shift 2;;
-    --wallet-id)      WALLET_ID="${2:-}"; shift 2;;
-    --slot)           SLOT="${2:-}"; shift 2;;
-    --module)         P11="${2:-}"; shift 2;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0;;
+    --expect-chr)     need_val "$1" "${2-}"; EXPECT_CHR="$2"; shift 2;;
+    --expect-devaut-sha) need_val "$1" "${2-}"; EXPECT_DEVAUT_SHA="$2"; shift 2;;
+    --expect-serial)  need_val "$1" "${2-}"; EXPECT_SERIAL="$2"; shift 2;;
+    --expect-address) need_val "$1" "${2-}"; EXPECT_ADDR="$2"; shift 2;;
+    --wallet-id)      need_val "$1" "${2-}"; WALLET_ID="$2"; shift 2;;
+    --slot)           need_val "$1" "${2-}"; SLOT="$2"; shift 2;;
+    --module)         need_val "$1" "${2-}"; P11="$2"; shift 2;;
+    --reader)         need_val "$1" "${2-}"; READER="$2"; shift 2;;
+    --kek-id)         need_val "$1" "${2-}"; KEK_ID="$2"; shift 2;;
+    --kek-ref)        need_val "$1" "${2-}"; KEK_REF="$2"; shift 2;;
+    -h|--help) sed -n '2,43p' "$0"; exit 0;;
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
 done
 
 pass=0; fail=0
+devaut_hex="" kek_pin=""
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 
 SLOT_ARGS=()
 [ -n "$SLOT" ] && SLOT_ARGS=(--slot "$SLOT")
-# No arguments on purpose: this reads the card's configuration options and nothing else. It is
-# time-capped because an unresponsive reader must FAIL the gate, not hang it.
-card_info(){ perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool 2>/dev/null; }
+# --reader goes to every OpenSC tool that talks to the card directly. Without it they take OpenSC's
+# default reader, which with two cards attached is whichever enumerated first.
+READER_ARGS=() RD_ARGS=()
+[ -n "$READER" ] && { READER_ARGS=(--reader "$READER"); RD_ARGS=(-r "$READER"); }
+# No options on purpose (beyond the reader): this reads the card's configuration options and nothing
+# else. It is time-capped because an unresponsive reader must FAIL the gate, not hang it.
+card_info(){ perl -e 'alarm 30; exec @ARGV' -- sc-hsm-tool ${RD_ARGS[@]+"${RD_ARGS[@]}"} 2>/dev/null; }
 
 # =================================================================================================
 hdr "B3 — the host carries no DKEK"
@@ -175,9 +211,24 @@ if [ -z "$EXPECT_SERIAL" ] || [ -z "$EXPECT_DEVAUT_SHA" ]; then
   printf '     a substituted genuine card: the serial is self-reported and the CHR is a name, while\n'
   printf '     only the digest covers the device public key.\n'
 else
-  serial="$(perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} \
-              --list-slots 2>/dev/null | grep -oE 'serial num *: *[A-Za-z0-9]+' | awk '{print $NF}' | head -1)"
-  if [ -z "$serial" ]; then
+  # THE SERIAL OF THE SELECTED SLOT, NOT THE FIRST ONE LISTED. `--list-slots` lists EVERY slot
+  # whatever --slot says, and this used to take the first serial it printed — so with two cards
+  # attached (the bench has a Pico beside the Nitrokey) B7 could compare the WRONG card's serial and
+  # pass. The block for --slot's id is the one read; with no --slot, more than one token present is
+  # refused as ambiguous rather than guessed.
+  slots="$(perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" --list-slots 2>/dev/null)"
+  # Slot ids are compared as canonical lowercase hex STRINGS: strtonum is gawk-only, and a Debian
+  # rack host runs mawk.
+  want_hex=""
+  [ -n "${SLOT:-}" ] && want_hex="$(printf '0x%x' "$SLOT" 2>/dev/null)"
+  serial="$(awk -v want="$want_hex" -v selected="${SLOT:-}" '
+      /^Slot [0-9]+ \(0x[0-9a-fA-F]+\)/ { match($0, /\(0x[0-9a-fA-F]+\)/); id = tolower(substr($0, RSTART + 1, RLENGTH - 2)); next }
+      /serial num *:/ { v = $NF; if (selected == "") { n++; last = v } else if (id == want) { print v; exit } }
+      END { if (selected == "" && n == 1) print last; else if (selected == "" && n > 1) print "AMBIGUOUS" }' <<< "$slots")"
+  if [ "$serial" = "AMBIGUOUS" ]; then
+    F "more than one token is attached and no --slot was given — WHICH card is being commissioned CANNOT BE EVALUATED"
+    printf '     Pass --slot <id> (and --reader) for the card under commissioning.\n'
+  elif [ -z "$serial" ]; then
     F "could not read a token serial — identity CANNOT BE EVALUATED"
   elif [ "$serial" != "$EXPECT_SERIAL" ]; then
     F "SERIAL MISMATCH — expected '$EXPECT_SERIAL', card reports '$serial'. This is a DIFFERENT DEVICE."
@@ -199,7 +250,8 @@ else
     # byte-identical to the scsh reader on DENK0404144 (2026-09-18). Requiring a Smart Card Shell
     # install in a colocation cage is how a mandatory check turns into a skipped one.
     if [ -z "$devout" ] && [ -n "$DEVAUT_SH" ] && [ -r "$DEVAUT_SH" ]; then
-      devout="$(perl -e 'alarm 60; exec @ARGV' -- bash "$DEVAUT_SH" --expect-serial "$EXPECT_SERIAL" 2>/dev/null)"
+      devout="$(perl -e 'alarm 60; exec @ARGV' -- bash "$DEVAUT_SH" ${READER_ARGS[@]+"${READER_ARGS[@]}"} \
+                  --expect-serial "$EXPECT_SERIAL" 2>/dev/null)"
     fi
     if [ -z "$devout" ]; then
       F "could not read C.DevAut — device identity CANNOT BE EVALUATED"
@@ -209,6 +261,9 @@ else
       chr="$(grep -oE '^DEVAUT_CHR=.*' <<< "$devout" | cut -d= -f2-)"
       car="$(grep -oE '^DEVAUT_CAR=.*' <<< "$devout" | cut -d= -f2-)"
       sha="$(grep -oE '^DEVAUT_SHA256=.*' <<< "$devout" | cut -d= -f2-)"
+      # Kept for the KEK section below: the attestation is verified against THESE bytes, the ones
+      # whose digest was just compared with the ceremony's pin.
+      devaut_hex="$(grep -oE '^DEVAUT_HEX=[0-9A-Fa-f]*' <<< "$devout" | cut -d= -f2-)"
 
       if [ -n "$EXPECT_CHR" ]; then
         if [ "$chr" = "$EXPECT_CHR" ]; then
@@ -290,6 +345,122 @@ else
 fi
 
 # =================================================================================================
+hdr "KEK provenance — the key regalia-kms will pin was GENERATED on THIS genuine card (ADR-0002 D1)"
+# WHY THIS IS HERE AND NOWHERE ELSE. regalia-kms identifies its KEK by device_serial plus
+# public_key_sha256 (regalia-kms#26). It cannot check where that key came from: CKA_LOCAL answers
+# nothing on an SC-HSM (#447), and the two files that do — C.DevAut in EF 2F02 and the key
+# attestation in EF CE<keyref> — are out of PKCS#11's reach. So the daemon trusts a PIN, and the pin
+# is only worth what was proven before it was written down. This is where that proof happens: a
+# pin printed without it would carry an imported key, a mismatched id/ref pairing or a clone's key
+# into the manifest with exactly the same authority as the real thing.
+#
+# THE PIN AND THE ATTESTED POINT COME FROM ONE READ. The point handed to the verifier as
+# --expect-point is extracted from the SAME SubjectPublicKeyInfo bytes that are hashed into the pin.
+# Reading the point from one pkcs11-tool call and hashing the output of another would verify one
+# key and pin whatever the second call returned.
+#
+# THE MANIFEST FRAGMENT IS PRINTED ONLY IF COMMISSIONING PASSES AS A WHOLE (see RESULT). A pin for a
+# card that failed B6 or B7 is a line someone will copy anyway.
+if [ -z "$KEK_ID" ] && [ -z "$KEK_REF" ]; then
+  printf '  \033[33mNOTE\033[0m no --kek-id/--kek-ref given; the KEK pin (public_key_sha256) was NOT\n'
+  printf '        produced, and nothing here proved the KEK was generated on this card. Pass the\n'
+  printf '        KEK'"'"'s PKCS#11 id and SC-HSM key reference to produce the manifest binding pin.\n'
+elif [ -z "$KEK_ID" ] || [ -z "$KEK_REF" ]; then
+  # ONE WITHOUT THE OTHER IS A FAILURE, NOT A NOTE. The operator asked for the pin; answering with a
+  # note would let "Commissioning PASSED" stand over a pin that was never produced.
+  F "--kek-id and --kek-ref must be given TOGETHER — the KEK pin CANNOT BE EVALUATED from one of them"
+  printf '     --kek-id is the PKCS#11 id the daemon uses; --kek-ref is the SC-HSM key reference whose\n'
+  printf '     EF CE<ref> holds its attestation. They differ (pkcs15-tool --list-keys prints both).\n'
+elif ! [[ "$KEK_ID" =~ ^([0-9A-Fa-f]{2})+$ ]]; then
+  F "--kek-id '$KEK_ID' is not a hex PKCS#11 id (e.g. 0a) — the KEK pin CANNOT BE EVALUATED"
+elif [ -z "$EXPECT_SERIAL" ] || [ -z "$EXPECT_DEVAUT_SHA" ]; then
+  F "the KEK pin needs the pinned identity (--expect-serial, --expect-devaut-sha) — CANNOT BE EVALUATED"
+elif [ -z "$devaut_hex" ]; then
+  # The attestation is signed by the device key INSIDE C.DevAut. Without those bytes there is
+  # nothing to verify it against — and fetching them again here would be a second read that
+  # nobody compared with the ceremony's digest.
+  F "C.DevAut bytes (DEVAUT_HEX) were not obtained above — the attestation CANNOT BE EVALUATED"
+elif [ -z "$ATTEST_SH" ] || [ ! -r "$ATTEST_SH" ]; then
+  F "hsm-key-attestation-read.sh not found — the KEK attestation CANNOT BE EVALUATED"
+  printf '     Point HSM_KEY_ATTEST_READ_SH at qubes/scripts/hsm-key-attestation-read.sh.\n'
+elif [ -z "$ATTEST_PY" ] || [ ! -r "$ATTEST_PY" ]; then
+  F "hsm-key-attestation-verify.py not found — the KEK attestation CANNOT BE EVALUATED"
+  printf '     Point HSM_KEY_ATTEST_VERIFY_PY at qubes/scripts/hsm-key-attestation-verify.py.\n'
+elif [ -z "$TRUST_DIR" ] || [ ! -d "$TRUST_DIR" ]; then
+  # No anchor, no genuineness: the verifier's other arm (--devaut-already-verified) is an assertion,
+  # and nothing earlier in THIS script validated the chain — B7 compares a digest, it does not
+  # verify a signature. So the anchor is mandatory here.
+  F "no SmartCard-HSM trust anchor directory — the device chain CANNOT BE EVALUATED"
+  printf '     Point HSM_TRUST_DIR at qubes/trust-anchors/smartcard-hsm.\n'
+elif ! python3 -c 'import cryptography' >/dev/null 2>&1; then
+  F "python3 with the cryptography package is absent — the KEK attestation CANNOT BE EVALUATED"
+else
+  kek_tmp="$(mktemp -d)"
+  # C.DevAut must be the bytes whose digest B7 compared against the ceremony's pin. Recomputed here
+  # from DEVAUT_HEX rather than trusting the reader's DEVAUT_SHA256 field, which is a separate line
+  # a reader could get wrong independently of the bytes.
+  printf '%s' "$devaut_hex" | python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+    > "$kek_tmp/devaut.bin" 2>/dev/null
+  devaut_recomputed="$(sha256sum < "$kek_tmp/devaut.bin" | awk '{print $1}')"
+  if [ ! -s "$kek_tmp/devaut.bin" ] || [ "$devaut_recomputed" != "$EXPECT_DEVAUT_SHA" ]; then
+    F "the C.DevAut bytes read above do not hash to the pinned digest — the attestation would be checked against an UNPINNED device"
+  else
+    perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} \
+      --read-object --type pubkey --id "$KEK_ID" -o "$kek_tmp/kek.der" >/dev/null 2>&1
+    # The uncompressed EC point inside that SubjectPublicKeyInfo. An RSA or unparseable key yields
+    # nothing, and nothing is a failure: the SC-HSM attestation path here is the EC one.
+    kek_point="$( [ -s "$kek_tmp/kek.der" ] && python3 - "$kek_tmp/kek.der" 2>/dev/null <<'PYPOINT'
+import sys
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_public_key
+k = load_der_public_key(open(sys.argv[1], "rb").read())
+if isinstance(k, ec.EllipticCurvePublicKey):
+    print(k.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint).hex())
+PYPOINT
+)"
+    att_out="$(perl -e 'alarm 60; exec @ARGV' -- bash "$ATTEST_SH" ${READER_ARGS[@]+"${READER_ARGS[@]}"} \
+                 --expect-serial "$EXPECT_SERIAL" --key-ref "$KEK_REF" 2>"$kek_tmp/att.err")"; att_rc=$?
+    att_hex="$(grep -oE '^ATTEST_HEX=[0-9A-Fa-f]*' <<< "$att_out" | cut -d= -f2-)"
+    if [ ! -s "$kek_tmp/kek.der" ]; then
+      F "no public key with ID $KEK_ID on this token — the KEK pin CANNOT BE EVALUATED"
+    elif [ -z "$kek_point" ]; then
+      F "key ID $KEK_ID is not an EC public key this can parse — the KEK attestation CANNOT BE EVALUATED"
+    elif [ "$att_rc" -ne 0 ] || [ -z "$att_hex" ]; then
+      # Named, because the likeliest causes are different operator actions: a wrong --kek-ref, or a
+      # key that was IMPORTED and so has no attestation at all — which must never be pinned.
+      F "could not read the attestation at key reference $KEK_REF — the KEK's provenance CANNOT BE EVALUATED"
+      # The reader's own named reason when it gave one; otherwise the tail of whatever it printed.
+      att_why="$(grep '^hsm-key-attestation-read:' "$kek_tmp/att.err")"
+      [ -n "$att_why" ] || att_why="$(grep -v '^[[:space:]]*$' "$kek_tmp/att.err" | tail -3)"
+      printf '%s\n' "$att_why" | sed 's/^/     /'
+    else
+      printf '%s' "$att_hex" | python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+        > "$kek_tmp/attest.bin" 2>/dev/null
+      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- python3 "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
+                   --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
+                   --expect-point "$kek_point" 2>&1)"; ver_rc=$?
+      # THE EXIT CODE AND THE THREE VERDICT LINES, ALL OF THEM. A zero exit alone would accept a
+      # verifier that returned early, or one run without --expect-point by a future edit; requiring
+      # each line pins what was actually checked: the chain, the device signature, and that the
+      # attested key IS the key at --kek-id.
+      if [ "$ver_rc" -eq 0 ] \
+         && grep -qx 'DEVAUT_CHAIN=verified' <<< "$ver_out" \
+         && grep -qx 'ATTEST_SIGNATURE=verified' <<< "$ver_out" \
+         && grep -qx 'ATTESTED_POINT_MATCHES=yes' <<< "$ver_out"; then
+        kek_pin="sha256:$(sha256sum < "$kek_tmp/kek.der" | awk '{print $1}')"
+        P "C.DevAut chains to the CardContact root in $TRUST_DIR"
+        P "EF $(printf 'CE%02X' "$KEK_REF") is signed by this device and attests the key at ID $KEK_ID — generated on this card"
+        P "KEK public_key_sha256 = $kek_pin (SubjectPublicKeyInfo of ID $KEK_ID)"
+      else
+        F "the KEK attestation DID NOT VERIFY — imported key, wrong --kek-ref for --kek-id, or not a genuine card. DO NOT PIN IT."
+        printf '%s\n' "$ver_out" | sed 's/^/     /' | tail -6
+      fi
+    fi
+  fi
+  rm -rf "$kek_tmp"
+fi
+
+# =================================================================================================
 hdr "No SO-PIN material at the site"
 # Under D3 the SO-PIN is held off-site at 2-of-3. Its presence here would collapse that.
 # BOUNDED DELIBERATELY. The first version of this walked /etc /root /home /opt /srv /var/lib in
@@ -335,6 +506,14 @@ printf '  %d passed, %d failed\n' "$pass" "$fail"
 if [ "$fail" -ne 0 ]; then
   printf '\n  \033[1;31mDO NOT PUT THIS CARD INTO SERVICE.\033[0m Every failure above is a property that\n'
   printf '  cannot be checked again once the card is trusted — commissioning is the only gate.\n'
+  [ -n "$kek_pin" ] && printf '\n  The KEK attestation verified, but NO MANIFEST_BINDING_PINS line is printed for a card\n  that failed commissioning.\n'
   exit 1
 fi
 printf '\n  Commissioning PASSED. Record the serial, CHR and counter baseline in the fleet log.\n'
+# The custody pin, ONLY now: every check above passed, including the attestation that makes it mean
+# "generated on this genuine card". One JSON line, prefixed so it can be grepped out of a transcript
+# and pasted into the manifest binding without retyping a digest.
+if [ -n "$kek_pin" ]; then
+  printf '\n  Custody manifest binding pins for the KEK (ADR-0002 D1) — copy this line:\n'
+  printf 'MANIFEST_BINDING_PINS {"device_serial":"%s","public_key_sha256":"%s"}\n' "$EXPECT_SERIAL" "$kek_pin"
+fi
