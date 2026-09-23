@@ -135,11 +135,11 @@ def fleet_manifest() -> dict:
             "objects": [signer, fido]}
 
 
-def commission_transcript(serial=NK_SERIAL, pin=PIN_NK, kek_id="0A", pins_line=True) -> str:
+def commission_transcript(serial=NK_SERIAL, pin=PIN_NK, kek_id="0A", pins_line=True, key_type="EC") -> str:
     """The tail commission-card.sh --kek-id/--kek-ref prints on a pass, colours included."""
     lines = [
         "\n\x1b[1m### KEK provenance (ADR-0002 D1)\x1b[0m",
-        f"  \x1b[32mPASS\x1b[0m EF CE01 is signed by this device and attests the key at ID {kek_id} — generated on this card",
+        f"  \x1b[32mPASS\x1b[0m EF CE01 is signed by this device and attests the {key_type} key at ID {kek_id} — generated on this card",
         f"  \x1b[32mPASS\x1b[0m KEK public_key_sha256 = {pin} (SubjectPublicKeyInfo of ID {kek_id})",
         "\n\x1b[1m### RESULT\x1b[0m", "  9 passed, 0 failed",
         "\n  Commissioning PASSED. Record the serial, CHR and counter baseline in the fleet log.",
@@ -148,6 +148,57 @@ def commission_transcript(serial=NK_SERIAL, pin=PIN_NK, kek_id="0A", pins_line=T
         lines += ["\n  Custody manifest binding pins for the KEK (ADR-0002 D1) — copy this line:",
                   f'MANIFEST_BINDING_PINS {{"device_serial":"{serial}","public_key_sha256":"{pin}"}}']
     return "\n".join(lines) + "\n"
+
+
+# A REAL FAILED RUN: commission-card.sh on the bench Nitrokey (DENK0404144), 2026-09-23, regalia#28
+# criterion 4 rehearsal — colour codes stripped, otherwise verbatim. It failed B3 (the scan could not
+# read /root), the staging interlock, B6 and the KEK attestation, so it printed no pins line; record
+# used to call it "unrecognised evidence". No secrets: it is a pass/fail report.
+FAILED_COMMISSION_TRANSCRIPT = """
+### B3 — the host carries no DKEK
+  FAIL the DKEK scan could not complete — B3 CANNOT BE EVALUATED (run as root, or fix the paths it names)
+     REFUSING: /root could not be scanned completely, so this host cannot be reported clean:
+         find: ‘/root’: Permission denied
+       Re-run with enough privilege to read these paths (the guard runs as root on a KMS
+       host), or scope the scan with --only-dir if they are genuinely out of scope.
+
+### The staging registry must not still list this card as wipeable
+  FAIL THIS CARD IS STILL LISTED staging IN /home/user/regalia/tools/hsm-staging-registry.json — the drills may wipe it on schedule.
+     Remove the entry in a reviewed change BEFORE putting the card into service;
+     a production key on a card automation may erase is not custody.
+
+### B6 — the card has RESET RETRY COUNTER disabled
+  FAIL RRC IS ENABLED — the SO-PIN can reset the user PIN and export every key. DO NOT RACK THIS CARD.
+     Re-initialise via Smart Card Shell (SmartCardHSMInitializer) with RRC disabled.
+     sc-hsm-tool --initialize CANNOT produce such a card: it hardcodes the option ON.
+
+### B7 — this is OUR card, not merely A genuine one
+  PASS token serial matches the value recorded at the ceremony (DENK0404144)
+  PASS C.DevAut digest matches the pinned value
+
+### Funding address — the key in this card controls the money we think it controls
+  NOTE no --expect-address given; the on-chain identity of the wallet key was not
+        checked. Pass the akash1… address recorded at the ceremony to check it here.
+
+### KEK provenance — the key regalia-kms will pin was GENERATED on THIS genuine card (ADR-0002 D1)
+  FAIL the KEK attestation DID NOT VERIFY — imported key, wrong --kek-ref for --kek-id, or not a genuine card. DO NOT PIN IT.
+     hsm-key-attestation-verify FAILED: C.DevAut does not validate to an anchor in /home/user/rc/qubes/trust-anchors/smartcard-hsm; the attestation below would prove nothing.
+     cvc-devaut-verify ERROR: pycvc is not importable — install the hash-pinned deps: pip install --require-hashes -r qubes/requirements.txt
+     DEVAUT_CHAIN=failed
+
+### No SO-PIN material at the site
+  PASS no SO-PIN-shaped material in the usual config locations (tripwire, not proof of absence)
+
+### Key-use-counter baseline
+  NOTE no key-use counter reported. It is set at key GENERATION; imported keys
+        may not carry one. If absent, 4.2 reconciliation cannot work — decide deliberately.
+
+### RESULT
+  3 passed, 4 failed
+
+  DO NOT PUT THIS CARD INTO SERVICE. Every failure above is a property that
+  cannot be checked again once the card is trusted — commissioning is the only gate.
+"""
 
 
 NK_B = "DENK0000002"
@@ -598,6 +649,34 @@ class Record(Case):
         ev[0] = self.file("nk.txt", commission_transcript(pin=self.pin_nk, pins_line=False))
         self.record_refuses(ev, "no MANIFEST_BINDING_PINS line")
 
+    def test_a_failed_commissioning_run_is_named_as_one(self):
+        """The bench transcript of a run that FAILED. It is a commission-card.sh transcript, so the
+        refusal must say what happened to it — failed, no pins issued, and why — not that it is
+        unrecognised. Nothing is written."""
+        ev = self.standard_evidence()
+        ev[0] = self.file("commission-nitrokey-bench-20.txt", FAILED_COMMISSION_TRANSCRIPT)
+        self.record_refuses(ev, "commission-nitrokey-bench-20.txt: commission-card.sh transcript from a run that "
+                                "did NOT pass (4 failed) — no pins were issued; fix the failures it lists and "
+                                "re-commission",
+                            "FAIL the DKEK scan could not complete", "FAIL THIS CARD IS STILL LISTED staging",
+                            "FAIL RRC IS ENABLED", "… and 1 more")
+        result = self.run_tool("record", self.manifest, "--evidence", *ev)
+        self.assertNotIn("unrecognised evidence", result.stderr)
+
+    def test_a_failed_run_with_colours_is_still_recognised(self):
+        """As captured by `script` or a tee — the ANSI codes commission-card.sh prints left in."""
+        coloured = FAILED_COMMISSION_TRANSCRIPT.replace("### ", "\x1b[1m### ").replace("  FAIL ", "  \x1b[31mFAIL\x1b[0m ")
+        ev = self.standard_evidence()
+        ev[0] = self.file("failed-coloured.txt", coloured)
+        self.record_refuses(ev, "run that did NOT pass (4 failed)", "FAIL RRC IS ENABLED")
+
+    def test_a_failed_run_with_a_pins_line_pasted_in_is_still_refused(self):
+        """commission-card.sh never prints pins for a failed run; one next to a failed tally was put
+        there by hand, and the tally wins."""
+        ev = self.standard_evidence()
+        ev[0] = self.file("edited.txt", FAILED_COMMISSION_TRANSCRIPT + commission_transcript(pin=self.pin_nk))
+        self.record_refuses(ev, "run that did NOT pass (4 failed)")
+
     def test_refuses_two_transcripts_pasted_together(self):
         ev = self.standard_evidence()
         ev[0] = self.file("nk.txt", commission_transcript(pin=self.pin_nk) + commission_transcript(pin=self.pin_nk))
@@ -849,6 +928,28 @@ class KeyEncryptionKeys(Case):
         self.assertNotIn("OPERATION VERIFIED", result.stdout, "a round trip must never be reported as re-verified")
         got = json.loads(out.read_text())
         self.assertEqual([b["state"] for o in got["objects"][:2] for b in o["bindings"]], ["qualified"] * 4)
+
+    def test_a_real_rsa_kek_commissioning_transcript_is_recorded(self):
+        """ADR-0002 D1's envelope KEK is RSA, and commission-card.sh could not commission one until the
+        verifier compared RSA keys. The pin here is the SPKI of the RSA-2048 key GENERATED on
+        DENK0404144 (id 21, 2026-09-23; pinned by test_hsm_key_attestation_verify.py), in the transcript
+        shape commission-card.sh prints for an RSA key, with a decrypt round trip encrypted to that same
+        real key. record must put that pin on the envelope KEK binding and qualify it."""
+        sys.path.insert(0, str(HERE))
+        from test_hsm_key_attestation_verify import PIN_RSA_ID21, SPKI_RSA_ID21
+        real = bytes.fromhex(SPKI_RSA_ID21)
+        self.rsa[NK_SERIAL] = (None, real)
+        ev = self.kek_evidence()
+        ev[0] = self.file(f"nk-{NK_SERIAL}-0b.txt",
+                          commission_transcript(serial=NK_SERIAL, pin=PIN_RSA_ID21, kek_id="0b", key_type="RSA"))
+        out = self.dir / "q.json"
+        result = self.run_tool("record", self.manifest, "--evidence", *ev, "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        got = json.loads(out.read_text())
+        kek = got["objects"][0]
+        self.assertEqual((kek["id"], kek["algorithm"]), ("envelope-kek", "rsa2048"))
+        self.assertEqual(kek["bindings"][0]["public_key_sha256"], PIN_RSA_ID21)
+        self.assertEqual(kek["bindings"][0]["state"], "qualified")
 
     def test_plan_prints_the_round_trip_and_says_it_is_not_reverifiable(self):
         out = self.run_tool("plan", self.manifest).stdout

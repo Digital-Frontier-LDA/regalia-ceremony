@@ -23,10 +23,13 @@
 # because the daemon cannot read the card's device certificate or key attestation (PKCS#11 does not
 # reach those files). So the one moment "this key was GENERATED on THIS genuine card" can be proven
 # is here: the attestation in EF CE<kek-ref> is verified against C.DevAut, C.DevAut against the
-# CardContact root, and the attested point against the public key at --kek-id. Only then is a
-# MANIFEST_BINDING_PINS line printed for the custody manifest binding. Give both or neither: the id
+# CardContact root, and the attested public key against the public key at --kek-id — RSA (the
+# envelope KEK, modulus and exponent) or EC (point and curve), the two types the card attests. Only
+# then is a MANIFEST_BINDING_PINS line printed for the custody manifest binding. Give both or neither: the id
 # names the key PKCS#11 sees, the ref names the file its attestation lives in, and the two numbers
 # are different (key id 0a is key ref 1 on DENK0404144 — `pkcs15-tool --list-keys` shows both).
+# Its Python runs under the interpreter tools/ceremony-python.sh resolves (pycvc and cryptography;
+# CEREMONY_VENV picks one), never whichever python3 happens to be first on PATH.
 #
 # --reader names the PC/SC reader the OpenSC readers use, and --slot the PKCS#11 slot. Resolve both
 # BY SERIAL (tools/hsm-reader-select.sh: hsm_reader_for / hsm_slot_id_for), never by position. The
@@ -63,6 +66,22 @@ DEVAUT_SH="${HSM_DEVAUT_READ_SH:-$(find_helper hsm-devaut-read.sh)}"
 DERIVE_PY="${HSM_DERIVE_ADDRESS_PY:-$(find_helper derive-akash-address.py)}"
 ATTEST_SH="${HSM_KEY_ATTEST_READ_SH:-$(find_helper hsm-key-attestation-read.sh)}"
 ATTEST_PY="${HSM_KEY_ATTEST_VERIFY_PY:-$(find_helper hsm-key-attestation-verify.py)}"
+# The interpreter resolver (tools/ceremony-python.sh). The KEK section runs Python that needs pycvc
+# and cryptography, which live in the ceremony venv, not in the system interpreter — see the KEK
+# section for what running the bare `python3` did on the bench.
+CEREMONY_PY_SH="${HSM_CEREMONY_PYTHON_SH:-}"
+if [ -z "$CEREMONY_PY_SH" ]; then
+  for c in "$HERE/../../tools/ceremony-python.sh" "$HERE/../../ceremony/tools/ceremony-python.sh"; do
+    [ -r "$c" ] && { CEREMONY_PY_SH="$c"; break; }
+  done
+fi
+# The bin dir of the first interpreter that imports what the KEK section needs. Called in a command
+# substitution, so the resolver it sources is loaded into a subshell: this script wants its answer,
+# not its functions.
+kek_python_bin() {
+  # shellcheck source=/dev/null
+  . "$CEREMONY_PY_SH" && ceremony_python_find cryptography cvc
+}
 # The CardContact root the device certificate must chain to. Not a helper script, so resolved here
 # the same two ways find_helper resolves them.
 TRUST_DIR="${HSM_TRUST_DIR:-}"
@@ -85,7 +104,7 @@ while [ $# -gt 0 ]; do
     --reader)         need_val "$1" "${2-}"; READER="$2"; shift 2;;
     --kek-id)         need_val "$1" "${2-}"; KEK_ID="$2"; shift 2;;
     --kek-ref)        need_val "$1" "${2-}"; KEK_REF="$2"; shift 2;;
-    -h|--help) sed -n '2,43p' "$0"; exit 0;;
+    -h|--help) sed -n '2,46p' "$0"; exit 0;;
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
 done
@@ -354,10 +373,25 @@ hdr "KEK provenance — the key regalia-kms will pin was GENERATED on THIS genui
 # pin printed without it would carry an imported key, a mismatched id/ref pairing or a clone's key
 # into the manifest with exactly the same authority as the real thing.
 #
-# THE PIN AND THE ATTESTED POINT COME FROM ONE READ. The point handed to the verifier as
-# --expect-point is extracted from the SAME SubjectPublicKeyInfo bytes that are hashed into the pin.
-# Reading the point from one pkcs11-tool call and hashing the output of another would verify one
-# key and pin whatever the second call returned.
+# THE PIN AND THE ATTESTED KEY COME FROM ONE READ. The SubjectPublicKeyInfo handed to the verifier
+# as --expect-spki is the SAME file whose bytes are hashed into the pin. Comparing the key from one
+# pkcs11-tool call and hashing the output of another would verify one key and pin whatever the second
+# call returned.
+#
+# RSA AND EC BOTH. This section used to extract an EC point and pass --expect-point, so an RSA key —
+# ADR-0002 D1's envelope KEK, the main key this pin exists for — FAILED as "not an EC public key this
+# can parse" before its attestation was even read (regalia#28 criterion 4 rehearsal, DENK0404144,
+# 2026-09-23). The card attests both: the verifier now compares the whole key (modulus AND exponent,
+# or point AND curve) against the SPKI itself. A key of any other type cannot have been generated
+# with an attestation on a SmartCard-HSM, so it is a named failure, never a skip.
+#
+# THE INTERPRETER IS RESOLVED, NOT ASSUMED. Every Python this section runs needs cryptography, and the
+# chain walk needs pycvc — the hash-pinned deps that live in the ceremony venv. The same rehearsal ran
+# this section under the system python3: the verifier could not import pycvc and the KEK FAILED as
+# "C.DevAut does not validate to an anchor", while the same verifier under the venv verified the
+# same bytes. A genuine card was reported as not genuine because of which interpreter was first on
+# PATH. tools/ceremony-python.sh is the repo's one answer to "which interpreter has the deps"; it is
+# used for every Python below, and no interpreter with them is its own named failure.
 #
 # THE MANIFEST FRAGMENT IS PRINTED ONLY IF COMMISSIONING PASSES AS A WHOLE (see RESULT). A pin for a
 # card that failed B6 or B7 is a line someone will copy anyway.
@@ -392,14 +426,22 @@ elif [ -z "$TRUST_DIR" ] || [ ! -d "$TRUST_DIR" ]; then
   # verify a signature. So the anchor is mandatory here.
   F "no SmartCard-HSM trust anchor directory — the device chain CANNOT BE EVALUATED"
   printf '     Point HSM_TRUST_DIR at qubes/trust-anchors/smartcard-hsm.\n'
-elif ! python3 -c 'import cryptography' >/dev/null 2>&1; then
-  F "python3 with the cryptography package is absent — the KEK attestation CANNOT BE EVALUATED"
+elif [ -z "$CEREMONY_PY_SH" ] || [ ! -r "$CEREMONY_PY_SH" ]; then
+  F "tools/ceremony-python.sh not found — the interpreter for the KEK attestation CANNOT BE RESOLVED, so it CANNOT BE EVALUATED"
+  printf '     Point HSM_CEREMONY_PYTHON_SH at tools/ceremony-python.sh.\n'
+elif ! kek_py_bin="$(kek_python_bin)" \
+     || [ ! -x "$kek_py_bin/python3" ]; then
+  F "no Python interpreter here can import pycvc and cryptography — the KEK attestation CANNOT BE EVALUATED"
+  printf '     Not a verdict on the card: the device chain needs pycvc. tools/ceremony-python.sh looked in\n'
+  printf '     $CEREMONY_VENV, /opt/dev-bin/regalia-venv, the historical venv paths and the system python3.\n'
+  printf '     Build the venv (qubes/requirements.txt, --require-hashes) or set CEREMONY_VENV.\n'
 else
+  KEK_PY="$kek_py_bin/python3"
   kek_tmp="$(mktemp -d)"
   # C.DevAut must be the bytes whose digest B7 compared against the ceremony's pin. Recomputed here
   # from DEVAUT_HEX rather than trusting the reader's DEVAUT_SHA256 field, which is a separate line
   # a reader could get wrong independently of the bytes.
-  printf '%s' "$devaut_hex" | python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+  printf '%s' "$devaut_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
     > "$kek_tmp/devaut.bin" 2>/dev/null
   devaut_recomputed="$(sha256sum < "$kek_tmp/devaut.bin" | awk '{print $1}')"
   if [ ! -s "$kek_tmp/devaut.bin" ] || [ "$devaut_recomputed" != "$EXPECT_DEVAUT_SHA" ]; then
@@ -407,24 +449,27 @@ else
   else
     perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "$P11" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} \
       --read-object --type pubkey --id "$KEK_ID" -o "$kek_tmp/kek.der" >/dev/null 2>&1
-    # The uncompressed EC point inside that SubjectPublicKeyInfo. An RSA or unparseable key yields
-    # nothing, and nothing is a failure: the SC-HSM attestation path here is the EC one.
-    kek_point="$( [ -s "$kek_tmp/kek.der" ] && python3 - "$kek_tmp/kek.der" 2>/dev/null <<'PYPOINT'
+    # What kind of key the token holds at --kek-id: rsa, ec, another type's name, or nothing when the
+    # bytes are not a SubjectPublicKeyInfo. Only to NAME the failure for the last two — the verifier
+    # compares the key itself, so this answer never decides a pass.
+    kek_type="$( [ -s "$kek_tmp/kek.der" ] && "$KEK_PY" - "$kek_tmp/kek.der" 2>/dev/null <<'PYTYPE'
 import sys
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_public_key
+from cryptography.hazmat.primitives.asymmetric import ec, rsa
+from cryptography.hazmat.primitives.serialization import load_der_public_key
 k = load_der_public_key(open(sys.argv[1], "rb").read())
-if isinstance(k, ec.EllipticCurvePublicKey):
-    print(k.public_bytes(Encoding.X962, PublicFormat.UncompressedPoint).hex())
-PYPOINT
+print("rsa" if isinstance(k, rsa.RSAPublicKey) else "ec" if isinstance(k, ec.EllipticCurvePublicKey)
+      else type(k).__name__)
+PYTYPE
 )"
     att_out="$(perl -e 'alarm 60; exec @ARGV' -- bash "$ATTEST_SH" ${READER_ARGS[@]+"${READER_ARGS[@]}"} \
                  --expect-serial "$EXPECT_SERIAL" --key-ref "$KEK_REF" 2>"$kek_tmp/att.err")"; att_rc=$?
     att_hex="$(grep -oE '^ATTEST_HEX=[0-9A-Fa-f]*' <<< "$att_out" | cut -d= -f2-)"
     if [ ! -s "$kek_tmp/kek.der" ]; then
       F "no public key with ID $KEK_ID on this token — the KEK pin CANNOT BE EVALUATED"
-    elif [ -z "$kek_point" ]; then
-      F "key ID $KEK_ID is not an EC public key this can parse — the KEK attestation CANNOT BE EVALUATED"
+    elif [ -z "$kek_type" ]; then
+      F "key ID $KEK_ID is not a SubjectPublicKeyInfo this can parse — the KEK attestation CANNOT BE EVALUATED"
+    elif [ "$kek_type" != rsa ] && [ "$kek_type" != ec ]; then
+      F "key ID $KEK_ID is neither an RSA nor an EC key ($kek_type) — a SmartCard-HSM attests only those, so it cannot be proven generated on this card. DO NOT PIN IT."
     elif [ "$att_rc" -ne 0 ] || [ -z "$att_hex" ]; then
       # Named, because the likeliest causes are different operator actions: a wrong --kek-ref, or a
       # key that was IMPORTED and so has no attestation at all — which must never be pinned.
@@ -434,26 +479,42 @@ PYPOINT
       [ -n "$att_why" ] || att_why="$(grep -v '^[[:space:]]*$' "$kek_tmp/att.err" | tail -3)"
       printf '%s\n' "$att_why" | sed 's/^/     /'
     else
-      printf '%s' "$att_hex" | python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+      printf '%s' "$att_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
         > "$kek_tmp/attest.bin" 2>/dev/null
-      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- python3 "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
+      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
                    --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
-                   --expect-point "$kek_point" 2>&1)"; ver_rc=$?
+                   --expect-spki "$kek_tmp/kek.der" 2>&1)"; ver_rc=$?
       # THE EXIT CODE AND THE THREE VERDICT LINES, ALL OF THEM. A zero exit alone would accept a
-      # verifier that returned early, or one run without --expect-point by a future edit; requiring
+      # verifier that returned early, or one run without --expect-spki by a future edit; requiring
       # each line pins what was actually checked: the chain, the device signature, and that the
-      # attested key IS the key at --kek-id.
+      # attested key IS the key at --kek-id (the very bytes hashed into the pin below).
       if [ "$ver_rc" -eq 0 ] \
          && grep -qx 'DEVAUT_CHAIN=verified' <<< "$ver_out" \
          && grep -qx 'ATTEST_SIGNATURE=verified' <<< "$ver_out" \
-         && grep -qx 'ATTESTED_POINT_MATCHES=yes' <<< "$ver_out"; then
+         && grep -qx 'ATTESTED_KEY_MATCHES=yes' <<< "$ver_out"; then
         kek_pin="sha256:$(sha256sum < "$kek_tmp/kek.der" | awk '{print $1}')"
         P "C.DevAut chains to the CardContact root in $TRUST_DIR"
-        P "EF $(printf 'CE%02X' "$KEK_REF") is signed by this device and attests the key at ID $KEK_ID — generated on this card"
+        P "EF $(printf 'CE%02X' "$KEK_REF") is signed by this device and attests the $(tr a-z A-Z <<< "$kek_type") key at ID $KEK_ID — generated on this card"
         P "KEK public_key_sha256 = $kek_pin (SubjectPublicKeyInfo of ID $KEK_ID)"
+      elif grep -q '^DEPENDENCY_MISSING=' <<< "$ver_out"; then
+        # The resolver said this interpreter imports the deps; the verifier disagrees. Still not a
+        # verdict on the card, so not worded as one.
+        F "the KEK attestation verifier is missing a dependency under $KEK_PY — CANNOT BE EVALUATED (not a verdict on the card)"
+        grep -E '^(hsm-key-attestation-verify|DEPENDENCY_MISSING)' <<< "$ver_out" | sed 's/^/     /'
+      elif grep -qx 'DEVAUT_CHAIN=not-evaluated' <<< "$ver_out"; then
+        # The chain could not be CHECKED (an empty or malformed C.DevAut read, a chain walker that
+        # exited on its own error). That is the environment talking, not a verdict on the card, and
+        # wording it as "not a genuine card" is the misreport this section exists to avoid (review of
+        # regalia-ceremony#40). Still a FAIL: nothing is pinned without a verified chain.
+        F "the C.DevAut chain could NOT BE EVALUATED — no verdict on the card; re-read C.DevAut and check the verifier's reason below"
+        grep -E '^(hsm-key-attestation-verify|cvc-devaut-verify) |^DEVAUT_CHAIN=' <<< "$ver_out" | sed 's/^/     /' | head -6
       else
         F "the KEK attestation DID NOT VERIFY — imported key, wrong --kek-ref for --kek-id, or not a genuine card. DO NOT PIN IT."
-        printf '%s\n' "$ver_out" | sed 's/^/     /' | tail -6
+        # The verifier's named reasons FIRST, then its verdict lines. A tail of the combined output
+        # used to show whichever lines came last, which on the bench was not the one that said why.
+        { grep -E '^(hsm-key-attestation-verify|cvc-devaut-verify) ' <<< "$ver_out"
+          grep -E '^[A-Z_]+=' <<< "$ver_out" | grep -vE '^(ATTESTED_POINT|DEVAUT_CHR|ATTEST_CAR)='; } \
+          | sed 's/^/     /' | head -10
       fi
     fi
   fi

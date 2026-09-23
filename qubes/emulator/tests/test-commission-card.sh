@@ -323,9 +323,19 @@ else
   fx(){ python3 -c 'import sys; sys.path.insert(0, sys.argv[1])
 import test_hsm_key_attestation_read as r, test_hsm_key_attestation_verify as v
 print({"devaut": r.EF2F02, "ce01": r.CE01_KEY_0A, "der": r.KEK_DER_0A, "pin": r.KEK_PIN_0A,
-       "old_ce01": v.CE01}[sys.argv[2]])' "$HERE" "$1"; }
+       "old_ce01": v.CE01, "rsa_ce": v.CE04_RSA_ID21, "rsa_der": v.SPKI_RSA_ID21, "rsa_pin": v.PIN_RSA_ID21,
+       "ec_ce": v.CE03_EC_ID20, "ec_der": v.SPKI_EC_ID20}[sys.argv[2]])' "$HERE" "$1"; }
   DEVAUT_HEX_REAL="$(fx devaut)"; CE01_REAL="$(fx ce01)"; KEK_DER_REAL="$(fx der)"; PIN_REAL="$(fx pin)"
   CE01_OTHER_KEY="$(fx old_ce01)"
+  # The RSA-2048 KEK generated on DENK0404144 at id 21 / key ref 4 (2026-09-23), and a P-256 key at
+  # id 20 / ref 3 from the same run — both pinned by test_hsm_key_attestation_verify.py.
+  CE04_RSA="$(fx rsa_ce)"; RSA_DER="$(fx rsa_der)"; PIN_RSA="$(fx rsa_pin)"
+  CE03_EC="$(fx ec_ce)"; EC20_DER="$(fx ec_der)"
+  # The interpreter that has the deps, as a CEREMONY_VENV root: the rows that hide it behind a
+  # python3 without pycvc must still let commission-card.sh find it — the venv on a dev box, the
+  # system prefix in CI.
+  REAL_PY_ROOT="$(dirname "$(ceremony_python_find cryptography cvc)")"
+  REAL_PY="$REAL_PY_ROOT/bin/python3"
   DEVAUT_SHA_REAL="$(python3 -c 'import hashlib,sys; print(hashlib.sha256(bytes.fromhex(sys.argv[1])).hexdigest())' "$DEVAUT_HEX_REAL")"
   # A signature byte flipped: the structure still parses, only the device signature breaks.
   CE01_BADSIG="${CE01_REAL:0:$(( ${#CE01_REAL} - 4 ))}$( [ "${CE01_REAL: -4:2}" = "00" ] && echo 01 || echo 00 )${CE01_REAL: -2}"
@@ -348,7 +358,15 @@ STUB
 #!/usr/bin/env python3
 print("DEVAUT_CHAIN=verified")
 STUB
-  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py"
+  # A verifier whose chain walk could not RUN (malformed C.DevAut, its own error): exit 2 and
+  # DEVAUT_CHAIN=not-evaluated. That is not a verdict on the card and must not be worded as one.
+  cat > "$FAKE/verify-notevaluated.py" <<'STUB'
+import sys
+print("hsm-key-attestation-verify ERROR: the chain walker could not evaluate C.DevAut", file=sys.stderr)
+print("DEVAUT_CHAIN=not-evaluated")
+sys.exit(2)
+STUB
+  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py" "$FAKE/verify-notevaluated.py"
   mkdir -p "$FAKE/args" "$FAKE/empty-trust"
   REG_NONE="$FAKE/reg-none.json"
   printf '{"schema":"regalia.staging-hardware/v1","environment":"staging","devices":[]}\n' > "$REG_NONE"
@@ -356,7 +374,7 @@ STUB
 
   cc_kek(){ RRC_STATE="${RRC:-disabled}" FAKE_SERIAL=SER123 FAKE_SHA="$DEVAUT_SHA_REAL" \
     FAKE_DEVAUT_HEX="${DVHEX-$DEVAUT_HEX_REAL}" FAKE_ATTEST_HEX="${ATHEX-$CE01_REAL}" \
-    FAKE_KEK_DER_HEX="$KEK_DER_REAL" FAKE_ARGS_DIR="$FAKE/args" \
+    FAKE_KEK_DER_HEX="${KDER-$KEK_DER_REAL}" FAKE_KEK_ID="${KID:-0a}" FAKE_ARGS_DIR="$FAKE/args" \
     SCSH_HOME=/nonexistent HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" \
     HSM_KEY_ATTEST_READ_SH="${ATTEST_READ:-$FAKE/attest-read.sh}" HSM_STAGING_REGISTRY_FILE="$REG_NONE" \
     bash "$CC" --expect-serial SER123 --expect-devaut-sha "$DEVAUT_SHA_REAL" "$@" >"$FAKE/outk" 2>&1; echo $?; }
@@ -419,9 +437,9 @@ EOF
     && P "a non-hex --kek-id is refused" || F "a malformed --kek-id was used"
 
   # THE PAIRING ATTACK / MISTAKE: a real, valid attestation — for a DIFFERENT key. Only
-  # --expect-point catches it, so this proves the point is actually passed and compared.
+  # --expect-spki catches it, so this proves the point is actually passed and compared.
   rc="$(ATHEX="$CE01_OTHER_KEY" cc_kek --kek-id 0a --kek-ref 1)"
-  { [ "$rc" != 0 ] && grep -q 'DID NOT VERIFY' "$FAKE/outk" && grep -q 'ATTESTED_POINT_MATCHES=no' "$FAKE/outk" && no_fragment; } \
+  { [ "$rc" != 0 ] && grep -q 'DID NOT VERIFY' "$FAKE/outk" && grep -q 'ATTESTED_KEY_MATCHES=no' "$FAKE/outk" && no_fragment; } \
     && P "a genuine attestation of ANOTHER key (wrong --kek-ref for --kek-id) is refused, no pin printed" \
     || { F "an attestation for a different key produced a pin"; sed 's/^/      /' "$FAKE/outk"; }
   rc="$(ATHEX="$CE01_BADSIG" cc_kek --kek-id 0a --kek-ref 1)"
@@ -435,6 +453,11 @@ EOF
   { [ "$rc" != 0 ] && no_fragment; } \
     && P "a verifier that exits 0 without the signature and point verdicts is NOT a pass" \
     || F "exit status alone was taken as verification"
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-notevaluated.py" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'could NOT BE EVALUATED — no verdict on the card' "$FAKE/outk" \
+      && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "a chain that could not be EVALUATED is reported as such, not as 'not a genuine card'" \
+    || F "DEVAUT_CHAIN=not-evaluated was misreported as a verdict on the card"
   rc="$(HSM_KEY_ATTEST_VERIFY_PY=/nonexistent cc_kek --kek-id 0a --kek-ref 1)"
   { [ "$rc" != 0 ] && grep -q 'hsm-key-attestation-verify.py not found' "$FAKE/outk" && no_fragment; } \
     && P "no verifier -> CANNOT BE EVALUATED -> failure" || F "the attestation was skipped without a verifier"
@@ -460,6 +483,118 @@ EOF
   { [ "$rc" != 0 ] && grep -q 'do not hash to the pinned digest' "$FAKE/outk" && no_fragment; } \
     && P "C.DevAut bytes that are not the pinned device's are refused before verifying against them" \
     || F "the attestation was checked against an unpinned device certificate"
+
+  # ---- RSA: ADR-0002 D1's envelope KEK (regalia#28 criterion 4 rehearsal) -------------------------
+  # Before this, an RSA key FAILED "not an EC public key this can parse" before its attestation was
+  # read. The bytes are the real card's; only the card I/O is stubbed.
+  FRAG_RSA="MANIFEST_BINDING_PINS {\"device_serial\":\"SER123\",\"public_key_sha256\":\"$PIN_RSA\"}"
+  rc="$(KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  [ "$rc" = 0 ] && P "an RSA KEK generated and attested on the card passes" \
+                || { F "the real RSA attestation for key 21 was refused"; sed 's/^/      /' "$FAKE/outk"; }
+  grep -qxF "$FRAG_RSA" "$FAKE/outk" \
+    && P "…and the manifest fragment carries the RSA key's SPKI digest ($PIN_RSA)" \
+    || F "no MANIFEST_BINDING_PINS line with the RSA pin"
+  grep -qF "KEK public_key_sha256 = $PIN_RSA (SubjectPublicKeyInfo of ID 21)" "$FAKE/outk" \
+    && P "…with the KEK PASS line record reads, format unchanged" || F "the RSA KEK PASS line is missing or reworded"
+  grep -q 'attests the RSA key at ID 21 — generated on this card' "$FAKE/outk" \
+    && P "…and the attestation PASS line names the key type" || F "the RSA attestation PASS line is missing"
+  # That transcript, as is, through record — with a decrypt round trip encrypted to the same real key
+  # (a public-key operation; the private half is on DENK0404144). The manifest is ADR-0002's KEK fleet
+  # cut down to the envelope KEK, and the run scoped to site A's Nitrokey, so the RSA pin from this
+  # transcript is the whole of what gets qualified.
+  cp "$FAKE/outk" "$FAKE/outk-rsa"
+  python3 - "$HERE" "$FAKE/kr.json" "$RSA_DER" <<'PYKR'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import test_ceremony_manifest as t
+m = t.kek_manifest()
+kek = m["objects"][0]
+kek["bindings"][0].update(device_serial="SER123", object_id="21")
+m["objects"] = [kek, m["objects"][-1]]
+open(sys.argv[2], "w").write(json.dumps(m))
+proof = t.round_trip_proof("decrypt", "SER123", "21", bytes.fromhex(sys.argv[3]), device_id="nitrokey-sitea")
+open(sys.argv[2] + ".proof.json", "w").write(json.dumps(proof))
+PYKR
+  python3 "$HERE/../../scripts/ceremony-manifest.py" record "$FAKE/kr.json" --evidence "$FAKE/outk-rsa" \
+    "$FAKE/kr.json.proof.json" --site sitea --backend nitrokey-pkcs11 --out "$FAKE/kr.out.json" >"$FAKE/kr.log" 2>&1
+  if python3 -c 'import json,sys; b=json.load(open(sys.argv[1]))["objects"][0]["bindings"][0]
+sys.exit(0 if (b["state"], b["public_key_sha256"]) == ("qualified", sys.argv[2]) else 1)' "$FAKE/kr.out.json" "$PIN_RSA" 2>/dev/null; then
+    P "…and ceremony-manifest.py record qualifies the RSA envelope KEK from this very transcript"
+  else
+    F "record did not accept the RSA commissioning transcript: $(cat "$FAKE/kr.log")"
+  fi
+
+  rc="$(KID=21 KDER="$EC20_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'DID NOT VERIFY' "$FAKE/outk" && grep -q 'ATTESTED_KEY_MATCHES=no' "$FAKE/outk" \
+    && grep -q "the attestation is of an RSA key but the token's key is EC" "$FAKE/outk" && no_fragment; } \
+    && P "an RSA attestation for an EC key at --kek-id is refused, with the mismatch named" \
+    || { F "an RSA attestation was accepted for an EC key"; sed 's/^/      /' "$FAKE/outk"; }
+  rc="$(KID=20 KDER="$EC20_DER" ATHEX="$CE03_EC" cc_kek --kek-id 20 --kek-ref 3)"
+  { [ "$rc" = 0 ] && grep -q 'attests the EC key at ID 20' "$FAKE/outk"; } \
+    && P "the P-256 key from the same run still passes through --expect-spki" || F "the real P-256 attestation was refused"
+  ED_DER="$(openssl genpkey -algorithm ED25519 2>/dev/null | openssl pkey -pubout -outform DER 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"
+  rc="$(KID=21 KDER="$ED_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'key ID 21 is neither an RSA nor an EC key (Ed25519PublicKey)' "$FAKE/outk" && no_fragment; } \
+    && P "a key that is neither RSA nor EC is a named failure" || { F "an Ed25519 key was not refused by name"; sed 's/^/      /' "$FAKE/outk"; }
+  rc="$(KID=21 KDER="30030a0b0c" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'key ID 21 is not a SubjectPublicKeyInfo this can parse' "$FAKE/outk" && no_fragment; } \
+    && P "bytes that are not an SPKI are a named failure" || F "an unparseable public key was not refused by name"
+
+  # ---- the interpreter (the bench, 2026-09-23) -----------------------------------------------------
+  # The python3 first on PATH cannot import pycvc — the bench's system interpreter. A package named
+  # `cvc` that refuses to import stands in for the missing one, for that interpreter only (its own
+  # PYTHONPATH, set by a wrapper), so commission-card.sh must FIND the one that can rather than use
+  # this one. Everything else in the run is unchanged, so this row fails only on the interpreter.
+  mkdir -p "$FAKE/nopycvc/cvc" "$FAKE/pybin"
+  printf 'raise ImportError("simulated: pycvc is not installed")\n' > "$FAKE/nopycvc/cvc/__init__.py"
+  printf '#!/usr/bin/env bash\nPYTHONPATH=%q exec %q "$@"\n' "$FAKE/nopycvc" "$REAL_PY" > "$FAKE/pybin/python3"
+  chmod +x "$FAKE/pybin/python3"
+  if "$FAKE/pybin/python3" -c 'import cvc' 2>/dev/null; then
+    F "the pycvc-less python3 stand-in imports cvc — the interpreter rows prove nothing"
+  else
+    rc="$(PATH="$FAKE/pybin:$PATH" CEREMONY_VENV="$REAL_PY_ROOT" KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+    { [ "$rc" = 0 ] && grep -qxF "$FRAG_RSA" "$FAKE/outk"; } \
+      && P "with a python3 first on PATH that lacks pycvc, the KEK still verifies (the resolved interpreter runs it)" \
+      || { F "the KEK section ran the python3 on PATH, not the one with the deps"; sed 's/^/      /' "$FAKE/outk"; }
+  fi
+  cat > "$FAKE/no-python.sh" <<'STUB'
+# A resolver that finds nothing: no interpreter on this host imports the deps.
+ceremony_python_find(){ return 1; }
+STUB
+  rc="$(HSM_CEREMONY_PYTHON_SH="$FAKE/no-python.sh" KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'no Python interpreter here can import pycvc and cryptography — the KEK attestation CANNOT BE EVALUATED' "$FAKE/outk" \
+    && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "no interpreter with pycvc + cryptography is a named FAIL, not a chain verdict" \
+    || { F "a missing interpreter was not refused by name"; sed 's/^/      /' "$FAKE/outk"; }
+  rc="$(HSM_CEREMONY_PYTHON_SH=/nonexistent KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'tools/ceremony-python.sh not found' "$FAKE/outk" && no_fragment; } \
+    && P "no interpreter resolver is a named FAIL" || F "a missing resolver was not refused by name"
+  # A verifier that vouches for the chain and the signature and exits 0 — but never says the attested
+  # key IS the key at --kek-id (a verifier run without --expect-spki, or an old one). Not a pass: the
+  # pin would then be a genuine card's word about SOME key.
+  cat > "$FAKE/verify-nokey.py" <<'STUB'
+#!/usr/bin/env python3
+print("DEVAUT_CHAIN=verified")
+print("ATTEST_SIGNATURE=verified")
+STUB
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-nokey.py" KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "a verifier that never says ATTESTED_KEY_MATCHES=yes is NOT a pass" \
+    || F "a pin was printed without the attested key being compared to the token's"
+  # The verifier itself reporting a missing dependency (the resolver and the verifier disagree):
+  # named as such, never as "DID NOT VERIFY".
+  cat > "$FAKE/verify-nodep.py" <<'STUB'
+#!/usr/bin/env python3
+import sys
+print("hsm-key-attestation-verify ERROR: MISSING DEPENDENCY — pycvc not importable", file=sys.stderr)
+print("DEPENDENCY_MISSING=pycvc")
+sys.exit(2)
+STUB
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-nodep.py" KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"
+  { [ "$rc" != 0 ] && grep -q 'verifier is missing a dependency' "$FAKE/outk" && grep -q 'MISSING DEPENDENCY — pycvc' "$FAKE/outk" \
+    && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "a verifier reporting a missing dependency is surfaced as that, first" \
+    || { F "a missing dependency in the verifier was reported as a card verdict"; sed 's/^/      /' "$FAKE/outk"; }
 
   rc="$(RRC=enabled cc_kek --kek-id 0a --kek-ref 1)"
   { [ "$rc" != 0 ] && no_fragment && grep -q 'NO MANIFEST_BINDING_PINS line' "$FAKE/outk"; } \
