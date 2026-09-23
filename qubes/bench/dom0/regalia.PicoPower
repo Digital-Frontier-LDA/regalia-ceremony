@@ -1,0 +1,83 @@
+#!/bin/bash
+# regalia.PicoPower — switch VBUS on ONE hub port in the USB qube, and re-attach what comes back.
+#
+# Installed in dom0 as /etc/qubes-rpc/regalia.PicoPower. Called from the bench qube as
+#
+#   qrexec-client-vm dom0 regalia.PicoPower+off
+#   qrexec-client-vm dom0 regalia.PicoPower+on
+#   qrexec-client-vm dom0 regalia.PicoPower+status
+#
+# WHY DOM0. A power cut makes the DUT re-enumerate, and on Qubes R4.2 a re-enumerated USB device is
+# not re-attached to the qube that had it. Re-attaching is a dom0 operation, so the service that cuts
+# power must be the one that restores the attachment — or every cut costs a human at the dom0 console.
+#
+# WHAT THE CALLER CONTROLS: the verb, from a fixed list. NOTHING ELSE. The hub, the port, the USB
+# qube and the qube the device is attached to all come from /etc/regalia/pico-power.conf in dom0.
+# The caller's identity is checked against that file too, on top of the qrexec policy, so a
+# policy typo cannot hand the port to another qube.
+#
+# WHAT GETS ATTACHED: the device at the configured PORT PATH (<usbvm>:<loc>.<port>), never "whatever
+# looks like a Pico". A VID:PID match would attach anything that claims to be one.
+set -euo pipefail
+
+CONF=/etc/regalia/pico-power.conf
+[ -r "$CONF" ] || { echo "ERROR: $CONF missing" >&2; exit 2; }
+# shellcheck disable=SC1090
+. "$CONF"
+: "${USBVM:?}" "${HUB_LOC:?}" "${HUB_PORT:?}" "${TARGET:?}"
+ATTACH_WAIT="${ATTACH_WAIT:-45}"
+
+[[ "$HUB_LOC" =~ ^[0-9]+(-[0-9]+(\.[0-9]+)*)?$ ]] || { echo "ERROR: bad HUB_LOC in $CONF" >&2; exit 2; }
+[[ "$HUB_PORT" =~ ^[0-9]+$ ]] || { echo "ERROR: bad HUB_PORT in $CONF" >&2; exit 2; }
+if [ "${QREXEC_REMOTE_DOMAIN:-}" != "$TARGET" ]; then
+    echo "ERROR: caller '${QREXEC_REMOTE_DOMAIN:-?}' is not the configured bench qube" >&2; exit 2
+fi
+
+VERB="${1:-}"
+DEV="$USBVM:$HUB_LOC.$HUB_PORT"
+hub(){ qvm-run --pass-io --no-gui --no-autostart -u root "$USBVM" "uhubctl -e -l $HUB_LOC -p $HUB_PORT $*"; }
+
+# NEVER CUT THE DEBUG PROBE. On 2026-08-09 a cut on the probe's own port left it half-enumerated,
+# and three power cycles did not clear it: it took a physical replug.
+refuse_if_probe(){
+    if hub 2>/dev/null | grep -qi 'Debug Probe'; then
+        echo "REFUSING: the Debug Probe is on $HUB_LOC port $HUB_PORT" >&2; exit 2
+    fi
+}
+
+case "$VERB" in
+    status)
+        hub
+        qvm-usb list "$USBVM" 2>/dev/null | awk -v d="$DEV" '$1 == d' || true
+        ;;
+    off)
+        refuse_if_probe
+        # Detach first so the bench qube's usb-proxy is not left holding a dead device.
+        qvm-usb detach "$TARGET" "$DEV" >/dev/null 2>&1 || true
+        hub -a off >/dev/null
+        # A HUB CAN REPORT A PORT OFF WHILE THE DEVICE STAYS POWERED. Say what it now reports.
+        hub | grep -E "^\s*Port $HUB_PORT:" || true
+        echo "OFF"
+        ;;
+    on)
+        hub -a on >/dev/null
+        for _ in $(seq 1 "$ATTACH_WAIT"); do
+            row="$(qvm-usb list "$USBVM" 2>/dev/null | awk -v d="$DEV" '$1 == d')"
+            if [ -n "$row" ]; then
+                # Already ours (a power-on with no cut before it): nothing to do.
+                if [ "$(awk '{print $NF}' <<< "$row")" = "$TARGET" ]; then echo "ATTACHED $DEV"; exit 0; fi
+                # The device node can be listed a moment before the proxy can claim it.
+                for _ in 1 2 3 4 5; do
+                    if qvm-usb attach "$TARGET" "$DEV" 2>/dev/null; then echo "ATTACHED $DEV"; exit 0; fi
+                    sleep 1
+                done
+                echo "ERROR: $DEV is present but would not attach to $TARGET" >&2; exit 3
+            fi
+            sleep 1
+        done
+        echo "ERROR: nothing enumerated at $DEV within ${ATTACH_WAIT}s of power-on" >&2; exit 3
+        ;;
+    *)
+        echo "ERROR: verb must be off, on or status" >&2; exit 2
+        ;;
+esac
