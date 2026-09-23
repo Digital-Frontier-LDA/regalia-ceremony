@@ -72,18 +72,19 @@ if [ -z "$TRUST_DIR" ]; then
   done
 fi
 
+need_val() { [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || { echo "$1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --expect-chr)     EXPECT_CHR="${2:-}"; shift 2;;
-    --expect-devaut-sha) EXPECT_DEVAUT_SHA="${2:-}"; shift 2;;
-    --expect-serial)  EXPECT_SERIAL="${2:-}"; shift 2;;
-    --expect-address) EXPECT_ADDR="${2:-}"; shift 2;;
-    --wallet-id)      WALLET_ID="${2:-}"; shift 2;;
-    --slot)           SLOT="${2:-}"; shift 2;;
-    --module)         P11="${2:-}"; shift 2;;
-    --reader)         READER="${2:-}"; shift 2;;
-    --kek-id)         KEK_ID="${2:-}"; shift 2;;
-    --kek-ref)        KEK_REF="${2:-}"; shift 2;;
+    --expect-chr)     need_val "$1" "${2-}"; EXPECT_CHR="$2"; shift 2;;
+    --expect-devaut-sha) need_val "$1" "${2-}"; EXPECT_DEVAUT_SHA="$2"; shift 2;;
+    --expect-serial)  need_val "$1" "${2-}"; EXPECT_SERIAL="$2"; shift 2;;
+    --expect-address) need_val "$1" "${2-}"; EXPECT_ADDR="$2"; shift 2;;
+    --wallet-id)      need_val "$1" "${2-}"; WALLET_ID="$2"; shift 2;;
+    --slot)           need_val "$1" "${2-}"; SLOT="$2"; shift 2;;
+    --module)         need_val "$1" "${2-}"; P11="$2"; shift 2;;
+    --reader)         need_val "$1" "${2-}"; READER="$2"; shift 2;;
+    --kek-id)         need_val "$1" "${2-}"; KEK_ID="$2"; shift 2;;
+    --kek-ref)        need_val "$1" "${2-}"; KEK_REF="$2"; shift 2;;
     -h|--help) sed -n '2,43p' "$0"; exit 0;;
     *) echo "unknown argument: $1" >&2; exit 2;;
   esac
@@ -391,8 +392,8 @@ elif [ -z "$TRUST_DIR" ] || [ ! -d "$TRUST_DIR" ]; then
   # verify a signature. So the anchor is mandatory here.
   F "no SmartCard-HSM trust anchor directory — the device chain CANNOT BE EVALUATED"
   printf '     Point HSM_TRUST_DIR at qubes/trust-anchors/smartcard-hsm.\n'
-elif ! command -v python3 >/dev/null; then
-  F "python3 is absent — the KEK attestation CANNOT BE EVALUATED"
+elif ! python3 -c 'import cryptography' >/dev/null 2>&1; then
+  F "python3 with the cryptography package is absent — the KEK attestation CANNOT BE EVALUATED"
 else
   kek_tmp="$(mktemp -d)"
   # C.DevAut must be the bytes whose digest B7 compared against the ceremony's pin. Recomputed here

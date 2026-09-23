@@ -234,7 +234,7 @@ def dump(data):
         row = data[i:i+16]
         h = " ".join("%02X" % b for b in row)
         a = "".join(chr(b) if 32 <= b < 127 else "." for b in row)
-        out.append("%-47s %s" % (h, a))
+        out.append(h + " " + (" " * (16 - len(row)) if i else "") + a)
     return "\n".join(out)
 
 args = sys.argv[1:]

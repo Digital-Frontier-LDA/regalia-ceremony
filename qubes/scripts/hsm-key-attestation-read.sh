@@ -38,12 +38,13 @@ CHUNK=255                         # Le=FF
 MAX_BYTES=8192
 
 die() { printf 'hsm-key-attestation-read: %s\n' "$*" >&2; exit 2; }
+need_val() { [ "$#" -ge 2 ] && [ -n "$2" ] && [ "${2#--}" = "$2" ] || die "$1 needs a value"; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --reader)        READER="${2:-}"; shift 2;;
-    --expect-serial) EXPECT_SERIAL="${2:-}"; shift 2;;
-    --key-ref)       KEY_REF="${2:-}"; shift 2;;
+    --reader)        need_val "$1" "${2-}"; READER="$2"; shift 2;;
+    --expect-serial) need_val "$1" "${2-}"; EXPECT_SERIAL="$2"; shift 2;;
+    --key-ref)       need_val "$1" "${2-}"; KEY_REF="$2"; shift 2;;
     -h|--help)       sed -n '2,32p' "$0"; exit 0;;
     *) die "unknown argument: $1";;
   esac
@@ -99,8 +100,12 @@ apdu_data() {
   out="$(opensc-tool ${RARGS[@]+"${RARGS[@]}"} -s "$1" 2>&1)" || { printf '%s\n' "$out" >&2; return 1; }
   sw="$(sed -n 's/.*SW1=0x\([0-9A-Fa-f]*\), SW2=0x\([0-9A-Fa-f]*\).*/\1\2/p' <<< "$out" | tail -1)"
   sw="${sw^^}"
-  data="$(awk '/^Received/ {buf=""; want=1; next}
-               want && /^[0-9A-F][0-9A-F] / { s=substr($0,1,48); gsub(/[^0-9A-F]/,"",s); buf = buf s }
+  data="$(awk '/^Received/ {buf=""; want=1; row=0; next}
+               want && /^[0-9A-F][0-9A-F] / {
+                 row++
+                 n = (row == 1) ? int(length($0) / 4) : int((length($0) - 16) / 3)
+                 s=substr($0,1,3*n); gsub(/[^0-9A-F]/,"",s); buf = buf s
+               }
                END { printf "%s", buf }' <<< "$out")"
   printf '%s %s' "${sw:-????}" "$data"
   case "$sw" in
