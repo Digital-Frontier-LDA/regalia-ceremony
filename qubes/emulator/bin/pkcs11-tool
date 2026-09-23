@@ -35,7 +35,10 @@ set -euo pipefail
 # error, so a regression that puts it on argv fails the suites instead of passing quietly.
 # ECDSA output is raw r||s unless --signature-format openssl, as in OpenSC — so dropping that flag
 # breaks verification here exactly as it would against a card.
-# EMU_P11_BAD_SIGNATURE=1 makes the token return a well-formed signature over OTHER data.
+# --decrypt RSA-PKCS-OAEP honours --hash-algorithm / --mgf (default SHA-1, as OpenSC), so a ciphertext
+# made with other OAEP parameters fails here as on a card. --derive ECDH1-DERIVE takes the peer's SPKI.
+# EMU_P11_BAD_SIGNATURE=1 (or EMU_P11_BAD_RESULT=1) makes the token return a well-formed but WRONG
+# answer: a signature over other data, a decryption with a flipped byte, a shared secret with one.
 # EMU_P11_ARGV_LOG=FILE appends every argv this model sees, for the secret-leak suite.
 # ==================================================================================================
 emu_module=""; _prev=""
@@ -47,7 +50,7 @@ case "${emu_module##*/}" in libykcs11*) emu_model=ykcs11;; esac
 emu_p11(){
   [ -n "${EMU_P11_ARGV_LOG:-}" ] && printf '%s\n' "$*" >> "$EMU_P11_ARGV_LOG"
   local root pin_default list=0 keygen=0 read_obj=0 sign=0 login=0 slot="" id="" out="" in="" mech="" keytype=""
-  local pin_arg="" fmt="" type=""
+  local pin_arg="" fmt="" type="" decrypt=0 derive=0 oaep_hash=SHA-1 mgf=""
   if [ "$emu_model" = ykcs11 ]; then root="${EMU_YKMAN_STATE:-${TMPDIR:-/tmp}/emu-ykman}"; pin_default=123456
   else root="$EMU_P11_TOKENS"; pin_default=648219; fi
   while [ $# -gt 0 ]; do
@@ -57,6 +60,10 @@ emu_p11(){
       --keypairgen|-k) keygen=1; shift;;
       --read-object|-r) read_obj=1; shift;;
       --sign|-s) sign=1; shift;;
+      --decrypt) decrypt=1; shift;;
+      --derive) derive=1; shift;;
+      --hash-algorithm) oaep_hash="$2"; shift 2;;
+      --mgf) mgf="$2"; shift 2;;
       --login|-l) login=1; shift;;
       --slot) slot="$2"; shift 2;;
       --id|-d) id="$(printf '%s' "$2" | tr 'A-F' 'a-f')"; shift 2;;
@@ -149,7 +156,7 @@ emu_p11(){
     [ "$login" = 1 ] || { echo "error: PKCS11 function C_Sign failed: rv = CKR_USER_NOT_LOGGED_IN (0x101)" >&2; return 1; }
     [ -f "$in" ] && [ -n "$out" ] || { echo "error: --sign needs --input-file and --output-file" >&2; return 2; }
     local data="$in"
-    if [ "${EMU_P11_BAD_SIGNATURE:-0}" = 1 ]; then
+    if [ "${EMU_P11_BAD_RESULT:-${EMU_P11_BAD_SIGNATURE:-0}}" = 1 ]; then
       data="$out.other"; { cat "$in"; printf 'x'; } | openssl dgst -sha256 -binary > "$data"
     fi
     echo "Using signature algorithm $mech"
@@ -175,6 +182,29 @@ PY
       *) echo "error: mechanism $mech not modelled [EMULATED]" >&2; return 1;;
     esac
     rm -f "$out.other"
+    return 0
+  fi
+  local bad="${EMU_P11_BAD_RESULT:-${EMU_P11_BAD_SIGNATURE:-0}}"
+  flip(){ python3 -c 'import sys; d=bytearray(open(sys.argv[1],"rb").read()); d[-1]^=1; open(sys.argv[1],"wb").write(d)' "$1"; }
+  if [ "$decrypt" = 1 ] || [ "$derive" = 1 ]; then
+    [ "$login" = 1 ] || { echo "error: PKCS11 function C_Login required: rv = CKR_USER_NOT_LOGGED_IN (0x101)" >&2; return 1; }
+    [ -f "$in" ] && [ -n "$out" ] || { echo "error: needs --input-file and --output-file" >&2; return 2; }
+  fi
+  if [ "$decrypt" = 1 ]; then
+    [ "$mech" = RSA-PKCS-OAEP ] || { echo "error: mechanism $mech not modelled for --decrypt [EMULATED]" >&2; return 1; }
+    local md; md="$(printf '%s' "$oaep_hash" | tr 'A-Z' 'a-z' | tr -d '-')"
+    local mgfmd; mgfmd="$(printf '%s' "${mgf:-MGF1-$oaep_hash}" | sed 's/^MGF1-//' | tr 'A-Z' 'a-z' | tr -d '-')"
+    openssl pkeyutl -decrypt -inkey "$kdir/key.pem" -pkeyopt rsa_padding_mode:oaep -pkeyopt "rsa_oaep_md:$md" \
+      -pkeyopt "rsa_mgf1_md:$mgfmd" -in "$in" -out "$out" 2>/dev/null \
+      || { echo "error: PKCS11 function C_Decrypt failed: rv = CKR_ENCRYPTED_DATA_INVALID (0x40)" >&2; echo "Aborting." >&2; return 1; }
+    [ "$bad" = 1 ] && flip "$out"
+    return 0
+  fi
+  if [ "$derive" = 1 ]; then
+    [ "$mech" = ECDH1-DERIVE ] || { echo "error: mechanism $mech not modelled for --derive [EMULATED]" >&2; return 1; }
+    openssl pkeyutl -derive -inkey "$kdir/key.pem" -peerkey "$in" -peerform DER -out "$out" 2>/dev/null \
+      || { echo "error: PKCS11 function C_DeriveKey failed: rv = CKR_MECHANISM_PARAM_INVALID (0x71)" >&2; echo "Aborting." >&2; return 1; }
+    [ "$bad" = 1 ] && flip "$out"
     return 0
   fi
   echo "pkcs11-tool [EMULATED $emu_model]: nothing to do" >&2; return 2

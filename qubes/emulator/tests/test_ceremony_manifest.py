@@ -77,7 +77,8 @@ def operation_proof(backend, serial, object_id, key, der, challenge=None, signat
     """A regalia.operation-proof/v1 record, signed for real unless a test substitutes a part."""
     challenge = os.urandom(32) if challenge is None else challenge
     signature = sign(key, challenge, digest) if signature is None else signature
-    record = {"evidence": "regalia.operation-proof/v1", "backend": backend, "device_serial": serial,
+    record = {"evidence": "regalia.operation-proof/v1", "class": "reverifiable-signature",
+              "backend": backend, "device_serial": serial,
               "object_id": object_id, "operation": "sign",
               "challenge_b64": base64.b64encode(challenge).decode(),
               "signature_b64": base64.b64encode(signature).decode(),
@@ -147,6 +148,66 @@ def commission_transcript(serial=NK_SERIAL, pin=PIN_NK, kek_id="0A", pins_line=T
         lines += ["\n  Custody manifest binding pins for the KEK (ADR-0002 D1) — copy this line:",
                   f'MANIFEST_BINDING_PINS {{"device_serial":"{serial}","public_key_sha256":"{pin}"}}']
     return "\n".join(lines) + "\n"
+
+
+NK_B = "DENK0000002"
+
+
+def kek_manifest(yubikey: bool = False) -> dict:
+    """ADR-0002's KEK roles: an RSA envelope KEK (unwrap/wrap) and an EC key-agreement key, each on two
+    Nitrokeys at two sites; with `yubikey`, also an RSA PIV KEK (unwrap) in slot 9d of both YubiKeys."""
+    m = fleet_manifest()
+    base = m["objects"][0]
+    kek = copy.deepcopy(base)
+    kek.update(id="envelope-kek", name="Envelope KEK", purpose="envelope-kek", custody="hardware-envelope",
+               algorithm="rsa2048", operations=["unwrap", "wrap"], policy_id="envelope-kek",
+               bindings=[binding("sitea", "nitrokey-pkcs11", "nitrokey-sitea", "0b", device_serial=NK_SERIAL),
+                         binding("siteb", "nitrokey-pkcs11", "nitrokey-siteb", "0b", device_serial=NK_B)])
+    agree = copy.deepcopy(base)
+    agree.update(id="session-agreement-key", name="Agreement key", purpose="session-agreement", algorithm="p256",
+                 operations=["key-agreement"], policy_id="session-agreement",
+                 bindings=[binding("sitea", "nitrokey-pkcs11", "nitrokey-sitea", "0c", device_serial=NK_SERIAL),
+                           binding("siteb", "nitrokey-pkcs11", "nitrokey-siteb", "0c", device_serial=NK_B)])
+    objects = [kek, agree]
+    if yubikey:
+        piv = copy.deepcopy(base)
+        piv.update(id="piv-kek", name="PIV KEK", purpose="piv-kek", algorithm="rsa2048", operations=["unwrap"],
+                   policy_id="piv-kek", bindings=[b for b in copy.deepcopy(base["bindings"]) if b["backend"] == "yubikey-piv"])
+        for b in piv["bindings"]:
+            b["object_id"] = "9d"
+        objects.append(piv)
+    m["objects"] = objects + [m["objects"][1]]
+    return m
+
+
+def oaep_encrypt(der: bytes, data: bytes) -> bytes:
+    """What operation-proof.sh does to the challenge: RSA-OAEP, SHA-1, MGF1-SHA-1, no label — the daemon's wrap."""
+    with tempfile.TemporaryDirectory() as work:
+        pub = pathlib.Path(work, "pub.der")
+        pub.write_bytes(der)
+        return subprocess.run(["openssl", "pkeyutl", "-encrypt", "-pubin", "-keyform", "DER", "-inkey", str(pub),
+                               "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha1",
+                               "-pkeyopt", "rsa_mgf1_md:sha1"], input=data, check=True, capture_output=True).stdout
+
+
+def round_trip_proof(operation, serial, object_id, der, challenge=None, material=None, device_id=None, **override):
+    """A live-round-trip record. decrypt: the ciphertext of a fresh challenge to `der`; key-agreement: a
+    fresh ephemeral key on `der`'s curve. Only the challenge's SHA-256 is recorded, never the challenge."""
+    challenge = os.urandom(32) if challenge is None else challenge
+    record = {"evidence": "regalia.operation-proof/v1", "class": "live-round-trip", "backend": "nitrokey-pkcs11",
+              "device_serial": serial, "object_id": object_id, "operation": operation,
+              "public_key_der_b64": base64.b64encode(der).decode(),
+              "challenge_sha256": "sha256:" + hashlib.sha256(challenge).hexdigest()}
+    if operation == "decrypt":
+        material = oaep_encrypt(der, challenge) if material is None else material
+        record["ciphertext_b64"] = base64.b64encode(material).decode()
+    else:
+        material = keypair("prime256v1")[1] if material is None else material
+        record["ephemeral_public_key_der_b64"] = base64.b64encode(material).decode()
+    if device_id:
+        record["device_id"] = device_id
+    record.update(override)
+    return record
 
 
 def keys_info(slot="9C (SIGNATURE)", algorithm="ECCP256", origin="GENERATED", pin="ONCE", touch="NEVER") -> str:
@@ -647,7 +708,7 @@ class OperationBehaviour(Case):
                                 challenge=challenge)
         ev[4] = self.proof_file("op-yka.json", "yubikey-piv", YK_A, "9c", self.key_a, self.der_a,
                                 challenge=challenge)
-        self.record_refuses(ev, "reused challenge", "op-nk.json signed the same challenge")
+        self.record_refuses(ev, "reused challenge", "op-nk.json used the same challenge")
 
     def test_an_empty_challenge_is_refused(self):
         ev = self.standard_evidence()
@@ -702,10 +763,15 @@ class OperationBehaviour(Case):
         ev[3] = self.proof_file("op-nk.json", "nitrokey-pkcs11", NK_SERIAL, "0a", key, der)
         self.record_refuses(ev, "plans p256 but the key that signed is secp256k1")
 
-    def test_a_proof_for_an_unprovable_operation_is_refused(self):
+    def test_a_signature_proof_claiming_another_operation_is_refused(self):
         ev = self.standard_evidence()
         ev[4] = self.proof_file("op-yka.json", "yubikey-piv", YK_A, "9c", self.key_a, self.der_a, operation="unwrap")
-        self.record_refuses(ev, "operation 'unwrap' is not a proof record can re-verify")
+        self.record_refuses(ev, "operation 'unwrap' is not a reverifiable-signature proof")
+
+    def test_a_proof_of_no_known_class_is_refused(self):
+        ev = self.standard_evidence()
+        ev[4] = self.proof_file("op-yka.json", "yubikey-piv", YK_A, "9c", self.key_a, self.der_a, **{"class": "trust-me"})
+        self.record_refuses(ev, "class must be reverifiable-signature or live-round-trip, not 'trust-me'")
 
     def test_without_openssl_record_refuses_rather_than_passes(self):
         before = self.manifest.read_bytes()
@@ -719,22 +785,30 @@ class OperationBehaviour(Case):
         self.assertFalse(out.exists())
         self.assertEqual(self.manifest.read_bytes(), before)
 
-    def test_plan_refuses_an_operation_no_proof_can_show(self):
-        m = fleet_manifest()
-        ka = copy.deepcopy(m["objects"][0])
-        ka.update(id="session-agreement-key", operations=["key-agreement"],
-                  bindings=[binding("sitea", "nitrokey-pkcs11", "nitrokey-sitea", "0b", device_serial=NK_SERIAL),
-                            binding("siteb", "nitrokey-pkcs11", "nitrokey-siteb", "0b", device_serial="DENK0000009")])
-        m["objects"].append(ka)
-        self.write_manifest(m)
-        self.refuses(self.run_tool("plan", self.manifest), "objects[2](session-agreement-key).bindings[0]",
-                     "operation(s) key-agreement have no operation proof record can re-verify")
+    def test_no_proof_class_covers_an_operation_mix_is_refused(self):
+        """Through the CLI the capability table never lets such a mix reach plan (an RSA key cannot
+        key-agree, an EC key cannot unwrap), so the ceremony's own rule is proven in-process."""
+        module = load_tool()
+        for ops, alg in ((["key-agreement"], "rsa2048"), (["unwrap"], "p256"), (["unwrap", "key-agreement"], "p256"),
+                         (["authenticate"], "p256")):
+            with self.assertRaises(module.Refusal) as caught:
+                module.required_proof("objects[9]", {"operations": ops}, alg)
+            self.assertIn("no operation proof covers operation(s)", str(caught.exception))
+        self.assertEqual(module.required_proof("x", {"operations": ["sign", "unwrap"]}, "rsa2048"),
+                         ("reverifiable-signature", "sign"), "sign+unwrap must bring the STRONGER proof")
+        self.assertEqual(module.required_proof("x", {"operations": ["release-secret", "seal-envelope"]}, "rsa3072"),
+                         ("live-round-trip", "decrypt"))
+        self.assertEqual(module.required_proof("x", {"operations": ["key-agreement"]}, "p384"),
+                         ("live-round-trip", "key-agreement"))
 
     def test_plan_names_the_operation_proof_step(self):
         out = self.run_tool("plan", self.manifest).stdout
-        self.assertIn(f"operation-proof.sh --backend nitrokey-pkcs11 --serial {NK_SERIAL} --object-id 0a", out)
-        self.assertIn("operation-proof.sh --backend yubikey-piv --serial <serial> --object-id 9c "
+        self.assertIn(f"operation-proof.sh --operation sign --backend nitrokey-pkcs11 --serial {NK_SERIAL} "
+                      f"--object-id 0a", out)
+        self.assertIn("operation-proof.sh --operation sign --backend yubikey-piv --serial <serial> --object-id 9c "
                       "--device-id yubikey-siteb", out)
+        self.assertIn("reverifiable-signature: the key signs a fresh challenge", out)
+        self.assertNotIn("live-round-trip", out, "a signing fleet must not be offered the weaker class")
 
     def test_certificate_sign_is_provable(self):
         m = fleet_manifest()
@@ -743,6 +817,143 @@ class OperationBehaviour(Case):
         result = self.run_tool("record", self.manifest, "--evidence", *self.standard_evidence(),
                                "--out", self.dir / "o.json")
         self.assertEqual(result.returncode, 0, result.stderr)
+
+
+class KeyEncryptionKeys(Case):
+    """The live-round-trip class (see SIGNATURE_OPERATIONS in the tool): ADR-0002's KEKs — RSA unwrap and EC
+    key-agreement on the Nitrokeys — qualify with a round trip attested at ceremony time, and record checks
+    everything about it that can be checked afterwards. Each refusal asserted by message."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_manifest(kek_manifest())
+        self.rsa = {s: keypair("rsa2048") for s in (NK_SERIAL, NK_B)}
+        self.ec = {s: keypair() for s in (NK_SERIAL, NK_B)}
+
+    def kek_evidence(self):
+        """[0..3] transcripts (0b@A, 0b@B, 0c@A, 0c@B), [4..7] their proofs, in the same order."""
+        ev, proofs = [], []
+        for kid, keys, op in (("0b", self.rsa, "decrypt"), ("0c", self.ec, "key-agreement")):
+            for serial in (NK_SERIAL, NK_B):
+                pin = "sha256:" + hashlib.sha256(keys[serial][1]).hexdigest()
+                ev.append(self.file(f"nk-{serial}-{kid}.txt", commission_transcript(serial=serial, pin=pin, kek_id=kid)))
+                proofs.append(self.file(f"op-{serial}-{kid}.json", round_trip_proof(op, serial, kid, keys[serial][1])))
+        return ev + proofs
+
+    def test_kek_and_agreement_keys_qualify_with_a_labelled_round_trip(self):
+        out = self.dir / "q.json"
+        result = self.run_tool("record", self.manifest, "--evidence", *self.kek_evidence(), "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.count("OPERATION ATTESTED"), 4)
+        self.assertIn("NOT re-verifiable afterwards", result.stdout)
+        self.assertNotIn("OPERATION VERIFIED", result.stdout, "a round trip must never be reported as re-verified")
+        got = json.loads(out.read_text())
+        self.assertEqual([b["state"] for o in got["objects"][:2] for b in o["bindings"]], ["qualified"] * 4)
+
+    def test_plan_prints_the_round_trip_and_says_it_is_not_reverifiable(self):
+        out = self.run_tool("plan", self.manifest).stdout
+        self.assertIn("--operation decrypt", out)
+        self.assertIn("--operation key-agreement", out)
+        self.assertIn("ATTESTED AT CEREMONY TIME, NOT RE-VERIFIABLE AFTERWARDS", out)
+
+    def test_a_round_trip_over_another_key_is_refused(self):
+        ev = self.kek_evidence()
+        ev[4] = self.file("op-a-0b.json", round_trip_proof("decrypt", NK_SERIAL, "0b", keypair("rsa2048")[1]))
+        self.record_refuses(ev, "op-a-0b.json: the operation proof is over a different key")
+
+    def test_a_signature_binding_cannot_take_a_round_trip(self):
+        self.write_manifest(fleet_manifest())
+        ev = self.standard_evidence()
+        rec = round_trip_proof("key-agreement", YK_A, "9c", self.der_a, device_id="yubikey-sitea")
+        rec["backend"] = "yubikey-piv"
+        ev[4] = self.file("op-yka.json", rec)
+        self.record_refuses(ev, "op-yka.json: a live-round-trip proof cannot stand in for "
+                                "objects[0](release-signing-key).bindings[1]", "the weaker class never substitutes")
+
+    def test_a_kek_cannot_take_a_signature_instead(self):
+        ev = self.kek_evidence()
+        key, der = self.rsa[NK_SERIAL]
+        ev[4] = self.file("op-a-0b.json", operation_proof("nitrokey-pkcs11", NK_SERIAL, "0b", key, der))
+        self.record_refuses(ev, "needs a live-round-trip decrypt proof", "not that it can decrypt")
+
+    def test_a_reused_round_trip_challenge_is_refused(self):
+        ev = self.kek_evidence()
+        challenge = os.urandom(32)
+        ev[4] = self.file("op-a-0b.json", round_trip_proof("decrypt", NK_SERIAL, "0b", self.rsa[NK_SERIAL][1], challenge))
+        ev[5] = self.file("op-b-0b.json", round_trip_proof("decrypt", NK_B, "0b", self.rsa[NK_B][1], challenge))
+        self.record_refuses(ev, "reused challenge", "op-a-0b.json used the same challenge")
+
+    def test_a_reused_ephemeral_key_is_refused(self):
+        ev = self.kek_evidence()
+        eph = keypair()[1]
+        ev[6] = self.file("op-a-0c.json", round_trip_proof("key-agreement", NK_SERIAL, "0c", self.ec[NK_SERIAL][1], material=eph))
+        ev[7] = self.file("op-b-0c.json", round_trip_proof("key-agreement", NK_B, "0c", self.ec[NK_B][1], material=eph))
+        self.record_refuses(ev, "reused challenge")
+
+    def test_a_malformed_ciphertext_is_refused(self):
+        der = self.rsa[NK_SERIAL][1]
+        n = int(subprocess.run(["openssl", "rsa", "-pubin", "-inform", "DER", "-noout", "-modulus"],
+                                          input=der, capture_output=True, check=True).stdout.split(b"=")[1].strip(), 16)
+        for name, bad in (("short", os.urandom(128)), ("above-modulus", (n + 1).to_bytes(256, "big")),
+                          ("zero", bytes(256))):
+            with self.subTest(name):
+                ev = self.kek_evidence()
+                ev[4] = self.file("op-a-0b.json", round_trip_proof("decrypt", NK_SERIAL, "0b", der, material=bad))
+                self.record_refuses(ev, "op-a-0b.json: the ciphertext is not an RSA ciphertext for the proof's "
+                                        "rsa2048 key")
+
+    def test_a_malformed_ephemeral_key_is_refused(self):
+        der = self.ec[NK_SERIAL][1]
+        off_curve = bytearray(keypair()[1])
+        off_curve[-1] ^= 0x01
+        for name, bad, why in (("other curve", keypair("secp384r1")[1], "is not a p256 key"),
+                               ("the token's own key", der, "is the token's own key"),
+                               ("off the curve", bytes(off_curve), "is not a valid point on p256")):
+            with self.subTest(name):
+                ev = self.kek_evidence()
+                ev[6] = self.file("op-a-0c.json", round_trip_proof("key-agreement", NK_SERIAL, "0c", der, material=bad))
+                self.record_refuses(ev, "op-a-0c.json: the ephemeral public key " + why)
+
+    def test_a_round_trip_carrying_its_plaintext_or_a_verdict_is_refused(self):
+        for extra in ({"challenge_b64": base64.b64encode(os.urandom(32)).decode()}, {"verified": "true"}):
+            with self.subTest(extra=sorted(extra)):
+                ev = self.kek_evidence()
+                ev[4] = self.file("op-a-0b.json", round_trip_proof("decrypt", NK_SERIAL, "0b", self.rsa[NK_SERIAL][1],
+                                                                   **extra))
+                self.record_refuses(ev, "no verdict, and no plaintext challenge for a round trip")
+
+    def test_a_bad_challenge_hash_is_refused(self):
+        ev = self.kek_evidence()
+        ev[4] = self.file("op-a-0b.json", round_trip_proof("decrypt", NK_SERIAL, "0b", self.rsa[NK_SERIAL][1],
+                                                           challenge_sha256=""))
+        self.record_refuses(ev, "challenge_sha256 must be sha256: and 64 lowercase hex")
+
+    def test_a_decrypt_round_trip_on_an_ec_key_is_refused(self):
+        ev = self.kek_evidence()
+        ev[4] = self.file("op-a-0b.json", round_trip_proof("decrypt", NK_SERIAL, "0b", self.ec[NK_SERIAL][1],
+                                                           material=bytes(64)))
+        self.record_refuses(ev, "a decrypt round trip needs an RSA key; the proof's key is p256")
+
+    def test_an_agreement_round_trip_on_an_rsa_key_is_refused(self):
+        ev = self.kek_evidence()
+        ev[6] = self.file("op-a-0c.json", round_trip_proof("key-agreement", NK_SERIAL, "0c", self.rsa[NK_SERIAL][1]))
+        self.record_refuses(ev, "a key-agreement round trip needs a p256 or p384 key; the proof's key is rsa2048")
+
+    def test_a_wrong_round_trip_operation_is_refused(self):
+        """An agreement key offered a decrypt round trip over its own key: digest and class match, the
+        operation does not."""
+        ev = self.kek_evidence()
+        key_der = self.ec[NK_SERIAL][1]
+        rec = round_trip_proof("key-agreement", NK_SERIAL, "0c", key_der)
+        ev[6] = self.file("op-a-0c.json", rec)
+        module = load_tool()
+        proof = module.parse_operation_proof(rec, "x")
+        proof.operation = "decrypt"
+        route = module.Route(1, 0, kek_manifest()["objects"][1], kek_manifest()["objects"][1]["bindings"][0])
+        evidence = module.Evidence("t", "nitrokey-pkcs11", "0c", NK_SERIAL, proof.public_key_sha256)
+        with self.assertRaises(module.Refusal) as caught:
+            module.match_operation_proofs({route.path: (route, evidence)}, [proof])
+        self.assertIn("needs a key-agreement proof, not decrypt", str(caught.exception))
 
 
 class ProofDeviceSide(Case):
@@ -800,6 +1011,84 @@ class ProofDeviceSide(Case):
         result = self.seal(self.der_a, self.token_sign(self.key_b, mechanism, to_sign), out)
         self.refuses(result, "the token's signature does not verify", "NOTHING WRITTEN")
         self.assertFalse(out.exists())
+
+    def rt_seal(self, operation, der, out, **files):
+        (self.dir / "pub.der").write_bytes(der)
+        args = ["operation-proof", "--operation", operation, "--backend", "nitrokey-pkcs11", "--serial", NK_SERIAL,
+                "--object-id", "0b", "--public-key", self.dir / "pub.der", "--out", out]
+        for flag, path in files.items():
+            args += [f"--{flag.replace('_', '-')}", path]
+        return self.run_tool(*args)
+
+    def test_a_decrypt_round_trip_uses_the_daemons_oaep_and_records_no_plaintext(self):
+        key, der = keypair("rsa2048")
+        (self.dir / "pub.der").write_bytes(der)
+        result = self.run_tool("proof-prepare", "--operation", "decrypt", "--public-key", self.dir / "pub.der",
+                               "--challenge-out", self.dir / "chal", "--ciphertext-out", self.dir / "ct")
+        self.assertEqual(result.stdout.strip(), "RSA-PKCS-OAEP", result.stderr)
+        challenge = (self.dir / "chal").read_bytes()
+        (self.dir / "key.pem").write_bytes(key)
+        # The token's answer, in software, with EXACTLY the daemon's parameters. A ciphertext made with any
+        # other OAEP hash would not decrypt here.
+        plain = subprocess.run(["openssl", "pkeyutl", "-decrypt", "-inkey", str(self.dir / "key.pem"),
+                                "-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha1",
+                                "-pkeyopt", "rsa_mgf1_md:sha1", "-in", str(self.dir / "ct")],
+                               capture_output=True, check=True).stdout
+        self.assertEqual(plain, challenge)
+        (self.dir / "answer").write_bytes(plain)
+        out = self.dir / "rt.json"
+        result = self.rt_seal("decrypt", der, out, challenge=self.dir / "chal", ciphertext=self.dir / "ct",
+                              token_output=self.dir / "answer")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("ATTESTED AT CEREMONY TIME, not re-verifiable afterwards", result.stdout)
+        text = out.read_text()
+        record = json.loads(text)
+        self.assertEqual(record["class"], "live-round-trip")
+        self.assertEqual(record["challenge_sha256"], "sha256:" + hashlib.sha256(challenge).hexdigest())
+        self.assertNotIn(base64.b64encode(challenge).decode(), text, "the plaintext challenge must never be recorded")
+        self.assertNotIn(challenge.hex(), text)
+        # A wrong decryption on the token is refused at ceremony time, and nothing is written.
+        (self.dir / "answer").write_bytes(bytes(b ^ 1 for b in plain))
+        bad = self.dir / "bad.json"
+        self.refuses(self.rt_seal("decrypt", der, bad, challenge=self.dir / "chal", ciphertext=self.dir / "ct",
+                                  token_output=self.dir / "answer"),
+                     "the token's decryption does not match", "NOTHING WRITTEN")
+        self.assertFalse(bad.exists())
+        (self.dir / "answer").write_bytes(b"")
+        self.refuses(self.rt_seal("decrypt", der, bad, challenge=self.dir / "chal", ciphertext=self.dir / "ct",
+                                  token_output=self.dir / "answer"), "the token's decryption does not match")
+
+    def test_a_key_agreement_round_trip_compares_both_sides(self):
+        key, der = keypair("secp384r1")
+        (self.dir / "pub.der").write_bytes(der)
+        result = self.run_tool("proof-prepare", "--operation", "key-agreement", "--public-key", self.dir / "pub.der",
+                               "--ephemeral-out", self.dir / "eph.pem", "--peer-out", self.dir / "peer.der")
+        self.assertEqual(result.stdout.strip(), "ECDH1-DERIVE", result.stderr)
+        (self.dir / "key.pem").write_bytes(key)
+        z = subprocess.run(["openssl", "pkeyutl", "-derive", "-inkey", str(self.dir / "key.pem"), "-peerkey",
+                            str(self.dir / "peer.der"), "-peerform", "DER"], capture_output=True, check=True).stdout
+        (self.dir / "answer").write_bytes(z)
+        out = self.dir / "ka.json"
+        result = self.rt_seal("key-agreement", der, out, ephemeral_key=self.dir / "eph.pem",
+                              token_output=self.dir / "answer")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = json.loads(out.read_text())
+        self.assertEqual(base64.b64decode(record["ephemeral_public_key_der_b64"]), (self.dir / "peer.der").read_bytes())
+        self.assertNotIn(z.hex(), out.read_text())
+        (self.dir / "answer").write_bytes(z[:-1] + bytes([z[-1] ^ 1]))
+        self.refuses(self.rt_seal("key-agreement", der, self.dir / "bad.json", ephemeral_key=self.dir / "eph.pem",
+                                  token_output=self.dir / "answer"), "the token's ECDH shared secret does not match")
+        self.assertFalse((self.dir / "bad.json").exists())
+
+    def test_prepare_refuses_a_round_trip_the_key_cannot_do(self):
+        (self.dir / "pub.der").write_bytes(self.der_a)
+        self.refuses(self.run_tool("proof-prepare", "--operation", "decrypt", "--public-key", self.dir / "pub.der",
+                                   "--challenge-out", self.dir / "c", "--ciphertext-out", self.dir / "t"),
+                     "a decrypt round trip needs an RSA key, not p256")
+        (self.dir / "pub.der").write_bytes(keypair("rsa2048")[1])
+        self.refuses(self.run_tool("proof-prepare", "--operation", "key-agreement", "--public-key", self.dir / "pub.der",
+                                   "--ephemeral-out", self.dir / "e", "--peer-out", self.dir / "p"),
+                     "a key-agreement round trip needs a p256 or p384 key, not rsa2048")
 
     def test_prepare_refuses_a_key_the_ceremony_does_not_provision(self):
         self.refuses(self.run_tool("proof-prepare", "--public-key", self.file("junk.der", "not a key"),

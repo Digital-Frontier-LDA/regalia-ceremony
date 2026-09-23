@@ -508,9 +508,12 @@ if [ -x "$OPP" ] && command -v openssl >/dev/null 2>&1; then
   opout="$(EMU_YKMAN_STATE="$OW/yk" EMU_P11_PIN="$OPIN" EMU_P11_ARGV_LOG="$OW/argv.log" EMU_PKCS11_REAL="$OW/lib/real" \
     TMPDIR="$OW" bash -c '
       ykman --device 36345471 piv keys generate --algorithm ECCP256 --pin-policy ONCE --touch-policy NEVER 9c "$1/gen.pem" >/dev/null
-      "$2" --backend yubikey-piv --serial 36345471 --object-id 9c --module "$1/lib/libykcs11.so.2" --out "$1/proof.json" <<< "$3"
+      "$2" --operation sign --backend yubikey-piv --serial 36345471 --object-id 9c --module "$1/lib/libykcs11.so.2" --out "$1/proof.json" <<< "$3"
+      # …and a KEK: the decrypt round trip logs in the same way, and must leak the PIN no more than a signature.
+      ykman --device 36345471 piv keys generate --algorithm RSA2048 --pin-policy ONCE --touch-policy NEVER 9d "$1/gen2.pem" >/dev/null
+      "$2" --operation decrypt --backend yubikey-piv --serial 36345471 --object-id 9d --module "$1/lib/libykcs11.so.2" --out "$1/kek-proof.json" <<< "$3"
     ' _ "$OW" "$OPP" "$OPIN" 2>&1)"
-  if [ ! -s "$OW/proof.json" ]; then
+  if [ ! -s "$OW/proof.json" ] || [ ! -s "$OW/kek-proof.json" ]; then
     F "operation-proof.sh produced no proof — the PIN checks below would pass on no evidence: $opout"
   else
     grep -qF -- "$OPIN" <<< "$opout" && F "operation-proof.sh PRINTED the token PIN" \

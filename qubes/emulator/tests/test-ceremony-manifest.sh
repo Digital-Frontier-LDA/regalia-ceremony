@@ -57,7 +57,9 @@ import json, sys
 sys.path.insert(0, sys.argv[1])
 import test_ceremony_manifest as t
 what, out = sys.argv[2], sys.argv[3]
-if what == "manifest":
+if what == "kek-manifest":
+    open(out, "w").write(json.dumps(t.kek_manifest(yubikey=True), indent=2))
+elif what == "manifest":
     m = t.fleet_manifest()
     if len(sys.argv) > 4 and sys.argv[4] == "touch-always":
         m["objects"][0]["bindings"][1]["touch_policy"] = "always"
@@ -71,7 +73,8 @@ if what == "manifest":
         m["objects"].append(second)
     open(out, "w").write(json.dumps(m, indent=2))
 else:
-    open(out, "w").write(t.commission_transcript(**({"pin": sys.argv[4]} if len(sys.argv) > 4 else {})))
+    kw = dict(zip(("pin", "serial", "kek_id"), sys.argv[4:]))
+    open(out, "w").write(t.commission_transcript(**kw))
 EOF
 }
 { fixture "$TESTS" manifest "$ROOT/manifest.json" \
@@ -89,7 +92,7 @@ nk_p11(){ pkcs11-tool --module "$CEREMONY_PKCS11_MODULE" --slot 0x4 "$@"; }
   && NK_PIN="sha256:$(sha256sum < "$ROOT/nk.der" | awk '{print $1}')" \
   && fixture "$TESTS" commission "$ROOT/commission.txt" "$NK_PIN"; } || { echo "  FAIL cannot build the Nitrokey"; exit 1; }
 # operation-proof.sh for the Nitrokey, the way the operator runs it after commission-card.sh.
-nk_proof(){ "$TESTS/../../scripts/operation-proof.sh" --backend nitrokey-pkcs11 --serial DENK0404144 --object-id 0a \
+nk_proof(){ "$TESTS/../../scripts/operation-proof.sh" --operation sign --backend nitrokey-pkcs11 --serial DENK0404144 --object-id 0a \
               --device-id nitrokey-sitea --out "$1/opproof-nitrokey-sitea-0a.json" <<< "$TOKEN_PIN" 2>&1; }
 
 # Drive the real main() in a subshell with a scripted stdin; $1 = the stdin, rest = env assignments.
@@ -243,7 +246,7 @@ drive $'m\nyubikey-sitea\n11110003\n'"$TOKEN_PIN"$'\nq' CEREMONY_MANIFEST="$ROOT
 # pins the FIRST key, its proof now signs with the second. record must refuse, by name.
 EV7="$ROOT/ev7"; cp -r "$EV" "$EV7"; rm -f "$EV7/custody-manifest.qualified.json"
 ykman --device 25923905 piv keys generate --algorithm ECCP256 --pin-policy ALWAYS --touch-policy NEVER 9c "$ROOT/regen.pem"
-"$TESTS/../../scripts/operation-proof.sh" --backend yubikey-piv --serial 25923905 --object-id 9c \
+"$TESTS/../../scripts/operation-proof.sh" --operation sign --backend yubikey-piv --serial 25923905 --object-id 9c \
   --device-id yubikey-siteb --out "$EV7/opproof-yubikey-yubikey-siteb-9c.json" <<< "$TOKEN_PIN" >/dev/null 2>&1 \
   || F "could not re-prove the regenerated slot"
 out="$(drive q CEREMONY_MANIFEST="$ROOT/manifest.json" CEREMONY_MANIFEST_EVIDENCE_DIR="$EV7")"; rc=$?
@@ -251,6 +254,62 @@ out="$(drive q CEREMONY_MANIFEST="$ROOT/manifest.json" CEREMONY_MANIFEST_EVIDENC
   && grep -q "Was the slot regenerated" <<< "$out"; } \
   && P "record refuses a proof over a key other than the one being pinned" || F "a proof over another key was accepted (rc=$rc)"
 [ -e "$EV7/custody-manifest.qualified.json" ] && F "a refused record wrote a manifest" || P "nothing written"
+
+# =================================================================================================
+hdr "KEKs (ADR-0002): RSA unwrap and EC key-agreement provision end to end with a labelled round trip"
+# The Nitrokey's main role: an RSA envelope KEK (0b) and an EC key-agreement key (0c) on each of two
+# cards, plus an RSA PIV KEK (slot 9d) on both YubiKeys through the wizard's m) step. A signature cannot
+# prove these operations, so each is proven by a live round trip — attested now, not re-verifiable later.
+fixture "$TESTS" kek-manifest "$ROOT/kek-manifest.json" || F "cannot build the KEK manifest"
+mkdir -p "$EMU_P11_TOKENS/DENK0000002"      # lists as 0x4 now; DENK0404144 moves to 0x8
+EVK="$ROOT/evk"; mkdir -p "$EVK"
+for card in "DENK0000002 0x4 nitrokey-siteb" "DENK0404144 0x8 nitrokey-sitea"; do
+  set -- $card
+  for kg in "0b rsa:2048 decrypt" "0c EC:prime256v1 key-agreement"; do
+    # shellcheck disable=SC2086
+    set -- "$1" "$2" "$3" $kg
+    NKPIN="$TOKEN_PIN" pkcs11-tool --module "$CEREMONY_PKCS11_MODULE" --slot "$2" --login --pin env:NKPIN \
+      --keypairgen --key-type "$5" --id "$4" >/dev/null
+    pkcs11-tool --module "$CEREMONY_PKCS11_MODULE" --slot "$2" --read-object --type pubkey --id "$4" \
+      --output-file "$ROOT/kek.der"
+    fixture "$TESTS" commission "$EVK/commission-$3-$4.txt" "sha256:$(sha256sum < "$ROOT/kek.der" | awk '{print $1}')" "$1" "$4"
+    kout="$("$TESTS/../../scripts/operation-proof.sh" --operation "$6" --backend nitrokey-pkcs11 --serial "$1" \
+             --object-id "$4" --device-id "$3" --out "$EVK/opproof-$3-$4.json" <<< "$TOKEN_PIN" 2>&1)" \
+      && grep -q "completed a live $6 round trip" <<< "$kout" \
+      && P "Nitrokey $1 id $4: $6 round trip at the rack" || F "Nitrokey $1 id $4 $6 round trip failed: $kout"
+  done
+done
+out="$(drive $'m\nyubikey-sitea\n36345471\n'"$TOKEN_PIN"$'\nm\nyubikey-siteb\n25923905\n'"$TOKEN_PIN"$'\nq' \
+        CEREMONY_MANIFEST="$ROOT/kek-manifest.json" CEREMONY_MANIFEST_EVIDENCE_DIR="$EVK")"; rc=$?
+[ "$rc" = 0 ] && P "the KEK ceremony completes" || { F "the KEK ceremony failed (rc=$rc)"; printf '%s\n' "$out" | tail -15; }
+grep -q "operation-proof.sh --operation 'decrypt' --backend yubikey-piv" <<< "$out" \
+  && P "m) proved each YubiKey KEK with a decrypt round trip, the operation the manifest's proof class names" \
+  || F "m) did not run a decrypt round trip for the PIV KEK"
+[ "$(grep -c "OPERATION ATTESTED" <<< "$out")" = 6 ] && ! grep -q "OPERATION VERIFIED" <<< "$out" \
+  && P "record qualified all six KEK bindings as ATTESTED (never reported as re-verified)" \
+  || F "record did not attest six KEK bindings"
+grep -q "ATTESTED AT CEREMONY TIME, NOT RE-VERIFIABLE AFTERWARDS" <<< "$out" \
+  && P "plan states plainly that a round trip is not re-verifiable afterwards" || F "plan did not label the round trip"
+check="$("$PY" -c 'import json,sys; m=json.load(open(sys.argv[1])); print(" ".join(b["state"] for o in m["objects"][:3] for b in o["bindings"]))' \
+          "$EVK/custody-manifest.qualified.json" 2>/dev/null)"
+[ "$check" = "qualified qualified qualified qualified qualified qualified" ] \
+  && P "the qualified manifest carries all six KEK bindings" || F "the KEK bindings were not qualified: $check"
+{ grep -qF -- "$TOKEN_PIN" <<< "$out" || grep -rqF -- "$TOKEN_PIN" "$EVK"; } && F "THE PIN APPEARS in the KEK run" \
+  || P "the PIN is in no output and no KEK evidence"
+! grep -rq '"challenge_b64"' "$EVK"/opproof-*.json && P "no round-trip proof records its plaintext challenge" \
+  || F "a round-trip proof recorded its plaintext challenge"
+
+# DRIFT: a ceremony-manifest.py whose piv-steps names no proof operation (an older copy, a hand-edited
+# one) must stop the step — never fall back to a default proof that could be the wrong class.
+EVD="$ROOT/evd"; mkdir -p "$EVD"
+out="$( ( manifest_tool(){ if [ "$1" = piv-steps ]; then python3 "$HERE/ceremony-manifest.py" "$@" | cut -f1-5; \
+                           else python3 "$HERE/ceremony-manifest.py" "$@"; fi; }
+         # shellcheck disable=SC2034  # read by step_manifest_yubikey, sourced from ceremony.sh
+         CEREMONY_MANIFEST="$ROOT/kek-manifest.json" CEREMONY_MANIFEST_EVIDENCE_DIR="$EVD" WORK="$EVD"
+         step_manifest_yubikey ) <<< $'yubikey-sitea\n11110007\n'"$TOKEN_PIN" 2>&1)"; rc=$?
+{ [ "$rc" != 0 ] && grep -q "piv-steps named no proof operation" <<< "$out" && ! ls "$EVD"/opproof-* >/dev/null 2>&1; } \
+  && P "a step list with no proof operation stops the step; no proof is guessed" \
+  || F "the m) step proceeded without a proof operation (rc=$rc): $(tail -5 <<< "$out")"
 
 # =================================================================================================
 hdr "Operation behaviour: nothing reached the real pkcs11-tool"

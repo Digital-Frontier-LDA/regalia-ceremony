@@ -476,8 +476,9 @@ step_manifest_yubikey() {
   b "Manifest — generate a planned YubiKey PIV key and capture its evidence"
   info "The slot, algorithm, PIN policy and touch policy come from the manifest; you choose only"
   info "WHICH token this is. The key is GENERATED ON THE TOKEN and never imported (ADR-0002 D5)."
-  info "Each key then signs a fresh challenge with the token's PIN — you are asked for it once per key."
-  local device serial steps slot alg pin touch path ev op
+  info "Each key is then proven with the token's PIN (a signature, or a decrypt round trip for a KEK) —"
+  info "you are asked for the PIN once per key."
+  local device serial steps slot alg pin touch path proof ev op
   read -r -p "   manifest device_id of the token in the reader > " device || return 1
   read -r -p "   its serial (ykman list --serials) > " serial || return 1
   case "$serial" in ''|*[!0-9]*) err "a YubiKey serial is digits only"; return 1 ;; esac
@@ -486,7 +487,7 @@ step_manifest_yubikey() {
   # The step list is read on fd 9, NOT stdin: operation-proof.sh below asks for the PIN on stdin, and
   # inside a `while … done <<< "$steps"` loop stdin IS the step list — the PIN prompt would read the
   # next step's line (or EOF) instead of the operator's keyboard.
-  while IFS=$'\t' read -r -u 9 slot alg pin touch path; do
+  while IFS=$'\t' read -r -u 9 slot alg pin touch path proof; do
     [ -n "$slot" ] || continue
     info "$path: slot $slot $alg pin=$pin touch=$touch on $device (serial $serial)"
     run "ykman --device '$serial' piv keys generate --algorithm '$alg' --pin-policy '$pin' --touch-policy '$touch' '$slot' '$WORK/yk-$serial-$slot.pem'" \
@@ -502,14 +503,17 @@ step_manifest_yubikey() {
       --keys-info "$WORK/yk-$serial-$slot.keys" --public-key "$WORK/yk-$serial-$slot.der" --out "$ev" \
       || { err "the token's own report was refused (reason above) — $path is NOT provisioned as planned"; return 1; }
     # THE OPERATION PROOF (regalia#28 criterion 3), while the token is still in the reader. Everything
-    # above is the token's REPORT of the key; this is the key WORKING: it signs a fresh challenge with
-    # the PIN the operator types (into operation-proof.sh, echo off — the wizard never sees it), and the
-    # signature is verified against the key just exported. record refuses the binding without it.
+    # above is the token's REPORT of the key; this is the key WORKING, with the PIN the operator types
+    # (into operation-proof.sh, echo off — the wizard never sees it). $proof is the operation the
+    # manifest's proof class needs, from piv-steps: `sign` for a signing key (a signature record
+    # re-verifies), `decrypt` for an RSA KEK (a live RSA-OAEP round trip, attested now and NOT
+    # re-verifiable later — the ceiling for a decrypt key). record refuses the binding without it.
     # Not behind run(): typing the PIN is the operator's consent, and a skipped proof is not a choice
     # this step offers — it only leaves the binding unqualifiable.
     op="$CEREMONY_MANIFEST_EVIDENCE_DIR/opproof-yubikey-$device-$slot.json"
-    show "operation-proof.sh --backend yubikey-piv --serial '$serial' --object-id '$slot' --device-id '$device' --out '$op'"
-    "$HERE/operation-proof.sh" --backend yubikey-piv --serial "$serial" --object-id "$slot" \
+    case "$proof" in sign|decrypt|key-agreement) ;; *) err "piv-steps named no proof operation for $path"; return 1;; esac
+    show "operation-proof.sh --operation '$proof' --backend yubikey-piv --serial '$serial' --object-id '$slot' --device-id '$device' --out '$op'"
+    "$HERE/operation-proof.sh" --operation "$proof" --backend yubikey-piv --serial "$serial" --object-id "$slot" \
         --device-id "$device" --out "$op" \
       || { err "no operation proof for $path (reason above) — record will refuse it. Re-run the command shown"; \
            err "once the cause is fixed — if it was a wrong PIN, that attempt already spent one of the token's retries."; return 1; }
