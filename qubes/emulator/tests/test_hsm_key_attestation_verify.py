@@ -347,6 +347,14 @@ class BothKeyTypesTest(unittest.TestCase):
         self.assert_mismatch(self.verify(self.paths["ce04"], "--expect-spki", self.put("e3.der", der)),
                              "the attested RSA public exponent is not the token key's exponent")
 
+    def test_an_spki_naming_an_unknown_algorithm_is_a_named_no_not_a_traceback(self):
+        """A well-formed SPKI whose algorithm OID (1.2.3.4) cryptography does not know raises
+        UnsupportedAlgorithm — not ValueError. It must still print the verdict line (review of #40)."""
+        unknown = bytes.fromhex("302a300506032a0304032100" + "11" * 32)
+        r = self.verify(self.paths["ce04"], "--expect-spki", self.put("unknown-alg.der", unknown))
+        self.assertNotIn("Traceback", r.stderr)
+        self.assert_mismatch(r, "names a key algorithm this cannot compare")
+
     def test_an_ec_attestation_against_another_ec_key_is_no(self):
         other = self.fresh_public_key("other-ec", ["-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256"])
         self.assert_mismatch(self.verify(self.paths["ce03"], "--expect-spki", other),

@@ -358,7 +358,15 @@ STUB
 #!/usr/bin/env python3
 print("DEVAUT_CHAIN=verified")
 STUB
-  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py"
+  # A verifier whose chain walk could not RUN (malformed C.DevAut, its own error): exit 2 and
+  # DEVAUT_CHAIN=not-evaluated. That is not a verdict on the card and must not be worded as one.
+  cat > "$FAKE/verify-notevaluated.py" <<'STUB'
+import sys
+print("hsm-key-attestation-verify ERROR: the chain walker could not evaluate C.DevAut", file=sys.stderr)
+print("DEVAUT_CHAIN=not-evaluated")
+sys.exit(2)
+STUB
+  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py" "$FAKE/verify-notevaluated.py"
   mkdir -p "$FAKE/args" "$FAKE/empty-trust"
   REG_NONE="$FAKE/reg-none.json"
   printf '{"schema":"regalia.staging-hardware/v1","environment":"staging","devices":[]}\n' > "$REG_NONE"
@@ -445,6 +453,11 @@ EOF
   { [ "$rc" != 0 ] && no_fragment; } \
     && P "a verifier that exits 0 without the signature and point verdicts is NOT a pass" \
     || F "exit status alone was taken as verification"
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-notevaluated.py" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'could NOT BE EVALUATED — no verdict on the card' "$FAKE/outk" \
+      && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "a chain that could not be EVALUATED is reported as such, not as 'not a genuine card'" \
+    || F "DEVAUT_CHAIN=not-evaluated was misreported as a verdict on the card"
   rc="$(HSM_KEY_ATTEST_VERIFY_PY=/nonexistent cc_kek --kek-id 0a --kek-ref 1)"
   { [ "$rc" != 0 ] && grep -q 'hsm-key-attestation-verify.py not found' "$FAKE/outk" && no_fragment; } \
     && P "no verifier -> CANNOT BE EVALUATED -> failure" || F "the attestation was skipped without a verifier"

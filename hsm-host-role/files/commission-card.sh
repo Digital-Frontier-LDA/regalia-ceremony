@@ -501,6 +501,13 @@ PYTYPE
         # verdict on the card, so not worded as one.
         F "the KEK attestation verifier is missing a dependency under $KEK_PY — CANNOT BE EVALUATED (not a verdict on the card)"
         grep -E '^(hsm-key-attestation-verify|DEPENDENCY_MISSING)' <<< "$ver_out" | sed 's/^/     /'
+      elif grep -qx 'DEVAUT_CHAIN=not-evaluated' <<< "$ver_out"; then
+        # The chain could not be CHECKED (an empty or malformed C.DevAut read, a chain walker that
+        # exited on its own error). That is the environment talking, not a verdict on the card, and
+        # wording it as "not a genuine card" is the misreport this section exists to avoid (review of
+        # regalia-ceremony#40). Still a FAIL: nothing is pinned without a verified chain.
+        F "the C.DevAut chain could NOT BE EVALUATED — no verdict on the card; re-read C.DevAut and check the verifier's reason below"
+        grep -E '^(hsm-key-attestation-verify|cvc-devaut-verify) |^DEVAUT_CHAIN=' <<< "$ver_out" | sed 's/^/     /' | head -6
       else
         F "the KEK attestation DID NOT VERIFY — imported key, wrong --kek-ref for --kek-id, or not a genuine card. DO NOT PIN IT."
         # The verifier's named reasons FIRST, then its verdict lines. A tail of the combined output

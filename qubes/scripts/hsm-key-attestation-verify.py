@@ -79,8 +79,12 @@ try:
     from cryptography.hazmat.primitives.asymmetric import ec, rsa
     from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
     from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat, load_der_public_key
+    from cryptography.exceptions import UnsupportedAlgorithm
 except ImportError:
     ec = None
+
+    class UnsupportedAlgorithm(Exception):  # never raised: the dependency check exits first
+        pass
 
 PROG = "hsm-key-attestation-verify"
 
@@ -170,6 +174,10 @@ def compare_to_spki(key, der):
         tok = load_der_public_key(der)
     except (ValueError, TypeError) as e:
         return False, f"the expected SubjectPublicKeyInfo does not parse ({e})"
+    except UnsupportedAlgorithm as e:
+        # A well-formed SPKI naming an algorithm `cryptography` does not know is still a named
+        # non-match, never a traceback without a verdict line (review of regalia-ceremony#40).
+        return False, f"the expected SubjectPublicKeyInfo names a key algorithm this cannot compare ({e})"
     if isinstance(tok, rsa.RSAPublicKey):
         if key["type"] != "rsa":
             return False, "the attestation is of an EC key but the token's key is RSA"
