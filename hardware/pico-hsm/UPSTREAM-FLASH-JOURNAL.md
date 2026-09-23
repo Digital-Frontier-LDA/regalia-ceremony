@@ -82,10 +82,37 @@ unproven — and our own rig can decide it.**
 4. Look for `INFO: flash redo restored` in the trace: it distinguishes "the cut did no damage" from
    "the cut did damage and the journal undid it", and only the second is evidence about the journal.
 
-**Not run here.** Building the firmware needs the pico-sdk, the ARM toolchain and the pico-hsm tree;
-this box has ~650 MB free on a 2 GB `/home`, which is the same constraint that blocked building
-`simd` for regalia#439. The board and the debug probe are both present, so it is a build-host
-problem rather than a hardware one.
+### Status, 2026-09-23: built, flashed, boots on our filesystem — the cuts are still to run
+
+The build-host problem is solved: the bench qube is a Qubes AppVM, so its root filesystem is
+volatile and has ~11 GB free. Everything below lives in `/build` there and is gone on reboot.
+
+| component | version |
+|---|---|
+| pico-hsm | `7d99457` (2026-09-17), **no local patches** |
+| pico-keys-sdk | `d075b18` (main, 2026-09-22) — contains `5efcd251`, `ab24e57b`, `e1fba2e6`, `7892b8ce` **and** `ebdbb28f`; pico-hsm's own pin `fff390a` lacks `ebdbb28f` |
+| pico-sdk | 2.3.1 |
+| toolchain | Arm GNU 15.2.Rel1 (the one the macOS bench pinned) |
+| config | `PICO_BOARD=waveshare_rp2350_pizero`, `PICO_STDIO_UART=ON`, `PICO_STDIO_RTT=ON`, Release |
+| OpenOCD | raspberrypi/openocd `sdk-2.2.0` — Debian's 0.12.0 has no `rp2350` target |
+
+`low_flash_recover_journal` and the `INFO: flash redo restored` string are both in the ELF
+(UF2 sha256 `aef5fb19…d9de`). Flashed to ESP41D722E2 over SWD, `Verified OK`.
+
+**It reads the filesystem our patched firmware wrote, unchanged**: the boot scan over the probe's
+UART lists every file (`2f02` device certificate, `d031`/`d131` the staging key), PKCS#11 login
+works, and `akash-funding` (ID 31) is present. So upstream's journal did not change the on-flash
+format in a way that orphans existing cards.
+
+Before flashing, the whole 16 MB flash was imaged over SWD, twice, byte-identical — restoring that
+image puts back our patched firmware and the staging key exactly.
+
+**Step 2 has a new instrument.** `tools/hsm-bug6-powerloss.sh` needs the `FORENSIC_CAUSAL` recorder,
+which existed only on the macOS bench and was never pushed. `tools/hsm-journal-powercut.sh` asks
+the narrower question this document is about — does a cut wedge the card, lose an acknowledged
+write, or make the journal act — with stock firmware and the UART boot log. On Qubes R4.2 a cut
+detaches the card from the bench qube, so it runs with an operator pulling the cable and
+re-attaching from dom0 (or, optionally, the dom0 service in `qubes/bench/`).
 
 ## Our patches
 
