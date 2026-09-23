@@ -7,6 +7,11 @@ what the ceremony proved (regalia#28).
     ceremony-manifest.py piv-steps MANIFEST --device-id ID [--site S]
     ceremony-manifest.py yubikey-evidence --slot SLOT --info FILE --keys-info FILE --public-key FILE
                                           [--device-id ID] --out OUT
+    ceremony-manifest.py proof-prepare [--operation sign|decrypt|key-agreement] --public-key FILE
+                                       [--challenge-out F --to-sign-out F | --challenge-out F --ciphertext-out F
+                                        | --ephemeral-out F --peer-out F]
+    ceremony-manifest.py operation-proof [--operation …] --backend B --serial S --object-id ID [--device-id ID]
+                                         --public-key FILE --out OUT (+ the operation's inputs)
 
 WHY THIS EXISTS. The 2026-09-03 audit of regalia#28 found the separation rules documented but nothing
 manifest-driven: the seal registry is hand-edited, and no tool fills a binding from ceremony output.
@@ -26,14 +31,21 @@ retyping in both directions:
     DEVICE reported, advances planned -> qualified, re-validates the whole result with regalia-kms's
     own validator, and only then writes. Anything it cannot account for is a named refusal and
     NOTHING is written: a half-recorded manifest is worse than an untouched one, because it looks
-    finished.
+    finished. A binding is qualified only with an OPERATION PROOF for exactly its key — a fresh
+    challenge the device signed with the PIN, whose signature `record` re-verifies itself against the
+    key being pinned (regalia#28 criterion 3; see SIGNATURE_OPERATIONS below).
 
   * `yubikey-evidence` packages the raw ykman output for one PIV slot into the evidence record
     `record` consumes. It keeps the RAW text, not conclusions drawn from it, so `record` re-derives
     every value itself instead of trusting a summary somebody could have edited.
 
-WHAT IT DOES NOT DO. It performs no hardware operation. It never runs pkcs11-tool, ykman or
-commission-card.sh; it reads what they printed. The Nitrokey pin comes from commission-card.sh
+  * `proof-prepare` / `operation-proof` are the two halves of the proof operation-proof.sh drives:
+    draw the challenge and name the mechanism for the key the token exported, then package the
+    token's signature — verified on the spot, with the same code `record` re-runs.
+
+WHAT IT DOES NOT DO. It performs no hardware operation. It never runs pkcs11-tool, ykman,
+operation-proof.sh or commission-card.sh; it reads what they printed (and runs openssl, which touches
+no device, to verify signatures). The Nitrokey pin comes from commission-card.sh
 --kek-id/--kek-ref, whose MANIFEST_BINDING_PINS line is printed only after the card's attestation
 proved the key was generated on that genuine card (ADR-0002 D1). This tool does not repeat any of
 those checks — it cannot, it has no card — and it does not accept a Nitrokey pin from anywhere else.
@@ -50,9 +62,11 @@ import argparse
 import base64
 import copy
 import hashlib
+import hmac
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass, field
@@ -64,6 +78,58 @@ sys.path.insert(0, str(HERE / "vendor" / "regalia_kms" / "tools"))
 import custody_manifest  # noqa: E402  (vendored; see vendor/regalia_kms/PINS.json)
 
 YUBIKEY_EVIDENCE_SCHEMA = "regalia.yubikey-piv-evidence/v1"
+OPERATION_PROOF_SCHEMA = "regalia.operation-proof/v1"
+
+# THE OPERATION-BEHAVIOUR CONTROL (regalia#28 criterion 3). Everything else `record` checks — serial,
+# slot, algorithm, origin, PIN and touch policy, the public-key digest — is what the device SAYS about
+# the key. None of it shows the key WORKS: that the private half is in the slot the export came from,
+# that the operator's PIN unlocks it, and that the card will perform the operation the manifest
+# plans for it. A slot whose key was regenerated after the export, a card whose PIN is not the one
+# the custodian holds, or an object PKCS#11 will not sign with would all qualify on the reports alone,
+# and the daemon would discover it at its first request in production.
+#
+# So a binding reaches `qualified` only with an operation proof: a fresh random challenge signed ON THE
+# DEVICE with the operator's PIN, and `record` ITSELF re-verifying that signature with openssl against
+# the public key the binding is being pinned to. No verdict is carried in the proof, because a boolean
+# is exactly what an edited file would say; `record` recomputes the only verdict it accepts.
+#
+# TWO PROOF CLASSES, AND THE WEAKER ONE SAYS SO.
+#
+#   reverifiable-signature  for any object whose operations include sign or certificate-sign. The token
+#                           signs a fresh challenge; the proof carries challenge, signature and key, and
+#                           `record` re-verifies the signature with openssl. Checkable by anyone, at any
+#                           time, forgeable by nobody who lacks the private key.
+#
+#   live-round-trip         for keys whose operations are decrypt-shaped (unwrap, wrap, release-secret,
+#                           seal-envelope — RSA KEKs) or key-agreement (EC). A decrypt or ECDH result
+#                           CANNOT be re-verified afterwards: whoever made the ciphertext or the ephemeral
+#                           key already knows the answer the token is meant to produce, so a file saying
+#                           "the token returned X" proves nothing on its own. The check is therefore made
+#                           LIVE, in the ceremony process, at the moment the token answers: operation-
+#                           proof.sh encrypts a fresh challenge to the exported key with RSA-OAEP exactly
+#                           as the daemon wraps (regalia-kms internal/keywrap: OAEP SHA-1, MGF1-SHA-1, no
+#                           label) and has the token decrypt it, or runs ephemeral ECDH on both sides
+#                           (CKM_ECDH1_DERIVE, CKD_NULL, as the daemon's Derive), and compares. The proof
+#                           then records only what can be checked offline — the key, the ciphertext or
+#                           ephemeral public key (well-formed for THAT key), and the SHA-256 of the
+#                           challenge for reuse detection — never the plaintext, never a verdict.
+#                           It is ATTESTED AT CEREMONY TIME, NOT RE-VERIFIABLE AFTERWARDS, and that is the
+#                           ceiling for decrypt and key-agreement keys: no stronger evidence exists.
+#
+# The strongest applicable class is required. An object that can sign MUST bring a signature, even if it
+# also unwraps: the weaker class never substitutes where the stronger one is available. Refusing KEKs
+# outright instead — an earlier draft did — made the Nitrokey's main role under ADR-0002 (the envelope
+# KEK) impossible to provision through the manifest at all.
+SIGNATURE_OPERATIONS = frozenset(("sign", "certificate-sign"))
+DECRYPT_OPERATIONS = frozenset(("unwrap", "wrap", "release-secret", "seal-envelope"))
+AGREEMENT_OPERATIONS = frozenset(("key-agreement",))
+RSA_ALGORITHMS = frozenset(("rsa2048", "rsa3072", "rsa4096"))
+AGREEMENT_ALGORITHMS = frozenset(("p256", "p384"))
+SIGNATURE_CLASS = "reverifiable-signature"
+ROUND_TRIP_CLASS = "live-round-trip"
+# 256 bits: a challenge the operator could have signed earlier, or reused from another proof, proves
+# the key worked THEN, not that the key being pinned works now.
+CHALLENGE_BYTES = 32
 
 # Only these custody modes are provisioned by a key ceremony. fido-multi-enrollment credentials are
 # enrolled at the relying party (tools/fido_continuity.py in regalia-kms owns them) and an `exception`
@@ -100,10 +166,22 @@ OID_EC_PUBLIC_KEY = bytes.fromhex("06072a8648ce3d0201")
 OID_P256 = bytes.fromhex("06082a8648ce3d030107")
 OID_P384 = bytes.fromhex("06052b81040022")
 OID_RSA = bytes.fromhex("06092a864886f70d010101")
+OID_SECP256K1 = bytes.fromhex("06052b8104000a")
 SPKI_FAMILY = {
     "ECCP256": (OID_EC_PUBLIC_KEY, OID_P256),
     "ECCP384": (OID_EC_PUBLIC_KEY, OID_P384),
     "RSA2048": (OID_RSA,),
+}
+# manifest algorithm -> (SPKI OIDs, RSA modulus bits or None, the digest the operation proof signs).
+# The digest matches the curve size so a raw-ECDSA token signs a full-width input on every curve:
+# a 32-byte digest on P-384 is legal ECDSA but a PIV applet is free to reject or pad it.
+PROOF_KEY = {
+    "p256": ((OID_EC_PUBLIC_KEY, OID_P256), None, "sha256"),
+    "p384": ((OID_EC_PUBLIC_KEY, OID_P384), None, "sha384"),
+    "secp256k1": ((OID_EC_PUBLIC_KEY, OID_SECP256K1), None, "sha256"),
+    "rsa2048": ((OID_RSA,), 2048, "sha256"),
+    "rsa3072": ((OID_RSA,), 3072, "sha256"),
+    "rsa4096": ((OID_RSA,), 4096, "sha256"),
 }
 
 FINGERPRINT = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -247,6 +325,22 @@ def check_fleet(manifest: dict[str, Any]) -> None:
             keys[pk] = (r.device_id, r.path)
 
 
+def required_proof(path: str, obj: dict[str, Any], algorithm: str) -> tuple[str, str]:
+    """(proof class, proof operation) this object's key must bring — the STRONGEST applicable — or a
+    refusal naming why no proof class covers it (see SIGNATURE_OPERATIONS)."""
+    operations = set(obj["operations"])
+    if operations & SIGNATURE_OPERATIONS:
+        return SIGNATURE_CLASS, "sign"
+    if operations <= DECRYPT_OPERATIONS and algorithm in RSA_ALGORITHMS:
+        return ROUND_TRIP_CLASS, "decrypt"
+    if operations <= AGREEMENT_OPERATIONS and algorithm in AGREEMENT_ALGORITHMS:
+        return ROUND_TRIP_CLASS, "key-agreement"
+    raise Refusal(f"{path}: no operation proof covers operation(s) {', '.join(sorted(operations))} on "
+                  f"{algorithm} — a signature proves sign/certificate-sign, a live RSA-OAEP round trip proves "
+                  f"unwrap/wrap/release-secret/seal-envelope on RSA, a live ECDH round trip proves "
+                  f"key-agreement on p256/p384; this ceremony will not qualify what none of them shows")
+
+
 def check_route(route: Route) -> str:
     """Refuse what the ceremony cannot honour for one PLANNED binding; return its key algorithm."""
     b, obj = route.binding, route.obj
@@ -259,6 +353,9 @@ def check_route(route: Route) -> str:
     if route.backend not in PROVISIONED_BACKENDS:
         raise Refusal(f"{route.path}: backend {route.backend} is not provisioned by this ceremony")
     algorithm = key_algorithm(route)
+    # Refused HERE, at plan, and not only when record finds no proof: a ceremony that generates a key it
+    # can never qualify has made a key it now has to account for (see SIGNATURE_OPERATIONS).
+    required_proof(route.path, obj, algorithm)
     if route.backend == "yubikey-piv":
         if route.object_id not in PIV_SLOTS:
             raise Refusal(f"{route.path}: object_id {b['object_id']} is not a PIV key slot "
@@ -364,6 +461,30 @@ def describe(route: Route, serials: dict[str, str]) -> list[str]:
             f"  proves     the MANIFEST_BINDING_PINS line: serial and public_key_sha256, printed only after the "
             f"attestation proved the key was generated on this genuine card (ADR-0002 D1)",
         ]
+    return lines + proof_lines(route, serial or "<serial>")
+
+
+def proof_lines(route: Route, serial: str) -> list[str]:
+    """The operation-proof step for one binding, with the class it will carry and what that class is
+    worth — stated plainly, because a live round trip is weaker evidence and nobody reading the plan
+    should mistake it for a signature."""
+    cls, operation = required_proof(route.path, route.obj, key_algorithm(route))
+    when = ("the wizard's m) step runs it right after generation" if route.backend == "yubikey-piv"
+            else "run it right after commissioning")
+    lines = [f"  operation  operation-proof.sh --operation {operation} --backend {route.backend} --serial {serial} "
+             f"--object-id {route.object_id} --device-id {route.device_id} "
+             f"--out opproof-{route.device_id}-{route.object_id}.json ({when}; the token's PIN is asked for)"]
+    if cls == SIGNATURE_CLASS:
+        lines.append(f"  proves     {SIGNATURE_CLASS}: the key signs a fresh challenge with the PIN; record re-verifies "
+                     f"the signature against the pinned key, and anyone can again later (regalia#28 criterion 3)")
+    else:
+        how = ("RSA-OAEP (SHA-1/MGF1-SHA-1, as the daemon wraps) encrypts a fresh challenge to the key and the token "
+               "decrypts it" if operation == "decrypt" else
+               "the token and openssl each derive ECDH with a fresh ephemeral key (CKM_ECDH1_DERIVE, as the daemon)")
+        lines.append(f"  proves     {ROUND_TRIP_CLASS}: {how}; the ceremony compares the results live. ATTESTED AT "
+                     f"CEREMONY TIME, NOT RE-VERIFIABLE AFTERWARDS — record can check only the key, the "
+                     f"{'ciphertext' if operation == 'decrypt' else 'ephemeral key'} and challenge freshness. That is "
+                     f"the ceiling for {operation} keys: no stronger evidence exists for them")
     return lines
 
 
@@ -520,7 +641,225 @@ def parse_yubikey_record(record: Any, source: str) -> Evidence:
     )
 
 
-def parse_evidence(path: Path) -> Evidence:
+# -------------------------------------------------------------------------------------------------
+# Operation proofs (regalia#28 criterion 3; see SIGNATURE_OPERATIONS)
+# -------------------------------------------------------------------------------------------------
+
+@dataclass
+class OperationProof:
+    source: str
+    backend: str
+    object_id: str
+    device_serial: str
+    proof_class: str
+    operation: str
+    public_key_der: bytes
+    challenge_sha256: str
+    challenge: bytes = b""     # reverifiable-signature: the challenge the token signed
+    signature: bytes = b""     # reverifiable-signature: its signature
+    material: bytes = b""      # live-round-trip: the ciphertext, or the ephemeral public key (DER SPKI)
+    device_id: str | None = None
+
+    @property
+    def public_key_sha256(self) -> str:
+        return "sha256:" + hashlib.sha256(self.public_key_der).hexdigest()
+
+
+def der_tlv(data: bytes, at: int) -> tuple[int, bytes, int]:
+    """One DER TLV at `at`: (tag, value, offset after it). Refuses indefinite or overrunning lengths."""
+    if at + 2 > len(data):
+        raise ValueError("truncated")
+    tag, length, at = data[at], data[at + 1], at + 2
+    if length & 0x80:
+        n = length & 0x7F
+        if n == 0 or n > 4 or at + n > len(data):
+            raise ValueError("bad length")
+        length, at = int.from_bytes(data[at:at + n], "big"), at + n
+    if at + length > len(data):
+        raise ValueError("overrun")
+    return tag, data[at:at + length], at + length
+
+
+def proof_key_algorithm(der: bytes, source: str) -> str:
+    """The manifest algorithm of a SubjectPublicKeyInfo, parsed structurally — the AlgorithmIdentifier's
+    OIDs and, for RSA, the modulus length — or a refusal. This is what decides the digest the proof was
+    signed over, so it is read from the key itself and never from anything the proof says about it."""
+    try:
+        tag, spki, end = der_tlv(der, 0)
+        if tag != 0x30 or end != len(der):
+            raise ValueError("not one SEQUENCE")
+        tag, algid, at = der_tlv(spki, 0)
+        tag2, bits, end = der_tlv(spki, at)
+        if tag != 0x30 or tag2 != 0x03 or end != len(spki) or not bits or bits[0] != 0:
+            raise ValueError("not an SPKI")
+        _, _, at = der_tlv(algid, 0)
+        oids = [algid[:at]]
+        if at < len(algid):
+            ptag, _, pend = der_tlv(algid, at)
+            if ptag == 0x06:
+                oids.append(algid[at:pend])
+        for name, (want, modulus_bits, _) in PROOF_KEY.items():
+            if tuple(oids[:len(want)]) != want:
+                continue
+            if modulus_bits is None:
+                return name
+            _, rsa, _ = der_tlv(bits[1:], 0)
+            _, n, _ = der_tlv(rsa, 0)
+            if int.from_bytes(n, "big").bit_length() == modulus_bits:
+                return name
+    except ValueError:
+        pass
+    raise Refusal(f"{source}: the operation proof's public key is not a SubjectPublicKeyInfo of any algorithm "
+                  f"this ceremony provisions")
+
+
+def signature_verifies(proof: OperationProof) -> bool:
+    """RE-VERIFY, with openssl, that `signature` is the proof key's signature over `challenge`. This is the
+    only verdict record accepts. Fails CLOSED: no openssl is a refusal, never a pass."""
+    digest = PROOF_KEY[proof_key_algorithm(proof.public_key_der, proof.source)][2]
+    pem = (b"-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(proof.public_key_der)
+           + b"-----END PUBLIC KEY-----\n")
+    with tempfile.TemporaryDirectory(prefix="opproof.") as work:
+        paths = {name: Path(work, name) for name in ("pub.pem", "challenge", "signature")}
+        paths["pub.pem"].write_bytes(pem)
+        paths["challenge"].write_bytes(proof.challenge)
+        paths["signature"].write_bytes(proof.signature)
+        try:
+            result = subprocess.run(["openssl", "dgst", f"-{digest}", "-verify", str(paths["pub.pem"]),
+                                     "-signature", str(paths["signature"]), str(paths["challenge"])],
+                                    capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise Refusal(f"{proof.source}: cannot re-verify the operation proof — openssl did not run "
+                          f"({error}); a proof that was not verified is not a proof") from None
+    # Both, not either: an openssl that exits 0 without saying so, or says so and exits non-zero, is not
+    # an answer this control can stand on.
+    return result.returncode == 0 and result.stdout.strip() == "Verified OK"
+
+
+def openssl(args: list[str], source: str, input_bytes: bytes | None = None) -> subprocess.CompletedProcess:
+    """Run openssl, which touches no device. Fails CLOSED: an openssl that does not run is a refusal,
+    never a pass — a check that was not made is not a check."""
+    try:
+        return subprocess.run(["openssl", *args], input=input_bytes, capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise Refusal(f"{source}: cannot check the operation proof — openssl did not run ({error}); "
+                      f"a proof that was not checked is not a proof") from None
+
+
+def rsa_modulus(der: bytes) -> int:
+    _, spki, _ = der_tlv(der, 0)
+    _, _, at = der_tlv(spki, 0)
+    _, bits, _ = der_tlv(spki, at)
+    _, rsa, _ = der_tlv(bits[1:], 0)
+    _, n, _ = der_tlv(rsa, 0)
+    return int.from_bytes(n, "big")
+
+
+def ec_point_is_valid(der: bytes, source: str) -> bool:
+    """openssl's full public-key check: the point is on the named curve and not the identity. A peer
+    point off the curve is the input of an invalid-curve attack, and a proof built on one proves nothing
+    about the token's key."""
+    with tempfile.TemporaryDirectory(prefix="opproof.") as work:
+        path = Path(work, "peer.der")
+        path.write_bytes(der)
+        result = openssl(["pkey", "-pubin", "-inform", "DER", "-in", str(path), "-pubcheck", "-noout"], source)
+    return result.returncode == 0
+
+
+def parse_operation_proof(record: Any, source: str) -> OperationProof:
+    """Read a proof of either class (see SIGNATURE_OPERATIONS). Everything checkable offline is checked
+    HERE; the signature itself is re-verified at match time, against the key being pinned."""
+    base = {"evidence", "class", "backend", "device_serial", "object_id", "operation", "public_key_der_b64"}
+    shapes = {
+        (SIGNATURE_CLASS, "sign"): base | {"challenge_b64", "signature_b64"},
+        (ROUND_TRIP_CLASS, "decrypt"): base | {"challenge_sha256", "ciphertext_b64"},
+        (ROUND_TRIP_CLASS, "key-agreement"): base | {"challenge_sha256", "ephemeral_public_key_der_b64"},
+    }
+    cls, operation = record.get("class"), record.get("operation")
+    if cls not in (SIGNATURE_CLASS, ROUND_TRIP_CLASS):
+        raise Refusal(f"{source}: an operation proof's class must be {SIGNATURE_CLASS} or {ROUND_TRIP_CLASS}, "
+                      f"not {cls!r}")
+    if (cls, operation) not in shapes:
+        raise Refusal(f"{source}: operation {operation!r} is not a {cls} proof — a {SIGNATURE_CLASS} proves "
+                      f"sign; a {ROUND_TRIP_CLASS} proves decrypt or key-agreement")
+    required = shapes[(cls, operation)]
+    if not required <= record.keys() or not record.keys() <= required | {"device_id"}:
+        raise Refusal(f"{source}: a {cls} {operation} proof carries exactly {sorted(required)} (and optionally "
+                      f"device_id) — in particular no verdict, and no plaintext challenge for a round trip")
+    for key in sorted(record.keys()):
+        if not isinstance(record[key], str):
+            raise Refusal(f"{source}: {key} must be a string")
+    if record["backend"] not in PROVISIONED_BACKENDS:
+        raise Refusal(f"{source}: operation proof for backend {record['backend']}, which this ceremony does not "
+                      f"provision")
+    if not SERIAL.fullmatch(record["device_serial"]):
+        raise Refusal(f"{source}: device_serial is not a serial")
+    object_id = norm_id(record["object_id"])
+    if (object_id not in PIV_SLOTS) if record["backend"] == "yubikey-piv" else not HEX_ID.fullmatch(object_id):
+        raise Refusal(f"{source}: object_id {record['object_id']} is not a {record['backend']} object id")
+    decoded = {}
+    for key in sorted(k for k in record if k.endswith("_b64")):
+        try:
+            decoded[key] = base64.b64decode(record[key], validate=True)
+        except ValueError:
+            raise Refusal(f"{source}: {key} is not base64") from None
+    der = decoded["public_key_der_b64"]
+    algorithm = proof_key_algorithm(der, source)
+    proof = OperationProof(source, record["backend"], object_id, record["device_serial"], cls, operation, der,
+                           "", device_id=record.get("device_id"))
+
+    if cls == SIGNATURE_CLASS:
+        challenge = decoded["challenge_b64"]
+        if not challenge:
+            raise Refusal(f"{source}: the operation proof's challenge is empty — a signature over nothing "
+                          f"proves nothing about the key")
+        if len(challenge) < CHALLENGE_BYTES:
+            raise Refusal(f"{source}: the operation proof's challenge is {len(challenge)} bytes; a fresh "
+                          f"challenge is at least {CHALLENGE_BYTES} random bytes")
+        if not decoded["signature_b64"]:
+            raise Refusal(f"{source}: the operation proof carries no signature")
+        proof.challenge, proof.signature = challenge, decoded["signature_b64"]
+        proof.challenge_sha256 = "sha256:" + hashlib.sha256(challenge).hexdigest()
+        return proof
+
+    # live-round-trip: the challenge itself was compared in the ceremony process and is not here.
+    if not FINGERPRINT.fullmatch(record["challenge_sha256"]):
+        raise Refusal(f"{source}: challenge_sha256 must be sha256: and 64 lowercase hex — without it a "
+                      f"reused challenge cannot be told from a fresh one")
+    proof.challenge_sha256 = record["challenge_sha256"]
+    if operation == "decrypt":
+        if algorithm not in RSA_ALGORITHMS:
+            raise Refusal(f"{source}: a decrypt round trip needs an RSA key; the proof's key is {algorithm}")
+        ciphertext, n = decoded["ciphertext_b64"], rsa_modulus(der)
+        # An RSA-OAEP ciphertext for THIS key is exactly the modulus length and, as an integer, in [1, n).
+        # Anything else was not encrypted to this key, whatever the ceremony says the token returned.
+        if len(ciphertext) != (n.bit_length() + 7) // 8 or not 0 < int.from_bytes(ciphertext, "big") < n:
+            raise Refusal(f"{source}: the ciphertext is not an RSA ciphertext for the proof's {algorithm} key "
+                          f"({len(ciphertext)} bytes; a {n.bit_length()}-bit modulus takes "
+                          f"{(n.bit_length() + 7) // 8}, as an integer below the modulus)")
+        proof.material = ciphertext
+    else:
+        if algorithm not in AGREEMENT_ALGORITHMS:
+            raise Refusal(f"{source}: a key-agreement round trip needs a p256 or p384 key; the proof's key is "
+                          f"{algorithm}")
+        ephemeral = decoded["ephemeral_public_key_der_b64"]
+        try:
+            eph_algorithm = proof_key_algorithm(ephemeral, source)
+        except Refusal:
+            eph_algorithm = None
+        if eph_algorithm != algorithm:
+            raise Refusal(f"{source}: the ephemeral public key is not a {algorithm} key, so the token could not "
+                          f"have agreed with it")
+        if ephemeral == der:
+            raise Refusal(f"{source}: the ephemeral public key is the token's own key — that is not an "
+                          f"ephemeral key agreement")
+        if not ec_point_is_valid(ephemeral, source):
+            raise Refusal(f"{source}: the ephemeral public key is not a valid point on {algorithm}")
+        proof.material = ephemeral
+    return proof
+
+
+def parse_evidence(path: Path) -> Evidence | OperationProof:
     source = str(path)
     try:
         text = path.read_text(encoding="utf-8")
@@ -532,6 +871,8 @@ def parse_evidence(path: Path) -> Evidence:
             record = json.loads(text)
         except json.JSONDecodeError:
             raise Refusal(f"{source}: evidence looks like JSON but does not parse") from None
+        if isinstance(record, dict) and record.get("evidence") == OPERATION_PROOF_SCHEMA:
+            return parse_operation_proof(record, source)
         return parse_yubikey_record(record, source)
     if "MANIFEST_BINDING_PINS" in text or "Commissioning" in text or "KEK public_key_sha256" in text:
         return parse_commission_transcript(text, source)
@@ -571,11 +912,89 @@ def match(ev: Evidence, manifest: dict[str, Any], serials: dict[str, str]) -> Ro
     return candidates[0]
 
 
+def match_operation_proofs(assigned: dict[str, tuple[Route, Evidence]],
+                           proofs: list[OperationProof]) -> dict[str, OperationProof]:
+    """Pair each binding being recorded with exactly one operation proof for exactly its key, and
+    RE-VERIFY every signature. Returns binding path -> proof, or refuses by name; the caller writes
+    nothing on a refusal.
+
+    Pairing is by the device and object the proof names (backend, serial, object id), and then the
+    proof's public key must hash to the digest the binding is being pinned to — for a YubiKey the
+    digest of the key ykman exported, for a Nitrokey the attested pin commission-card.sh printed. The
+    two are separate checks on purpose: a proof for the right slot over the WRONG key is the slot
+    regenerated after its evidence was captured, and a message that said "no proof" would send the
+    operator looking for a missing file instead of at the key that changed under them."""
+    # FRESHNESS, for both classes: the challenge (by its SHA-256 — a round trip never records the
+    # plaintext) and a round trip's ciphertext or ephemeral key must each appear in exactly one proof.
+    seen: dict[str, str] = {}
+    for proof in proofs:
+        tokens = [proof.challenge_sha256]
+        if proof.material:
+            tokens.append("material:" + hashlib.sha256(proof.material).hexdigest())
+        for token in tokens:
+            if token in seen:
+                raise Refusal(f"{proof.source}: reused challenge — {seen[token]} used the same challenge; every "
+                              f"proof uses its own fresh one, or an answer given once could be presented for a "
+                              f"second binding")
+            seen[token] = proof.source
+
+    by_device: dict[tuple[str, str, str], OperationProof] = {}
+    for proof in proofs:
+        key = (proof.backend, proof.device_serial, proof.object_id)
+        if key in by_device:
+            raise Refusal(f"two operation proofs for {proof.backend} serial {proof.device_serial} object "
+                          f"{proof.object_id}: {by_device[key].source} and {proof.source}; each binding takes "
+                          f"exactly one")
+        by_device[key] = proof
+
+    verified: dict[str, OperationProof] = {}
+    for route, ev in assigned.values():
+        proof = by_device.pop((ev.backend, ev.device_serial, ev.object_id), None)
+        if proof is None:
+            raise Refusal(f"no operation proof for {route.path} ({route.backend} serial {ev.device_serial} object "
+                          f"{ev.object_id}) — a binding reaches qualified only when its key has been seen to "
+                          f"sign a fresh challenge with the PIN (operation-proof.sh; regalia#28 criterion 3)")
+        if proof.device_id is not None and proof.device_id != route.device_id:
+            raise Refusal(f"{proof.source}: the operation proof names device {proof.device_id} but serial "
+                          f"{ev.device_serial} object {ev.object_id} is {route.device_id} ({route.path})")
+        if proof.public_key_sha256 != ev.public_key_sha256:
+            raise Refusal(f"{proof.source}: the operation proof is over a different key — it was made with "
+                          f"{proof.public_key_sha256}, but {route.path} is being pinned to "
+                          f"{ev.public_key_sha256} ({ev.source}). Was the slot regenerated after its evidence "
+                          f"was captured?")
+        algorithm = proof_key_algorithm(proof.public_key_der, proof.source)
+        if algorithm != key_algorithm(route):
+            raise Refusal(f"{proof.source}: {route.path} plans {key_algorithm(route)} but the key that signed is "
+                          f"{algorithm}")
+        want_class, want_operation = required_proof(route.path, route.obj, key_algorithm(route))
+        if proof.proof_class != want_class:
+            if want_class == SIGNATURE_CLASS:
+                raise Refusal(f"{proof.source}: a {ROUND_TRIP_CLASS} proof cannot stand in for {route.path} — its "
+                              f"operations include sign, so a {SIGNATURE_CLASS} proof is available and required; "
+                              f"the weaker class never substitutes for the stronger")
+            raise Refusal(f"{proof.source}: {route.path} needs a {ROUND_TRIP_CLASS} {want_operation} proof — a "
+                          f"signature shows the key signs, not that it can {want_operation}")
+        if proof.operation != want_operation:
+            raise Refusal(f"{proof.source}: {route.path} needs a {want_operation} proof, not {proof.operation}")
+        if proof.proof_class == SIGNATURE_CLASS and not signature_verifies(proof):
+            raise Refusal(f"{proof.source}: the operation proof's signature does not verify against the key "
+                          f"pinned for {route.path} — the key in the slot did not sign this challenge")
+        verified[route.path] = proof
+
+    if by_device:
+        stray = sorted(p.source for p in by_device.values())
+        raise Refusal(f"operation proof(s) for no binding recorded in this run: {', '.join(stray)} — a proof "
+                      f"is evidence too, and evidence nothing accounts for is refused, not ignored")
+    return verified
+
+
 def cmd_record(args: argparse.Namespace) -> int:
     manifest = load_manifest(args.manifest)
     routes = planned_routes(manifest, args.site, args.backend)
     serials = device_serials(manifest)
-    evidence = [parse_evidence(p) for p in args.evidence]
+    parsed = [parse_evidence(p) for p in args.evidence]
+    evidence = [e for e in parsed if isinstance(e, Evidence)]
+    proofs = [e for e in parsed if isinstance(e, OperationProof)]
 
     assigned: dict[str, tuple[Route, Evidence]] = {}
     for ev in evidence:
@@ -615,6 +1034,10 @@ def cmd_record(args: argparse.Namespace) -> int:
 
     check_fleet(result)
     validate(result, "the recorded manifest no longer validates")
+    # LAST, after every check on what the devices REPORTED: the operation proof is about the key those
+    # reports describe, so it is only meaningful once they are known to be consistent — and a report
+    # that is wrong keeps its own, more specific refusal instead of surfacing as a proof mismatch.
+    verified = match_operation_proofs(assigned, proofs)
 
     out = args.out or args.manifest
     text = json.dumps(result, indent=2, ensure_ascii=False) + "\n"
@@ -630,6 +1053,14 @@ def cmd_record(args: argparse.Namespace) -> int:
     for route, ev in assigned.values():
         print(f"QUALIFIED {route.path} {route.device_id} serial={ev.device_serial} "
               f"public_key_sha256={ev.public_key_sha256} <- {ev.source}")
+        proof = verified[route.path]
+        if proof.proof_class == SIGNATURE_CLASS:
+            print(f"  OPERATION VERIFIED {route.path}: signed a {len(proof.challenge)}-byte challenge, "
+                  f"re-verified here against that key <- {proof.source}")
+        else:
+            print(f"  OPERATION ATTESTED {route.path}: live {proof.operation} round trip at ceremony time — NOT "
+                  f"re-verifiable afterwards (the ceiling for this key); key and "
+                  f"{'ciphertext' if proof.operation == 'decrypt' else 'ephemeral key'} checked here <- {proof.source}")
     print(f"RECORDED {len(assigned)} binding(s) -> {out}")
     return 0
 
@@ -650,7 +1081,8 @@ def read_public_key(path: Path) -> bytes:
 
 def cmd_piv_steps(args: argparse.Namespace) -> int:
     """Machine-readable generation parameters for ONE YubiKey, for ceremony.sh to execute. Tab-separated
-    `slot algorithm pin_policy touch_policy path`, ykman spelling. Produced by the same checks as
+    `slot algorithm pin_policy touch_policy path proof-operation`, ykman spelling; the last column is the
+    operation-proof.sh --operation the binding's proof class needs (sign, decrypt or key-agreement). Produced by the same checks as
     `plan`, so the wizard can only ever generate what `plan` would have printed — the policies come
     from the manifest and are never typed by the operator."""
     manifest = load_manifest(args.manifest)
@@ -659,7 +1091,8 @@ def cmd_piv_steps(args: argparse.Namespace) -> int:
         raise Refusal(f"no planned yubikey-piv binding for device {args.device_id} in this scope")
     for r in routes:
         print("\t".join([r.object_id, YUBIKEY_ALGORITHM[key_algorithm(r)], r.binding["pin_policy"].upper(),
-                         r.binding["touch_policy"].upper(), r.path]))
+                         r.binding["touch_policy"].upper(), r.path,
+                         required_proof(r.path, r.obj, key_algorithm(r))[1]]))
     return 0
 
 
@@ -681,6 +1114,146 @@ def cmd_yubikey_evidence(args: argparse.Namespace) -> int:
     Path(args.out).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     print(f"EVIDENCE {args.out}: serial={ev.device_serial} slot={ev.object_id} {ev.ykman_algorithm} "
           f"pin={ev.pin_policy} touch={ev.touch_policy} public_key_sha256={ev.public_key_sha256}")
+    return 0
+
+
+# =================================================================================================
+# proof-prepare / operation-proof (the device side of the operation-behaviour control)
+# =================================================================================================
+
+def pem_of(der: bytes) -> bytes:
+    return b"-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(der) + b"-----END PUBLIC KEY-----\n"
+
+
+# The daemon's wrap, as openssl spells it: regalia-kms internal/keywrap.RSAOAEP uses OAEP with
+# keywrap.OAEPHash = SHA-1, MGF1 on the same hash, and no OAEP label (the PKCS#11 driver passes
+# CKZ_DATA_SPECIFIED with nil). The round trip must use exactly this, or it proves the token opens
+# something the daemon never sends. operation-proof.sh asks the token for the matching mechanism:
+# RSA-PKCS-OAEP --hash-algorithm SHA-1 --mgf MGF1-SHA1.
+OAEP_OPTS = ["-pkeyopt", "rsa_padding_mode:oaep", "-pkeyopt", "rsa_oaep_md:sha1", "-pkeyopt", "rsa_mgf1_md:sha1"]
+EC_CURVE = {"p256": "P-256", "p384": "P-384"}
+
+
+def need(args: argparse.Namespace, operation: str, *names: str) -> None:
+    missing = [f"--{n.replace('_', '-')}" for n in names if getattr(args, n) is None]
+    if missing:
+        raise Refusal(f"--operation {operation} needs {', '.join(missing)}")
+
+
+def cmd_proof_prepare(args: argparse.Namespace) -> int:
+    """Draw the fresh challenge and say how the token must answer it. Decided HERE, from the key the token
+    exported, so operation-proof.sh holds no algorithm table of its own to drift from PROOF_KEY. Prints the
+    pkcs11-tool mechanism name.
+
+      sign           raw ECDSA over the curve-sized digest, or SHA256-RSA-PKCS over the challenge
+      decrypt        the challenge RSA-OAEP-encrypted to the token's key exactly as the daemon wraps
+      key-agreement  an ephemeral keypair on the token key's curve, for CKM_ECDH1_DERIVE"""
+    try:
+        der = read_public_key(args.public_key)
+    except (OSError, ValueError) as error:
+        raise Refusal(f"cannot read the token's public key {args.public_key}: {error}") from None
+    source = str(args.public_key)
+    algorithm = proof_key_algorithm(der, source)
+    challenge = os.urandom(CHALLENGE_BYTES)
+    if args.operation == "sign":
+        need(args, "sign", "challenge_out", "to_sign_out")
+        digest = PROOF_KEY[algorithm][2]
+        if PROOF_KEY[algorithm][1] is None:
+            mechanism, to_sign = "ECDSA", hashlib.new(digest, challenge).digest()
+        else:
+            mechanism, to_sign = "SHA256-RSA-PKCS", challenge
+        args.challenge_out.write_bytes(challenge)
+        args.to_sign_out.write_bytes(to_sign)
+    elif args.operation == "decrypt":
+        need(args, "decrypt", "challenge_out", "ciphertext_out")
+        if algorithm not in RSA_ALGORITHMS:
+            raise Refusal(f"{source}: a decrypt round trip needs an RSA key, not {algorithm}")
+        with tempfile.TemporaryDirectory(prefix="opproof.") as work:
+            Path(work, "pub.pem").write_bytes(pem_of(der))
+            result = openssl(["pkeyutl", "-encrypt", "-pubin", "-inkey", str(Path(work, "pub.pem")), *OAEP_OPTS],
+                             source, challenge)
+        if result.returncode != 0 or not result.stdout:
+            raise Refusal(f"{source}: openssl could not RSA-OAEP-encrypt the challenge to the token's key")
+        mechanism = "RSA-PKCS-OAEP"
+        args.challenge_out.write_bytes(challenge)
+        args.ciphertext_out.write_bytes(result.stdout)
+    else:
+        need(args, "key-agreement", "ephemeral_out", "peer_out")
+        if algorithm not in AGREEMENT_ALGORITHMS:
+            raise Refusal(f"{source}: a key-agreement round trip needs a p256 or p384 key, not {algorithm}")
+        made = openssl(["genpkey", "-algorithm", "EC", "-pkeyopt", f"ec_paramgen_curve:{EC_CURVE[algorithm]}",
+                        "-out", str(args.ephemeral_out)], source)
+        pub = openssl(["pkey", "-in", str(args.ephemeral_out), "-pubout", "-outform", "DER"], source)
+        if made.returncode != 0 or pub.returncode != 0 or not pub.stdout:
+            raise Refusal(f"{source}: openssl could not make an ephemeral {algorithm} key")
+        mechanism = "ECDH1-DERIVE"
+        args.peer_out.write_bytes(pub.stdout)
+    print(mechanism)
+    return 0
+
+
+def cmd_operation_proof(args: argparse.Namespace) -> int:
+    """Package one token answer as the proof record, checking it NOW, at the token. A signature is verified
+    with the same code `record` runs again later. A round trip is COMPARED here, in the ceremony process —
+    the only place it can be — and what is written keeps no plaintext and no verdict: record can check the
+    key, the ciphertext or ephemeral key, and challenge freshness, and nothing more (see SIGNATURE_OPERATIONS)."""
+    try:
+        der = read_public_key(args.public_key)
+        record = {
+            "evidence": OPERATION_PROOF_SCHEMA,
+            "class": SIGNATURE_CLASS if args.operation == "sign" else ROUND_TRIP_CLASS,
+            "backend": args.backend,
+            "device_serial": args.serial,
+            "object_id": norm_id(args.object_id),
+            "operation": args.operation,
+            "public_key_der_b64": base64.b64encode(der).decode("ascii"),
+        }
+        if args.operation == "sign":
+            need(args, "sign", "challenge", "signature")
+            record["challenge_b64"] = base64.b64encode(args.challenge.read_bytes()).decode("ascii")
+            record["signature_b64"] = base64.b64encode(args.signature.read_bytes()).decode("ascii")
+        elif args.operation == "decrypt":
+            need(args, "decrypt", "challenge", "ciphertext", "token_output")
+            challenge, answer = args.challenge.read_bytes(), args.token_output.read_bytes()
+            record["challenge_sha256"] = "sha256:" + hashlib.sha256(challenge).hexdigest()
+            record["ciphertext_b64"] = base64.b64encode(args.ciphertext.read_bytes()).decode("ascii")
+        else:
+            need(args, "key-agreement", "ephemeral_key", "token_output")
+            answer = args.token_output.read_bytes()
+            with tempfile.TemporaryDirectory(prefix="opproof.") as work:
+                Path(work, "pub.pem").write_bytes(pem_of(der))
+                expected = openssl(["pkeyutl", "-derive", "-inkey", str(args.ephemeral_key),
+                                    "-peerkey", str(Path(work, "pub.pem"))], str(args.out)).stdout
+            peer = openssl(["pkey", "-in", str(args.ephemeral_key), "-pubout", "-outform", "DER"], str(args.out)).stdout
+            if not expected or not peer:
+                raise Refusal(f"{args.out}: openssl could not derive the ephemeral side of the key agreement")
+            challenge = expected
+            record["challenge_sha256"] = "sha256:" + hashlib.sha256(expected).hexdigest()
+            record["ephemeral_public_key_der_b64"] = base64.b64encode(peer).decode("ascii")
+    except (OSError, ValueError) as error:
+        raise Refusal(f"cannot read the operation proof's inputs: {error}") from None
+    if args.device_id:
+        record["device_id"] = args.device_id
+    proof = parse_operation_proof(record, str(args.out))
+    algorithm = proof_key_algorithm(proof.public_key_der, str(args.out))
+    if args.operation == "sign":
+        if not signature_verifies(proof):
+            raise Refusal(f"{args.out}: the token's signature does not verify against the public key it exported "
+                          f"for object {proof.object_id} — the key in that slot did not sign this challenge. "
+                          f"NOTHING WRITTEN; this binding is not operation-verified")
+        how = f"signed a fresh {len(proof.challenge)}-byte challenge; verified"
+    else:
+        # Constant-time, and length-checked first: an empty or truncated answer is a failure, not a match.
+        if not answer or not hmac.compare_digest(answer, challenge):
+            what = "decryption" if args.operation == "decrypt" else "ECDH shared secret"
+            raise Refusal(f"{args.out}: the token's {what} does not match what the ceremony expected — the key "
+                          f"in that slot did not answer this challenge. NOTHING WRITTEN; this binding is not "
+                          f"operation-verified")
+        how = (f"completed a live {args.operation} round trip on a fresh challenge, compared here (ATTESTED AT "
+               f"CEREMONY TIME, not re-verifiable afterwards)")
+    Path(args.out).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    print(f"OPERATION PROOF {args.out}: {args.backend} serial={args.serial} object={proof.object_id} "
+          f"{algorithm} {how} against public_key_sha256={proof.public_key_sha256}")
     return 0
 
 
@@ -706,9 +1279,28 @@ def main(argv: list[str] | None = None) -> int:
     y.add_argument("--public-key", type=Path, required=True, help="`ykman … piv keys export SLOT` (PEM or DER)")
     y.add_argument("--device-id", help="the manifest device_id this token is")
     y.add_argument("--out", type=Path, required=True)
+    pp = sub.add_parser("proof-prepare")
+    pp.add_argument("--operation", choices=("sign", "decrypt", "key-agreement"), default="sign")
+    pp.add_argument("--public-key", type=Path, required=True, help="the token's public key (PEM or DER SPKI)")
+    for name in ("--challenge-out", "--to-sign-out", "--ciphertext-out", "--ephemeral-out", "--peer-out"):
+        pp.add_argument(name, type=Path)
+    op = sub.add_parser("operation-proof")
+    op.add_argument("--operation", choices=("sign", "decrypt", "key-agreement"), default="sign")
+    op.add_argument("--ciphertext", type=Path)
+    op.add_argument("--token-output", type=Path, help="what the token returned for decrypt / key-agreement")
+    op.add_argument("--ephemeral-key", type=Path, help="the ephemeral private key proof-prepare made (PEM)")
+    op.add_argument("--backend", required=True, choices=sorted(PROVISIONED_BACKENDS))
+    op.add_argument("--serial", required=True)
+    op.add_argument("--object-id", required=True)
+    op.add_argument("--device-id")
+    op.add_argument("--challenge", type=Path)
+    op.add_argument("--signature", type=Path)
+    op.add_argument("--public-key", type=Path, required=True)
+    op.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     handler = {"plan": cmd_plan, "record": cmd_record, "piv-steps": cmd_piv_steps,
-               "yubikey-evidence": cmd_yubikey_evidence}[args.command]
+               "yubikey-evidence": cmd_yubikey_evidence, "proof-prepare": cmd_proof_prepare,
+               "operation-proof": cmd_operation_proof}[args.command]
     try:
         return handler(args)
     except Refusal as refusal:

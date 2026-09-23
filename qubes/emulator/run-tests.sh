@@ -350,6 +350,9 @@ say "CUSTODY MANIFEST ceremony (regalia#28): plan/record on a mixed fleet, every
 python3 "$HERE/tests/test_ceremony_manifest.py" || suite_failed "test_ceremony_manifest.py"
 "$HERE/tests/test-ceremony-manifest.sh" || suite_failed "test-ceremony-manifest.sh"
 
+say "OPERATION PROOF (regalia#28 criterion 3): each new key signs a fresh challenge with its PIN — by serial, PIN never on argv, one retry at most"
+"$HERE/tests/test-operation-proof.sh" || suite_failed "test-operation-proof.sh"
+
 say "OFFLINE BUNDLE metadata, complete hash coverage, and centralized release signature verification"
 python3 "$HERE/../../debian/offline-bundle/test_bundle.py" || suite_failed "test_bundle.py"
 

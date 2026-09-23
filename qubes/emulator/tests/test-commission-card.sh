@@ -379,15 +379,22 @@ import test_ceremony_manifest as t
 m = t.fleet_manifest()
 m["objects"][0]["bindings"][0]["device_serial"] = "SER123"
 open(sys.argv[2], "w").write(json.dumps(m))
+# The operation proof record now also requires (regalia#28 criterion 3). This KEK is DENK0404144's REAL
+# key, whose private half is on that card, so no valid proof for it can exist here. A proof for the
+# same serial and id over ANOTHER key is supplied instead: record must then refuse it as "over a
+# different key" and name the pin it was about to record — which is only possible if it read the pin
+# out of this very transcript and put it on the right binding.
+key, der = t.keypair()
+open(sys.argv[2] + ".proof.json", "w").write(json.dumps(t.operation_proof("nitrokey-pkcs11", "SER123", "0a", key, der)))
 EOF
-  if python3 "$HERE/../../scripts/ceremony-manifest.py" record "$FAKE/km.json" --evidence "$FAKE/outk" \
-       --backend nitrokey-pkcs11 --out "$FAKE/km.out.json" >/dev/null 2>"$FAKE/km.err" \
-     && python3 -c 'import json,sys; b=json.load(open(sys.argv[1]))["objects"][0]["bindings"][0]
-sys.exit(not (b["state"]=="qualified" and b["public_key_sha256"]==sys.argv[2] and b["device_serial"]=="SER123"))' \
-       "$FAKE/km.out.json" "$PIN_REAL"; then
-    P "…and ceremony-manifest.py record reads this very transcript into the binding (regalia#28)"
+  python3 "$HERE/../../scripts/ceremony-manifest.py" record "$FAKE/km.json" --evidence "$FAKE/outk" \
+    "$FAKE/km.json.proof.json" --backend nitrokey-pkcs11 --out "$FAKE/km.out.json" >/dev/null 2>"$FAKE/km.err"
+  if grep -q "the operation proof is over a different key" "$FAKE/km.err" \
+     && grep -qF "objects[0](release-signing-key).bindings[0] is being pinned to $PIN_REAL" "$FAKE/km.err" \
+     && [ ! -e "$FAKE/km.out.json" ]; then
+    P "…and ceremony-manifest.py record reads this very transcript's pin into the binding (regalia#28)"
   else
-    F "ceremony-manifest.py record could not read commission-card's own output: $(cat "$FAKE/km.err")"
+    F "ceremony-manifest.py record did not read commission-card's own output into the binding: $(cat "$FAKE/km.err")"
   fi
   grep -qx -- '--reader 2 --expect-serial SER123 --key-ref 1' "$FAKE/args/attest.args" \
     && P "…the attestation was read from the named reader, for the named card, at --kek-ref" \

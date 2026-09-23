@@ -18,6 +18,7 @@ vault-tools-apt:
       - libccid
       - pcsc-tools
       - yubikey-manager
+      - ykcs11             # PKCS#11 for YubiKey PIV — operation-proof.sh signs through it (regalia#28)
       - ssss
       - python3-pip
       - python3-venv
