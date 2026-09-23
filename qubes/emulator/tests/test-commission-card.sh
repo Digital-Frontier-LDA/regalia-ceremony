@@ -370,6 +370,25 @@ STUB
     || F "the MANIFEST_BINDING_PINS line is missing or carries the wrong serial/pin"
   grep -q 'generated on this card' "$FAKE/outk" && P "…with a PASS line naming what was proven" \
     || F "the attestation PASS line is missing"
+  # regalia#28: this transcript is what `ceremony-manifest.py record` consumes. Feed it THIS output,
+  # not a fixture shaped like it, so a change to either side's format fails here and not at the rack.
+  python3 - "$HERE" "$FAKE/km.json" <<'EOF'
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import test_ceremony_manifest as t
+m = t.fleet_manifest()
+m["objects"][0]["bindings"][0]["device_serial"] = "SER123"
+open(sys.argv[2], "w").write(json.dumps(m))
+EOF
+  if python3 "$HERE/../../scripts/ceremony-manifest.py" record "$FAKE/km.json" --evidence "$FAKE/outk" \
+       --backend nitrokey-pkcs11 --out "$FAKE/km.out.json" >/dev/null 2>"$FAKE/km.err" \
+     && python3 -c 'import json,sys; b=json.load(open(sys.argv[1]))["objects"][0]["bindings"][0]
+sys.exit(not (b["state"]=="qualified" and b["public_key_sha256"]==sys.argv[2] and b["device_serial"]=="SER123"))' \
+       "$FAKE/km.out.json" "$PIN_REAL"; then
+    P "…and ceremony-manifest.py record reads this very transcript into the binding (regalia#28)"
+  else
+    F "ceremony-manifest.py record could not read commission-card's own output: $(cat "$FAKE/km.err")"
+  fi
   grep -qx -- '--reader 2 --expect-serial SER123 --key-ref 1' "$FAKE/args/attest.args" \
     && P "…the attestation was read from the named reader, for the named card, at --kek-ref" \
     || F "the attestation reader was not given --reader/--expect-serial/--key-ref: $(cat "$FAKE/args/attest.args" 2>/dev/null)"
