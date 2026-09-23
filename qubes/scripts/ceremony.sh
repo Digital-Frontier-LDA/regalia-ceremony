@@ -487,6 +487,15 @@ step_manifest_yubikey() {
   # The step list is read on fd 9, NOT stdin: operation-proof.sh below asks for the PIN on stdin, and
   # inside a `while … done <<< "$steps"` loop stdin IS the step list — the PIN prompt would read the
   # next step's line (or EOF) instead of the operator's keyboard.
+  # VALIDATE THE WHOLE STEP LIST BEFORE GENERATING ANYTHING. `piv keys generate` REPLACES whatever is
+  # in the slot and cannot be undone, so a step that could never be proven must be refused before the
+  # first key on this token is touched — not after it, and not after an earlier slot in the same list
+  # was already regenerated (review of regalia-ceremony#39).
+  while IFS=$'\t' read -r -u 9 slot alg pin touch path proof; do
+    [ -n "$slot" ] || continue
+    case "$proof" in sign|decrypt|key-agreement) ;;
+      *) err "piv-steps named no proof operation for $path — nothing was generated on $serial"; return 1;; esac
+  done 9<<< "$steps"
   while IFS=$'\t' read -r -u 9 slot alg pin touch path proof; do
     [ -n "$slot" ] || continue
     info "$path: slot $slot $alg pin=$pin touch=$touch on $device (serial $serial)"
@@ -511,7 +520,6 @@ step_manifest_yubikey() {
     # Not behind run(): typing the PIN is the operator's consent, and a skipped proof is not a choice
     # this step offers — it only leaves the binding unqualifiable.
     op="$CEREMONY_MANIFEST_EVIDENCE_DIR/opproof-yubikey-$device-$slot.json"
-    case "$proof" in sign|decrypt|key-agreement) ;; *) err "piv-steps named no proof operation for $path"; return 1;; esac
     show "operation-proof.sh --operation '$proof' --backend yubikey-piv --serial '$serial' --object-id '$slot' --device-id '$device' --out '$op'"
     "$HERE/operation-proof.sh" --operation "$proof" --backend yubikey-piv --serial "$serial" --object-id "$slot" \
         --device-id "$device" --out "$op" \

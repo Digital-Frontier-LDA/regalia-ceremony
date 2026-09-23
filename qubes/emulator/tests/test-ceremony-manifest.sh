@@ -310,6 +310,12 @@ out="$( ( manifest_tool(){ if [ "$1" = piv-steps ]; then python3 "$HERE/ceremony
 { [ "$rc" != 0 ] && grep -q "piv-steps named no proof operation" <<< "$out" && ! ls "$EVD"/opproof-* >/dev/null 2>&1; } \
   && P "a step list with no proof operation stops the step; no proof is guessed" \
   || F "the m) step proceeded without a proof operation (rc=$rc): $(tail -5 <<< "$out")"
+# AND THE TOKEN WAS NEVER TOUCHED. `piv keys generate` replaces the slot's key irreversibly, so the
+# refusal must come BEFORE it (review of #39): no key generated for 11110007, no evidence written.
+{ ! ls "${EMU_YKMAN_STATE:-${TMPDIR:-/tmp}/emu-ykman}/11110007"/*/key.pem >/dev/null 2>&1 \
+  && ! ls "$EVD"/yubikey-* >/dev/null 2>&1; } \
+  && P "…and it stopped before generating: no key replaced on the token, no evidence written" \
+  || F "a key was GENERATED (irreversibly replacing the slot) before the step list was refused"
 
 # =================================================================================================
 hdr "Operation behaviour: nothing reached the real pkcs11-tool"
