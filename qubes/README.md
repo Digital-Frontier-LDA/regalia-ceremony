@@ -43,8 +43,13 @@ rejected because disposability cannot be proved from inside that guest.
 ## Build (run in **dom0**)
 
 ```bash
-# 1. clone a fresh template for the tools (keeps your base template clean)
-qvm-clone debian-12 vault-tools
+# 1. clone a fresh template for the tools (keeps your base template clean). Debian 13: its OpenSC
+#    0.26.1, pcscd 2.3.3, libccid 1.6.2 and yubikey-manager 5.6.1 are exactly the versions the hardware
+#    drills qualified (regalia-kms config/qualified-stack.json); Debian 12 ships older ones.
+qvm-clone debian-13-minimal vault-tools
+#    a *-minimal template lacks the salt connector and passwordless root that qubesctl needs:
+qvm-run -p -u root vault-tools 'apt-get update && apt-get install -y qubes-mgmt-salt-vm-connector qubes-core-agent-passwordless-root'
+qvm-shutdown --wait vault-tools
 
 # 2. apply the Salt formula: installs apt packages + the non-apt binaries + scripts
 #    (the TEMPLATE needs net to install; the vault AppVM below will not)

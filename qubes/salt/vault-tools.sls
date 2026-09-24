@@ -13,6 +13,7 @@ vault-tools-apt:
   pkg.installed:
     - pkgs:
       - age
+      - iproute2           # `ip`: the air-gap preflight needs it, and a *-minimal template may lack it
       - opensc
       - pcscd
       - libccid
@@ -58,7 +59,12 @@ slip39-shamir:
     # externally-managed marker here is correct (and required for state.apply to succeed).
     # Fall back to a plain install for an older pip that doesn't recognize the flag (or a
     # distro that doesn't enforce PEP 668) so state.apply doesn't hard-fail on the flag alone.
-    - name: pip3 install --break-system-packages --require-hashes -r /opt/vault-ceremony/requirements.txt || pip3 install --require-hashes -r /opt/vault-ceremony/requirements.txt
+    # --only-binary :all:: never compile. Every pinned package has a pinned wheel (checked for
+    # Python 3.11 and 3.13, 2026-09-24); a missing one must fail HERE, not silently need gcc on a
+    # minimal template or on the machine that later recovers from the disc.
+    # QUOTED: ":all: " is a YAML mapping indicator in a plain scalar, and Salt could not render
+    # the state at all (caught by CI on the Debian 12 build, 2026-09-24).
+    - name: 'pip3 install --break-system-packages --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt || pip3 install --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt'
     - require:
       - pkg: vault-tools-apt
     # idempotent: only (re)install when requirements.txt actually changes
@@ -73,9 +79,16 @@ slip39-shamir:
 # recovered on anything but the vault-tools image — defeating the self-contained-disc claim.
 slip39-wheels:
   cmd.run:
+    # For EVERY supported recovery interpreter, not just this template's: cffi's wheel is
+    # per-version (cp311 vs cp313), and a disc read on the other Debian release would otherwise
+    # hold no installable cffi (review of #46). Python 3.11 = Debian 12, 3.13 = Debian 13.
     - name: >
-        pip3 download --require-hashes -r /opt/vault-ceremony/requirements.txt
-        -d /opt/vault-ceremony/wheels
+        for v in 3.11 3.13; do
+        pip3 download --only-binary :all: --require-hashes
+        --python-version "$v" --implementation cp
+        --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux_2_34_x86_64
+        -r /opt/vault-ceremony/requirements.txt -d /opt/vault-ceremony/wheels || exit 1;
+        done
     - require:
       - pkg: vault-tools-apt
     - onchanges:

@@ -42,7 +42,12 @@ shamir-mnemonic[cli]==0.3.0 \
     # SLIP-0039 (Shamir) library + `shamir` CLI
 
 pycryptodome==3.23.0 \
-    --hash=sha256:447700a657182d60338bab09fdb27518f8856aecd80ae4c6bdddb67ff5da44ef
+    --hash=sha256:447700a657182d60338bab09fdb27518f8856aecd80ae4c6bdddb67ff5da44ef \
+    --hash=sha256:c8987bd3307a39bc03df5c8e0e3d8be0c4c3518b7f044b0f4c15d1aa78f52575
+    # The SECOND hash is the prebuilt cp37-abi3 manylinux x86_64 wheel. With only the sdist pinned, pip
+    # had to COMPILE this package: it failed on a debian-13-minimal template (no gcc), and the offline
+    # wheels baked for recovery discs would have needed a compiler on the recovering machine too
+    # (measured 2026-09-24 with pip --only-binary :all:).
     # keccak256 for Ethermint/EVM chain addresses (Evmos, Injective, Dymension, Canto, XPLA,
     # ZetaChain, Cronos). Those chains derive bech32(hrp, keccak256(uncompressed_pubkey)[-20:])
     # under coin type 60, NOT the Cosmos SDK's ripemd160(sha256(compressed)). Without a real
