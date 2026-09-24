@@ -82,6 +82,41 @@ class EnvironmentPreflightTests(unittest.TestCase):
                     changed[key] = value
                     self.assertTrue(MODULE.evaluate(changed)[1])
 
+    # Mounts measured on a real Qubes R4.2 VM (Debian 13, kernel 6.18.31-1.qubes), 2026-09-24.
+    REAL_QUBES_MOUNTS = [
+        {"target": "/", "source": "/dev/xvda3", "fstype": "ext4", "options": "rw,relatime"},
+        {"target": "/proc/xen", "source": "xen", "fstype": "xenfs", "options": "rw,relatime"},
+        {"target": "/sys/fs/bpf", "source": "bpf", "fstype": "bpf", "options": "rw,nosuid,nodev,noexec"},
+        {"target": "/sys/kernel/debug", "source": "debugfs", "fstype": "debugfs", "options": "rw,nosuid"},
+        {"target": "/sys/kernel/tracing", "source": "tracefs", "fstype": "tracefs", "options": "rw,nosuid"},
+        {"target": "/sys/kernel/config", "source": "configfs", "fstype": "configfs", "options": "rw,nosuid"},
+        {"target": "/sys/fs/fuse/connections", "source": "fusectl", "fstype": "fusectl", "options": "rw"},
+        {"target": "/dev/hugepages", "source": "hugetlbfs", "fstype": "hugetlbfs", "options": "rw"},
+        {"target": "/dev/mqueue", "source": "mqueue", "fstype": "mqueue", "options": "rw"},
+        {"target": "/proc/sys/fs/binfmt_misc", "source": "systemd-1", "fstype": "autofs", "options": "rw,relatime,fd=37"},
+        {"target": "/proc/sys/fs/binfmt_misc", "source": "binfmt_misc", "fstype": "binfmt_misc", "options": "rw"},
+        {"target": "/usr/lib/modules", "source": "none", "fstype": "overlay",
+         "options": "rw,relatime,lowerdir=/tmp/modules,upperdir=/sysroot/lib/modules,workdir=/sysroot/lib/.modules_work"},
+    ]
+
+    def test_a_real_qubes_vm_mount_table_passes(self):
+        snap = safe(qdb={"/qubes-vm-type": "DispVM", "/qubes-vm-persistence": "none"},
+                    root_mount=self.REAL_QUBES_MOUNTS[0], mounts=self.REAL_QUBES_MOUNTS)
+        _, failures, _ = MODULE.evaluate(snap)
+        self.assertEqual(failures, [])
+
+    def test_real_storage_and_other_automounts_still_fail(self):
+        for extra in (
+            {"target": "/var/spool/cron", "source": "/dev/xvdb", "fstype": "ext4", "options": "rw,nosuid"},
+            {"target": "/efi", "source": "systemd-1", "fstype": "autofs", "options": "rw,relatime,fd=62"},
+            {"target": "/run/user/1000/doc", "source": "portal", "fstype": "fuse.portal", "options": "rw"},
+            {"target": "/usr/lib/modules", "source": "/dev/xvdb", "fstype": "overlay", "options": "rw,lowerdir=/mnt/x"},
+        ):
+            snap = safe(qdb={"/qubes-vm-type": "DispVM", "/qubes-vm-persistence": "none"},
+                        root_mount=self.REAL_QUBES_MOUNTS[0], mounts=self.REAL_QUBES_MOUNTS + [extra])
+            _, failures, _ = MODULE.evaluate(snap)
+            self.assertTrue(any(extra["target"] in f for f in failures), extra)
+
     def test_missing_rtc_is_explicit_warning_not_false_evidence(self):
         _, failures, notes = MODULE.evaluate(safe(rtc_epoch=None))
         self.assertEqual(failures, [])

@@ -18,6 +18,15 @@ import time
 
 ALLOWED_PROFILES = {"qubes-disposable", "qubes-vault", "debian-live"}
 
+# Filesystems with no backing storage: nothing written to them survives a reboot. Measured on a
+# real Qubes R4.2 VM (2026-09-24), every VM has xenfs, bpf, debugfs, tracefs, configfs, fusectl,
+# hugetlbfs, mqueue and binfmt_misc mounted read-write; without these the preflight failed on
+# every Qubes VM before any real finding.
+KERNEL_PSEUDO_FS = {
+    "proc", "sysfs", "cgroup", "cgroup2", "devpts", "tmpfs", "securityfs", "pstore", "efivarfs",
+    "xenfs", "bpf", "debugfs", "tracefs", "configfs", "fusectl", "hugetlbfs", "mqueue", "binfmt_misc",
+}
+
 
 def _read(path: str) -> str:
     try:
@@ -188,10 +197,19 @@ def evaluate(snapshot: dict[str, object]) -> tuple[str | None, list[str], list[s
             opts = str(mount.get("options", ""))
             fstype = str(mount.get("fstype", ""))
             expected_qubes_mount = any(target == prefix or target.startswith(prefix + "/") for prefix in qubes_rw_prefixes)
-            if "rw" in opts.split(",") and target not in allowed_rw and not expected_qubes_mount and fstype not in {
-                "proc", "sysfs", "cgroup", "cgroup2", "devpts", "tmpfs", "securityfs", "pstore", "efivarfs"
-            }:
-                failures.append(f"unexpected writable persistent mount: {target or '<unknown>'}")
+            # Qubes mounts the dom0-provided kernel modules image (lowerdir /tmp/modules) under an
+            # overlay on /usr/lib/modules in every VM; its upper layer is the root volume, which a
+            # disposable discards.
+            if profile.startswith("qubes-") and fstype == "overlay" and target in ("/usr/lib/modules", "/lib/modules") \
+                    and "lowerdir=/tmp/modules" in opts:
+                expected_qubes_mount = True
+            # systemd's standard binfmt_misc trigger; the binfmt_misc mount behind it is a kernel
+            # pseudo-filesystem. Any OTHER automount (e.g. /efi) can mount real storage on access.
+            if fstype == "autofs" and target == "/proc/sys/fs/binfmt_misc":
+                expected_qubes_mount = True
+            if "rw" in opts.split(",") and target not in allowed_rw and not expected_qubes_mount \
+                    and fstype not in KERNEL_PSEUDO_FS:
+                failures.append(f"unexpected writable persistent mount: {target or '<unknown>'} ({fstype})")
 
     if profile == "qubes-vault":
         notes.append("persistent Qubes AppVM: teardown scan and explicit qube destruction are mandatory")

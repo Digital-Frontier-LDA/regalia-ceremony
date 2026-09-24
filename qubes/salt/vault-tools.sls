@@ -11,6 +11,10 @@
 
 vault-tools-apt:
   pkg.installed:
+    # No Recommends: this is a single-purpose air-gapped image. With them, a debian-13-minimal
+    # build pulled udisks2, gvfs, gnome-terminal, WebKit, NetworkManager's applet and a SPICE
+    # server (2026-09-24). Every tool the ceremony needs is listed here explicitly instead.
+    - install_recommends: False
     - pkgs:
       - age
       - iproute2           # `ip`: the air-gap preflight needs it, and a *-minimal template may lack it
@@ -208,3 +212,25 @@ vault-services-enabled:
     - unless: 'for u in pcscd.socket cups.service cups.socket; do systemctl is-enabled -q "$u" || exit 1; done'
     - require:
       - pkg: vault-tools-apt
+
+# What the in-guest environment preflight requires of every ceremony VM, set in the image so the
+# disposable passes it (measured on a real Qubes R4.2 VM, 2026-09-24):
+# - journald keeps the journal in RAM only: Debian 13 persists it under /var/log/journal.
+vault-journald-volatile:
+  file.managed:
+    - name: /etc/systemd/journald.conf.d/60-regalia-volatile.conf
+    - makedirs: True
+    - mode: "0644"
+    - contents: |
+        # regalia vault: never write the journal to disk (preflight-environment.py)
+        [Journal]
+        Storage=volatile
+
+# - nothing automounts storage. systemd's GPT auto-generator mounts the template disk's EFI
+#   partition on /efi on first access (a Qubes VM boots the dom0-provided kernel and never needs
+#   it), and udisks2 automounts removable media. A mask in /etc outranks the generated unit.
+vault-no-automount:
+  cmd.run:
+    - name: systemctl mask efi.automount udisks2.service
+    - unless: 'test "$(readlink /etc/systemd/system/efi.automount)" = /dev/null && test "$(readlink /etc/systemd/system/udisks2.service)" = /dev/null'
+
