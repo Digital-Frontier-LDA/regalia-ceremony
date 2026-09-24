@@ -44,6 +44,27 @@ pkcs11-tool --module /usr/lib/*/opensc-pkcs11.so -L    # note the "serial num"
 If `--list-readers` shows the reader but a connect says "Unresponsive", the CCID stack is fine on
 Qubes; re-attach the device. Two HSMs attached at once are addressed **by serial**, never by index.
 
+## 2b. Acceptance on arrival: rule out the 2025 batch defect (no PIN, changes nothing)
+
+One of the first two production units (DENK0400664) failed at the reader-to-card layer: its serial
+flipped to `01A001000000000`, its ATR truncated to 3 bytes, and its APDUs died after 242 exchanges
+(regalia#482). The same batch may have supplied any unit you receive. Run this **on arrival, before
+anything else**, in the vault AppVM with the scripts copied as in step 1 (it needs sudo to
+re-enumerate the device):
+
+```
+cd qubes/scripts
+sudo -v && ./nitrokey-acceptance.sh                # --usb <port path> if several are attached
+```
+
+`ACCEPTED` means:
+- 10 re-enumerations, each with the same well-formed serial and the full 24-byte ATR;
+- then 2000 of 2000 unauthenticated GET CHALLENGE exchanges answered.
+
+`REJECTED` names the failed check; don't commission the unit. Measured on DENK0404144 on
+2026-09-24: ACCEPTED in under two minutes. The defect is intermittent, so raise
+`--enumerations`/`--apdus` for more confidence. A pass is evidence, not proof.
+
 ## 3. Read-only qualification (spends no PIN, changes nothing)
 
 ```
