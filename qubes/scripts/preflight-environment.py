@@ -114,6 +114,17 @@ def inspect_host() -> dict[str, object]:
     }
 
 
+def _is_qubes_modules_overlay(options: str) -> bool:
+    """Exactly the overlay Qubes builds in every VM (measured on R4.2, 2026-09-24): the dom0-provided
+    modules image as the ONLY lower layer, and its writable upper and work directories on the root
+    volume (/sysroot in the initramfs), which Qubes resets from the template at every boot. Any
+    other lower, upper or work directory could put persistent storage behind the exemption."""
+    fields = dict(o.split("=", 1) for o in options.split(",") if "=" in o)
+    return (fields.get("lowerdir") == "/tmp/modules"
+            and fields.get("upperdir") == "/sysroot/lib/modules"
+            and fields.get("workdir") == "/sysroot/lib/.modules_work")
+
+
 def _os_id() -> str:
     for line in _read("/etc/os-release").splitlines():
         if line.startswith("ID="):
@@ -201,7 +212,7 @@ def evaluate(snapshot: dict[str, object]) -> tuple[str | None, list[str], list[s
             # overlay on /usr/lib/modules in every VM; its upper layer is the root volume, which a
             # disposable discards.
             if profile.startswith("qubes-") and fstype == "overlay" and target in ("/usr/lib/modules", "/lib/modules") \
-                    and "lowerdir=/tmp/modules" in opts:
+                    and _is_qubes_modules_overlay(opts):
                 expected_qubes_mount = True
             # systemd's standard binfmt_misc trigger; the binfmt_misc mount behind it is a kernel
             # pseudo-filesystem. Any OTHER automount (e.g. /efi) can mount real storage on access.

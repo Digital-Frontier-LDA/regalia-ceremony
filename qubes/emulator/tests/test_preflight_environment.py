@@ -111,6 +111,12 @@ class EnvironmentPreflightTests(unittest.TestCase):
             {"target": "/efi", "source": "systemd-1", "fstype": "autofs", "options": "rw,relatime,fd=62"},
             {"target": "/run/user/1000/doc", "source": "portal", "fstype": "fuse.portal", "options": "rw"},
             {"target": "/usr/lib/modules", "source": "/dev/xvdb", "fstype": "overlay", "options": "rw,lowerdir=/mnt/x"},
+            # review of #52: the right lower layer is not enough — a second lower, or an upper/work
+            # directory on persistent storage (/rw), must not ride the exemption
+            {"target": "/usr/lib/modules", "source": "none", "fstype": "overlay",
+             "options": "rw,lowerdir=/tmp/modules:/rw/x,upperdir=/sysroot/lib/modules,workdir=/sysroot/lib/.modules_work"},
+            {"target": "/usr/lib/modules", "source": "none", "fstype": "overlay",
+             "options": "rw,lowerdir=/tmp/modules,upperdir=/rw/modules,workdir=/rw/.modules_work"},
         ):
             snap = safe(qdb={"/qubes-vm-type": "DispVM", "/qubes-vm-persistence": "none"},
                         root_mount=self.REAL_QUBES_MOUNTS[0], mounts=self.REAL_QUBES_MOUNTS + [extra])
