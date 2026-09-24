@@ -229,8 +229,18 @@ if needs drives; then
   # GONOGO_OPTICAL_GLOB overrides the device glob for tests only; defaults to the real nodes.
   optglob="${GONOGO_OPTICAL_GLOB:-/dev/sr*}"
   n=$(ls $optglob 2>/dev/null | wc -l | tr -d ' ')
-  if [ "$n" -ge 2 ]; then
-    ok "$n optical drives present (/dev/sr*)"
+  # One USB writer + a read-only drive reached through qvm-block (a laptop's internal bay, which
+  # belongs to dom0): CEREMONY_VERIFY_DEV names that node. It is attached only once the disc is in
+  # it, so it cannot be probed here; step_archive shows the attach and the verify against it.
+  vdev="${CEREMONY_VERIFY_DEV:-/dev/sr1}"
+  blockverify=0
+  case "$vdev" in /dev/sr*) ;; *) [ "$n" -eq 1 ] && blockverify=1 ;; esac
+  if [ "$n" -ge 2 ] || [ "$blockverify" = 1 ]; then
+    if [ "$blockverify" = 1 ]; then
+      ok "1 optical drive to burn on; the cross-drive verify reads back through $vdev (qvm-block, attached at the verify step)"
+    else
+      ok "$n optical drives present (/dev/sr*)"
+    fi
     # Presence is NOT capability, and a total writer COUNT is not enough either. A read-only
     # DVD-ROM reader exposes a /dev/srN node exactly like a writer, so two DVD-ROM readers count
     # as 2 nodes here yet cannot burn. Worse, step_archive HARDCODES `growisofs -Z /dev/sr0`, so
@@ -247,7 +257,7 @@ if needs drives; then
     # no DVD-write row -> WARN, exactly like the other counter probes above.
     # GONOGO_CDROM_INFO overrides the table path for tests only; defaults to the real proc file.
     cdinfo="${GONOGO_CDROM_INFO:-/proc/sys/dev/cdrom/info}"
-    burnnode="${GONOGO_BURN_DRIVE:-/dev/sr0}"; burnbase="${burnnode##*/}"
+    burnnode="${GONOGO_BURN_DRIVE:-${CEREMONY_BURN_DEV:-/dev/sr0}}"; burnbase="${burnnode##*/}"
     if [ -r "$cdinfo" ] && grep -qiE '^Can write DVD-R:' "$cdinfo"; then
       # Value fields of the 'Can write DVD-R:' row (tabs -> spaces), one per attached drive.
       wrow=$(grep -iE '^Can write DVD-R:' "$cdinfo" | head -1 | sed 's/^[^:]*://' | tr '\t' ' ')
@@ -272,7 +282,7 @@ if needs drives; then
     else
       warn "could not read optical write-capability table ($cdinfo) — confirm at least one drive is a DVD/M-DISC WRITER before the burn (a read-only DVD-ROM cannot burn a share)."
     fi
-  elif [ "$n" -eq 1 ]; then bad "only 1 optical drive — you cannot cross-drive verify the burn. Attach the second drive."
+  elif [ "$n" -eq 1 ]; then bad "only 1 optical drive — you cannot cross-drive verify the burn. Attach the second drive, or set CEREMONY_VERIFY_DEV to the qvm-block node of a read-only one (e.g. /dev/xvdi for an internal bay drive)."
   else bad "no /dev/sr* optical drive — attach the M-DISC writer(s)."; fi
 fi
 

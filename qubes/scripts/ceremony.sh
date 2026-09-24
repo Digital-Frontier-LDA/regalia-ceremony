@@ -1876,9 +1876,19 @@ step_archive() {
   warn "Also burn the SEALED custodian-contact sheet's content is NOT on the disc — it is the"
   warn "printed sheet sealed in each case (your chosen model). Keep it sealed, not on the M-DISC."
   info "Typical (review paths/devices first):"
-  show "growisofs -Z /dev/sr0 -R -J '$burn'                 # burn on drive A (/dev/sr0)"
-  show "mount -o ro /dev/sr1 /mnt && ( cd /mnt && sha256sum -c manifest.sha256 )   # verify FROM drive B (/dev/sr1), not the source tree"
-  show "d=\$(mktemp -d) && xorriso -osirrox on -indev /dev/sr1 -extract / \"\$d\" && ( cd \"\$d\" && sha256sum -c manifest.sha256 )   # same check without a kernel mount"
+  # Burn and verify drives. Two USB drives are /dev/sr0 + /dev/sr1. With ONE USB writer and a
+  # laptop's internal bay drive, the bay belongs to dom0 and reaches this qube read-only through
+  # `qvm-block`, as /dev/xvdX: set CEREMONY_VERIFY_DEV to that node. It can read, never burn.
+  local bdev="${CEREMONY_BURN_DEV:-/dev/sr0}" vdev="${CEREMONY_VERIFY_DEV:-/dev/sr1}"
+  show "growisofs -Z $bdev -R -J '$burn'                 # burn on drive A ($bdev)"
+  case "$vdev" in
+    /dev/sr*) : ;;
+    *) info "Verify drive $vdev is a block-attached drive. Move the disc into it, then in dom0:"
+       show "qvm-block attach --ro <this-qube> dom0:sr0      # the internal bay drive, READ-ONLY"
+       info "and check which node appeared here (lsblk) — it must be $vdev." ;;
+  esac
+  show "mount -o ro $vdev /mnt && ( cd /mnt && sha256sum -c manifest.sha256 )   # verify FROM drive B ($vdev), not the source tree"
+  show "d=\$(mktemp -d) && xorriso -osirrox on -indev $vdev -extract / \"\$d\" && ( cd \"\$d\" && sha256sum -c manifest.sha256 )   # same check without a kernel mount"
   info "Generate a checksum manifest of what you burn first (recurses into recovery-kit/):"
   run "( cd '$burn' && find . -type f ! -name manifest.sha256 -print0 | xargs -0 sha256sum > manifest.sha256 ) && cat '$burn/manifest.sha256'"
 }

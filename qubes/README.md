@@ -112,6 +112,20 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 # print/seal shares, then power off the disposable (RAM wiped).
 ```
 
+### Ceremony media on a laptop (few USB ports, no hub)
+
+Attach devices per step with `qvm-usb attach <dispvm> sys-usb:<id>` and detach what the step no
+longer needs; the wizard runs one step at a time, so nothing needs a hub.
+
+- **Webcam** (printed-QR scan-back) and a **built-in reader** are internal USB: no port used.
+- **HSM funding** needs both Nitrokeys at once; every other step needs at most one token.
+- **M-DISC:** burn on the USB writer (`qvm-usb`). For the cross-drive verify, a laptop's internal
+  bay drive belongs to dom0 and can only be passed **read-only** with `qvm-block`. Run the
+  ceremony with `CEREMONY_VERIFY_DEV=/dev/xvdi` (the node `qvm-block` creates; confirm with
+  `lsblk`). Once the burned disc is in the bay, in dom0:
+  `qvm-block attach --ro <dispvm> dom0:sr0`. Preflight and go/no-go accept this layout; without
+  it they require two USB drives.
+
 `ceremony.sh` is built for **both** tokens: a YubiKey step (PIV/P-256 `ops` age identity)
 **and** a Nitrokey HSM 2 step (DKEK 4-of-6 backup + on-device secp256k1 funding key). It
 prints paper shares to a CUPS printer and never echoes a secret to the terminal (secrets
