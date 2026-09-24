@@ -131,6 +131,52 @@ else
   P "does not hard-STOP on an unreadable capability table"
 fi
 
+# ONE USB writer + a laptop bay drive reached read-only through qvm-block (it belongs to dom0 and
+# appears as /dev/xvdX only once a disc is in it). CEREMONY_VERIFY_DEV declares that layout.
+mkdir -p "$FAKE/one/dev"; : > "$FAKE/one/dev/sr0"
+cat > "$FAKE/cdinfo-single-writer" <<'EOS'
+CD-ROM information, Id: cdrom.c 3.20 2003/12/17
+
+drive name:		sr0
+Can write CD-R:		1
+Can write DVD-R:	1
+Can read DVD:		1
+EOS
+cat > "$FAKE/cdinfo-single-reader" <<'EOS'
+CD-ROM information, Id: cdrom.c 3.20 2003/12/17
+
+drive name:		sr0
+Can write CD-R:		0
+Can write DVD-R:	0
+Can read DVD:		1
+EOS
+run1(){ GONOGO_OPTICAL_GLOB="$FAKE/one/dev/sr*" GONOGO_CDROM_INFO="$1" "$GN" --need drives 2>&1 || true; }
+
+hdr "one USB drive, no verify drive declared -> STOP (no cross-drive verify)"
+out="$(run1 "$FAKE/cdinfo-single-writer")"
+if grep -qi 'only 1 optical drive' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
+  P "a lone drive still STOPs when no second (block-attached) drive is declared"
+else
+  F "a lone drive passed without any cross-drive verify path"
+fi
+
+hdr "one USB writer + CEREMONY_VERIFY_DEV=/dev/xvdi (qvm-block bay drive) -> GO"
+out="$(CEREMONY_VERIFY_DEV=/dev/xvdi run1 "$FAKE/cdinfo-single-writer")"
+if grep -qi 'reads back through /dev/xvdi' <<< "$out" && grep -qi 'DVD writer profile' <<< "$out"; then
+  P "accepts one writer with a declared qvm-block verify drive, and still checks the writer"
+else
+  F "one writer + declared qvm-block verify drive was not accepted"
+  echo "$out" | grep -iE 'optical|drive|sr|xvd' | sed 's/^/      /'
+fi
+
+hdr "one READ-ONLY drive + CEREMONY_VERIFY_DEV -> STOP (the declared layout cannot burn)"
+out="$(CEREMONY_VERIFY_DEV=/dev/xvdi run1 "$FAKE/cdinfo-single-reader")"
+if grep -qi 'NONE can WRITE' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
+  P "the write-capability check still applies to the lone burn drive"
+else
+  F "a read-only lone drive passed because a verify drive was declared"
+fi
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] && exit 0 || exit 1
