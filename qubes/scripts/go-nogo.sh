@@ -13,6 +13,13 @@
 # --need takes a comma list of: yubikey hsm sle4442 printer drives. Anything not listed is
 # checked best-effort (warn only). With nothing listed, every probe is advisory.
 set -uo pipefail
+# The vault-tools image keeps its pinned tools in /opt/vault-bin (sops, shamir, sle4442-manager)
+# and the hash-pinned Python packages in the /opt/vault-ceremony/venv interpreter. /etc/profile.d
+# puts both on PATH for LOGIN shells only; the xterm a disposable opens is not one, so add them here.
+for _d in /opt/vault-bin /opt/vault-ceremony/venv/bin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) [ -d "$_d" ] && PATH="$_d:$PATH" ;; esac
+done
+unset _d
 HERE="$(cd "$(dirname "$0")" && pwd)"
 
 NEED=""

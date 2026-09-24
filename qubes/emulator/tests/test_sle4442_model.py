@@ -20,6 +20,17 @@ sle = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sle)
 
 
+def _manager_path():
+    # sle4442-manager is a real ceremony tool and ships with the ceremony scripts: ../../scripts
+    # in a checkout, /opt/vault-ceremony/scripts in the emulator image.
+    here = os.path.dirname(__file__)
+    for p in (os.path.join(here, "..", "..", "scripts", "sle4442-manager"),
+              "/opt/vault-ceremony/scripts/sle4442-manager"):
+        if os.path.exists(p):
+            return p
+    raise FileNotFoundError("sle4442-manager not found next to the ceremony scripts")
+
+
 def h(s):
     return bytes.fromhex(s.replace(" ", ""))
 
@@ -190,7 +201,7 @@ class TestSecretLeak(unittest.TestCase):
 
 
 def _load_manager_module():
-    """Load bin/sle4442-manager with a faked smartcard layer (pyscard is absent on the native
+    """Load scripts/sle4442-manager with a faked smartcard layer (pyscard is absent on the native
     test host). Shared by the manager-level test classes below."""
     import types
 
@@ -219,7 +230,7 @@ def _load_manager_module():
 
         loader = SourceFileLoader(
             "sle4442_manager",
-            os.path.join(os.path.dirname(__file__), "..", "bin", "sle4442-manager"),
+            _manager_path(),
         )
         spec = importlib.util.spec_from_loader("sle4442_manager", loader)
         mgr = importlib.util.module_from_spec(spec)
@@ -322,7 +333,7 @@ class TestManagerStoreNoLeak(unittest.TestCase):
     ADDR = 0x20
 
     def _load_manager(self):
-        """Load bin/sle4442-manager with a faked smartcard layer (pyscard is absent on the
+        """Load scripts/sle4442-manager with a faked smartcard layer (pyscard is absent on the
         native test host), wiring conn.transmit() straight into the real SLE4442 model."""
         import types
 
@@ -351,7 +362,7 @@ class TestManagerStoreNoLeak(unittest.TestCase):
 
             loader = SourceFileLoader(
                 "sle4442_manager",
-                os.path.join(os.path.dirname(__file__), "..", "bin", "sle4442-manager"),
+                _manager_path(),
             )
             spec = importlib.util.spec_from_loader("sle4442_manager", loader)
             mgr = importlib.util.module_from_spec(spec)

@@ -132,7 +132,7 @@ jobs:
           echo "=== cups error_log ==="; sudo tail -50 /var/log/cups/error_log 2>/dev/null || true
 
   salt-build-vault:
-    name: Build vault-tools from the salt recipe (debian:12) + validate against it
+    name: Build vault-tools from the salt recipe (debian:13 + Qubes repo) + validate against it
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -142,12 +142,23 @@ jobs:
           # any script in that checkout can read it. Neither job pushes.
           persist-credentials: false
 
-      - name: Apply the REAL vault-tools recipe in a debian:12 container, then validate
+      - name: Apply the REAL vault-tools recipe in a debian:13 container, then validate
         run: |
-          docker run --rm -v "$PWD:/repo" -w /repo debian:12 bash -euxc '
+          # debian:13 + the Qubes R4.2 VM repository = what the owner builds on (debian-13-minimal).
+          # The recipe installs Qubes packages (qubes-usb-proxy), so a plain Debian image cannot
+          # build it, and a Debian 12 build proved nothing about the trixie template (the system
+          # pip install passed on 12 and failed on 13, 2026-09-24).
+          docker run --rm -v "$PWD:/repo" -w /repo debian:13 bash -euxc '
             export DEBIAN_FRONTEND=noninteractive
             apt-get update
             apt-get install -y --no-install-recommends ca-certificates curl libdigest-sha-perl xxd
+            # The Qubes archive key exactly as qubes-core-agent ships it in every Qubes Debian VM
+            # (Qubes publishes it only inside its packages). Fingerprint
+            # 0EBE 5463 493C C304 21DA  8AC4 5BB7 1C44 1BCB 10FE, "Qubes OS 4.2 Debian Packages Signing Key".
+            echo "0365dcd00056ce4fff3c7367fdc335f8367d59994a24a6c9b8deb70a89b01e36  qubes/ci/qubes-archive-keyring-4.2.gpg" | sha256sum -c -
+            install -m 0644 qubes/ci/qubes-archive-keyring-4.2.gpg /usr/share/keyrings/qubes-archive-keyring-4.2.gpg
+            echo "deb [arch=amd64 signed-by=/usr/share/keyrings/qubes-archive-keyring-4.2.gpg] https://deb.qubes-os.org/r4.2/vm trixie main" > /etc/apt/sources.list.d/qubes-r4.list
+            apt-get update
             # Salt was dropped from Debian bookworm main (on a real Qubes template salt comes from Qubes).
             # Install salt-call via the official Salt bootstrap: -X = do not start services (salt-call --local
             # is standalone), -d = skip the daemon dep, -x python3 = use the system python.
@@ -175,9 +186,14 @@ jobs:
             echo "sops:"; sops --version
             test -f /opt/vault-ceremony/ceremony.sh
             test -f /opt/vault-ceremony/requirements.txt
-            for t in age pkcs11-tool sc-hsm-tool shamir ssss-split ssss-combine qrencode age-plugin-yubikey; do
+            for t in age pkcs11-tool sc-hsm-tool shamir ssss-split ssss-combine qrencode age-plugin-yubikey \
+                     sle4442-manager zbarcam zbarimg growisofs xorriso lp lpstat cancel v4l2-ctl xterm; do
               command -v "$t" >/dev/null || { echo "MISSING built tool: $t"; exit 1; }
             done
+            # the ceremony python3 (the venv) imports the pinned packages AND the Debian pyscard
+            python3 -c "import mnemonic, shamir_mnemonic, smartcard, cryptography, Crypto" \
+              || { echo "the vault python cannot import the ceremony modules"; exit 1; }
+            python3 /opt/vault-ceremony/payload-qr.py --selftest
             ls /opt/vault-ceremony/wheels/*.whl >/dev/null 2>&1 && echo "offline recovery wheels baked in"
             # the stubbed test/sim/proof harnesses MUST NOT ship in the real image
             for h in test-ceremony recital-ceremony simulate-ceremony prove-ceremony; do

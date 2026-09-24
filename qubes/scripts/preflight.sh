@@ -9,6 +9,13 @@
 # (most importantly: if this qube can reach a network).
 
 set -uo pipefail
+# The vault-tools image keeps its pinned tools in /opt/vault-bin (sops, shamir, sle4442-manager)
+# and the hash-pinned Python packages in the /opt/vault-ceremony/venv interpreter. /etc/profile.d
+# puts both on PATH for LOGIN shells only; the xterm a disposable opens is not one, so add them here.
+for _d in /opt/vault-bin /opt/vault-ceremony/venv/bin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) [ -d "$_d" ] && PATH="$_d:$PATH" ;; esac
+done
+unset _d
 
 fail=0
 ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; }
@@ -166,6 +173,19 @@ drives=$(ls /dev/sr* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$drives" -ge 2 ]; then ok "$drives optical drives — burn on one, cross-verify on the other."
 elif [ "$drives" -eq 1 ]; then warn "only 1 optical drive seen — cross-drive verify not possible; verify the burn on a second drive."
 else warn "no /dev/sr* optical drive seen — attach the internal/external DVD writer for M-DISC archive."; fi
+
+echo "== Chip cards (SLE-4442) =="
+# The chip-card step needs the manager AND pyscard; the manager exits at import without pyscard,
+# which would surface only at the step, with a share already in RAM.
+if command -v sle4442-manager >/dev/null 2>&1 && python3 -c "import smartcard" >/dev/null 2>&1; then
+  ok "sle4442-manager + pyscard"
+else bad "sle4442-manager or python3-pyscard missing — the SLE-4442 chip-card step cannot run; rebuild the template."; fi
+
+echo "== Camera (scan the printed QR back) =="
+if command -v zbarcam >/dev/null 2>&1; then
+  if ls /dev/video* >/dev/null 2>&1; then ok "zbarcam + a camera ($(ls /dev/video* | head -1))"
+  else warn "no /dev/video* — attach the webcam with 'qvm-usb attach' to scan the printed sheets back (or scan them with zbarimg from a photo)."; fi
+else warn "zbarcam not installed — printed QR sheets cannot be scanned back here."; fi
 
 echo "== Entropy =="
 ent=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
