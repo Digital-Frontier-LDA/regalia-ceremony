@@ -1759,8 +1759,9 @@ step_chipcard() {
   if [ ! -s "$pscfile" ]; then
     warn "No $pscfile found. Write the card's PSC there (no trailing newline), e.g.:"
     show "printf 'FFFFFF' > '$pscfile' && chmod 600 '$pscfile'"
-    warn "FFFFFF is the FACTORY PSC — a card still on it is unprotected. Change it before"
-    warn "sealing a share, or the card is a plaintext share to anyone who finds it."
+    warn "The PSC guards WRITES only: an SLE-4442 can always be READ, so whoever holds this card"
+    warn "holds the share, exactly like the paper and metal copies — its protection is the sealed"
+    warn "case. FFFFFF is the FACTORY PSC: change it so the share cannot be overwritten or erased."
     ask "continue with the PSC file as-is?" || return 1
     [ -s "$pscfile" ] || { err "no PSC file — refusing to guess (a wrong guess burns one of three attempts)."; return 1; }
   fi

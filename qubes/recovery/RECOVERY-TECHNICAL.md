@@ -31,6 +31,16 @@ used** (the recovery card is stamped with the HSM-restore steps, and the disc ca
 **DKEK password shares** (4-of-6) — there are **no** SLIP-39 funding word-shares; recover it
 with **Section 3B** below, not Section 3.
 
+**Reading the chip card** (only if you need this case's share from it — the printed and metal
+copies hold the same share). You need a PC/SC reader that supports SLE-4442 memory cards (e.g.
+ACS ACR39U with the `libacsccid1` driver); ordinary chip-card readers cannot power these cards.
+No PSC is needed to read. The share is plain ASCII text stored from **byte 32**, with no length
+marker; the unused bytes after it read as `FF` (or `00`):
+```bash
+./sle4442-manager read --addr 32 --len 224 | xxd -r -p | tr -d '\377\000' > share.txt
+```
+`share.txt` now holds the share's words. It is SECRET: keep it on the offline machine only.
+
 ## 2. Get an OFFLINE machine
 Recovery must be **air-gapped** (no network) — the seeds appear in plaintext during recovery.
 Two options:
