@@ -42,6 +42,28 @@ rejected because disposability cannot be proved from inside that guest.
 
 ## Build (run in **dom0**)
 
+dom0 has no network and no git, and nothing should be built from a working copy on another qube.
+Fetch the recipe from the public repository at an exact, **merged** commit (take its full 40-character
+SHA from the merged pull request on GitHub). A throwaway disposable downloads it; dom0 only
+receives the bytes and checks that nothing changed on the way:
+
+```bash
+# 0. fetch the recipe at a pinned commit (dom0)
+REV=<full 40-character commit SHA of the merged release>
+URL="https://github.com/Digital-Frontier-LDA/regalia-ceremony/archive/$REV.tar.gz"
+qvm-create --class DispVM --template default-dvm --label red vault-fetch   # any disposable template WITH network
+qvm-run -p vault-fetch "curl -fsSL '$URL' | sha256sum"      # note the sum it prints
+qvm-run -p vault-fetch "curl -fsSL '$URL'" > /tmp/vault-ceremony.tgz
+sha256sum /tmp/vault-ceremony.tgz                           # must equal the sum above
+qvm-kill vault-fetch; qvm-remove -f vault-fetch
+rm -rf /tmp/vault-ceremony && mkdir /tmp/vault-ceremony
+tar -xzf /tmp/vault-ceremony.tgz -C /tmp/vault-ceremony --strip-components=1 "regalia-ceremony-$REV/qubes"
+cd /tmp/vault-ceremony/qubes                                # steps 1–5 run from here
+```
+
+GitHub builds the tarball from exactly that commit; two downloads of the same `$REV` give the
+same bytes (checked 2026-09-24), so the two sums catch corruption between the disposable and dom0.
+
 ```bash
 # 1. clone a fresh template for the tools (keeps your base template clean). Debian 13: its OpenSC
 #    0.26.1, pcscd 2.3.3, libccid 1.6.2 and yubikey-manager 5.6.1 are exactly the versions the hardware
@@ -73,6 +95,14 @@ qvm-features vault appmenus-dispvm 1
 
 # 5. snapshot the ready image so you can restore it anywhere
 qvm-backup --dest-vm <backup-store> vault-tools
+```
+
+To start a ceremony, open a terminal in a fresh disposable, then find its name (`dispNNNN`) to
+attach devices to it:
+
+```bash
+qvm-run --dispvm=vault xterm &                  # dom0; in the xterm: /opt/vault-ceremony/ceremony.sh
+qvm-ls --class DispVM --running                  # its name, for qvm-usb / qvm-block attach
 ```
 
 Before each real ceremony, run **both** preflights: `preflight-dom0.sh <vault>` in **dom0**
