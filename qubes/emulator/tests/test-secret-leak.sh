@@ -11,6 +11,10 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 # checkout AND from the baked image, where scripts live at /opt/vault-ceremony/scripts and
 # emulator bins at /opt/vault-emu/bin — not the repo-relative layout.
 BIN="${EMU_BIN:-$HERE/../bin}"
+# sle4442-manager is a REAL ceremony tool (it ships in the vault image), so it lives with the
+# ceremony scripts: ../../scripts in a checkout, /opt/vault-ceremony/scripts in the emulator image.
+SLE_MGR="$HERE/../../scripts/sle4442-manager"
+[ -f "$SLE_MGR" ] || SLE_MGR="/opt/vault-ceremony/scripts/sle4442-manager"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"
 export PATH="$BIN:$PATH"
 
@@ -115,9 +119,9 @@ fi
 hdr "SLE-4442 PSC: resolvable off-argv (env / file), and a non-default argv PSC warns"
 # pyscard may be absent on this host, so exec ONLY resolve_psc out of the manager source
 # (it has no pyscard dependency) and confirm the env path returns the PSC without argv.
-psc_env="$(SLE4442_PSC=AABBCC T="$HERE" python3 - <<'PY' 2>/dev/null
+psc_env="$(SLE4442_PSC=AABBCC T="$SLE_MGR" python3 - <<'PY' 2>/dev/null
 import importlib.util, os, sys, re
-origin = os.path.join(os.environ["T"], "..", "bin", "sle4442-manager")
+origin = os.environ["T"]
 src = open(origin).read()
 ns = {"os": os, "sys": sys}
 exec(compile(re.search(r"DEFAULT_PSC = .*?return psc or DEFAULT_PSC", src, re.S).group(0), "m", "exec"), ns)
@@ -305,7 +309,7 @@ grep -q 'cancel -x -a' <<<"$CER_CODE" \
 
 # =====================================================================================
 hdr "sle4442-manager 'info' does not dump card memory (a stored share) to stdout"
-SLE_CODE="$(python3 "$HERE/source_lexing.py" python "$BIN/sle4442-manager")" \
+SLE_CODE="$(python3 "$HERE/source_lexing.py" python "$SLE_MGR")" \
   || { echo "source lexer failed" >&2; exit 2; }
 if grep -qE 'main\[0:16\]|FF B0 00 00 10' <<<"$SLE_CODE"; then
   F "info still reads/prints main-memory contents — a stored secret would leak to stdout"

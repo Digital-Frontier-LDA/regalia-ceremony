@@ -5,6 +5,8 @@ archival paper, and reassemble them back.
   payload-qr.py --split payload.age --outdir ./qr        # emit qr-01.png … + INSTRUCTIONS.txt
   payload-qr.py --join ./qr/chunks.txt --out payload.age # reassemble from decoded chunk text
   payload-qr.py --selftest                               # split→join round-trip, no files kept
+  payload-qr.py --verify-scan payload.age                # scan the PRINTED sheet back (webcam)
+  payload-qr.py --verify-scan payload.age --scans scans.txt   # … or from decoded lines / stdin (-)
 
 WHY A FORMAT AT ALL: a payload larger than one symbol has to be chunked, and N loose QR codes
 with no headers are a puzzle — you cannot tell their order, whether one is missing, or whether
@@ -172,7 +174,9 @@ def join_lines(lines):
         # no whitespace, from being split further.
         parts = line.split(None, 3)
         if len(parts) != 4 or parts[0] != MAGIC:
-            sys.exit("payload-qr: not a %s chunk line: %.40s…" % (MAGIC, line))
+            # Never echo the content: a share line pasted or scanned by mistake would print its words.
+            sys.exit("payload-qr: a line that is NOT a %s chunk (%d chars, content not shown — it may "
+                     "be a share)" % (MAGIC, len(line)))
         idx_total, dg, chunk = parts[1], parts[2], parts[3]
         try:
             idx, tot = (int(x) for x in idx_total.split("/"))
@@ -222,6 +226,99 @@ def join(chunks_path, out_path, quiet=False):
     return data
 
 
+ZBAR_QR_ONLY = ["-Sdisable", "-Sqrcode.enable"]
+
+
+def _scan_line(raw):
+    """One decoded symbol as a scanner reports it. zbarimg/zbarcam without --raw prefix the
+    symbology ("QR-Code:"); accept both so an operator can feed either tool's output."""
+    line = raw.strip()
+    if line.startswith("QR-Code:"):
+        line = line[len("QR-Code:"):].strip()
+    return line
+
+
+def verify_scan(payload_path, scans=None, device="/dev/video0", quiet=False):
+    """Prove the PRINTED sheet, not the PNGs, rebuilds the payload byte-for-byte.
+
+    --split already proves the chunks rebuild the payload, but that is a check on files that are
+    about to be shredded. What survives the ceremony is toner on paper, and a printer that
+    scales, crops, drops a page or smears a symbol produces a sheet that LOOKS right. The only
+    evidence that the paper is a backup is decoding the paper. Chunks are read as they are
+    scanned (the webcam repeats a symbol many times a second; repeats are idempotent), progress
+    is shown, and the check ends as soon as every index is in hand.
+    """
+    with open(payload_path, "rb") as fh:
+        expected = fh.read()
+    want = _digest(expected)
+    proc = None
+    if scans is None:
+        if not shutil.which("zbarcam"):
+            sys.exit("payload-qr: zbarcam not found (zbar-tools) — cannot scan the sheet")
+        # --raw: the decoded bytes without charset conversion or a "QR-Code:" prefix. QR only, so
+        # a barcode on the paper packaging or a label in view cannot inject a stray line.
+        proc = subprocess.Popen(["zbarcam", "--raw", "-q"] + ZBAR_QR_ONLY + [device],
+                                stdout=subprocess.PIPE, text=True)
+        source = proc.stdout
+        if not quiet:
+            print("payload-qr: hold each printed symbol to the camera (%s); the window closes when "
+                  "every chunk is read. Close it yourself to stop." % device, flush=True)
+    elif scans == "-":
+        source = sys.stdin
+    else:
+        source = open(scans)
+
+    lines, seen, total = [], set(), None
+    try:
+        for raw in source:
+            line = _scan_line(raw)
+            if not line:
+                continue
+            parts = line.split(None, 3)
+            if len(parts) != 4 or parts[0] != MAGIC:
+                # Never echo the content: a share QR held to the camera by mistake would print its
+                # words here, on the one terminal the ceremony keeps free of secrets.
+                sys.exit("payload-qr: scanned a symbol that is NOT a %s chunk (%d chars, content not "
+                         "shown — it may be a share). Keep only the payload sheet in view."
+                         % (MAGIC, len(line)))
+            # A chunk from a DIFFERENT payload (an earlier print, another ceremony's sheet) is
+            # refused on sight rather than after a confusing checksum mismatch at the end.
+            if parts[2] != want:
+                sys.exit("payload-qr: scanned a chunk of ANOTHER payload (checksum %s, this payload "
+                         "is %s) — a sheet from a different print or ceremony is on the desk"
+                         % (parts[2], want))
+            try:
+                idx, tot = (int(x) for x in parts[1].split("/"))
+            except ValueError:
+                sys.exit("payload-qr: malformed index field %r" % parts[1])
+            lines.append(line)
+            if idx not in seen:
+                seen.add(idx)
+                total = tot
+                if not quiet:
+                    print("payload-qr: read chunk %d/%d (%d of %d)" % (idx, tot, len(seen), tot),
+                          flush=True)
+            if total is not None and len(seen) >= total:
+                break
+    finally:
+        if proc is not None:
+            proc.terminate()
+            proc.wait()
+        elif scans not in (None, "-"):
+            source.close()
+
+    if total is None:
+        sys.exit("payload-qr: SCAN-BACK FAILED — no chunk was read from the sheet")
+    # join_lines re-checks everything (missing indexes, conflicting duplicates, base64, digest).
+    rebuilt = join_lines(lines)
+    if rebuilt != expected:
+        sys.exit("payload-qr: SCAN-BACK FAILED — the printed sheet rebuilds a DIFFERENT payload")
+    if not quiet:
+        print("payload-qr: SCAN-BACK OK — the printed sheet rebuilds %s byte-for-byte "
+              "(%d chunk(s), sha256-16 %s)" % (payload_path, total, want))
+    return total
+
+
 def selftest():
     """Round-trip a synthetic multi-chunk payload. Proves the format, the digest check and the
     missing-chunk detection actually work before anyone relies on them at a ceremony."""
@@ -238,6 +335,12 @@ def selftest():
         assert rebuilt == payload, "round-trip mismatch"
         lines = open(os.path.join(tmp, "qr", "chunks.txt")).read().splitlines()
         print("payload-qr selftest: OK (%d chunks, digest %s, round-trip byte-exact)" % (total, digest))
+        # Scan-back path, fed as a scanner would: out of order, repeated, with zbarimg's prefix.
+        scanned = os.path.join(tmp, "scans.txt")
+        with open(scanned, "w") as fh:
+            fh.write("\n".join(["QR-Code:" + lines[-1]] + lines[::-1] + lines) + "\n")
+        verify_scan(src, scans=scanned, quiet=True)
+        print("payload-qr selftest: scan-back OK (out-of-order, repeated, prefixed scans)")
         return lines
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -249,6 +352,11 @@ def main():
     g.add_argument("--split", metavar="PAYLOAD.age")
     g.add_argument("--join", metavar="CHUNKS.txt")
     g.add_argument("--selftest", action="store_true")
+    g.add_argument("--verify-scan", metavar="PAYLOAD.age",
+                   help="scan the PRINTED sheet back and require it to rebuild PAYLOAD.age")
+    ap.add_argument("--scans", metavar="FILE",
+                    help="with --verify-scan: decoded lines from FILE ('-' = stdin) instead of the camera")
+    ap.add_argument("--device", default="/dev/video0", help="with --verify-scan: the camera")
     ap.add_argument("--outdir", default="./qr")
     ap.add_argument("--out", default="./payload.age")
     ap.add_argument("--allow-plaintext", action="store_true",
@@ -257,6 +365,8 @@ def main():
     os.umask(0o077)
     if a.selftest:
         selftest()
+    elif a.verify_scan:
+        verify_scan(a.verify_scan, scans=a.scans, device=a.device)
     elif a.split:
         split(a.split, a.outdir, allow_plaintext=a.allow_plaintext)
     else:

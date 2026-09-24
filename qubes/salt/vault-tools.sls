@@ -30,6 +30,21 @@ vault-tools-apt:
       - secure-delete
       - vim                # hardened editor required by sops-edit-airgap.sh (fails closed without it)
       - openssl            # centralized-KMS P-256 offline-bundle signature verification
+      # --- Qubes plumbing a *-minimal template lacks -----------------------------------
+      - qubes-usb-proxy    # `qvm-usb attach` into the vault: WITHOUT it no token, reader, drive
+                           # or webcam can be passed through, and debian-13-minimal omits it
+      - xterm              # a terminal to run the wizard in; minimal templates ship none
+      # --- ceremony media (step 4 M-DISC, paper, chip cards, scan-back) ----------------
+      - dvd+rw-tools       # growisofs: burn the M-DISC on drive A (step_archive)
+      - xorriso            # read the disc back from drive B without a kernel mount (osirrox)
+      - cups               # print spooler; USB-only queues enforced by pick_printer/preflight
+      - cups-client        # lp / lpstat / cancel, which ceremony.sh drives
+      - cups-filters       # PNG/text -> printer; without it a QR page cannot be rendered
+      - ipp-usb            # driverless IPP-over-USB (most current USB lasers)
+      - ghostscript        # PostScript rendering for the recovery card and non-PS printers
+      - printer-driver-brlaser   # Brother monochrome lasers that are not IPP-everywhere
+      - python3-pyscard    # sle4442-manager: SLE-4442 chip cards over PC/SC
+      - v4l-utils          # v4l2-ctl: find/focus the webcam used to scan printed QR back
 
 # SLIP-0039 `shamir` CLI (not packaged in Debian).
 # MIDDLE supply-chain posture (quorum 2026-06-29): install the pip deps with
@@ -53,23 +68,40 @@ recovery-docs:
     - dir_mode: "0755"
 slip39-shamir:
   cmd.run:
-    # --break-system-packages: a modern Debian (bookworm+) enforces PEP 668 and refuses a
-    # system pip install without it. This template is a single-purpose vault image where a
-    # system-wide install of the (hash-pinned) SLIP-39 tools IS the intent, so overriding the
-    # externally-managed marker here is correct (and required for state.apply to succeed).
-    # Fall back to a plain install for an older pip that doesn't recognize the flag (or a
-    # distro that doesn't enforce PEP 668) so state.apply doesn't hard-fail on the flag alone.
+    # A VENV IN THE TEMPLATE ROOT, not a system pip install. Measured on debian-13-minimal
+    # (2026-09-24): the system install FAILS there, because yubikey-manager pulls Debian's
+    # python3-click 8.1.8 and pip cannot uninstall a Debian package to put the pinned 8.5.0 in its
+    # place (uninstall-no-record-file) — and forcing it would swap the click ykman runs on. A
+    # system pip install also lands in /usr/local, which Qubes copies into a qube only on its
+    # FIRST boot (/usr/local.orig -> /rw/usrlocal), so every template rebuild after that would be
+    # invisible to the vault. /opt is template root: it reaches every disposable, every time.
+    # --system-site-packages: the venv still sees Debian's python3-pyscard (sle4442-manager);
+    # its own pinned packages shadow Debian's only inside the venv. --ignore-installed: EVERY pin
+    # goes into the venv even when a same-version copy is visible outside it; otherwise pip counts
+    # a leftover /usr/local install as satisfied and the venv silently lacks it (seen on a rebuild
+    # after a failed system install: no `shamir` CLI).
     # --only-binary :all:: never compile. Every pinned package has a pinned wheel (checked for
     # Python 3.11 and 3.13, 2026-09-24); a missing one must fail HERE, not silently need gcc on a
     # minimal template or on the machine that later recovers from the disc.
     # QUOTED: ":all: " is a YAML mapping indicator in a plain scalar, and Salt could not render
     # the state at all (caught by CI on the Debian 12 build, 2026-09-24).
-    - name: 'pip3 install --break-system-packages --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt || pip3 install --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt'
+    - name: 'rm -rf /opt/vault-ceremony/venv && python3 -m venv --system-site-packages /opt/vault-ceremony/venv && /opt/vault-ceremony/venv/bin/pip install --no-cache-dir --ignore-installed --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt && cp /opt/vault-ceremony/requirements.txt /opt/vault-ceremony/venv/requirements.installed'
+    # Rebuilt unless the venv was COMPLETED for exactly this requirements.txt. Not `onchanges`:
+    # the file lands before the install runs, so after a failed first build a re-run saw no change
+    # and skipped the install, reporting success with no venv (found on the trixie build).
+    - unless: 'cmp -s /opt/vault-ceremony/requirements.txt /opt/vault-ceremony/venv/requirements.installed'
     - require:
       - pkg: vault-tools-apt
-    # idempotent: only (re)install when requirements.txt actually changes
-    - onchanges:
       - file: ceremony-requirements
+
+# The SLIP-0039 CLI on PATH, from the venv.
+slip39-shamir-bin:
+  file.symlink:
+    - name: /opt/vault-bin/shamir
+    - target: /opt/vault-ceremony/venv/bin/shamir
+    - makedirs: True
+    - require:
+      - cmd: slip39-shamir
 
 # Bake the hash-pinned WHEELS into the image (network is available during this build) so
 # ceremony.sh step_archive can burn them onto each M-DISC. A recoverer on a clean offline
@@ -88,10 +120,12 @@ slip39-wheels:
         --python-version "$v" --implementation cp
         --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux_2_34_x86_64
         -r /opt/vault-ceremony/requirements.txt -d /opt/vault-ceremony/wheels || exit 1;
-        done
+        done;
+        cp /opt/vault-ceremony/requirements.txt /opt/vault-ceremony/wheels/requirements.downloaded
+    # Same completion stamp as the venv, for the same reason.
+    - unless: 'cmp -s /opt/vault-ceremony/requirements.txt /opt/vault-ceremony/wheels/requirements.downloaded'
     - require:
       - pkg: vault-tools-apt
-    - onchanges:
       - file: ceremony-requirements
 
 # --- Non-apt binaries: pinned VERSION + verified SHA-256 ------------------------
@@ -129,12 +163,21 @@ age-plugin-yubikey:
 # locked crate checksums:  apt install cargo pkg-config libpcsclite-dev &&
 #   cargo install --locked --version 0.5.1 age-plugin-yubikey
 
+# sle4442-manager ships with the ceremony scripts; expose it on PATH like the other tools.
+sle4442-manager:
+  file.symlink:
+    - name: /opt/vault-bin/sle4442-manager
+    - target: /opt/vault-ceremony/sle4442-manager
+    - makedirs: True
+    - require:
+      - file: ceremony-scripts
+
 ceremony-bin-path:
   file.managed:
     - name: /etc/profile.d/vault-bin.sh
     - contents: |
-        # Baked into vault-tools template — adds the pinned binaries to PATH.
-        export PATH="/opt/vault-bin:$PATH"
+        # Baked into vault-tools template — the pinned binaries, then the pinned-package venv.
+        export PATH="/opt/vault-ceremony/venv/bin:/opt/vault-bin:$PATH"
     - mode: "0644"
 
 # Bake ONLY the real-ceremony scripts into /opt (template root = inherited read-only).
@@ -152,9 +195,16 @@ ceremony-scripts:
     # in the real ceremony image (they prepend a fake-bin of STUBBED tools to PATH). Regex-anchor it.
     - exclude_pat: 'E@(test-ceremony|recital-ceremony|simulate-ceremony|prove-ceremony)\.sh$'
 
-# Enable the smartcard daemon so the reader works once passed through.
-pcscd-enabled:
-  service.enabled:
-    - name: pcscd
+# Enable the smartcard daemon and the print spooler so a reader, token or USB printer attached
+# with qvm-usb just works in the disposable (its spool is discarded with it).
+# `systemctl enable` only writes unit symlinks and needs no running systemd, so it behaves the same
+# in the live template, a chroot and CI's container. Salt's service.enabled does not: without a
+# running systemd it falls back to insserv, which Debian 13 no longer ships (trixie build, 2026-09-24).
+vault-services-enabled:
+  cmd.run:
+    - name: systemctl enable pcscd.socket cups.service cups.socket
+    # One unit at a time: with several units `systemctl is-enabled` succeeds when ANY is enabled
+    # (checked on trixie with cups.socket disabled: rc 0), which would skip enabling the rest.
+    - unless: 'for u in pcscd.socket cups.service cups.socket; do systemctl is-enabled -q "$u" || exit 1; done'
     - require:
       - pkg: vault-tools-apt
