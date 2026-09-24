@@ -1766,7 +1766,13 @@ step_chipcard() {
   # contents, so it is safe to run and show. Two attempts left is already a warning; one means
   # a single slip destroys the card and whatever it holds.
   local infout attempts
-  infout="$(sle4442-manager info 2>&1)" || { err "could not read the card — is it inserted and is pcscd running?"; return 1; }
+  # On failure show the manager's own last line (which reader, mute card, no SLE-4442 found).
+  # Safe to print: `info` never outputs card memory.
+  infout="$(sle4442-manager info 2>&1)" || {
+    err "could not read the card: $(printf '%s\n' "$infout" | tail -1)"
+    err "Is it inserted chip-up and is pcscd running? With several readers attached, set"
+    err "SLE4442_READER to a substring of the chip-card reader's name."
+    return 1; }
   printf '%s\n' "$infout" | sed 's/^/     /'
   attempts="$(printf '%s\n' "$infout" | grep -oE '\(([0-9]+) PSC attempts left\)' | grep -oE '[0-9]+' | head -1)"
   case "${attempts:-}" in
