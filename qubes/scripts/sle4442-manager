@@ -106,30 +106,61 @@ def cmd_info(conn):
     print(f"  memory          : 256 bytes (contents not shown; use `read` to display)")
 
 
+# Bytes 0..31 are the card's factory area: the first four are the header the card answers reset
+# with (A2 13 10 91), the rest manufacturer data, and cards usually ship with them write-protected
+# (the only range protection memory covers). A share never goes there.
+FIRST_USER_BYTE = 32
+
+
+def _present_psc(conn, psc):
+    """Present the PSC. Returns None when verified, else exits with the reason.
+
+    ACS ACR39x Reference Manual v1.03, 8.4.7: SW1 = 90h and SW2 is the error counter — 07h
+    verified, 00h LOCKED, anything else this presentation failed. So 90 00 means LOCKED here; a
+    tool that took 90 00 as success would report a locked card as unlocked."""
+    _, sw1, sw2 = _xmit(conn, "FF 20 00 00 03 " + psc)
+    if sw1 != 0x90:
+        sys.exit(f"PSC presentation failed: {sw1:02X} {sw2:02X}")
+    counter = sw2 & 0x07
+    if counter == 0x07:
+        return None
+    if counter == 0x00:
+        sys.exit("the card is LOCKED (PSC error counter 0): it can never be written again")
+    sys.exit(f"PSC wrong — {bin(counter).count('1')} attempt(s) left")
+
+
+def _read(conn, addr, length):
+    """Read `length` bytes. ACS appends PROT 1..4 (the protection bits) after the data (8.4.2);
+    other readers may not. Return exactly the data, or exit if the length is neither."""
+    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {length:02X}")
+    if not _ok(sw1, sw2):
+        sys.exit(f"read failed: {sw1:02X} {sw2:02X}")
+    if len(data) == length + 4:
+        data = data[:length]
+    elif len(data) != length:
+        sys.exit(f"read returned {len(data)} bytes for {length} requested")
+    return bytes(data)
+
+
 def cmd_verify(conn, psc):
     select_sle4442(conn)
-    _, sw1, sw2 = _xmit(conn, "FF 20 00 00 03 " + psc)
-    if _ok(sw1, sw2):
-        print("PSC verified — card unlocked for writing")
-    elif sw1 == 0x63:
-        sys.exit(f"PSC wrong — {sw2 & 0x0F} attempts left")
-    else:
-        sys.exit(f"verify failed: {sw1:02X} {sw2:02X}")
+    _present_psc(conn, psc)
+    print("PSC verified — card unlocked for writing")
 
 
 def cmd_read(conn, addr, length):
     select_sle4442(conn)
-    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {length:02X}")
-    if not _ok(sw1, sw2):
-        sys.exit(f"read failed: {sw1:02X} {sw2:02X}")
-    print(toHexString(data).replace(" ", ""))
+    print(_read(conn, addr, length).hex().upper())
 
 
 def _write(conn, psc, addr, payload):
+    if addr < FIRST_USER_BYTE:
+        sys.exit(f"refusing to write at {addr}: bytes 0..{FIRST_USER_BYTE - 1} are the card's factory "
+                 f"area (its reset header and manufacturer data). Use --addr {FIRST_USER_BYTE} or later.")
+    if addr + len(payload) > 256:
+        sys.exit("payload too large for the card at that address")
     select_sle4442(conn)
-    _, sw1, sw2 = _xmit(conn, "FF 20 00 00 03 " + psc)
-    if not _ok(sw1, sw2):
-        sys.exit(f"PSC verify failed before write: {sw1:02X} {sw2:02X}")
+    _present_psc(conn, psc)
     hexpayload = " ".join(f"{b:02X}" for b in payload)
     apdu = f"FF D0 00 {addr:02X} {len(payload):02X} " + hexpayload
     _, w1, w2 = _xmit(conn, apdu)
@@ -143,22 +174,17 @@ def cmd_write(conn, psc, addr, hexdata):
     # verify-read back: a card can ACK the UPDATE (SW=90 00) yet persist zeros/garbage (a
     # weak/faulty EEPROM cell or a hostile card). For a set-once key backup, never report
     # success on the status word alone — read the bytes back and fail loudly on any mismatch.
-    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {len(payload):02X}")
-    if not _ok(sw1, sw2) or bytes(data) != payload:
+    if _read(conn, addr, len(payload)) != payload:
         # never echo `payload` — it is the secret share; report only non-secret status
-        sys.exit(f"verify-read mismatch after write at {addr}: the card did not persist the "
-                 f"payload (read status {sw1:02X} {sw2:02X})")
+        sys.exit(f"verify-read mismatch after write at {addr}: the card did not persist the payload")
     print(f"wrote and verified {len(payload)} bytes at {addr}")
 
 
 def cmd_store(conn, psc, addr, text):
     payload = text.encode()
-    if len(payload) > 256 - addr:
-        sys.exit("payload too large for the card at that address")
     _write(conn, psc, addr, payload)
     # verify-read back
-    data, sw1, sw2 = _xmit(conn, f"FF B0 00 {addr:02X} {len(payload):02X}")
-    if not _ok(sw1, sw2) or bytes(data) != payload:
+    if _read(conn, addr, len(payload)) != payload:
         sys.exit("verify-read mismatch after store")
     # NOTE: never echo `text` — it is the secret payload (e.g. a Shamir share). Print only
     # non-secret status so a tee/script log or screenshot of the ceremony can't leak it.

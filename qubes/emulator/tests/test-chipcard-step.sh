@@ -41,11 +41,16 @@ case "${1:-}" in
     tf=""; prev=""
     for a in "$@"; do [ "$prev" = "--text-file" ] && tf="$a"; prev="$a"; done
     [ -s "$tf" ] || { echo "no text file" >&2; exit 1; }
+    ad=""; prev=""
+    for a in "$@"; do [ "$prev" = "--addr" ] && ad="$a"; prev="$a"; done
+    # the real manager refuses the 32-byte factory area and anything past byte 255
+    [ "${ad:-0}" -ge 32 ] || { echo "refusing to write at ${ad:-0}: factory area" >&2; exit 1; }
     n=$(wc -c < "$tf" | tr -d ' ')
-    [ "$n" -le 256 ] || { echo "payload too large for the card at that address" >&2; exit 1; }
+    [ $((ad + n)) -le 256 ] || { echo "payload too large for the card at that address" >&2; exit 1; }
+    echo "$ad" > "$C/stored-addr"
     if [ "${STUB_STORE_FAIL:-0}" = 1 ]; then echo "verify-read mismatch after store" >&2; exit 1; fi
     cp "$tf" "$C/stored"
-    echo "stored and verified $n bytes at 0"
+    echo "stored and verified $n bytes at $ad"
     exit 0;;
   read) echo "THE-CARD-WOULD-PRINT-THE-SHARE-HERE"; exit 0;;
 esac
@@ -102,14 +107,21 @@ out="$(STUB_ATTEMPTS=2 step_chipcard "$SHARE" 2>&1)"
 grep -qi "only 2 PSC attempts left" <<< "$out" && P "warns at 2 attempts" || F "no warning at 2 attempts"
 
 # =====================================================================================
-hdr "CAPACITY: refuse anything larger than the card's 256 bytes"
+hdr "CAPACITY: refuse anything larger than the card's 224 writable bytes"
 reset
 big="$WORK/payload.age"; head -c 1400 /dev/urandom | base64 | head -c 1400 > "$big"
 out="$(step_chipcard "$big" 2>&1)"
 [ ! -s "$CARD/stored" ] && P "refused a payload that cannot fit" || F "BUG: attempted to store an oversized payload"
-grep -qi "an SLE-4442 holds 256" <<< "$(echo "$out")" \
-  && P "explains the 256-byte limit and points the payload elsewhere" \
+grep -qi "an SLE-4442 holds 224 writable bytes" <<< "$(echo "$out")" \
+  && P "explains the 224-byte limit and points the payload elsewhere" \
   || F "did not explain the capacity limit"
+
+# =====================================================================================
+hdr "ADDRESS: the share goes after the 32-byte factory area"
+reset
+out="$(step_chipcard "$SHARE" 2>&1)"
+[ "$(cat "$CARD/stored-addr" 2>/dev/null)" = 32 ] && P "stored from byte 32, never over the card's reset header" \
+  || F "the share was not stored at byte 32 (got '$(cat "$CARD/stored-addr" 2>/dev/null)')"
 
 # =====================================================================================
 hdr "UNREADABLE CARD: fail closed rather than writing blind"

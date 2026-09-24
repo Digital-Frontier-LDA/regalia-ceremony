@@ -1743,12 +1743,15 @@ step_chipcard() {
   [ -s "$share" ] || { err "share file '$share' is missing or empty"; return 1; }
 
   local nbytes; nbytes=$(wc -c < "$share" | tr -d ' ')
-  if [ "$nbytes" -gt 256 ]; then
-    err "that file is $nbytes bytes; an SLE-4442 holds 256. A share fits (~140 B) — an encrypted"
-    err "payload does not. Put the payload on the M-DISC and the QR sheets instead."
+  # 224, not 256: bytes 0..31 are the card's factory area (its reset header and manufacturer
+  # data, usually write-protected), so the share is stored from byte 32.
+  if [ "$nbytes" -gt 224 ]; then
+    err "that file is $nbytes bytes; an SLE-4442 holds 224 writable bytes (256 minus its 32-byte"
+    err "factory area). A share fits (~140 B) — an encrypted payload does not. Put the payload on"
+    err "the M-DISC and the QR sheets instead."
     return 1
   fi
-  info "share is $nbytes bytes — fits in the card's 256-byte main memory."
+  info "share is $nbytes bytes — fits in the card's 224 writable bytes (from byte 32)."
 
   # PSC off-argv, always: a PSC on the command line lands in ps, /proc/<pid>/cmdline and the
   # shell history, and it is the only thing standing between a found card and its share.
@@ -1787,7 +1790,7 @@ step_chipcard() {
   # `store` verify-reads the bytes back and compares INTERNALLY, failing loudly on a mismatch,
   # and never echoes the payload. Do NOT follow this with `sle4442-manager read` to "confirm" —
   # that subcommand PRINTS the stored bytes, which would put the share on the terminal.
-  run "sle4442-manager store --addr 0 --text-file '$share' --psc-file '$pscfile'" \
+  run "sle4442-manager store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
     || { err "store failed or was skipped — the card does NOT hold the share."; \
          err "If the PSC was wrong, one of the three attempts has been spent."; return 1; }
   info "Share stored AND verify-read back by the card (a write that ACKs but does not persist"

@@ -46,7 +46,15 @@ SW_OK = b"\x90\x00"
 SW_NO_AUTH = b"\x69\x82"          # security status not satisfied
 SW_WRONG_LEN = b"\x67\x00"
 SW_WRONG_P1P2 = b"\x6b\x00"
-SW_LOCKED = b"\x69\x83"           # authentication method blocked
+SW_LOCKED = b"\x69\x83"           # authentication method blocked (not used for PSC: see below)
+
+
+def sw_psc(counter):
+    """ACS ACR39x Reference Manual v1.03, 8.4.7 PRESENT_CODE_MEMORY_CARD: SW1 = 90h and SW2 is the
+    error counter. 07h = verified, 00h = LOCKED, anything else = this presentation failed. So on a
+    real ACS reader 90 00 means LOCKED, not success; the emulator answers the same way so tests
+    exercise what the hardware does."""
+    return bytes([0x90, counter & 0x07])
 SW_INS_UNSUPPORTED = b"\x6d\x00"
 SW_CLA_UNSUPPORTED = b"\x6e\x00"
 
@@ -149,7 +157,9 @@ class SLE4442:
                 le = self.MAIN_SIZE - addr
             if addr + le > self.MAIN_SIZE:
                 return SW_WRONG_P1P2
-            return bytes(self.main[addr:addr + le]) + SW_OK
+            # ACS 8.4.2: the data is followed by PROT 1..4, the protection bits of the first 32
+            # bytes, before SW1 SW2.
+            return bytes(self.main[addr:addr + le]) + bytes(self.protection) + SW_OK
 
         # READ PROTECTION MEMORY — FF B2 00 00 04
         if ins == 0xB2:
@@ -165,12 +175,12 @@ class SLE4442:
             if p3 != 3 or len(body) != 3:
                 return SW_WRONG_LEN
             if self.error_counter == 0x00:
-                return SW_LOCKED
+                return sw_psc(0x00)
             if bytes(body) == self.psc:
                 self.error_counter = 0x07
                 self.authenticated = True
                 self._save()
-                return SW_OK
+                return sw_psc(0x07)
             # wrong PSC: clear one error-counter bit (decrement remaining attempts).
             # SLE4442 clears from the high bit down, so the counter steps
             # 0x07 -> 0x03 -> 0x01 -> 0x00 (matches PC/SC reader datasheets).
@@ -180,8 +190,7 @@ class SLE4442:
                     self.error_counter &= ~(1 << bit)
                     break
             self._save()
-            remaining = bin(self.error_counter & 0x07).count("1")
-            return bytes([0x63, 0xC0 | remaining])  # 63 Cx = wrong, x attempts left
+            return sw_psc(self.error_counter)
 
         # UPDATE MAIN MEMORY — FF D0 00 <addr> <lc> <data>  (needs auth)
         if ins == 0xD0:
