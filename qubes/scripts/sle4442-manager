@@ -7,7 +7,7 @@ card, using the standard PC/SC memory-card pseudo-APDUs (CLA=0xFF). Against the 
 it talks to sle4442-vpicc.py through pcscd + vpcd; against a real Identiv/SCM reader with
 a real SLE-4442 it works unchanged.
 
-  sle4442-manager info
+  sle4442-manager info                       # picks the one reader holding an SLE-4442 (by ATR)
   sle4442-manager verify  --psc FFFFFF
   sle4442-manager read    --addr 32 --len 16
   sle4442-manager write   --psc FFFFFF --addr 32 --hex-file share.hex
@@ -29,19 +29,51 @@ except Exception as exc:  # pragma: no cover - only in the emulator image
     sys.exit(f"sle4442-manager: pyscard not available ({exc}); run inside the emulator image")
 
 
+# SLE-4442 answers to reset with the ISO 7816-10 synchronous ATR A2 13 10 91; readers that hide
+# the 2-wire protocol behind PC/SC synthesise a 3B 04 header around the same identity bytes
+# (e.g. ACS: 3B 04 92 23 10 91). A token (Nitrokey, YubiKey) never carries either.
+_SLE4442_ATR_MARKS = (bytes.fromhex("a2131091"), bytes.fromhex("92231091"))
+
+
+def _looks_sle4442(reader):
+    try:
+        conn = reader.createConnection()
+        conn.connect()
+        atr = bytes(conn.getATR())
+        conn.disconnect()
+    except Exception:
+        return False
+    return any(m in atr for m in _SLE4442_ATR_MARKS)
+
+
 def _connect(reader_substr):
     rl = readers()
     if not rl:
         sys.exit("no PC/SC readers found — is pcscd + vpcd + the vpicc running?")
-    chosen = None
-    for r in rl:
-        if reader_substr is None or reader_substr.lower() in str(r).lower():
-            chosen = r
-            break
-    if chosen is None:
-        sys.exit(f"no reader matching '{reader_substr}'. readers: {[str(r) for r in rl]}")
+    if reader_substr is not None:
+        matches = [r for r in rl if reader_substr.lower() in str(r).lower()]
+        if not matches:
+            sys.exit(f"no reader matching '{reader_substr}'. readers: {[str(r) for r in rl]}")
+        chosen = matches[0]
+    else:
+        # NEVER "the first reader". On the vault the first reader can be a Nitrokey or a YubiKey,
+        # and a PSC sent there is at best a confusing failure. Pick the one reader holding an
+        # SLE-4442 card, or refuse and name the readers.
+        cards = [r for r in rl if _looks_sle4442(r)]
+        if len(cards) != 1:
+            sys.exit("%s SLE-4442 card found by ATR; name the reader with --reader or "
+                     "SLE4442_READER (a substring of one of: %s)"
+                     % ("no" if not cards else "more than one", [str(r) for r in rl]))
+        chosen = cards[0]
     conn = chosen.createConnection()
-    conn.connect()
+    try:
+        conn.connect()
+    except Exception as exc:
+        # A card that is present but mute is the signature of a reader without synchronous
+        # memory-card support (seen with a Realtek 0bda:0169 combo reader, regalia#43), or a card
+        # inserted the wrong way round.
+        sys.exit(f"the card in '{chosen}' does not answer ({exc}). Check it is inserted chip-up; if "
+                 "it still does not answer, this reader cannot drive SLE-4442 memory cards.")
     return conn, str(chosen)
 
 
@@ -182,7 +214,9 @@ def resolve_secret(args, kind):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="drive an SLE-4442 card over PC/SC")
-    ap.add_argument("--reader", default=None, help="reader name substring (default: first)")
+    ap.add_argument("--reader", default=os.environ.get("SLE4442_READER") or None,
+                    help="reader name substring (default: SLE4442_READER, else the one reader "
+                         "holding an SLE-4442 card by ATR)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("info")
     for name_ in ("verify", "write", "store"):

@@ -487,3 +487,68 @@ class TestManagerWriteVerifiesReadBack(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestManagerReaderSelection(unittest.TestCase):
+    """Without --reader the manager must never take "the first reader": on the vault that can be a
+    Nitrokey or a YubiKey. It picks the ONE reader whose card carries an SLE-4442 ATR, or refuses."""
+
+    class _Reader:
+        def __init__(self, name, atr=None, mute=False):
+            self.name, self.atr, self.mute, self.connects = name, atr, mute, 0
+
+        def __str__(self):
+            return self.name
+
+        def createConnection(self):
+            reader = self
+
+            class _Conn:
+                def connect(self):
+                    reader.connects += 1
+                    if reader.atr is None or reader.mute:
+                        raise RuntimeError("Card is unpowered")
+
+                def getATR(self):
+                    return list(reader.atr)
+
+                def disconnect(self):
+                    pass
+
+            return _Conn()
+
+    NITROKEY = bytes.fromhex("3BDE18FF81919FE8")      # a processor card: never an SLE-4442
+    ACS_SLE = bytes.fromhex("3B0492231091")           # ACS-style synthesised SLE-4442 ATR
+    RAW_SLE = bytes.fromhex("A2131091")               # ISO 7816-10 synchronous ATR
+
+    def _connect(self, rl, reader=None):
+        mgr = _load_manager_module()
+        mgr.readers = lambda: rl
+        return mgr._connect(reader)
+
+    def test_picks_the_only_sle4442_card_not_the_first_reader(self):
+        rl = [self._Reader("Nitrokey HSM", self.NITROKEY), self._Reader("ACS ACR39U", self.ACS_SLE)]
+        _, name = self._connect(rl)
+        self.assertEqual(name, "ACS ACR39U")
+
+    def test_raw_synchronous_atr_is_recognised(self):
+        rl = [self._Reader("empty slot"), self._Reader("reader", self.RAW_SLE)]
+        self.assertEqual(self._connect(rl)[1], "reader")
+
+    def test_refuses_when_no_reader_holds_an_sle4442(self):
+        rl = [self._Reader("Nitrokey HSM", self.NITROKEY), self._Reader("Realtek CRW", mute=True)]
+        with self.assertRaises(SystemExit) as cm:
+            self._connect(rl)
+        self.assertIn("no SLE-4442 card found", str(cm.exception))
+
+    def test_refuses_when_two_readers_hold_one(self):
+        rl = [self._Reader("A", self.ACS_SLE), self._Reader("B", self.ACS_SLE)]
+        with self.assertRaises(SystemExit) as cm:
+            self._connect(rl)
+        self.assertIn("more than one", str(cm.exception))
+
+    def test_explicit_reader_wins_and_a_mute_card_says_why(self):
+        rl = [self._Reader("A", self.ACS_SLE), self._Reader("Realtek CRW", mute=True)]
+        with self.assertRaises(SystemExit) as cm:
+            self._connect(rl, "crw")
+        self.assertIn("cannot drive SLE-4442", str(cm.exception))
