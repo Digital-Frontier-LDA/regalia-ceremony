@@ -59,6 +59,12 @@ order="$(grep -oE 'change-pin -P [0-9]+ -n [0-9]+|change-puk -p [0-9]+ -n [0-9]+
 grep -q "PIN BINDING PROVEN" <<< "$out" && P "the binding proof is reported" || F "no binding proof"
 grep -qE "24681357|97531864" <<< "$out" && F "a PIN or PUK was printed" || P "no PIN or PUK is printed"
 
+# A second factory token in the same run must not receive the same escrowed PIN.
+: > "$CALLS"
+out="$(yubikey_pins_set_this_run=1 step_yubikey_ops 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q "change-pin" "$CALLS" && grep -q "separate run" <<< "$out" \
+  && P "a second factory token in the same run is refused before its PIN is set" || F "second token got the same PIN (rc=$rc)"
+
 : > "$CALLS"
 out="$(PLUGIN_FAILS=1 step_yubikey_ops 2>&1)"; rc=$?
 [ "$rc" != 0 ] && P "a failed generation is reported as a failure" || F "a failed generation returned success"
