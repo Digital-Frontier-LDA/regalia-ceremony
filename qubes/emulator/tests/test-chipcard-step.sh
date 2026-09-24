@@ -72,7 +72,7 @@ ask(){ return 0; }
 SHARE="$WORK/w1"
 mk_share(){ printf 'tuna acid academic academic advance broken carbon chubby cinema civil clay column' > "$SHARE"; }
 mk_psc(){ printf 'A1B2C3' > "$WORK/sle4442.psc"; chmod 600 "$WORK/sle4442.psc"; }
-reset(){ rm -f "$CARD/stored"; mk_share; mk_psc; }
+reset(){ rm -f "$CARD/stored" "$CARD/stored-addr"; mk_share; mk_psc; }
 
 # =====================================================================================
 hdr "HAPPY PATH: a share that fits is stored and verify-read by the card"
@@ -120,7 +120,7 @@ grep -qi "an SLE-4442 holds 224 writable bytes" <<< "$(echo "$out")" \
 hdr "ADDRESS: the share goes after the 32-byte factory area"
 reset
 out="$(step_chipcard "$SHARE" 2>&1)"
-[ "$(cat "$CARD/stored-addr" 2>/dev/null)" = 32 ] && P "stored from byte 32, never over the card's reset header" \
+[ -s "$CARD/stored" ] && [ "$(cat "$CARD/stored-addr" 2>/dev/null)" = 32 ] && P "stored from byte 32, never over the card's reset header" \
   || F "the share was not stored at byte 32 (got '$(cat "$CARD/stored-addr" 2>/dev/null)')"
 
 # =====================================================================================

@@ -606,3 +606,25 @@ class TestManagerAgainstACSProtocol(unittest.TestCase):
     def test_read_strips_prot_bytes(self):
         self.card.main[40:44] = b"\xca\xfe\xba\xbe"
         self.assertEqual(self.mgr._read(self.conn, 40, 4), b"\xca\xfe\xba\xbe")
+
+
+class TestManagerStoreLeavesNoTail(TestManagerAgainstACSProtocol):
+    """Review of #50: a shorter share stored over a longer one must not leave the old tail, and a
+    PSC status that is not exactly 90 07 is never success."""
+
+    def test_shorter_share_over_longer_leaves_no_old_tail(self):
+        self.mgr.cmd_store(self.conn, self.PSC, 32, "a much longer earlier share with many words")
+        self.mgr.cmd_store(self.conn, self.PSC, 32, "short share")
+        area = bytes(self.card.main[32:256])
+        self.assertEqual(area.rstrip(b"\x00"), b"short share")
+
+    def test_undocumented_psc_status_is_not_success(self):
+        class Odd:
+            def transmit(self, apdu):
+                return [], 0x90, 0x0F
+        with self.assertRaises(SystemExit):
+            self.mgr._present_psc(Odd(), self.PSC)
+
+    def test_text_with_padding_bytes_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self.mgr.cmd_store(self.conn, self.PSC, 32, "bad\x00share")

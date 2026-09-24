@@ -119,14 +119,15 @@ def _present_psc(conn, psc):
     verified, 00h LOCKED, anything else this presentation failed. So 90 00 means LOCKED here; a
     tool that took 90 00 as success would report a locked card as unlocked."""
     _, sw1, sw2 = _xmit(conn, "FF 20 00 00 03 " + psc)
-    if sw1 != 0x90:
+    # Exact values only: SW2 is a 3-bit counter, so anything above 07 is not a documented answer
+    # and must never be read as success (masking would turn 90 0F into "verified").
+    if sw1 != 0x90 or sw2 > 0x07:
         sys.exit(f"PSC presentation failed: {sw1:02X} {sw2:02X}")
-    counter = sw2 & 0x07
-    if counter == 0x07:
+    if sw2 == 0x07:
         return None
-    if counter == 0x00:
+    if sw2 == 0x00:
         sys.exit("the card is LOCKED (PSC error counter 0): it can never be written again")
-    sys.exit(f"PSC wrong — {bin(counter).count('1')} attempt(s) left")
+    sys.exit(f"PSC wrong — {bin(sw2).count('1')} attempt(s) left")
 
 
 def _read(conn, addr, length):
@@ -153,12 +154,17 @@ def cmd_read(conn, addr, length):
     print(_read(conn, addr, length).hex().upper())
 
 
-def _write(conn, psc, addr, payload):
+def _check_range(addr, length):
+    """Refuse before anything reaches the card, so a refused write spends no PSC attempt."""
     if addr < FIRST_USER_BYTE:
         sys.exit(f"refusing to write at {addr}: bytes 0..{FIRST_USER_BYTE - 1} are the card's factory "
                  f"area (its reset header and manufacturer data). Use --addr {FIRST_USER_BYTE} or later.")
-    if addr + len(payload) > 256:
+    if addr + length > 256:
         sys.exit("payload too large for the card at that address")
+
+
+def _write(conn, psc, addr, payload):
+    _check_range(addr, len(payload))
     select_sle4442(conn)
     _present_psc(conn, psc)
     hexpayload = " ".join(f"{b:02X}" for b in payload)
@@ -182,9 +188,17 @@ def cmd_write(conn, psc, addr, hexdata):
 
 def cmd_store(conn, psc, addr, text):
     payload = text.encode()
-    _write(conn, psc, addr, payload)
-    # verify-read back
-    if _read(conn, addr, len(payload)) != payload:
+    # The share is stored with no length field, so the WHOLE area to the end of the card is
+    # written: the text, then 00 padding. Otherwise a shorter share over a longer earlier one
+    # leaves the old tail behind, and a recoverer reading to the end gets the wrong words even
+    # though this store verified. Text cannot contain 00 or FF, so padding is unambiguous.
+    if b"\x00" in payload or b"\xff" in payload:
+        sys.exit("refusing to store: the text contains a 00 or FF byte, which recovery strips")
+    _check_range(addr, len(payload))
+    area = payload + b"\x00" * (256 - addr - len(payload))
+    _write(conn, psc, addr, area)
+    # verify-read back the whole area, padding included
+    if _read(conn, addr, len(area)) != area:
         sys.exit("verify-read mismatch after store")
     # NOTE: never echo `text` — it is the secret payload (e.g. a Shamir share). Print only
     # non-secret status so a tee/script log or screenshot of the ceremony can't leak it.
