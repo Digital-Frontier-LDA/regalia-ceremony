@@ -429,9 +429,18 @@ step_yubikey_ops() {
     fi
     [ "$yubikey_piv_pin" != "$yubikey_piv_puk" ] || { err "yubikey_piv_pin and yubikey_piv_puk are equal; the ceremony keeps them apart"; return 1; }
     if grep -q "Using default PIN" <<< "$info"; then
+      # Step 0 holds ONE yubikey_piv_pin. A second factory token in the same run would get the same
+      # PIN, and the fleet needs distinct PINs per token (regalia#17). The second token gets its own
+      # run, with its own pins.env.
+      if [ "${yubikey_pins_set_this_run:-0}" -ge 1 ]; then
+        err "This run already set the escrowed yubikey_piv_pin on a YubiKey. Two tokens must not share a"
+        err "PIN: provision this one in a separate run with its own pins.env (qubes/CREDENTIAL-SEPARATION.md)."
+        return 1
+      fi
       show "ykman piv access change-pin -P <factory PIN> -n <yubikey_piv_pin from step 0>"
       ask "set the card's PIN to the escrowed value?" || { err "the factory PIN was kept, so age-plugin-yubikey would replace it with an unescrowed one"; return 1; }
       ykman piv access change-pin -P 123456 -n "$yubikey_piv_pin" >/dev/null || { err "PIN change failed"; return 1; }
+      yubikey_pins_set_this_run=$(( ${yubikey_pins_set_this_run:-0} + 1 ))
     fi
     if grep -q "Using default PUK" <<< "$info"; then
       show "ykman piv access change-puk -p <factory PUK> -n <yubikey_piv_puk from step 0>"
@@ -1116,7 +1125,9 @@ step_shamir() {
 # Note: the regex matches the literals only; the empty case is checked separately, because
 # putting "|" with an empty alternation at the end is POSIX-correct but breaks under legacy
 # grep implementations (macOS Homebrew's grep is ugrep, which rejects it).
-DEV_DEFAULT_PINS_REGEX='^(648219|3537363231383830|CHANGEME|TODO|FILL_IN)$'
+# The YubiKey factory PIN, PUK and management key are defaults too: step_yubikey_ops changes a card TO
+# the escrowed value, so an escrowed factory value leaves the factory credential on the card.
+DEV_DEFAULT_PINS_REGEX='^(648219|3537363231383830|123456|12345678|010203040506070801020304050607080102030405060708|CHANGEME|TODO|FILL_IN)$'
 
 # Source the mode. main() asks the operator to confirm it interactively, so the env value is a
 # default, not a bypass. Record whether it arrived FROM THE ENVIRONMENT before the default is
@@ -1132,11 +1143,15 @@ CEREMONY_MODE="${CEREMONY_MODE:-prod}"
 fail_ceremony_default_pin() {
   local what="$1" value="$2"
   if [ "$CEREMONY_MODE" = "dev" ]; then
-    warn "DEV MODE — $what still holds a dev default: '$value'. Confirm this is a SCRATCH device."
+    # Only a value that IS a dev default is worth the warning, and the value itself is never
+    # printed: this used to echo every field, real PINs included, into the terminal and the capture.
+    if [ -z "$value" ] || grep -qE "$DEV_DEFAULT_PINS_REGEX" <<< "$value"; then
+      warn "DEV MODE — $what is unset or holds a dev default. Confirm this is a SCRATCH device."
+    fi
     return 0
   fi
   if [ -z "$value" ] || grep -qE "$DEV_DEFAULT_PINS_REGEX" <<< "$value"; then
-    err "PROD GUARD: $what is unset or holds a recognised dev default ('$value')."
+    err "PROD GUARD: $what is unset or holds a recognised dev default."
     err "Refusing to produce a tier-0 payload while a PIN could be the docs' example."
     err "Edit the file, set a real value you have written down elsewhere, and re-run."
     err "If you are intentionally on a SCRATCH device, set CEREMONY_MODE=dev and re-run."
@@ -1154,6 +1169,47 @@ fail_ceremony_default_pin() {
 # defaults ONCE, on a fresh screen, before any other step can run. The wizard refuses step 7
 # (step_payload) if this step has not been completed.
 # =============================================================================
+# CREDENTIAL SEPARATION (regalia#28 criterion 1; the rules are qubes/CREDENTIAL-SEPARATION.md).
+# The dev-default guard above catches a docs example. It says nothing about two fields holding the
+# SAME value — card A's user PIN reused on card B, a user PIN equal to its own SO PIN, a YubiKey PIN
+# equal to its PUK. Each of those turns one disclosure into two, and the payload would engrave it on
+# metal. So every credential step 0 loads must be distinct, and each must have the shape its device
+# accepts: a value the card will refuse at initialisation is found here, before anything is written.
+# PROD refuses; DEV warns, because the dev fixtures repeat on purpose. Values are never printed.
+check_credential_separation() {
+  # Byte semantics: a YubiKey takes at most 8 BYTES, and in a UTF-8 locale [[:print:]]{6,8} counts
+  # characters. Under C, multibyte input is not [[:print:]] at all, so it is refused outright.
+  local LC_ALL=C
+  local problems="" k v other ov
+  local fields="hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin yubikey_piv_pin yubikey_piv_puk yubikey_mgmt_key"
+  for k in $fields; do
+    # A field the file omits is a problem, not a skip: a file of comments would otherwise pass.
+    v="${!k:-}"; [ -n "$v" ] || { problems="$problems|$k: missing from the PIN file"; continue; }
+    case "$k" in
+      hsm_?_user_pin)  [[ "$v" =~ ^[[:print:]]{6,15}$ ]] || problems="$problems|$k: a SmartCard-HSM user PIN is 6-15 printable characters" ;;
+      hsm_?_so_pin)    [[ "$v" =~ ^[0-9A-Fa-f]{16}$ ]] || problems="$problems|$k: a SmartCard-HSM SO PIN is exactly 16 hex digits" ;;
+      yubikey_piv_pin|yubikey_piv_puk) [[ "$v" =~ ^[[:print:]]{6,8}$ ]] || problems="$problems|$k: a YubiKey PIV PIN or PUK is 6-8 characters" ;;
+      yubikey_mgmt_key) [[ "$v" =~ ^[0-9A-Fa-f]{48}$|^[0-9A-Fa-f]{32}$|^[0-9A-Fa-f]{64}$ ]] || problems="$problems|$k: a PIV management key is 32, 48 or 64 hex digits" ;;
+    esac
+    for other in $fields; do
+      [[ "$other" > "$k" ]] || continue
+      ov="${!other:-}"
+      [ -n "$ov" ] && [ "${v,,}" = "${ov,,}" ] && problems="$problems|$k and $other hold the same value"
+    done
+  done
+  [ -z "$problems" ] && { info "Credential separation: every loaded credential is distinct and well-formed."; return 0; }
+  local line
+  if [ "$CEREMONY_MODE" = "dev" ]; then
+    warn "DEV MODE — credential separation would REFUSE this file in PROD:"
+    while IFS= read -r line; do [ -n "$line" ] && warn "  - $line"; done <<< "${problems//|/$'\n'}"
+    return 0
+  fi
+  err "CREDENTIAL SEPARATION: refusing the PIN file (values not shown):"
+  while IFS= read -r line; do [ -n "$line" ] && err "  - $line"; done <<< "${problems//|/$'\n'}"
+  err "Every PIN, SO PIN, PUK and management key must be its own value (qubes/CREDENTIAL-SEPARATION.md)."
+  return 1
+}
+
 step_set_pins() {
   b "Step 0 — set HSM PIN defaults from a file"
   info "Mode: $CEREMONY_MODE"
@@ -1202,6 +1258,7 @@ EOF
     for k in $failing_keys; do err "  - $k"; done
     return 1
   fi
+  check_credential_separation || return 1
   # Mark steps 7 (and 9, which loads the keys into a serializer) as "needs step 0 first".
   state_step0_done=1
   info "PIN file loaded. Tier-0 payload steps will use these values, not the template."

@@ -39,6 +39,7 @@ two disagree.
 |---|---|
 | [`qubes/README.md`](qubes/README.md) | how a ceremony is actually run, start to finish |
 | [`qubes/CEREMONY-PROFILES.md`](qubes/CEREMONY-PROFILES.md) | the supported token profiles and what each requires |
+| [`qubes/CREDENTIAL-SEPARATION.md`](qubes/CREDENTIAL-SEPARATION.md) | which PINs, SO PINs, PUKs, DKEKs and transport artifacts may never be merged, and what checks each |
 | [`qubes/NITROKEY-QUALIFY.md`](qubes/NITROKEY-QUALIFY.md) | qualifying a Nitrokey HSM 2 on Qubes with OpenSC alone |
 | [`qubes/PICO-DRILL-RUNBOOK.md`](qubes/PICO-DRILL-RUNBOOK.md) | the staging bench: what is installed, pinned, and rehearsed |
 | [`qubes/PROOF-OF-WORKS.md`](qubes/PROOF-OF-WORKS.md) | what has actually been proven on hardware, and what has not |
