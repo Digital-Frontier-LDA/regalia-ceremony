@@ -67,8 +67,51 @@ piv_keys(){
       else
         openssl pkey -in "$d/key.pem" -pubout -outform "$fmt" -out "${args[1]:--}"
       fi ;;
+    attest)
+      # A Yubico-SHAPED attestation of the slot's key, issued under this emulator's own CA (emu_ca), with
+      # Yubico's serial / policy / firmware extensions. ceremony-manifest trusts that CA only in a
+      # simulation, via REGALIA_YUBICO_SIMULATED_TRUST_DIR=$STATE/trust.
+      [ -f "$d/meta" ] || { echo "Error: No key stored in slot $slot." >&2; exit 1; }
+      [ "$(sed -n 4p "$d/meta")" = GENERATED ] || { echo "Error: Attestation is only supported for generated keys." >&2; exit 1; }
+      emu_ca
+      local pin touch pinb touchb hexserial
+      pin="$(sed -n 2p "$d/meta")"; touch="$(sed -n 3p "$d/meta")"
+      case "$pin" in NEVER) pinb=01;; ALWAYS) pinb=03;; *) pinb=02;; esac        # ONCE (and DEFAULT) = 02
+      case "$touch" in ALWAYS) touchb=02;; CACHED) touchb=03;; *) touchb=01;; esac # NEVER (and DEFAULT) = 01
+      hexserial="$(printf '%08x' "$SERIAL" | sed 's/../&:/g; s/:$//')"
+      openssl pkey -in "$d/key.pem" -pubout -out "$d/pub.pem" 2>/dev/null
+      printf 'basicConstraints=critical,CA:FALSE\n1.3.6.1.4.1.41482.3.7=DER:02:04:%s\n1.3.6.1.4.1.41482.3.8=DER:%s:%s\n1.3.6.1.4.1.41482.3.3=DER:05:07:04\n' \
+        "$hexserial" "$pinb" "$touchb" > "$d/att.ext"
+      openssl req -new -key "$STATE/ca/f9.key" -subj "/CN=YubiKey PIV Attestation $slot" -out "$d/att.csr" 2>/dev/null
+      openssl x509 -req -in "$d/att.csr" -force_pubkey "$d/pub.pem" -CA "$STATE/ca/f9.pem" -CAkey "$STATE/ca/f9.key" \
+        -set_serial "0x$(openssl rand -hex 8)" -days 3650 -extfile "$d/att.ext" -out "${args[1]:--}" 2>/dev/null ;;
     *) echo "[EMULATED] ykman piv keys $verb $*" ;;
   esac
+}
+
+# The emulator's attestation CA: root -> "PIV attestation" intermediate -> f9, created once per $STATE.
+# $STATE/trust holds roots.pem and intermediates.pem for REGALIA_YUBICO_SIMULATED_TRUST_DIR. Like the
+# real batch key, one f9 serves every emulated serial; the signed serial extension is what differs.
+emu_ca(){
+  local ca="$STATE/ca"
+  [ -f "$ca/f9.pem" ] && return 0
+  mkdir -p "$ca" "$STATE/trust"
+  printf 'basicConstraints=critical,CA:TRUE\n' > "$ca/ca.ext"
+  openssl ecparam -genkey -name prime256v1 -noout -out "$ca/root.key" 2>/dev/null
+  openssl req -new -x509 -key "$ca/root.key" -subj "/CN=Emulated Yubico Attestation Root" -days 3650 \
+    -addext "basicConstraints=critical,CA:TRUE" -out "$ca/root.pem" 2>/dev/null
+  local name
+  for name in inter f9; do
+    openssl ecparam -genkey -name prime256v1 -noout -out "$ca/$name.key" 2>/dev/null
+  done
+  openssl req -new -key "$ca/inter.key" -subj "/CN=Emulated PIV Attestation" -out "$ca/inter.csr" 2>/dev/null
+  openssl x509 -req -in "$ca/inter.csr" -CA "$ca/root.pem" -CAkey "$ca/root.key" -set_serial 2 -days 3650 \
+    -extfile "$ca/ca.ext" -out "$ca/inter.pem" 2>/dev/null
+  openssl req -new -key "$ca/f9.key" -subj "/CN=YubiKey PIV Attestation" -out "$ca/f9.csr" 2>/dev/null
+  openssl x509 -req -in "$ca/f9.csr" -CA "$ca/inter.pem" -CAkey "$ca/inter.key" -set_serial 3 -days 3650 \
+    -extfile "$ca/ca.ext" -out "$ca/f9.pem" 2>/dev/null
+  cp "$ca/root.pem" "$STATE/trust/roots.pem"
+  cp "$ca/inter.pem" "$STATE/trust/intermediates.pem"
 }
 
 case "${1:-}" in
@@ -94,6 +137,12 @@ EOF
         ;;
       keys)
         piv_keys "${3:-}" "${@:4}" ;;
+      certificates)
+        if [ "${3:-}" = export ] && [ "$(printf '%s' "${4:-}" | tr 'A-F' 'a-f')" = f9 ]; then
+          emu_ca; cp "$STATE/ca/f9.pem" "${5:?output file}"
+        else
+          echo "[EMULATED] ykman piv ${*:2}"
+        fi ;;
       *) echo "[EMULATED] ykman piv ${*:2}" ;;
     esac
     ;;

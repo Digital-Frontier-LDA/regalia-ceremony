@@ -267,12 +267,69 @@ def keys_info(slot="9C (SIGNATURE)", algorithm="ECCP256", origin="GENERATED", pi
             f"PIN required for use:   {pin}\nTouch required for use: {touch}\n")
 
 
-def yubikey_record(serial, der, device_id=None, slot="9c", **info) -> dict:
+# A Yubico-SHAPED attestation hierarchy for the tests: root -> intermediate -> f9 -> slot attestation,
+# with Yubico's serial / policy / firmware extensions. It is trusted only because this module runs as a
+# simulation (CEREMONY_SIMULATE=1) and names it in REGALIA_YUBICO_SIMULATED_TRUST_DIR; outside a
+# simulation ceremony-manifest refuses that variable and trusts only the pinned Yubico roots.
+from cryptography import x509 as _x509  # noqa: E402
+from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser  # noqa: E402
+from cryptography.hazmat.primitives.asymmetric import ec as _ec  # noqa: E402
+from cryptography.x509.oid import NameOID as _NameOID  # noqa: E402
+import datetime as _dt  # noqa: E402
+
+_PIN_BYTE = {"NEVER": 1, "ONCE": 2, "ALWAYS": 3}
+_TOUCH_BYTE = {"NEVER": 1, "ALWAYS": 2, "CACHED": 3}
+
+
+def _name(cn):
+    return _x509.Name([_x509.NameAttribute(_NameOID.COMMON_NAME, cn)])
+
+
+def _cert(subject, issuer, public_key, signer, ca, extensions=()):
+    now = _dt.datetime.now(_dt.timezone.utc)
+    b = (_x509.CertificateBuilder().subject_name(_name(subject)).issuer_name(_name(issuer)).public_key(public_key)
+         .serial_number(_x509.random_serial_number()).not_valid_before(now - _dt.timedelta(days=1))
+         .not_valid_after(now + _dt.timedelta(days=30))
+         .add_extension(_x509.BasicConstraints(ca=ca, path_length=None), critical=True))
+    for oid, value in extensions:
+        b = b.add_extension(_x509.UnrecognizedExtension(_x509.ObjectIdentifier(oid), value), critical=False)
+    return b.sign(signer, _hashes.SHA256())
+
+
+class SimulatedYubico:
+    def __init__(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="sim-yubico-"))
+        root_k, inter_k, self.f9_key = (_ec.generate_private_key(_ec.SECP256R1()) for _ in range(3))
+        root = _cert("Simulated Yubico Root", "Simulated Yubico Root", root_k.public_key(), root_k, True)
+        inter = _cert("Simulated PIV Attestation", "Simulated Yubico Root", inter_k.public_key(), root_k, True)
+        self.f9 = _cert("YubiKey PIV Attestation", "Simulated PIV Attestation", self.f9_key.public_key(), inter_k, True)
+        (self.dir / "roots.pem").write_bytes(root.public_bytes(_ser.Encoding.PEM))
+        (self.dir / "intermediates.pem").write_bytes(inter.public_bytes(_ser.Encoding.PEM))
+
+    def attest(self, der, serial, pin="ONCE", touch="NEVER", signer=None):
+        return _cert("YubiKey PIV Attestation", "YubiKey PIV Attestation", _ser.load_der_public_key(der),
+                     signer or self.f9_key, False,
+                     (("1.3.6.1.4.1.41482.3.7", b"\x02\x04" + int(serial).to_bytes(4, "big")),
+                      ("1.3.6.1.4.1.41482.3.8", bytes([_PIN_BYTE[pin], _TOUCH_BYTE[touch]])),
+                      ("1.3.6.1.4.1.41482.3.3", b"\x05\x07\x04"))).public_bytes(_ser.Encoding.PEM).decode()
+
+
+SIM_YUBICO = SimulatedYubico()
+os.environ["CEREMONY_SIMULATE"] = "1"
+os.environ["REGALIA_YUBICO_SIMULATED_TRUST_DIR"] = str(SIM_YUBICO.dir)
+
+
+def yubikey_record(serial, der, device_id=None, slot="9c", attested=None, **info) -> dict:
+    """`attested` overrides what the attestation signs: dict(serial=…, pin=…, touch=…, der=…, signer=…)."""
+    a = {"serial": serial, "pin": info.get("pin", "ONCE"), "touch": info.get("touch", "NEVER"), "der": der}
+    a.update(attested or {})
     record = {
-        "evidence": "regalia.yubikey-piv-evidence/v1", "slot": slot,
-        "ykman_info": f"Device type: YubiKey 5 NFC\nSerial number: {serial}\nFirmware version: 5.7.1\n",
+        "evidence": "regalia.yubikey-piv-evidence/v2", "slot": slot,
+        "ykman_info": f"Device type: YubiKey 5 NFC\nSerial number: {serial}\nFirmware version: 5.7.4\n",
         "ykman_keys_info": keys_info(**info),
         "public_key_der_b64": base64.b64encode(der).decode(),
+        "attestation_pem": SIM_YUBICO.attest(a["der"], a["serial"], a["pin"], a["touch"], a.get("signer")),
+        "f9_pem": SIM_YUBICO.f9.public_bytes(_ser.Encoding.PEM).decode(),
     }
     if device_id:
         record["device_id"] = device_id
@@ -295,6 +352,10 @@ class Case(unittest.TestCase):
         path = self.dir / name
         path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
         return path
+
+    def write_attestation(self, der, serial, **attested):
+        (self.dir / "att.pem").write_text(SIM_YUBICO.attest(der, serial, **attested))
+        (self.dir / "f9.pem").write_bytes(SIM_YUBICO.f9.public_bytes(_ser.Encoding.PEM))
 
     def run_tool(self, *args):
         return subprocess.run([sys.executable, str(SCRIPT), *map(str, args)], capture_output=True, text=True)
@@ -503,6 +564,63 @@ class Plan(Case):
         self.refuses(self.run_tool("plan", self.manifest), "one slot holds one key")
 
 
+class YubicoAttestation(Case):
+    """v2 evidence: `record` re-verifies the Yubico attestation and refuses every way it can disagree with
+    the device's report. Each case replaces site A's evidence in an otherwise valid set."""
+
+    def record_with_a(self, record):
+        ev = self.standard_evidence()
+        ev[1] = self.file("yka.json", record)
+        return ev
+
+    def test_the_standard_attested_evidence_records(self):
+        result = self.run_tool("record", self.manifest, "--evidence", *self.standard_evidence(), "--out", self.dir / "o.json")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_a_v1_record_without_an_attestation_is_refused_by_name(self):
+        record = yubikey_record(YK_A, self.der_a, "yubikey-sitea")
+        record["evidence"] = "regalia.yubikey-piv-evidence/v1"
+        del record["attestation_pem"], record["f9_pem"]
+        self.record_refuses(self.record_with_a(record), "carries no Yubico attestation")
+
+    def test_an_attestation_for_another_serial_is_refused(self):
+        # The f9 key is shared across a batch: only the signed serial ties the key to THIS device.
+        self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea", attested={"serial": YK_B})),
+                            "is signed for serial", "shared across a batch")
+
+    def test_an_attestation_of_another_key_is_refused(self):
+        self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea", attested={"der": self.der_b})),
+                            "the attested key is not the exported key")
+
+    def test_an_attestation_signing_another_policy_is_refused(self):
+        # The report says ONCE/NEVER; the signed attestation says ALWAYS/CACHED — the report is the lie.
+        self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea",
+                                                              attested={"pin": "ALWAYS", "touch": "CACHED"})),
+                            "the attestation signs PIN policy always and touch policy cached")
+
+    def test_an_attestation_not_signed_by_the_f9_key_is_refused(self):
+        forger = _ec.generate_private_key(_ec.SECP256R1())
+        self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea", attested={"signer": forger})),
+                            "does not chain to a trusted Yubico root", "not proven genuine")
+
+    def test_the_simulated_trust_directory_is_refused_outside_a_simulation(self):
+        env = dict(os.environ, CEREMONY_SIMULATE="0")
+        out = self.dir / "o.json"
+        result = subprocess.run([sys.executable, str(SCRIPT), "record", str(self.manifest), "--evidence",
+                                 *map(str, self.standard_evidence()), "--out", str(out)],
+                                capture_output=True, text=True, env=env)
+        self.refuses(result, "is set outside a simulation")
+        self.assertFalse(out.exists())
+
+    def test_without_the_simulated_trust_the_simulated_chain_is_not_genuine(self):
+        # The same evidence, judged against the PINNED Yubico roots, is refused: the test CA is not Yubico.
+        env = {k: v for k, v in os.environ.items() if k != "REGALIA_YUBICO_SIMULATED_TRUST_DIR"}
+        result = subprocess.run([sys.executable, str(SCRIPT), "record", str(self.manifest), "--evidence",
+                                 *map(str, self.standard_evidence()), "--out", str(self.dir / "o.json")],
+                                capture_output=True, text=True, env=env)
+        self.refuses(result, "does not chain to a trusted Yubico root")
+
+
 class Record(Case):
     def test_round_trip_on_a_mixed_fleet(self):
         out = self.dir / "qualified.json"
@@ -548,9 +666,11 @@ class Record(Case):
         pem = b"-----BEGIN PUBLIC KEY-----\n" + base64.encodebytes(self.der_a) + b"-----END PUBLIC KEY-----\n"
         (self.dir / "pub.pem").write_bytes(pem)
         out = self.dir / "made.json"
+        self.write_attestation(self.der_a, YK_A)
         result = self.run_tool("yubikey-evidence", "--device-id", "yubikey-sitea", "--slot", "9C",
                                "--info", self.dir / "info.txt", "--keys-info", self.dir / "keys.txt",
-                               "--public-key", self.dir / "pub.pem", "--out", out)
+                               "--public-key", self.dir / "pub.pem", "--attestation", self.dir / "att.pem",
+                               "--f9", self.dir / "f9.pem", "--out", out)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(out.read_text())["public_key_der_b64"], base64.b64encode(self.der_a).decode())
         ev = self.standard_evidence()
@@ -563,8 +683,10 @@ class Record(Case):
         (self.dir / "keys.txt").write_text(keys_info(origin="IMPORTED"))
         (self.dir / "pub.der").write_bytes(self.der_a)
         out = self.dir / "made.json"
+        self.write_attestation(self.der_a, YK_A)
         result = self.run_tool("yubikey-evidence", "--slot", "9c", "--info", self.dir / "info.txt",
                                "--keys-info", self.dir / "keys.txt", "--public-key", self.dir / "pub.der",
+                               "--attestation", self.dir / "att.pem", "--f9", self.dir / "f9.pem",
                                "--out", out)
         self.refuses(result, "reports Origin IMPORTED", "never imported (ADR-0002 D5)")
         self.assertFalse(out.exists())

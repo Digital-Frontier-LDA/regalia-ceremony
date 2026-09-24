@@ -77,7 +77,15 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE / "vendor" / "regalia_kms" / "tools"))
 import custody_manifest  # noqa: E402  (vendored; see vendor/regalia_kms/PINS.json)
 
-YUBIKEY_EVIDENCE_SCHEMA = "regalia.yubikey-piv-evidence/v1"
+YUBIKEY_EVIDENCE_SCHEMA = "regalia.yubikey-piv-evidence/v2"
+# v1 carried only ykman's REPORT (Origin GENERATED, the policies): the device's own word. v2 adds the
+# Yubico PIV attestation, and `record` re-verifies it, so every value it pins is signed by a genuine
+# YubiKey. A v1 record is refused by name rather than read as "no attestation given".
+YUBIKEY_EVIDENCE_SCHEMA_V1 = "regalia.yubikey-piv-evidence/v1"
+# Simulation only: a directory holding roots.pem and intermediates.pem that the emulator's ykman shim
+# issues attestations under. Honoured ONLY with CEREMONY_SIMULATE=1, and refused otherwise, so a
+# real ceremony can never be pointed at a trust anchor other than the pinned Yubico roots.
+SIMULATED_TRUST_ENV = "REGALIA_YUBICO_SIMULATED_TRUST_DIR"
 OPERATION_PROOF_SCHEMA = "regalia.operation-proof/v1"
 
 # THE OPERATION-BEHAVIOUR CONTROL (regalia#28 criterion 3). Everything else `record` checks — serial,
@@ -616,7 +624,10 @@ def piv_slot(value: str) -> str | None:
 def parse_yubikey_record(record: Any, source: str) -> Evidence:
     """Re-derive every value from the device's raw output. Nothing in the record is trusted as a
     conclusion; only the raw ykman text and the exported key bytes are read."""
-    required = {"evidence", "slot", "ykman_info", "ykman_keys_info", "public_key_der_b64"}
+    if isinstance(record, dict) and record.get("evidence") == YUBIKEY_EVIDENCE_SCHEMA_V1:
+        raise Refusal(f"{source}: a {YUBIKEY_EVIDENCE_SCHEMA_V1} record carries no Yubico attestation, only the "
+                      f"device's own report; re-capture it with `yubikey-evidence --attestation … --f9 …`")
+    required = {"evidence", "slot", "ykman_info", "ykman_keys_info", "public_key_der_b64", "attestation_pem", "f9_pem"}
     allowed = required | {"device_id"}
     if not isinstance(record, dict) or record.get("evidence") != YUBIKEY_EVIDENCE_SCHEMA:
         raise Refusal(f"{source}: not a {YUBIKEY_EVIDENCE_SCHEMA} record")
@@ -662,10 +673,58 @@ def parse_yubikey_record(record: Any, source: str) -> Evidence:
     if not der or der[0] != 0x30 or not all(oid in der[:32] for oid in SPKI_FAMILY[algorithm]):
         raise Refusal(f"{source}: the exported public key is not a {algorithm} SubjectPublicKeyInfo — "
                       f"the export and the metadata do not describe the same key")
+    check_yubikey_attestation(record, source, serial, slot, pin, der)
     return Evidence(
         source, "yubikey-piv", slot, serial, "sha256:" + hashlib.sha256(der).hexdigest(),
         device_id=record.get("device_id"), pin_policy=pin, touch_policy="never", ykman_algorithm=algorithm,
     )
+
+
+def attestation_verifier():
+    """yubikey-attestation-verify.py, imported (its name has hyphens). It needs `cryptography`, which the
+    vault's hash-pinned requirements carry; without it the evidence cannot be checked, and says so."""
+    import importlib.util
+    path = Path(__file__).resolve().parent / "yubikey-attestation-verify.py"
+    spec = importlib.util.spec_from_file_location("yubikey_attestation_verify", path)
+    module = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(module)
+    except SystemExit:  # the verifier exits 2 with DEPENDENCY_MISSING when cryptography is absent
+        raise Refusal("DEPENDENCY_MISSING=cryptography: the Yubico attestation cannot be verified here") from None
+    return module
+
+
+def attestation_trust(verifier):
+    """The pinned Yubico roots, unless this is explicitly a simulation with an emulator CA."""
+    directory = os.environ.get(SIMULATED_TRUST_ENV)
+    if not directory:
+        return None
+    if os.environ.get("CEREMONY_SIMULATE") != "1":
+        raise Refusal(f"{SIMULATED_TRUST_ENV} is set outside a simulation (CEREMONY_SIMULATE!=1): a real "
+                      f"ceremony trusts only the pinned Yubico roots, so unset it")
+    base = Path(directory)
+    return (verifier.load_all(str(base / "intermediates.pem")), verifier.load_all(str(base / "roots.pem")))
+
+
+def check_yubikey_attestation(record: dict, source: str, serial: str, slot: str, pin: str, der: bytes) -> None:
+    """The v2 check: a Yubico attestation, re-verified here, that signs exactly what the report claims."""
+    verifier = attestation_verifier()
+    try:
+        facts = verifier.attested_facts(record["attestation_pem"].encode(), record["f9_pem"].encode(),
+                                        trust=attestation_trust(verifier))
+    except (ValueError, OSError) as error:
+        raise Refusal(f"{source}: the attestation for slot {slot} does not parse: {error}") from None
+    if not facts["chain"]:
+        raise Refusal(f"{source}: the attestation for slot {slot} does not chain to a trusted Yubico root "
+                      f"({facts['how']}) — the device is not proven genuine")
+    if facts["serial"] is None or str(facts["serial"]) != serial:
+        raise Refusal(f"{source}: the attestation is signed for serial {facts['serial']}, but the report is from "
+                      f"{serial} — the f9 key is shared across a batch, so only this serial identifies the device")
+    if facts["pin_policy"] != pin or facts["touch_policy"] != "never":
+        raise Refusal(f"{source}: the attestation signs PIN policy {facts['pin_policy']} and touch policy "
+                      f"{facts['touch_policy']} for slot {slot}, not {pin}/never as reported")
+    if facts["spki"] != der:
+        raise Refusal(f"{source}: the attested key is not the exported key for slot {slot} — they are two keys")
 
 
 # -------------------------------------------------------------------------------------------------
@@ -1131,6 +1190,8 @@ def cmd_yubikey_evidence(args: argparse.Namespace) -> int:
             "ykman_info": args.info.read_text(encoding="utf-8"),
             "ykman_keys_info": args.keys_info.read_text(encoding="utf-8"),
             "public_key_der_b64": base64.b64encode(read_public_key(args.public_key)).decode("ascii"),
+            "attestation_pem": args.attestation.read_text(encoding="ascii"),
+            "f9_pem": args.f9.read_text(encoding="ascii"),
         }
     except OSError as error:
         raise Refusal(f"cannot read ykman output: {error}") from None
@@ -1139,7 +1200,7 @@ def cmd_yubikey_evidence(args: argparse.Namespace) -> int:
     # Refuse NOW, at the device, rather than at record time after the token has left the table.
     ev = parse_yubikey_record(record, str(args.out))
     Path(args.out).write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    print(f"EVIDENCE {args.out}: serial={ev.device_serial} slot={ev.object_id} {ev.ykman_algorithm} "
+    print(f"EVIDENCE {args.out}: Yubico-attested; serial={ev.device_serial} slot={ev.object_id} {ev.ykman_algorithm} "
           f"pin={ev.pin_policy} touch={ev.touch_policy} public_key_sha256={ev.public_key_sha256}")
     return 0
 
@@ -1304,6 +1365,8 @@ def main(argv: list[str] | None = None) -> int:
     y.add_argument("--info", type=Path, required=True, help="`ykman --device S info` output")
     y.add_argument("--keys-info", type=Path, required=True, help="`ykman --device S piv keys info SLOT` output")
     y.add_argument("--public-key", type=Path, required=True, help="`ykman … piv keys export SLOT` (PEM or DER)")
+    y.add_argument("--attestation", type=Path, required=True, help="`ykman … piv keys attest SLOT` (PEM)")
+    y.add_argument("--f9", type=Path, required=True, help="`ykman … piv certificates export f9` (PEM)")
     y.add_argument("--device-id", help="the manifest device_id this token is")
     y.add_argument("--out", type=Path, required=True)
     pp = sub.add_parser("proof-prepare")
