@@ -3,9 +3,9 @@
 # by testing for the 2025 batch defect (regalia#482: DENK0400664; Nitrokey support thread 6994,
 # Nitrokey/nitrokey-pro-firmware#100).
 #
-#   sudo -v && tools/nitrokey-acceptance.sh                  # the only Nitrokey on USB
-#   sudo -v && tools/nitrokey-acceptance.sh --usb 1-1        # one of several, by USB port path
-#   tools/nitrokey-acceptance.sh --enumerations 20 --apdus 4000
+#   sudo -v && qubes/scripts/nitrokey-acceptance.sh                  # the only Nitrokey on USB
+#   sudo -v && qubes/scripts/nitrokey-acceptance.sh --usb 1-1        # one of several, by USB port path
+#   qubes/scripts/nitrokey-acceptance.sh --enumerations 20 --apdus 4000
 #
 # NON-DESTRUCTIVE. No PIN, no SO PIN, no initialisation, no key operation: only USB re-enumeration
 # and unauthenticated APDUs (SELECT the SmartCard-HSM applet, GET CHALLENGE). Safe on a
@@ -35,6 +35,10 @@ while [ $# -gt 0 ]; do
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
 done
+# Positive integers only: 0 enumerations or 0 exchanges would ACCEPT a unit nothing was asked of.
+for v in "$ENUMS" "$APDUS"; do
+  [[ "$v" =~ ^[1-9][0-9]*$ ]] || { echo "--enumerations and --apdus must be positive integers (got '$v')" >&2; exit 2; }
+done
 for t in opensc-tool sudo; do command -v "$t" >/dev/null || { echo "$t is required" >&2; exit 2; }; done
 sudo -n true 2>/dev/null || { echo "needs sudo for the USB re-enumeration; run 'sudo -v' first" >&2; exit 2; }
 
@@ -58,9 +62,12 @@ say "Nitrokey HSM at USB $USBPATH: bcdDevice $(cat "$DEV/bcdDevice"), serial str
 say "  opensc $(opensc-tool --info 2>/dev/null | sed -n 's/^OpenSC \([0-9.]*\).*/\1/p' | head -1)"
 
 # The PC/SC reader name carries the USB serial string the device reported THIS time.
-reader_index(){ local serial; serial="$(tr -d ' ' < "$DEV/serial" 2>/dev/null)"
+# The list is captured before it is searched: a pipe from opensc-tool under pipefail can report its
+# producer's failure (or a SIGPIPE) as the search's, and hsm-lint-predicates.sh refuses that shape.
+reader_index(){ local serial readers; serial="$(tr -d ' ' < "$DEV/serial" 2>/dev/null)"
   [ -n "$serial" ] || return 1
-  opensc-tool -l 2>/dev/null | awk -v s="$serial" 'index($0, "(" s) { print $1; exit }'; }
+  readers="$(opensc-tool -l 2>/dev/null || true)"
+  awk -v s="$serial" 'index($0, "(" s) { print $1; exit }' <<< "$readers"; }
 wait_reader(){ local r; for _ in $(seq 1 20); do r="$(reader_index || true)"; [ -n "$r" ] && { echo "$r"; return 0; }; sleep 1; done; return 1; }
 
 # ---- 1 + 2: re-enumerate, and read the serial and the ATR every time --------------------------------

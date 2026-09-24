@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# tools/nitrokey-acceptance.sh must REJECT each measured symptom of the 2025 batch defect (regalia#482)
+# qubes/scripts/nitrokey-acceptance.sh must REJECT each measured symptom of the 2025 batch defect (regalia#482)
 # and accept a healthy unit. The defective unit is not on any bench, so the three symptoms are
 # replayed here from what DENK0400664 did: a serial that flips to 01A001000000000 on re-enumeration,
 # a 3-byte ATR, and APDUs that die after 242 exchanges.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-TOOL="$HERE/../../../tools/nitrokey-acceptance.sh"
+TOOL="$HERE/../../scripts/nitrokey-acceptance.sh"
 pass=0; fail=0
 P(){ printf '  PASS %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  FAIL %s\n' "$1"; fail=$((fail+1)); }
@@ -66,6 +66,12 @@ run_case "$S4" "$GOOD" 242
 
 run_case "DENK04041440000 DENK04041450000 DENK04041440000 DENK04041440000" "$GOOD" 100000
 [ "$rc" = 1 ] && grep -q "changed from" <<< "$out" && P "a serial that changes between enumerations is rejected" || F "changing serial accepted: $out"
+
+for bad in "--enumerations 0" "--apdus 0" "--apdus -5" "--enumerations x"; do
+  # shellcheck disable=SC2086
+  out="$(bash "$TOOL" $bad 2>&1)"; rc=$?
+  [ "$rc" = 2 ] && grep -q "positive integers" <<< "$out" && P "refuses $bad" || F "accepted $bad (rc=$rc)"
+done
 
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" = 0 ]

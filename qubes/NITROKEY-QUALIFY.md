@@ -49,10 +49,12 @@ Qubes; re-attach the device. Two HSMs attached at once are addressed **by serial
 One of the first two production units (DENK0400664) failed at the reader-to-card layer: its serial
 flipped to `01A001000000000`, its ATR truncated to 3 bytes, and its APDUs died after 242 exchanges
 (regalia#482). The same batch may have supplied any unit you receive. Run this **on arrival, before
-anything else**, from any host where the device is attached (it needs sudo to re-enumerate it):
+anything else**, in the vault AppVM with the scripts copied as in step 1 (it needs sudo to
+re-enumerate the device):
 
 ```
-sudo -v && tools/nitrokey-acceptance.sh            # --usb <port path> if several are attached
+cd qubes/scripts
+sudo -v && ./nitrokey-acceptance.sh                # --usb <port path> if several are attached
 ```
 
 `ACCEPTED` means:
