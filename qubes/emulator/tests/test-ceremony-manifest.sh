@@ -197,6 +197,13 @@ out="$(drive $'m\nyubikey-sitea\n36345471\n'"$TOKEN_PIN"$'\nq' CEREMONY_MANIFEST
 [ -e "$EV2/custody-manifest.qualified.json" ] && F "a refused record wrote a manifest" || P "nothing written"
 
 # =================================================================================================
+hdr "A device_id that is not one path component: refused before anything touches the evidence directory"
+EVT="$ROOT/evt"; mkdir -p "$EVT"; touch "$ROOT/outside-evidence.json"
+out="$(drive $'m\n../outside\n11110001\nq' CEREMONY_MANIFEST="$ROOT/manifest.json" CEREMONY_MANIFEST_EVIDENCE_DIR="$EVT")"
+grep -q "must be one path component" <<< "$out" && [ -e "$ROOT/outside-evidence.json" ] \
+  && P "a traversal device_id is refused, and nothing outside the evidence directory was touched" || F "a traversal device_id was accepted"
+
+# =================================================================================================
 hdr "A token that reports an imported key: refused at the device"
 EV3="$ROOT/ev3"; mkdir -p "$EV3"
 out="$(drive $'m\nyubikey-sitea\n11110001\nq' CEREMONY_MANIFEST="$ROOT/manifest.json" \
