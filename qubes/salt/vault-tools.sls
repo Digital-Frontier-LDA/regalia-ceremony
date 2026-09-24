@@ -13,6 +13,7 @@ vault-tools-apt:
   pkg.installed:
     - pkgs:
       - age
+      - iproute2           # `ip`: the air-gap preflight needs it, and a *-minimal template may lack it
       - opensc
       - pcscd
       - libccid
@@ -58,7 +59,10 @@ slip39-shamir:
     # externally-managed marker here is correct (and required for state.apply to succeed).
     # Fall back to a plain install for an older pip that doesn't recognize the flag (or a
     # distro that doesn't enforce PEP 668) so state.apply doesn't hard-fail on the flag alone.
-    - name: pip3 install --break-system-packages --require-hashes -r /opt/vault-ceremony/requirements.txt || pip3 install --require-hashes -r /opt/vault-ceremony/requirements.txt
+    # --only-binary :all:: never compile. Every pinned package has a pinned wheel (checked for
+    # Python 3.11 and 3.13, 2026-09-24); a missing one must fail HERE, not silently need gcc on a
+    # minimal template or on the machine that later recovers from the disc.
+    - name: pip3 install --break-system-packages --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt || pip3 install --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt
     - require:
       - pkg: vault-tools-apt
     # idempotent: only (re)install when requirements.txt actually changes
@@ -74,7 +78,7 @@ slip39-shamir:
 slip39-wheels:
   cmd.run:
     - name: >
-        pip3 download --require-hashes -r /opt/vault-ceremony/requirements.txt
+        pip3 download --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt
         -d /opt/vault-ceremony/wheels
     - require:
       - pkg: vault-tools-apt
