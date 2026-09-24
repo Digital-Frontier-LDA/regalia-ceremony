@@ -17,6 +17,13 @@
 #     DRY RUN with throwaway keys.
 
 set -uo pipefail
+# The vault-tools image keeps its pinned tools in /opt/vault-bin (sops, shamir, sle4442-manager)
+# and the hash-pinned Python packages in the /opt/vault-ceremony/venv interpreter. /etc/profile.d
+# puts both on PATH for LOGIN shells only; the xterm a disposable opens is not one, so add them here.
+for _d in /opt/vault-bin /opt/vault-ceremony/venv/bin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) [ -d "$_d" ] && PATH="$_d:$PATH" ;; esac
+done
+unset _d
 
 # Resolve sibling scripts relative to THIS file, not $0. $0 breaks when the wizard is
 # symlinked, run through a wrapper, or sourced by a test harness — and a wizard that can't
@@ -324,6 +331,39 @@ pick_printer() {
   warn "CUPS spool advice: keep /var/spool/cups on tmpfs (DispVM does); jobs are purged after each print."
 }
 
+# ---- scan-back (webcam) ------------------------------------------------------
+# Decoding the PRINTED symbol is the only proof that paper is a backup: every earlier check is on
+# files that are shredded on exit. A webcam attached with `qvm-usb attach` shows up as /dev/video*.
+# Returns 0 when verified, 1 when it failed, 2 when the operator skipped (no camera, or declined).
+SCAN_DEVICE="${CEREMONY_SCAN_DEVICE:-/dev/video0}"
+scan_back_payload() {
+  local enc="$1"
+  if ! command -v zbarcam >/dev/null 2>&1 || [ ! -e "$SCAN_DEVICE" ]; then
+    warn "no camera at $SCAN_DEVICE — scan the printed sheet back later:"
+    warn "  photograph it, then: zbarimg --raw -q photo.jpg | payload-qr.py --verify-scan payload.age --scans -"
+    return 2
+  fi
+  ask "scan the PRINTED QR sheet back with the camera now (strongly recommended)?" || return 2
+  python3 "$HERE/payload-qr.py" --verify-scan "$enc" --device "$SCAN_DEVICE"
+}
+
+# Scan ONE printed share symbol back and compare it with the file it was printed from, without
+# echoing either: zbarcam's output goes into a variable in this RAM-only shell, never the terminal.
+scan_back_share() {
+  local label="$1" secret_file="$2" got want
+  command -v zbarcam >/dev/null 2>&1 && [ -e "$SCAN_DEVICE" ] || return 2
+  ask "scan the PRINTED '$label' QR back with the camera now?" || return 2
+  info "hold the printed '$label' QR to the camera; the window closes on the first QR read."
+  got="$(timeout "${CEREMONY_SCAN_TIMEOUT:-180}" zbarcam --raw -q -1 -Sdisable -Sqrcode.enable "$SCAN_DEVICE" 2>/dev/null)" || true
+  want="$(cat "$secret_file")"
+  if [ -n "$got" ] && [ "$got" = "$want" ]; then
+    got=""; want=""; info "   SCAN-BACK OK — the printed '$label' QR decodes to exactly the share."; return 0
+  fi
+  got=""; want=""
+  err "SCAN-BACK FAILED for '$label' — the printed QR did not decode to the share (or nothing was read)."
+  return 1
+}
+
 # print a single labelled artifact (text words + a QR PNG of the same string).
 # arg1 = human label, arg2 = path to a file holding the secret string (one line).
 print_share() {
@@ -382,6 +422,11 @@ print_share() {
       fi
     done
     info "print queue drained for '$label'"
+    local _sb=0; scan_back_share "$label" "$secret_file" || _sb=$?
+    if [ "$_sb" = 1 ]; then
+      warn "the '$label' page is NOT proven readable: reprint it before it is sealed."
+      pause
+    fi
     # PURGE the job DATA files from the CUPS spool so the plaintext share doesn't linger on disk.
     # Safe here: the queue has drained (all pages printed), so this deletes only COMPLETED job
     # data, never a still-pending page. `cancel -a` alone only cancels ACTIVE (queued) jobs; once
@@ -1427,6 +1472,18 @@ TPL
   warn "toner cracks along a fold, and a fold through a symbol is the realistic failure mode."
   warn "The M-DISC gets payload.age itself (step 4); the chip cards get a SHARE, not this"
   warn "payload — an SLE-4442 holds 256 bytes and this file is several times that."
+  if [ -n "$PRINTER" ] && ask "print the QR sheet (INSTRUCTIONS.txt + every symbol) to $PRINTER now?"; then
+    run "lp -d '$PRINTER' '$qrdir/INSTRUCTIONS.txt' '$qrdir'/qr-*.png" \
+      || warn "printing failed — print $qrdir/INSTRUCTIONS.txt and $qrdir/qr-*.png yourself"
+  fi
+  # SCAN-BACK: the checks above prove the PNG files; the sheet is what survives. A printer that
+  # scales, crops or drops a page produces paper that looks right and rebuilds nothing.
+  local _sb=0; scan_back_payload "$enc" || _sb=$?
+  case "$_sb" in
+    0) info "   the PRINTED sheet rebuilds payload.age byte-for-byte." ;;
+    2) warn "the printed sheet was NOT scanned back; it is unproven until it is." ;;
+    *) err "the printed sheet does NOT rebuild payload.age — reprint and scan again before relying on it."; return 1 ;;
+  esac
   info "Payload archived. $enc will be shredded with the workdir on exit."
 }
 
@@ -1753,6 +1810,9 @@ step_archive() {
   local sdir; sdir="$HERE"; local kit="$burn/recovery-kit"; mkdir -p "$kit"
   cp -r "$sdir/recovery" "$kit/" 2>/dev/null || cp -r "$sdir/../recovery" "$kit/" 2>/dev/null || true
   cp "$sdir"/*.py "$sdir"/*.sh "$kit/" 2>/dev/null || true
+  # sle4442-manager has no extension, so the globs above miss it; a recoverer reading a share off
+  # a chip card needs it as much as the rest of the toolkit.
+  cp "$sdir/sle4442-manager" "$kit/" 2>/dev/null || true
   cp "$sdir/requirements.txt" "$kit/" 2>/dev/null || cp "$sdir/../requirements.txt" "$kit/" 2>/dev/null || true
   # Stage the HASH-PINNED wheels (shamir-mnemonic + mnemonic + their deps) so the
   # CLEAN-MACHINE / Tails recovery path RECOVERY-TECHNICAL.md endorses works with NO network:
@@ -1812,6 +1872,7 @@ step_archive() {
   info "Typical (review paths/devices first):"
   show "growisofs -Z /dev/sr0 -R -J '$burn'                 # burn on drive A (/dev/sr0)"
   show "mount -o ro /dev/sr1 /mnt && ( cd /mnt && sha256sum -c manifest.sha256 )   # verify FROM drive B (/dev/sr1), not the source tree"
+  show "d=\$(mktemp -d) && xorriso -osirrox on -indev /dev/sr1 -extract / \"\$d\" && ( cd \"\$d\" && sha256sum -c manifest.sha256 )   # same check without a kernel mount"
   info "Generate a checksum manifest of what you burn first (recurses into recovery-kit/):"
   run "( cd '$burn' && find . -type f ! -name manifest.sha256 -print0 | xargs -0 sha256sum > manifest.sha256 ) && cat '$burn/manifest.sha256'"
 }
