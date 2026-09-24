@@ -203,6 +203,8 @@ ceremony-scripts:
 vault-services-enabled:
   cmd.run:
     - name: systemctl enable pcscd.socket cups.service cups.socket
-    - unless: systemctl is-enabled pcscd.socket cups.service cups.socket
+    # One unit at a time: with several units `systemctl is-enabled` succeeds when ANY is enabled
+    # (checked on trixie with cups.socket disabled: rc 0), which would skip enabling the rest.
+    - unless: 'for u in pcscd.socket cups.service cups.socket; do systemctl is-enabled -q "$u" || exit 1; done'
     - require:
       - pkg: vault-tools-apt

@@ -174,7 +174,9 @@ def join_lines(lines):
         # no whitespace, from being split further.
         parts = line.split(None, 3)
         if len(parts) != 4 or parts[0] != MAGIC:
-            sys.exit("payload-qr: not a %s chunk line: %.40s…" % (MAGIC, line))
+            # Never echo the content: a share line pasted or scanned by mistake would print its words.
+            sys.exit("payload-qr: a line that is NOT a %s chunk (%d chars, content not shown — it may "
+                     "be a share)" % (MAGIC, len(line)))
         idx_total, dg, chunk = parts[1], parts[2], parts[3]
         try:
             idx, tot = (int(x) for x in idx_total.split("/"))
@@ -274,7 +276,11 @@ def verify_scan(payload_path, scans=None, device="/dev/video0", quiet=False):
                 continue
             parts = line.split(None, 3)
             if len(parts) != 4 or parts[0] != MAGIC:
-                sys.exit("payload-qr: scanned a symbol that is not a %s chunk: %.40s…" % (MAGIC, line))
+                # Never echo the content: a share QR held to the camera by mistake would print its
+                # words here, on the one terminal the ceremony keeps free of secrets.
+                sys.exit("payload-qr: scanned a symbol that is NOT a %s chunk (%d chars, content not "
+                         "shown — it may be a share). Keep only the payload sheet in view."
+                         % (MAGIC, len(line)))
             # A chunk from a DIFFERENT payload (an earlier print, another ceremony's sheet) is
             # refused on sight rather than after a confusing checksum mismatch at the end.
             if parts[2] != want:
