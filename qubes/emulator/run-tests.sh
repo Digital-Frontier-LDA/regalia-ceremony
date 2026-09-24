@@ -167,6 +167,7 @@ say "YUBIKEY two-device identity isolation (a standby ceremony must not overwrit
 
 say "CEREMONY two-YubiKey registration (running the real wizard step twice preserves both identities)"
 "$HERE/tests/test-ceremony-two-yubikey.sh" || suite_failed "test-ceremony-two-yubikey.sh"
+"$HERE/tests/test-nitrokey-acceptance.sh" || suite_failed "test-nitrokey-acceptance.sh"
 "$HERE/tests/test-ceremony-yubikey-factory-card.sh" || suite_failed "test-ceremony-yubikey-factory-card.sh"
 "$HERE/tests/test-ceremony-credential-separation.sh" || suite_failed "test-ceremony-credential-separation.sh"
 
