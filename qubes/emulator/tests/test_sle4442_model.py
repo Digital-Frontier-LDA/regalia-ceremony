@@ -35,6 +35,10 @@ def h(s):
     return bytes.fromhex(s.replace(" ", ""))
 
 
+# ACS ACR39x Reference Manual v1.03, 8.4.7: a verified PSC answers 90 07 (SW2 = error counter).
+PSC_OK = bytes.fromhex("9007")
+
+
 class TestSLE4442(unittest.TestCase):
     def setUp(self):
         self.card = sle.SLE4442(psc=b"\x12\x34\x56")
@@ -47,7 +51,8 @@ class TestSLE4442(unittest.TestCase):
     def test_read_main_memory(self):
         r = self.card.apdu(h("FF B0 00 00 06"))
         self.assertEqual(r[-2:], sle.SW_OK)
-        self.assertEqual(r[:-2], h("A2 13 10 91 FF FF"))
+        # ACS 8.4.2: data, then PROT 1..4 (all bytes writable on a fresh model card)
+        self.assertEqual(r[:-2], h("A2 13 10 91 FF FF") + h("FF FF FF FF"))
 
     def test_read_security_memory_hides_psc(self):
         r = self.card.apdu(h("FF B1 00 00 04"))
@@ -57,15 +62,15 @@ class TestSLE4442(unittest.TestCase):
         self.assertEqual(self.card.apdu(h("FF D0 00 20 01 AB")), sle.SW_NO_AUTH)
 
     def test_verify_then_write(self):
-        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), sle.SW_OK)
+        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), PSC_OK)
         self.assertEqual(self.card.apdu(h("FF D0 00 20 03 DE AD BE")), sle.SW_OK)
         r = self.card.apdu(h("FF B0 00 20 03"))
-        self.assertEqual(r, h("DE AD BE") + sle.SW_OK)
+        self.assertEqual(r[:3], h("DE AD BE"))
+        self.assertEqual(r[-2:], sle.SW_OK)
 
     def test_wrong_psc_decrements_counter(self):
         r = self.card.apdu(h("FF 20 00 00 03 00 00 00"))
-        self.assertEqual(r[0], 0x63)
-        self.assertEqual(r[1] & 0x0F, 2)  # 2 attempts left
+        self.assertEqual(r, h("90 03"))  # ACS: SW1 90, SW2 = error counter 0b011, 2 attempts left
         sec = self.card.apdu(h("FF B1 00 00 04"))
         self.assertEqual(sec[0], 0x03)  # 0b011 = two bits remaining
 
@@ -78,7 +83,8 @@ class TestSLE4442(unittest.TestCase):
     def test_lockout_after_three_wrong(self):
         for _ in range(3):
             self.card.apdu(h("FF 20 00 00 03 00 00 00"))
-        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), sle.SW_LOCKED)
+        # ACS 8.4.7: a locked card answers 90 00 — which is exactly why 90 00 is NOT success
+        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), h("90 00"))
         # locked card cannot authenticate even with the right PSC
         self.assertEqual(self.card.apdu(h("FF D0 00 20 01 AB")), sle.SW_NO_AUTH)
 
@@ -91,14 +97,14 @@ class TestSLE4442(unittest.TestCase):
         # a locked byte can no longer be written
         self.assertEqual(self.card.apdu(h("FF D0 00 00 01 99")), sle.SW_NO_AUTH)
         r = self.card.apdu(h("FF B0 00 00 01"))
-        self.assertEqual(r[:-2], h("7E"))        # still the pre-lock value
+        self.assertEqual(r[:1], h("7E"))         # still the pre-lock value
 
     def test_change_psc(self):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
         self.assertEqual(self.card.apdu(h("FF D2 00 00 03 AA BB CC")), sle.SW_OK)
         # old PSC now fails, new one works
-        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56"))[0], 0x63)
-        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 AA BB CC")), sle.SW_OK)
+        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), h("90 03"))
+        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 AA BB CC")), PSC_OK)
 
     def test_reset_clears_auth(self):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
@@ -110,8 +116,7 @@ class TestSLE4442(unittest.TestCase):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
         self.card.apdu(h("FF D0 00 20 02 AA BB CC DD"))
         r = self.card.apdu(h("FF B0 00 20 04"))
-        self.assertEqual(r, h("AA BB 00 00") + sle.SW_OK,
-                         "wrote trailing bytes beyond Lc")
+        self.assertEqual(r[:4], h("AA BB 00 00"), "wrote trailing bytes beyond Lc")
 
     def test_write_rejects_data_shorter_than_lc(self):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
@@ -122,9 +127,9 @@ class TestSLE4442(unittest.TestCase):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
         self.card.apdu(h("FF D0 00 04 01 7E"))   # set byte 4 to a known value
         self.card.apdu(h("FF D1 00 05 01 00"))   # lock byte 5
-        before = self.card.apdu(h("FF B0 00 04 03"))[:-2]
+        before = self.card.apdu(h("FF B0 00 04 03"))[:3]
         rv = self.card.apdu(h("FF D0 00 04 03 11 22 33"))   # 4 ok, 5 locked, 6 ok
-        after = self.card.apdu(h("FF B0 00 04 03"))[:-2]
+        after = self.card.apdu(h("FF B0 00 04 03"))[:3]
         self.assertEqual(rv, sle.SW_NO_AUTH)
         self.assertEqual(before, after, "a locked-byte write left a partial modification")
 
@@ -137,7 +142,7 @@ class TestSLE4442(unittest.TestCase):
             c1.apdu(h("FF D0 00 40 04 CA FE BA BE"))
             c2 = sle.SLE4442(psc=b"\x12\x34\x56", state_path=path)  # reload
             r = c2.apdu(h("FF B0 00 40 04"))
-            self.assertEqual(r, h("CA FE BA BE") + sle.SW_OK)
+            self.assertEqual(r[:4], h("CA FE BA BE"))
         finally:
             os.unlink(path)
 
@@ -552,3 +557,74 @@ class TestManagerReaderSelection(unittest.TestCase):
         with self.assertRaises(SystemExit) as cm:
             self._connect(rl, "crw")
         self.assertIn("cannot drive SLE-4442", str(cm.exception))
+
+
+class TestManagerAgainstACSProtocol(unittest.TestCase):
+    """The manager driven against the model, which answers as the ACS ACR39x Reference Manual
+    v1.03 documents: PRESENT_CODE returns 90 <error counter> (90 00 = LOCKED) and a read returns
+    the data followed by PROT 1..4. The manager was first written against a model that answered
+    90 00 / 63 Cx and returned bare data, so on a real ACS reader it would have rejected a correct
+    PSC, called a locked card unlocked, and failed its own read-back."""
+
+    PSC = "123456"
+
+    class _Conn:
+        def __init__(self, card):
+            self.card = card
+
+        def transmit(self, apdu):
+            r = self.card.apdu(bytes(apdu))
+            return list(r[:-2]), r[-2], r[-1]
+
+    def setUp(self):
+        self.mgr = _load_manager_module()
+        self.card = sle.SLE4442(psc=bytes.fromhex(self.PSC))
+        self.conn = self._Conn(self.card)
+
+    def test_store_at_32_writes_and_verifies_despite_prot_bytes(self):
+        self.mgr.cmd_store(self.conn, self.PSC, 32, "share-words alpha beta")
+        self.assertEqual(bytes(self.card.main[32:32 + 22]), b"share-words alpha beta")
+
+    def test_store_refuses_the_factory_area(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.mgr.cmd_store(self.conn, self.PSC, 0, "x")
+        self.assertIn("factory area", str(cm.exception))
+        self.assertEqual(bytes(self.card.main[:4]), bytes.fromhex("A2131091"), "reset header touched")
+        self.assertEqual(self.card.error_counter, 0x07, "a refused write must not spend a PSC attempt")
+
+    def test_wrong_psc_reports_attempts_left(self):
+        with self.assertRaises(SystemExit) as cm:
+            self.mgr.cmd_verify(self.conn, "000000")
+        self.assertIn("2 attempt(s) left", str(cm.exception))
+
+    def test_locked_card_is_never_reported_as_verified(self):
+        self.card.error_counter = 0x00
+        with self.assertRaises(SystemExit) as cm:
+            self.mgr.cmd_verify(self.conn, self.PSC)
+        self.assertIn("LOCKED", str(cm.exception))
+
+    def test_read_strips_prot_bytes(self):
+        self.card.main[40:44] = b"\xca\xfe\xba\xbe"
+        self.assertEqual(self.mgr._read(self.conn, 40, 4), b"\xca\xfe\xba\xbe")
+
+
+class TestManagerStoreLeavesNoTail(TestManagerAgainstACSProtocol):
+    """Review of #50: a shorter share stored over a longer one must not leave the old tail, and a
+    PSC status that is not exactly 90 07 is never success."""
+
+    def test_shorter_share_over_longer_leaves_no_old_tail(self):
+        self.mgr.cmd_store(self.conn, self.PSC, 32, "a much longer earlier share with many words")
+        self.mgr.cmd_store(self.conn, self.PSC, 32, "short share")
+        area = bytes(self.card.main[32:256])
+        self.assertEqual(area.rstrip(b"\x00"), b"short share")
+
+    def test_undocumented_psc_status_is_not_success(self):
+        class Odd:
+            def transmit(self, apdu):
+                return [], 0x90, 0x0F
+        with self.assertRaises(SystemExit):
+            self.mgr._present_psc(Odd(), self.PSC)
+
+    def test_text_with_padding_bytes_is_refused(self):
+        with self.assertRaises(SystemExit):
+            self.mgr.cmd_store(self.conn, self.PSC, 32, "bad\x00share")
