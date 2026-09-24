@@ -24,6 +24,9 @@ TESTS="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(mktemp -d)"
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1 TMPDIR="$ROOT" CEREMONY_MODE=prod
 export EMU_YKMAN_STATE="$ROOT/yk"
+# The emulator's ykman issues Yubico-shaped attestations under its own CA (qubes/emulator/bin/ykman
+# emu_ca); ceremony-manifest trusts that CA only because this is a simulation and it is named here.
+export REGALIA_YUBICO_SIMULATED_TRUST_DIR="$EMU_YKMAN_STATE/trust"
 export PATH="$TESTS/../bin:$PATH"
 PY="${PYTHON:-python3}"
 # The tokens' PIN, distinctive so the leak checks below cannot match anything by accident.
@@ -194,12 +197,19 @@ out="$(drive $'m\nyubikey-sitea\n36345471\n'"$TOKEN_PIN"$'\nq' CEREMONY_MANIFEST
 [ -e "$EV2/custody-manifest.qualified.json" ] && F "a refused record wrote a manifest" || P "nothing written"
 
 # =================================================================================================
+hdr "A device_id that is not one path component: refused before anything touches the evidence directory"
+EVT="$ROOT/evt"; mkdir -p "$EVT"; touch "$ROOT/outside-evidence.json"
+out="$(drive $'m\n../outside\n11110001\nq' CEREMONY_MANIFEST="$ROOT/manifest.json" CEREMONY_MANIFEST_EVIDENCE_DIR="$EVT")"
+grep -q "must be one path component" <<< "$out" && [ -e "$ROOT/outside-evidence.json" ] \
+  && P "a traversal device_id is refused, and nothing outside the evidence directory was touched" || F "a traversal device_id was accepted"
+
+# =================================================================================================
 hdr "A token that reports an imported key: refused at the device"
 EV3="$ROOT/ev3"; mkdir -p "$EV3"
 out="$(drive $'m\nyubikey-sitea\n11110001\nq' CEREMONY_MANIFEST="$ROOT/manifest.json" \
         CEREMONY_MANIFEST_EVIDENCE_DIR="$EV3" EMU_YKMAN_ORIGIN=IMPORTED)"; rc=$?
-grep -q "reports Origin IMPORTED" <<< "$out" && grep -q "NOT provisioned as planned" <<< "$out" \
-  && P "the step refuses the token's own IMPORTED report (ADR-0002 D5)" || F "an imported key was captured as evidence"
+grep -q "attests only keys generated on it" <<< "$out" && grep -q "NOT provisioned as planned" <<< "$out" \
+  && P "the step refuses an imported key: the token will not attest it (ADR-0002 D5)" || F "an imported key was captured as evidence"
 ls "$EV3"/*.json >/dev/null 2>&1 && F "evidence was written for an imported key" || P "no evidence written for it"
 [ "$rc" != 0 ] && P "and the ceremony does not end as a success" || F "the ceremony ended rc=0"
 

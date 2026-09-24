@@ -539,6 +539,11 @@ step_manifest_yubikey() {
   info "you are asked for the PIN once per key."
   local device serial steps slot alg pin touch path proof ev op
   read -r -p "   manifest device_id of the token in the reader > " device || return 1
+  # The id becomes part of evidence FILE NAMES below (and an rm), so it must be one safe path
+  # component: a manifest id of "../x" would otherwise reach outside the evidence directory.
+  if ! [[ "$device" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] || [[ "$device" == *..* ]]; then
+    err "manifest device_id must be one path component of letters, digits, '.', '_' or '-'"; return 1
+  fi
   read -r -p "   its serial (ykman list --serials) > " serial || return 1
   case "$serial" in ''|*[!0-9]*) err "a YubiKey serial is digits only"; return 1 ;; esac
   steps="$(manifest_tool piv-steps "$CEREMONY_MANIFEST" --device-id "$device" \
@@ -558,17 +563,28 @@ step_manifest_yubikey() {
   while IFS=$'\t' read -r -u 9 slot alg pin touch path proof; do
     [ -n "$slot" ] || continue
     info "$path: slot $slot $alg pin=$pin touch=$touch on $device (serial $serial)"
-    run "ykman --device '$serial' piv keys generate --algorithm '$alg' --pin-policy '$pin' --touch-policy '$touch' '$slot' '$WORK/yk-$serial-$slot.pem'" \
+    # Evidence from an EARLIER generation of this slot describes a key about to be replaced, so it is
+    # removed in the SAME confirmed action as the generation: declining keeps both the old key and its
+    # evidence, a failed removal generates nothing, and a failed generation leaves no stale proof.
+    run "rm -f '$CEREMONY_MANIFEST_EVIDENCE_DIR/yubikey-$device-$slot.json' '$CEREMONY_MANIFEST_EVIDENCE_DIR/opproof-yubikey-$device-$slot.json' && ykman --device '$serial' piv keys generate --algorithm '$alg' --pin-policy '$pin' --touch-policy '$touch' '$slot' '$WORK/yk-$serial-$slot.pem'" \
       || { warn "not generated — no evidence captured for $path"; continue; }
-    # Everything below is READ from the token, after generation. The evidence is the token's own
-    # report, so a policy mistyped anywhere would show up here rather than be recorded.
+    # Everything below is READ from the token, after generation: its report (info, keys info, the key)
+    # AND Yubico's attestation of that key. `record` believes the report only where the attestation,
+    # signed by a genuine YubiKey, says the same (serial, policies, the key itself).
     ykman --device "$serial" info > "$WORK/yk-$serial.info" \
       && ykman --device "$serial" piv keys info "$slot" > "$WORK/yk-$serial-$slot.keys" \
       && ykman --device "$serial" piv keys export "$slot" --format DER "$WORK/yk-$serial-$slot.der" \
       || { err "could not read the key back from $serial slot $slot — no evidence for $path"; return 1; }
+    # A YubiKey attests ONLY keys generated on it. A refusal here is the device itself saying this key
+    # was imported, which is stronger than its Origin line: it comes from the f9 key, not from a report.
+    ykman --device "$serial" piv keys attest "$slot" "$WORK/yk-$serial-$slot.att.pem" \
+      && ykman --device "$serial" piv certificates export f9 "$WORK/yk-$serial.f9.pem" \
+      || { err "$serial would not attest slot $slot: a YubiKey attests only keys generated on it, so this key"; \
+           err "was not (ADR-0002 D5) — $path is NOT provisioned as planned"; return 1; }
     ev="$CEREMONY_MANIFEST_EVIDENCE_DIR/yubikey-$device-$slot.json"
     manifest_tool yubikey-evidence --device-id "$device" --slot "$slot" --info "$WORK/yk-$serial.info" \
-      --keys-info "$WORK/yk-$serial-$slot.keys" --public-key "$WORK/yk-$serial-$slot.der" --out "$ev" \
+      --keys-info "$WORK/yk-$serial-$slot.keys" --public-key "$WORK/yk-$serial-$slot.der" \
+      --attestation "$WORK/yk-$serial-$slot.att.pem" --f9 "$WORK/yk-$serial.f9.pem" --out "$ev" \
       || { err "the token's own report was refused (reason above) — $path is NOT provisioned as planned"; return 1; }
     # THE OPERATION PROOF (regalia#28 criterion 3), while the token is still in the reader. Everything
     # above is the token's REPORT of the key; this is the key WORKING, with the PIN the operator types

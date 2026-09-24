@@ -149,6 +149,37 @@ def der_integer(raw):
     return int.from_bytes(raw[2:], "big")
 
 
+def attested_facts(attestation_pem, f9_pem, trust=None, now=None):
+    """The chain verdict and the signed facts, for a caller that decides for itself (ceremony-manifest's
+    `record`). `trust` is (intermediates, roots) and defaults to the vendored intermediates plus the
+    PINNED Yubico roots. Anything else is a simulation's business, and the caller must say so.
+    Raises ValueError on input that is not exactly one PEM certificate each."""
+    certs = x509.load_pem_x509_certificates(attestation_pem)
+    f9s = x509.load_pem_x509_certificates(f9_pem)
+    if len(certs) != 1 or len(f9s) != 1:
+        raise ValueError("expected exactly one attestation certificate and one f9 certificate")
+    attestation, f9 = certs[0], f9s[0]
+    intermediates, roots = trust if trust is not None else (
+        load_all(os.path.join(VENDOR, "yubico-intermediates.pem")), trusted_roots())
+    chained, how = verify_chain(attestation, f9, intermediates, roots,
+                                now or datetime.datetime.now(datetime.timezone.utc))
+    policy = extension_bytes(attestation, OID_POLICY)
+    firmware = extension_bytes(attestation, OID_FIRMWARE)
+    spki = attestation.public_key().public_bytes(serialization.Encoding.DER,
+                                                 serialization.PublicFormat.SubjectPublicKeyInfo)
+    # The slot is in the SIGNED subject: "YubiKey PIV Attestation 9a" (measured on 5.7.4).
+    cn = attestation.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+    slot = cn[0].value.rsplit(" ", 1)[-1].lower() if cn and cn[0].value.startswith("YubiKey PIV Attestation ") else None
+    return {
+        "chain": chained, "how": how, "slot": slot,
+        "serial": der_integer(extension_bytes(attestation, OID_SERIAL)),
+        "pin_policy": PIN_POLICY.get(policy[0]) if policy and len(policy) >= 2 else None,
+        "touch_policy": TOUCH_POLICY.get(policy[1]) if policy and len(policy) >= 2 else None,
+        "firmware": ".".join(str(b) for b in firmware) if firmware and len(firmware) == 3 else None,
+        "spki": spki,
+    }
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--attestation", required=True, help="PEM from `ykman piv keys attest <slot>`")
