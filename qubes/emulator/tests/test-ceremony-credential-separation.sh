@@ -47,6 +47,15 @@ refuses "a user PIN longer than 15" "hsm_a_user_pin: a SmartCard-HSM user PIN is
 refuses "a 5-character YubiKey PIN" "yubikey_piv_pin: a YubiKey PIV PIN or PUK is 6-8" pin=11111
 refuses "a malformed management key" "yubikey_mgmt_key: a PIV management key" mgmt=0102
 
+refuses "the YubiKey factory PIN" "PROD GUARD: yubikey_piv_pin is unset or holds a recognised dev default" pin=123456
+refuses "the YubiKey factory PUK" "PROD GUARD: yubikey_piv_puk is unset or holds a recognised dev default" puk=12345678
+refuses "a 6-character PIN of 12 bytes" "yubikey_piv_pin: a YubiKey PIV PIN or PUK is 6-8" pin=éééééé
+
+# A field the file omits entirely: without this, a file of comments passed step 0.
+pins; grep -v '^hsm_b_so_pin=' "$WORK/pins.env" > "$WORK/pins.tmp" && mv "$WORK/pins.tmp" "$WORK/pins.env"
+out="$(run_step0 prod)"; rc=$?
+[ "$rc" != 0 ] && grep -qF "hsm_b_so_pin: missing from the PIN file" <<< "$out" && P "PROD refuses a file that omits a field" || F "an omitted field passed (rc=$rc): $out"
+
 pins b_user=$GOOD_A_USER; out="$(run_step0 dev)"; rc=$?
 [ "$rc" = 0 ] && grep -q "would REFUSE this file in PROD" <<< "$out" && P "DEV warns and continues" || F "DEV did not warn-and-continue (rc=$rc)"
 leaks "$out" && F "DEV printed a value" || P "no value is printed in DEV either"

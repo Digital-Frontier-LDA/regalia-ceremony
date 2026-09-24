@@ -16,7 +16,8 @@ records nothing.
 
 **1. Every credential the ceremony escrows is its own value.** The seven step-0 fields are
 `hsm_a_user_pin`, `hsm_a_so_pin`, `hsm_b_user_pin`, `hsm_b_so_pin`, `yubikey_piv_pin`,
-`yubikey_piv_puk` and `yubikey_mgmt_key`. No two may be equal, compared case-insensitively. Card
+`yubikey_piv_puk` and `yubikey_mgmt_key`. All seven are required. No two may be equal, compared
+case-insensitively. Card
 A's PIN is not card B's; a user PIN is not its own SO PIN; a YubiKey PIN is not its PUK, nor any
 HSM PIN.
 *Verified by:* `check_credential_separation` in step 0. PROD refuses, DEV warns, and no value is
@@ -25,13 +26,16 @@ printed in either mode. Test: `test-ceremony-credential-separation.sh`.
 **2. Each credential has the shape its device accepts.**
 - SmartCard-HSM user PIN: 6–15 characters.
 - SmartCard-HSM SO PIN: exactly 16 hex digits.
-- YubiKey PIV PIN and PUK: 6–8 characters.
+- YubiKey PIV PIN and PUK: 6–8 bytes (checked as bytes: multibyte input is refused).
 - PIV management key: 32, 48 or 64 hex digits.
 
 A value the card would refuse at initialisation is found at step 0, before anything is written.
 *Verified by:* the same check and test.
 
 **3. No credential is a published default.** Rules 1 and 2 cannot catch a well-formed docs example.
+That covers the SmartCard-HSM examples and the YubiKey factory PIN `123456`, PUK `12345678` and
+management key. Escrowing a factory value would leave it on the card, because step_yubikey_ops
+changes a card *to* the escrowed value.
 *Verified by:* `fail_ceremony_default_pin` (PROD refuses). Test: `test-payload-step.sh`.
 
 **4. The escrowed value is the value on the card.** A PIN engraved on metal that the card does not

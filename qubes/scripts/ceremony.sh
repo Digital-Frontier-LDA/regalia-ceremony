@@ -1125,7 +1125,9 @@ step_shamir() {
 # Note: the regex matches the literals only; the empty case is checked separately, because
 # putting "|" with an empty alternation at the end is POSIX-correct but breaks under legacy
 # grep implementations (macOS Homebrew's grep is ugrep, which rejects it).
-DEV_DEFAULT_PINS_REGEX='^(648219|3537363231383830|CHANGEME|TODO|FILL_IN)$'
+# The YubiKey factory PIN, PUK and management key are defaults too: step_yubikey_ops changes a card TO
+# the escrowed value, so an escrowed factory value leaves the factory credential on the card.
+DEV_DEFAULT_PINS_REGEX='^(648219|3537363231383830|123456|12345678|010203040506070801020304050607080102030405060708|CHANGEME|TODO|FILL_IN)$'
 
 # Source the mode. main() asks the operator to confirm it interactively, so the env value is a
 # default, not a bypass. Record whether it arrived FROM THE ENVIRONMENT before the default is
@@ -1175,10 +1177,14 @@ fail_ceremony_default_pin() {
 # accepts: a value the card will refuse at initialisation is found here, before anything is written.
 # PROD refuses; DEV warns, because the dev fixtures repeat on purpose. Values are never printed.
 check_credential_separation() {
+  # Byte semantics: a YubiKey takes at most 8 BYTES, and in a UTF-8 locale [[:print:]]{6,8} counts
+  # characters. Under C, multibyte input is not [[:print:]] at all, so it is refused outright.
+  local LC_ALL=C
   local problems="" k v other ov
   local fields="hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin yubikey_piv_pin yubikey_piv_puk yubikey_mgmt_key"
   for k in $fields; do
-    v="${!k:-}"; [ -n "$v" ] || continue
+    # A field the file omits is a problem, not a skip: a file of comments would otherwise pass.
+    v="${!k:-}"; [ -n "$v" ] || { problems="$problems|$k: missing from the PIN file"; continue; }
     case "$k" in
       hsm_?_user_pin)  [[ "$v" =~ ^[[:print:]]{6,15}$ ]] || problems="$problems|$k: a SmartCard-HSM user PIN is 6-15 printable characters" ;;
       hsm_?_so_pin)    [[ "$v" =~ ^[0-9A-Fa-f]{16}$ ]] || problems="$problems|$k: a SmartCard-HSM SO PIN is exactly 16 hex digits" ;;
