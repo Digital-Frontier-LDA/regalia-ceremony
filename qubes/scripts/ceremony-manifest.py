@@ -717,6 +717,9 @@ def check_yubikey_attestation(record: dict, source: str, serial: str, slot: str,
     if not facts["chain"]:
         raise Refusal(f"{source}: the attestation for slot {slot} does not chain to a trusted Yubico root "
                       f"({facts['how']}) — the device is not proven genuine")
+    if facts["slot"] != slot:
+        raise Refusal(f"{source}: the attestation is signed for slot {facts['slot']}, but the record says {slot} "
+                      f"— an attestation of one slot cannot stand for another")
     if facts["serial"] is None or str(facts["serial"]) != serial:
         raise Refusal(f"{source}: the attestation is signed for serial {facts['serial']}, but the report is from "
                       f"{serial} — the f9 key is shared across a batch, so only this serial identifies the device")
@@ -1193,6 +1196,9 @@ def cmd_yubikey_evidence(args: argparse.Namespace) -> int:
             "attestation_pem": args.attestation.read_text(encoding="ascii"),
             "f9_pem": args.f9.read_text(encoding="ascii"),
         }
+    except UnicodeDecodeError:
+        raise Refusal("the attestation and f9 files must be PEM (ykman's default); DER was given — "
+                      "re-export without --format DER") from None
     except OSError as error:
         raise Refusal(f"cannot read ykman output: {error}") from None
     if args.device_id:

@@ -167,8 +167,11 @@ def attested_facts(attestation_pem, f9_pem, trust=None, now=None):
     firmware = extension_bytes(attestation, OID_FIRMWARE)
     spki = attestation.public_key().public_bytes(serialization.Encoding.DER,
                                                  serialization.PublicFormat.SubjectPublicKeyInfo)
+    # The slot is in the SIGNED subject: "YubiKey PIV Attestation 9a" (measured on 5.7.4).
+    cn = attestation.subject.get_attributes_for_oid(x509.oid.NameOID.COMMON_NAME)
+    slot = cn[0].value.rsplit(" ", 1)[-1].lower() if cn and cn[0].value.startswith("YubiKey PIV Attestation ") else None
     return {
-        "chain": chained, "how": how,
+        "chain": chained, "how": how, "slot": slot,
         "serial": der_integer(extension_bytes(attestation, OID_SERIAL)),
         "pin_policy": PIN_POLICY.get(policy[0]) if policy and len(policy) >= 2 else None,
         "touch_policy": TOUCH_POLICY.get(policy[1]) if policy and len(policy) >= 2 else None,

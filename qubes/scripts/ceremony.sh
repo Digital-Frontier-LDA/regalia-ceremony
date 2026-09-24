@@ -558,6 +558,9 @@ step_manifest_yubikey() {
   while IFS=$'\t' read -r -u 9 slot alg pin touch path proof; do
     [ -n "$slot" ] || continue
     info "$path: slot $slot $alg pin=$pin touch=$touch on $device (serial $serial)"
+    # Evidence from an EARLIER generation of this slot describes a key that is about to be replaced.
+    # Remove it first: if this generation then fails, record must find nothing, not the old key's proof.
+    rm -f "$CEREMONY_MANIFEST_EVIDENCE_DIR/yubikey-$device-$slot.json" "$CEREMONY_MANIFEST_EVIDENCE_DIR/opproof-yubikey-$device-$slot.json"
     run "ykman --device '$serial' piv keys generate --algorithm '$alg' --pin-policy '$pin' --touch-policy '$touch' '$slot' '$WORK/yk-$serial-$slot.pem'" \
       || { warn "not generated — no evidence captured for $path"; continue; }
     # Everything below is READ from the token, after generation: its report (info, keys info, the key)

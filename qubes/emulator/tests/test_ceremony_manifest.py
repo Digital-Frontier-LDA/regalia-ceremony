@@ -306,8 +306,8 @@ class SimulatedYubico:
         (self.dir / "roots.pem").write_bytes(root.public_bytes(_ser.Encoding.PEM))
         (self.dir / "intermediates.pem").write_bytes(inter.public_bytes(_ser.Encoding.PEM))
 
-    def attest(self, der, serial, pin="ONCE", touch="NEVER", signer=None):
-        return _cert("YubiKey PIV Attestation", "YubiKey PIV Attestation", _ser.load_der_public_key(der),
+    def attest(self, der, serial, pin="ONCE", touch="NEVER", signer=None, slot="9c"):
+        return _cert(f"YubiKey PIV Attestation {slot}", "YubiKey PIV Attestation", _ser.load_der_public_key(der),
                      signer or self.f9_key, False,
                      (("1.3.6.1.4.1.41482.3.7", b"\x02\x04" + int(serial).to_bytes(4, "big")),
                       ("1.3.6.1.4.1.41482.3.8", bytes([_PIN_BYTE[pin], _TOUCH_BYTE[touch]])),
@@ -328,7 +328,7 @@ def yubikey_record(serial, der, device_id=None, slot="9c", attested=None, **info
         "ykman_info": f"Device type: YubiKey 5 NFC\nSerial number: {serial}\nFirmware version: 5.7.4\n",
         "ykman_keys_info": keys_info(**info),
         "public_key_der_b64": base64.b64encode(der).decode(),
-        "attestation_pem": SIM_YUBICO.attest(a["der"], a["serial"], a["pin"], a["touch"], a.get("signer")),
+        "attestation_pem": SIM_YUBICO.attest(a["der"], a["serial"], a["pin"], a["touch"], a.get("signer"), a.get("slot", slot)),
         "f9_pem": SIM_YUBICO.f9.public_bytes(_ser.Encoding.PEM).decode(),
     }
     if device_id:
@@ -587,6 +587,22 @@ class YubicoAttestation(Case):
         # The f9 key is shared across a batch: only the signed serial ties the key to THIS device.
         self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea", attested={"serial": YK_B})),
                             "is signed for serial", "shared across a batch")
+
+    def test_an_attestation_of_another_slot_is_refused(self):
+        self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea", attested={"slot": "9a"})),
+                            "the attestation is signed for slot 9a, but the record says 9c")
+
+    def test_a_der_attestation_file_is_refused_by_name(self):
+        (self.dir / "info.txt").write_text(f"Serial number: {YK_A}\n")
+        (self.dir / "keys.txt").write_text(keys_info())
+        (self.dir / "pub.der").write_bytes(self.der_a)
+        self.write_attestation(self.der_a, YK_A)
+        der = _x509.load_pem_x509_certificate((self.dir / "att.pem").read_bytes()).public_bytes(_ser.Encoding.DER)
+        (self.dir / "att.der").write_bytes(der)
+        result = self.run_tool("yubikey-evidence", "--slot", "9c", "--info", self.dir / "info.txt", "--keys-info",
+                               self.dir / "keys.txt", "--public-key", self.dir / "pub.der", "--attestation",
+                               self.dir / "att.der", "--f9", self.dir / "f9.pem", "--out", self.dir / "o.json")
+        self.refuses(result, "must be PEM")
 
     def test_an_attestation_of_another_key_is_refused(self):
         self.record_refuses(self.record_with_a(yubikey_record(YK_A, self.der_a, "yubikey-sitea", attested={"der": self.der_b})),
