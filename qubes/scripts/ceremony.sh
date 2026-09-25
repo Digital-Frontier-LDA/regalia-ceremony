@@ -1801,10 +1801,10 @@ step_chipcard() {
 }
 
 step_archive() {
-  b "Archive to M-DISC (burn on one drive, VERIFY on the other)"
-  info "You have two optical drives — use both: burn on drive A, then read back + checksum"
-  info "on drive B. A marginal burn the writer can still read but a second drive cannot is the"
-  info "classic silent-failure; cross-drive verify catches it."
+  b "Archive to M-DISC (burn, then read every file back and checksum it)"
+  info "One writer is enough (ADR-0002 D9): burn, push the tray shut, read the disc back and"
+  info "check every file against the manifest. If a second drive is attached it is used for the"
+  info "readback instead, which also catches a disc only the burning drive can read."
   warn "Confirm the drive is M-DISC capable (DVD M-DISC is written like DVD+R by most burners;"
   warn "check the M-DISC logo/firmware). DVD M-DISC ≈ 4.7 GB — far more than any key/shares need."
   warn "SD cards / USB flash are NOT archival (charge leaks over years) — use M-DISC + paper only."
@@ -1883,19 +1883,24 @@ step_archive() {
   # Burn and verify drives. Two USB drives are /dev/sr0 + /dev/sr1. With ONE USB writer and a
   # laptop's internal bay drive, the bay belongs to dom0 and reaches this qube read-only through
   # `qvm-block`, as /dev/xvdX: set CEREMONY_VERIFY_DEV to that node. It can read, never burn.
-  local bdev="${CEREMONY_BURN_DEV:-/dev/sr0}" vdev="${CEREMONY_VERIFY_DEV:-/dev/sr1}"
+  local bdev="${CEREMONY_BURN_DEV:-/dev/sr0}" vdev="${CEREMONY_VERIFY_DEV:-}"
+  if [ -z "$vdev" ]; then
+    # A second optical drive if one is attached, else the burning drive itself (ADR-0002 D9).
+    if [ "$bdev" != /dev/sr1 ] && [ -b /dev/sr1 ]; then vdev=/dev/sr1; else vdev="$bdev"; fi
+  fi
   # -dvd-compat CLOSES a DVD-R/DVD+R: an open (appendable) disc reads badly in some drives, and an
   # archive disc is written once. Proven on a Verbatim AZO DVD-R, 2026-09-25: status "complete".
   show "growisofs -dvd-compat -Z $bdev -R -J '$burn'     # burn on drive A ($bdev), and close the disc"
   info "A slim USB writer ejects its tray after the burn and cannot pull it back: push it shut"
   info "(or move the disc to drive B) and wait for the drive to settle before the readback."
   case "$vdev" in
+    "$bdev") info "Readback on the same drive: push the tray shut and wait for it to settle first." ;;
     /dev/sr*) : ;;
     *) info "Verify drive $vdev is a block-attached drive. Move the disc into it, then in dom0:"
        show "qvm-block attach --ro <this-qube> dom0:sr0      # the internal bay drive, READ-ONLY"
        info "and check which node appeared here (lsblk) — it must be $vdev." ;;
   esac
-  show "mount -o ro $vdev /mnt && ( cd /mnt && sha256sum -c manifest.sha256 )   # verify FROM drive B ($vdev), not the source tree"
+  show "mount -o ro $vdev /mnt && ( cd /mnt && sha256sum -c manifest.sha256 )   # verify FROM the disc ($vdev), not the source tree"
   show "d=\$(mktemp -d) && xorriso -osirrox on -indev $vdev -extract / \"\$d\" && ( cd \"\$d\" && sha256sum -c manifest.sha256 )   # same check without a kernel mount"
   info "Generate a checksum manifest of what you burn first (recurses into recovery-kit/):"
   run "( cd '$burn' && find . -type f ! -name manifest.sha256 -print0 | xargs -0 sha256sum > manifest.sha256 ) && cat '$burn/manifest.sha256'"
@@ -2009,7 +2014,7 @@ main() {
    1) YubiKey  — hardware ops age/SOPS identity
    2) Nitrokey HSM 2 — cold funding key + DKEK 4-of-6 backup
    3) Shamir split a recovery root (breakglass age key / mnemonic) + print shares
-   4) Archive to M-DISC (burn + cross-drive verify)
+   4) Archive to M-DISC (burn + readback verify)
    7) Tier-0 recovery payload -> encrypt + archival QR codes
    8) Write a SLIP-39 share to an SLE-4442 chip card
    9) Import the seed-derived funding key into the HSM (supported custody path)

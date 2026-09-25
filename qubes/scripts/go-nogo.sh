@@ -225,21 +225,18 @@ if needs printer; then
 fi
 
 if needs drives; then
-  hdr "Two optical drives for M-DISC burn + cross-drive verify"
+  hdr "An optical WRITER for the M-DISC burn (+ readback)"
   # GONOGO_OPTICAL_GLOB overrides the device glob for tests only; defaults to the real nodes.
   optglob="${GONOGO_OPTICAL_GLOB:-/dev/sr*}"
   n=$(ls $optglob 2>/dev/null | wc -l | tr -d ' ')
-  # One USB writer + a read-only drive reached through qvm-block (a laptop's internal bay, which
-  # belongs to dom0): CEREMONY_VERIFY_DEV names that node. It is attached only once the disc is in
-  # it, so it cannot be probed here; step_archive shows the attach and the verify against it.
-  vdev="${CEREMONY_VERIFY_DEV:-/dev/sr1}"
-  blockverify=0
-  case "$vdev" in /dev/sr*) ;; *) [ "$n" -eq 1 ] && blockverify=1 ;; esac
-  if [ "$n" -ge 2 ] || [ "$blockverify" = 1 ]; then
-    if [ "$blockverify" = 1 ]; then
-      ok "1 optical drive to burn on; the cross-drive verify reads back through $vdev (qvm-block, attached at the verify step)"
-    else
-      ok "$n optical drives present (/dev/sr*)"
+  # One writer is enough (ADR-0002 D9): the burn is read back on the same drive once its tray is
+  # pushed shut. A second drive, or a read-only one reached through qvm-block (CEREMONY_VERIFY_DEV),
+  # is used for the readback when present, but is not required.
+  vdev="${CEREMONY_VERIFY_DEV:-}"
+  if [ "$n" -ge 1 ]; then
+    if [ "$n" -ge 2 ]; then ok "$n optical drives present (/dev/sr*) — the readback uses the second"
+    elif [ -n "$vdev" ]; then ok "1 optical drive to burn on; the readback uses $vdev (qvm-block, attached at the verify step)"
+    else ok "1 optical drive — burn, push the tray shut, read back on the same drive (ADR-0002 D9)"
     fi
     # Presence is NOT capability, and a total writer COUNT is not enough either. A read-only
     # DVD-ROM reader exposes a /dev/srN node exactly like a writer, so two DVD-ROM readers count
@@ -282,7 +279,6 @@ if needs drives; then
     else
       warn "could not read optical write-capability table ($cdinfo) — confirm at least one drive is a DVD/M-DISC WRITER before the burn (a read-only DVD-ROM cannot burn a share)."
     fi
-  elif [ "$n" -eq 1 ]; then bad "only 1 optical drive — you cannot cross-drive verify the burn. Attach the second drive, or set CEREMONY_VERIFY_DEV to the qvm-block node of a read-only one (e.g. /dev/xvdi for an internal bay drive)."
   else bad "no /dev/sr* optical drive — attach the M-DISC writer(s)."; fi
 fi
 
@@ -295,7 +291,7 @@ cat <<'SHEET'
     [ ] YubiKey PIV PIN + PUK + management key chosen; touch policy = ALWAYS.
     [ ] SLE-4442 PSC (and whether you change it from FFFFFF) decided; 3 wrong = locked.
     [ ] Funding address will be recorded on paper AND verified on-chain afterwards.
-    [ ] M-DISC media on hand (DVD M-DISC, not DVD+R); 2 drives; spare blanks.
+    [ ] M-DISC media on hand (DVD M-DISC, not DVD+R); a writer (on the M-DISC list for M-DISC media); spare blanks.
     [ ] Printer page memory will be power-cycled after printing.
 SHEET
 
