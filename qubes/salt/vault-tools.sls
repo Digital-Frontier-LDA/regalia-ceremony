@@ -66,9 +66,10 @@ vault-fetch-proxy:
         #!/bin/sh
         # Print the Qubes updates proxy if this machine has one, else nothing.
         P=http://127.0.0.1:8082
-        # A HEAD of one small page: the bare /simple/ index is the whole of PyPI (tens of MB) and
-        # overran the timeout, so the probe answered "no proxy" (proxy-only build, 2026-09-25).
-        if curl -sI -m 20 -o /dev/null -x "$P" https://pypi.org/simple/pip/ 2>/dev/null; then echo "$P"; fi
+        # A GET of one small page, failing on any HTTP error (--fail): the bare /simple/ index is
+        # the whole of PyPI (tens of MB) and overran the timeout, so the probe answered "no proxy"
+        # (proxy-only build, 2026-09-25).
+        if curl -sf -m 30 -o /dev/null -x "$P" https://pypi.org/simple/pip/ 2>/dev/null; then echo "$P"; fi
 
 # SLIP-0039 `shamir` CLI (not packaged in Debian).
 # MIDDLE supply-chain posture (quorum 2026-06-29): install the pip deps with
@@ -166,7 +167,7 @@ slip39-wheels:
 # matches; Salt's own file.managed download cannot use the proxy.
 sops-binary:
   cmd.run:
-    - name: 'PX=$(/opt/vault-build/fetch-proxy); mkdir -p /opt/vault-bin && curl -fsSL ${PX:+-x $PX} -o /opt/vault-bin/sops.part https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 && echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /opt/vault-bin/sops.part" | sha256sum -c - && install -m 0755 /opt/vault-bin/sops.part /opt/vault-bin/sops; rc=$?; rm -f /opt/vault-bin/sops.part; exit $rc'
+    - name: 'PX=$(/opt/vault-build/fetch-proxy); mkdir -p /opt/vault-bin && curl -fsSL --connect-timeout 30 --max-time 1200 --retry 3 ${PX:+-x $PX} -o /opt/vault-bin/sops.part https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 && echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /opt/vault-bin/sops.part" | sha256sum -c - && install -m 0755 /opt/vault-bin/sops.part /opt/vault-bin/sops; rc=$?; rm -f /opt/vault-bin/sops.part; exit $rc'
     - unless: 'echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /opt/vault-bin/sops" | sha256sum -c --status -'
     - require:
       - pkg: vault-tools-apt
@@ -177,7 +178,7 @@ sops-binary:
 # (pulled by the apt manifest). The .deb is hash-verified before dpkg installs it.
 age-plugin-yubikey-deb:
   cmd.run:
-    - name: 'PX=$(/opt/vault-build/fetch-proxy); D=/opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb; mkdir -p /opt/vault-bin && curl -fsSL ${PX:+-x $PX} -o $D.part https://github.com/str4d/age-plugin-yubikey/releases/download/v0.5.0/age-plugin-yubikey_0.5.0-1_amd64.deb && echo "bf7a02418de04b3d3df9791e185d493eb344829bca4009247a41bc4d7630b47f  $D.part" | sha256sum -c - && mv $D.part $D; rc=$?; rm -f $D.part; exit $rc'
+    - name: 'PX=$(/opt/vault-build/fetch-proxy); D=/opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb; mkdir -p /opt/vault-bin && curl -fsSL --connect-timeout 30 --max-time 1200 --retry 3 ${PX:+-x $PX} -o $D.part https://github.com/str4d/age-plugin-yubikey/releases/download/v0.5.0/age-plugin-yubikey_0.5.0-1_amd64.deb && echo "bf7a02418de04b3d3df9791e185d493eb344829bca4009247a41bc4d7630b47f  $D.part" | sha256sum -c - && mv $D.part $D; rc=$?; rm -f $D.part; exit $rc'
     - unless: 'echo "bf7a02418de04b3d3df9791e185d493eb344829bca4009247a41bc4d7630b47f  /opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb" | sha256sum -c --status -'
     - require:
       - pkg: vault-tools-apt
