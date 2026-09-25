@@ -256,6 +256,16 @@ vault-journald-volatile:
 # - nothing automounts storage. systemd's GPT auto-generator mounts the template disk's EFI
 #   partition on /efi on first access (a Qubes VM boots the dom0-provided kernel and never needs
 #   it), and udisks2 automounts removable media. A mask in /etc outranks the generated unit.
+# - no swap. Qubes gives every VM a swap partition on its volatile disk and turns it on twice:
+#   dev-xvdc1-swap.service (swapon early in boot) and the unit systemd generates from the
+#   "/dev/xvdc1 swap" line qubes-core-agent ships in /etc/fstab. With either, ceremony RAM can be
+#   paged to disk; the in-VM preflight failed on it in the first real disposable (2026-09-25).
+#   Masks in /etc outrank both; the fstab conffile is left untouched.
+vault-no-swap:
+  cmd.run:
+    - name: systemctl mask dev-xvdc1-swap.service dev-xvdc1.swap
+    - unless: 'test "$(readlink /etc/systemd/system/dev-xvdc1-swap.service)" = /dev/null && test "$(readlink /etc/systemd/system/dev-xvdc1.swap)" = /dev/null'
+
 vault-no-automount:
   cmd.run:
     - name: systemctl mask efi.automount udisks2.service
