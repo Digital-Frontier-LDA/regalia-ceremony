@@ -165,7 +165,7 @@ if command -v lpstat >/dev/null 2>&1; then
       bad "a NETWORK printer queue exists — remove it; print only over usb://."
       printf '%s\n' "$net" | sed 's/^/       /'
     else ok "no network printer queues (usb/local only)."; fi
-  else warn "no CUPS print queue — add the USB Brother laser (no network/storage printer) if you'll print paper shares."; fi
+  else warn "no CUPS print queue — add the USB laser printer (no network, no internal storage) if you'll print paper shares."; fi
 else warn "lp/lpstat not installed — paper steps will only write files."; fi
 
 echo "== Optical drives (M-DISC archive) =="

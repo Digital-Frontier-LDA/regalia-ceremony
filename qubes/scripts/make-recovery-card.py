@@ -11,7 +11,7 @@ the line, and slip it in beside the M-DISC.
   # then print on the ceremony's USB printer:
   lp -d <queue> recovery-card.ps
 
-PostScript only (no deps); prints on any CUPS/Brother queue.
+PostScript only (no deps); prints on any CUPS queue.
 """
 import argparse
 import datetime
