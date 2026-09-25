@@ -18,6 +18,7 @@ vault-tools-apt:
     - pkgs:
       - age
       - iproute2           # `ip`: the air-gap preflight needs it, and a *-minimal template may lack it
+      - curl               # fetches the pinned non-apt files through the Qubes updates proxy
       - opensc
       - pcscd
       - libccid
@@ -49,6 +50,25 @@ vault-tools-apt:
       - printer-driver-brlaser   # Brother monochrome lasers that are not IPP-everywhere
       - python3-pyscard    # sle4442-manager: SLE-4442 chip cards over PC/SC
       - v4l-utils          # v4l2-ctl: find/focus the webcam used to scan printed QR back
+
+# A Qubes TemplateVM has NO direct network: apt reaches the mirrors only through the Qubes updates
+# proxy (127.0.0.1:8082, forwarded over qrexec). Every other download in this recipe must go the
+# same way, or it fails with "Temporary failure in name resolution" (first real build on the
+# owner's machine, 2026-09-25: pip and the GitHub downloads all failed while apt succeeded). This
+# prints the proxy when it answers, and nothing elsewhere (CI, a build root with direct network),
+# so one recipe serves both. Every download stays hash-pinned; the proxy only carries bytes.
+vault-fetch-proxy:
+  file.managed:
+    - name: /opt/vault-build/fetch-proxy
+    - mode: "0755"
+    - makedirs: True
+    - contents: |
+        #!/bin/sh
+        # Print the Qubes updates proxy if this machine has one, else nothing.
+        P=http://127.0.0.1:8082
+        # A HEAD of one small page: the bare /simple/ index is the whole of PyPI (tens of MB) and
+        # overran the timeout, so the probe answered "no proxy" (proxy-only build, 2026-09-25).
+        if curl -sI -m 20 -o /dev/null -x "$P" https://pypi.org/simple/pip/ 2>/dev/null; then echo "$P"; fi
 
 # SLIP-0039 `shamir` CLI (not packaged in Debian).
 # MIDDLE supply-chain posture (quorum 2026-06-29): install the pip deps with
@@ -89,7 +109,7 @@ slip39-shamir:
     # minimal template or on the machine that later recovers from the disc.
     # QUOTED: ":all: " is a YAML mapping indicator in a plain scalar, and Salt could not render
     # the state at all (caught by CI on the Debian 12 build, 2026-09-24).
-    - name: 'rm -rf /opt/vault-ceremony/venv && python3 -m venv --system-site-packages /opt/vault-ceremony/venv && /opt/vault-ceremony/venv/bin/pip install --no-cache-dir --ignore-installed --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt && cp /opt/vault-ceremony/requirements.txt /opt/vault-ceremony/venv/requirements.installed'
+    - name: 'PX=$(/opt/vault-build/fetch-proxy); rm -rf /opt/vault-ceremony/venv && python3 -m venv --system-site-packages /opt/vault-ceremony/venv && /opt/vault-ceremony/venv/bin/pip install ${PX:+--proxy $PX} --no-cache-dir --ignore-installed --only-binary :all: --require-hashes -r /opt/vault-ceremony/requirements.txt && cp /opt/vault-ceremony/requirements.txt /opt/vault-ceremony/venv/requirements.installed'
     # Rebuilt unless the venv was COMPLETED for exactly this requirements.txt. Not `onchanges`:
     # the file lands before the install runs, so after a failed first build a re-run saw no change
     # and skipped the install, reporting success with no venv (found on the trixie build).
@@ -97,6 +117,7 @@ slip39-shamir:
     - require:
       - pkg: vault-tools-apt
       - file: ceremony-requirements
+      - file: vault-fetch-proxy
 
 # The SLIP-0039 CLI on PATH, from the venv.
 slip39-shamir-bin:
@@ -119,8 +140,9 @@ slip39-wheels:
     # per-version (cp311 vs cp313), and a disc read on the other Debian release would otherwise
     # hold no installable cffi (review of #46). Python 3.11 = Debian 12, 3.13 = Debian 13.
     - name: >
+        PX=$(/opt/vault-build/fetch-proxy);
         for v in 3.11 3.13; do
-        pip3 download --only-binary :all: --require-hashes
+        pip3 download ${PX:+--proxy $PX} --only-binary :all: --require-hashes
         --python-version "$v" --implementation cp
         --platform manylinux2014_x86_64 --platform manylinux_2_17_x86_64 --platform manylinux_2_34_x86_64
         -r /opt/vault-ceremony/requirements.txt -d /opt/vault-ceremony/wheels || exit 1;
@@ -131,6 +153,7 @@ slip39-wheels:
     - require:
       - pkg: vault-tools-apt
       - file: ceremony-requirements
+      - file: vault-fetch-proxy
 
 # --- Non-apt binaries: pinned VERSION + verified SHA-256 ------------------------
 # Installed to /opt/vault-bin (template root, inherited read-only). NOT /usr/local —
@@ -139,29 +162,32 @@ slip39-wheels:
 # (sops cross-checked against the GitHub release-asset digest).
 
 # sops (getsops/sops v3.13.1, linux amd64)
+# Fetched with curl (through the updates proxy on Qubes) and installed only after its SHA-256
+# matches; Salt's own file.managed download cannot use the proxy.
 sops-binary:
-  file.managed:
-    - name: /opt/vault-bin/sops
-    - source: https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64
-    - source_hash: sha256=620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a
-    - mode: "0755"
-    - makedirs: True
+  cmd.run:
+    - name: 'PX=$(/opt/vault-build/fetch-proxy); mkdir -p /opt/vault-bin && curl -fsSL ${PX:+-x $PX} -o /opt/vault-bin/sops.part https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 && echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /opt/vault-bin/sops.part" | sha256sum -c - && install -m 0755 /opt/vault-bin/sops.part /opt/vault-bin/sops; rc=$?; rm -f /opt/vault-bin/sops.part; exit $rc'
+    - unless: 'echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /opt/vault-bin/sops" | sha256sum -c --status -'
+    - require:
+      - pkg: vault-tools-apt
+      - file: vault-fetch-proxy
 
 # age-plugin-yubikey v0.5.0 — installed from the upstream .deb (v0.5.1 dropped its
 # Linux build, so v0.5.0 is the last with a Linux artifact). Needs pcscd at runtime
 # (pulled by the apt manifest). The .deb is hash-verified before dpkg installs it.
 age-plugin-yubikey-deb:
-  file.managed:
-    - name: /opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb
-    - source: https://github.com/str4d/age-plugin-yubikey/releases/download/v0.5.0/age-plugin-yubikey_0.5.0-1_amd64.deb
-    - source_hash: sha256=bf7a02418de04b3d3df9791e185d493eb344829bca4009247a41bc4d7630b47f
-    - makedirs: True
+  cmd.run:
+    - name: 'PX=$(/opt/vault-build/fetch-proxy); D=/opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb; mkdir -p /opt/vault-bin && curl -fsSL ${PX:+-x $PX} -o $D.part https://github.com/str4d/age-plugin-yubikey/releases/download/v0.5.0/age-plugin-yubikey_0.5.0-1_amd64.deb && echo "bf7a02418de04b3d3df9791e185d493eb344829bca4009247a41bc4d7630b47f  $D.part" | sha256sum -c - && mv $D.part $D; rc=$?; rm -f $D.part; exit $rc'
+    - unless: 'echo "bf7a02418de04b3d3df9791e185d493eb344829bca4009247a41bc4d7630b47f  /opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb" | sha256sum -c --status -'
+    - require:
+      - pkg: vault-tools-apt
+      - file: vault-fetch-proxy
 age-plugin-yubikey:
   pkg.installed:
     - sources:
       - age-plugin-yubikey: /opt/vault-bin/age-plugin-yubikey_0.5.0-1_amd64.deb
     - require:
-      - file: age-plugin-yubikey-deb
+      - cmd: age-plugin-yubikey-deb
       - pkg: vault-tools-apt
 # Alternative (newer versions / no .deb): build from crates.io, integrity via the
 # locked crate checksums:  apt install cargo pkg-config libpcsclite-dev &&
