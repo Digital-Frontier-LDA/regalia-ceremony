@@ -50,14 +50,14 @@ burn_src="$W/burn"; mkdir -p "$burn_src"
 echo "recovery-kit" > "$burn_src/RECOVERY-START-HERE.txt"
 echo "share data"   > "$burn_src/share1.txt"
 ( cd "$burn_src" && find . -type f ! -name manifest.sha256 -print0 | xargs -0 sha256sum > manifest.sha256 )
-growisofs -Z /dev/sr0 -R -J "$burn_src" >/dev/null 2>&1 \
+growisofs -dvd-compat -Z /dev/sr0 -R -J "$burn_src" >/dev/null 2>&1 \
   || { F "growisofs(emu) burn failed"; printf '\n  %d passed, %d failed\n' "$pass" "$fail"; exit 1; }
 ISO="$EMU_OPTICAL_DIR/sr0.iso"
 
 # ---- A. --fault must ALWAYS reject (run several times to defeat extraction-order luck) --
 hdr "A. --fault must force a REJECT every time (never a false 'burn is sound')"
 fault_ok=1
-for i in 1 2 3 4 5; do
+for _ in 1 2 3 4 5; do
   if optical-verify --image "$ISO" --manifest manifest.sha256 --fault >/dev/null 2>&1; then
     fault_ok=0
     break

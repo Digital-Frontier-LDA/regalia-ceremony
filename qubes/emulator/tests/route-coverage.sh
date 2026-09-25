@@ -205,7 +205,7 @@ burn_src="$WORK/burn"; mkdir -p "$burn_src"
 echo "recovery-kit" > "$burn_src/RECOVERY-START-HERE.txt"
 echo "share data"   > "$burn_src/share1.txt"
 ( cd "$burn_src" && find . -type f ! -name manifest.sha256 -print0 | xargs -0 sha256sum > manifest.sha256 )
-growisofs -Z /dev/sr0 -R -J "$burn_src" >/dev/null 2>&1 \
+growisofs -dvd-compat -Z /dev/sr0 -R -J "$burn_src" >/dev/null 2>&1 \
   && P "burned the kit to emulated drive A (/dev/sr0)" || F "growisofs burn failed"
 if optical-verify --image "$EMU_OPTICAL_DIR/sr0.iso" --manifest manifest.sha256 >/dev/null 2>&1; then
   P "cross-drive verify PASSES on a good burn"
