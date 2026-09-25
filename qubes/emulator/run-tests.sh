@@ -263,6 +263,9 @@ say "PREFLIGHT AIR-GAP — a missing route tool must never read as 'air-gapped'"
 say "PREFLIGHT LIVE INTERFACE — a routable address with no default route must FAIL, not WARN"
 "$HERE/tests/test-preflight-live-iface.sh" || suite_failed "test-preflight-live-iface.sh"
 
+say "PREFLIGHT TOKENS — 'No smart card readers found' is not a reader, and a missing HSM is said"
+"$HERE/tests/test-preflight-token-readers.sh" || suite_failed "test-preflight-token-readers.sh"
+
 say "FS SCAN — a dangling link must not crash or silently truncate the scan"
 python3 "$HERE/tests/test_scan_dangling_link.py" || suite_failed "test_scan_dangling_link.py"
 
