@@ -152,17 +152,28 @@ Can read DVD:		1
 EOS
 run1(){ GONOGO_OPTICAL_GLOB="$FAKE/one/dev/sr*" GONOGO_CDROM_INFO="$1" "$GN" --need drives 2>&1 || true; }
 
-hdr "one USB drive, no verify drive declared -> STOP (no cross-drive verify)"
+hdr "one USB writer, nothing else -> GO: burn, push the tray shut, read back on it (ADR-0002 D9)"
 out="$(run1 "$FAKE/cdinfo-single-writer")"
-if grep -qi 'only 1 optical drive' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
-  P "a lone drive still STOPs when no second (block-attached) drive is declared"
+# (The overall verdict is not asserted: on a dev host the air-gap preflight fails regardless.)
+if grep -qi 'read back on the same drive' <<< "$out" && grep -qi 'DVD writer profile' <<< "$out" \
+    && ! grep -qi 'only 1 optical drive' <<< "$out"; then
+  P "a lone writer is accepted, with the same-drive readback, and its write capability still checked"
 else
-  F "a lone drive passed without any cross-drive verify path"
+  F "a lone writer was not accepted for the single-drive readback"
+  echo "$out" | grep -iE 'optical|drive|sr|writer' | sed 's/^/      /'
+fi
+
+hdr "one READ-ONLY drive, nothing else -> STOP (it cannot burn)"
+out="$(run1 "$FAKE/cdinfo-single-reader")"
+if grep -qi 'NONE can WRITE' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
+  P "a lone read-only drive still STOPs"
+else
+  F "a lone read-only drive passed"
 fi
 
 hdr "one USB writer + CEREMONY_VERIFY_DEV=/dev/xvdi (qvm-block bay drive) -> GO"
 out="$(CEREMONY_VERIFY_DEV=/dev/xvdi run1 "$FAKE/cdinfo-single-writer")"
-if grep -qi 'reads back through /dev/xvdi' <<< "$out" && grep -qi 'DVD writer profile' <<< "$out"; then
+if grep -qi 'the readback uses /dev/xvdi' <<< "$out" && grep -qi 'DVD writer profile' <<< "$out"; then
   P "accepts one writer with a declared qvm-block verify drive, and still checks the writer"
 else
   F "one writer + declared qvm-block verify drive was not accepted"
@@ -175,6 +186,22 @@ if grep -qi 'NONE can WRITE' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
   P "the write-capability check still applies to the lone burn drive"
 else
   F "a read-only lone drive passed because a verify drive was declared"
+fi
+
+hdr "CEREMONY_VERIFY_DEV names an optical drive that is NOT attached -> STOP (review of #54)"
+out="$(CEREMONY_VERIFY_DEV=/dev/sr1 run1 "$FAKE/cdinfo-single-writer")"
+if grep -qi 'CEREMONY_VERIFY_DEV=/dev/sr1 is not attached' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
+  P "a configured readback drive that is absent STOPs instead of pointing the readback at nothing"
+else
+  F "an absent configured readback drive was accepted"
+fi
+
+hdr "CEREMONY_VERIFY_DEV names an attached second drive -> the gate reports THAT drive"
+out="$(CEREMONY_VERIFY_DEV=/dev/sr1 GONOGO_CDROM_INFO="$FAKE/cdinfo-one-writer" "$GN" --need drives 2>&1 || true)"
+if grep -qi 'the readback uses /dev/sr1 (CEREMONY_VERIFY_DEV)' <<< "$out"; then
+  P "the gate names the configured readback drive, as step_archive will use it"
+else
+  F "the gate did not report the configured readback drive"
 fi
 
 hdr "RESULT"

@@ -54,12 +54,13 @@ printf 'RECOVERY START HERE' > "$SRC/recovery-kit/RECOVERY-START-HERE.txt"
 
 # Helper: run the operator's verify command with the mount pointed at $1 (the "drive B" disc),
 # executed from the SOURCE dir (where the operator sits after generating the manifest). We
-# replace the real `mount -o ro /dev/sr1 /mnt` with `true` (mount always succeeds) and retarget
+# replace the real `mount -o ro /dev/srN /mnt` with `true` (mount always succeeds) and retarget
 # every /mnt at the disc dir, so the ONLY thing under test is whether the verify checksums the
 # disc or the source tree.
 run_verify_against() {
   local disc="$1" c="$cmd"
-  c="${c//mount -o ro \/dev\/sr1 \/mnt/true}"
+  # whichever drive the wizard chose (a second drive, or the burning drive: ADR-0002 D9)
+  c="$(printf '%s' "$c" | sed -E 's#mount -o ro /dev/[A-Za-z0-9]+ /mnt#true#')"
   c="${c//\/mnt/$disc}"
   ( cd "$SRC" && eval "$c" ) >/dev/null 2>&1
 }

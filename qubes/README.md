@@ -149,12 +149,10 @@ longer needs; the wizard runs one step at a time, so nothing needs a hub.
 
 - **Webcam** (printed-QR scan-back) and a **built-in reader** are internal USB: no port used.
 - **HSM funding** needs both Nitrokeys at once; every other step needs at most one token.
-- **M-DISC:** burn on the USB writer (`qvm-usb`). For the cross-drive verify, a laptop's internal
-  bay drive belongs to dom0 and can only be passed **read-only** with `qvm-block`. Run the
-  ceremony with `CEREMONY_VERIFY_DEV=/dev/xvdi` (the node `qvm-block` creates; confirm with
-  `lsblk`). Once the burned disc is in the bay, in dom0:
-  `qvm-block attach --ro <dispvm> dom0:sr0`. Preflight and go/no-go accept this layout; without
-  it they require two USB drives.
+- **M-DISC:** burn on the USB writer (`qvm-usb`), push the slim tray shut, and read the disc back
+  on the same drive (ADR-0002 D9: one writer is enough). A second drive is optional: a second USB
+  drive is used automatically, and a laptop's bay drive (dom0's, read-only through
+  `qvm-block attach --ro <dispvm> dom0:sr0`) is used with `CEREMONY_VERIFY_DEV=/dev/xvdi`.
 
 `ceremony.sh` is built for **both** tokens: a YubiKey step (PIV/P-256 `ops` age identity)
 **and** a Nitrokey HSM 2 step (DKEK 4-of-6 backup + on-device secp256k1 funding key). It
@@ -205,10 +203,11 @@ sealing.
 
 ## Hardware notes (T430-class airgap host)
 
-- **Two optical drives (internal + external) = burn on one, verify-read on the other.**
-  A marginal burn the *writing* drive can still read but a second drive cannot is the
-  classic silent failure; cross-drive verify catches it. `ceremony.sh` step 4 + `preflight`
-  check for ≥2 `/dev/sr*`.
+- **One optical writer is enough** (ADR-0002 D9). `ceremony.sh` step 4 **shows** the burn
+  (`growisofs -dvd-compat`, which closes the disc) and the readback (`sha256sum -c` of every file
+  against the manifest); it does not run them. **Run both, and seal the disc only after the
+  checksum check reports every file OK.** A second drive, when attached, does the readback instead and also catches a disc only
+  the burning drive can read; the recovery drill and seal checks read the disc on other drives later.
 - **M-DISC:** DVD M-DISC is written like DVD+R and most burners handle it, but confirm the
   drive's M-DISC support. DVD M-DISC ≈ 4.7 GB — vastly more than a key/shares need. (T430
   internal is DVD-multi: DVD M-DISC only, no Blu-ray.)
