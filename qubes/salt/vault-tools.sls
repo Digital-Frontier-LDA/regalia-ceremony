@@ -47,7 +47,7 @@ vault-tools-apt:
       - cups-filters       # PNG/text -> printer; without it a QR page cannot be rendered
       - ipp-usb            # driverless IPP-over-USB (most current USB lasers)
       - ghostscript        # PostScript rendering for the recovery card and non-PS printers
-      - printer-driver-brlaser   # older Brother monochrome lasers without driverless IPP-over-USB
+      - printer-driver-brlaser   # some older Brother monochrome models (Debian lists which)
       - python3-pyscard    # sle4442-manager: SLE-4442 chip cards over PC/SC
       - v4l-utils          # v4l2-ctl: find/focus the webcam used to scan printed QR back
 

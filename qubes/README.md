@@ -219,7 +219,7 @@ sealing.
   vault with `qvm-usb`.
 - **Printer:** any USB-attached **laser** printer with **no network and no internal storage**
   (driverless IPP-over-USB covers most current models; `printer-driver-brlaser` is included for
-  older Brother lasers; other brands may need their driver added to the recipe);
+  some older Brother models (Debian lists which); other brands may need their driver added to the recipe);
   power-cycle it after printing to clear page memory. The CUPS spool lives in the
   disposable qube and dies on shutdown.
 

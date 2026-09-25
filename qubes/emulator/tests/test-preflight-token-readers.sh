@@ -45,6 +45,16 @@ out="$(run "$FAKE/yubikey")"
 grep -q "OK   1 PC/SC reader(s) visible" <<< "$out" && P "the YubiKey's reader is counted" || F "YubiKey reader not counted"
 grep -q "WARN no Nitrokey HSM or Pico HSM" <<< "$out" && P "a YubiKey is not mistaken for an HSM" || F "YubiKey taken for an HSM"
 
+hdr "an HSM reader with no token answering (Card No): not reported as present (review of #56)"
+cat > "$FAKE/nocard" <<'O'
+# Detected readers (pcsc)
+Nr.  Card  Features  Name
+0    No              Nitrokey Nitrokey HSM (DENK04041440000         ) 00 00
+O
+out="$(run "$FAKE/nocard")"
+grep -q "HSM token(s) present" <<< "$out" && F "a Card No reader was reported as an HSM token" || P "no false 'HSM present'"
+grep -q "no token answers" <<< "$out" && P "says the HSM reader has no token answering" || F "no warning for the silent HSM reader"
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

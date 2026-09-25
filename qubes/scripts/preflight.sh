@@ -147,10 +147,13 @@ if command -v opensc-tool >/dev/null 2>&1; then
     warn "no smart-card reader or token seen — attach it with 'qvm-usb attach' from dom0."
   fi
   # The HSM itself, named: Nitrokey HSM 2 and Pico HSM both present as SmartCard-HSM readers.
-  hsms="$(grep -iE 'nitrokey hsm|smartcard-hsm|pico' <<< "$readers" \
-          | sed -E 's/^[0-9]+[[:space:]]+(Yes|No)[[:space:]]+//; s/[[:space:]]+/ /g' || true)"
+  # Only rows whose Card column is "Yes": a reader with no token answering is not an HSM.
+  hsms="$(grep -iE 'nitrokey hsm|smartcard-hsm|pico' <<< "$readers" | grep -E '^[0-9]+[[:space:]]+Yes[[:space:]]' \
+          | sed -E 's/^[0-9]+[[:space:]]+Yes[[:space:]]+//; s/[[:space:]]+/ /g' || true)"
   if [ -n "$hsms" ]; then
     ok "HSM token(s) present: $(tr '\n' ';' <<< "$hsms" | sed 's/;$//')"
+  elif grep -qiE 'nitrokey hsm|smartcard-hsm|pico' <<< "$readers"; then
+    warn "an HSM reader is attached but no token answers in it — re-seat it (detach/attach with qvm-usb)."
   else
     warn "no Nitrokey HSM or Pico HSM seen — attach it with 'qvm-usb attach' if this ceremony uses one."
   fi
