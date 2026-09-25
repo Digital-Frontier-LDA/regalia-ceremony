@@ -57,7 +57,7 @@ ISO="$EMU_OPTICAL_DIR/sr0.iso"
 # ---- A. --fault must ALWAYS reject (run several times to defeat extraction-order luck) --
 hdr "A. --fault must force a REJECT every time (never a false 'burn is sound')"
 fault_ok=1
-for i in 1 2 3 4 5; do
+for _ in 1 2 3 4 5; do
   if optical-verify --image "$ISO" --manifest manifest.sha256 --fault >/dev/null 2>&1; then
     fault_ok=0
     break
