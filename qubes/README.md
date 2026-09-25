@@ -154,6 +154,13 @@ longer needs; the wizard runs one step at a time, so nothing needs a hub.
   drive is used automatically, and a laptop's bay drive (dom0's, read-only through
   `qvm-block attach --ro <dispvm> dom0:sr0`) is used with `CEREMONY_VERIFY_DEV=/dev/xvdi`.
 
+**Wallet seed entropy (wizard step `e`).** A new seed is never taken from one random source: the
+wizard collects at least 100 rolls of a fair six-sided die (typed hidden, ~258 bits, hashed with
+SHA-256), 32 bytes from the attached HSM's hardware RNG (Nitrokey HSM 2 or Pico HSM, read directly
+over PC/SC with `hsm-random.py`), and 32 bytes of `/dev/urandom`,
+XORs them (`entropy-mix.py`), and encodes the result as a 24-word BIP39 mnemonic for step 3 c. It
+refuses without the dice or without the HSM.
+
 `ceremony.sh` is built for **both** tokens: a YubiKey step (PIV/P-256 `ops` age identity)
 **and** a Nitrokey HSM 2 step (DKEK 4-of-6 backup + on-device secp256k1 funding key). It
 prints paper shares to a CUPS printer and never echoes a secret to the terminal (secrets
