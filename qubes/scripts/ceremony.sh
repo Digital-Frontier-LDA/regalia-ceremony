@@ -1884,7 +1884,11 @@ step_archive() {
   # laptop's internal bay drive, the bay belongs to dom0 and reaches this qube read-only through
   # `qvm-block`, as /dev/xvdX: set CEREMONY_VERIFY_DEV to that node. It can read, never burn.
   local bdev="${CEREMONY_BURN_DEV:-/dev/sr0}" vdev="${CEREMONY_VERIFY_DEV:-/dev/sr1}"
-  show "growisofs -Z $bdev -R -J '$burn'                 # burn on drive A ($bdev)"
+  # -dvd-compat CLOSES a DVD-R/DVD+R: an open (appendable) disc reads badly in some drives, and an
+  # archive disc is written once. Proven on a Verbatim AZO DVD-R, 2026-09-25: status "complete".
+  show "growisofs -dvd-compat -Z $bdev -R -J '$burn'     # burn on drive A ($bdev), and close the disc"
+  info "A slim USB writer ejects its tray after the burn and cannot pull it back: push it shut"
+  info "(or move the disc to drive B) and wait for the drive to settle before the readback."
   case "$vdev" in
     /dev/sr*) : ;;
     *) info "Verify drive $vdev is a block-attached drive. Move the disc into it, then in dom0:"
