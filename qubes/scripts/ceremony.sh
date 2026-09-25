@@ -299,7 +299,7 @@ require_airgap_and_tools() {
   fi
 }
 
-# ---- printer (Brother laser via CUPS over USB) -------------------------------
+# ---- printer (a USB laser via CUPS) -------------------------------------------
 PRINTER=""
 pick_printer() {
   b "Printer"
@@ -308,7 +308,7 @@ pick_printer() {
   warn "spool lives in this disposable qube and dies when you power it off."
   if ! command -v lpstat >/dev/null 2>&1; then warn "CUPS (lp/lpstat) not installed; skipping print steps"; return 1; fi
   info "Detected print queues:"; lpstat -p 2>/dev/null | sed 's/^/     /' || true
-  read -r -p "   Brother queue name (blank = skip printing): " PRINTER
+  read -r -p "   printer queue name (blank = skip printing): " PRINTER
   [ -n "$PRINTER" ] || { warn "no printer chosen; paper steps will only write files for you to print manually"; return 1; }
   # the queue name is later embedded in an lp command; restrict it to CUPS-legal
   # characters so it can't inject shell metacharacters.

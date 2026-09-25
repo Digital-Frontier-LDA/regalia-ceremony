@@ -199,6 +199,11 @@ def evaluate(snapshot: dict[str, object]) -> tuple[str | None, list[str], list[s
         failures.append("mounted storage could not be enumerated")
     else:
         allowed_rw = {"/", "/dev", "/dev/shm", "/run", "/tmp"}
+        # Qubes bind-dirs (e.g. /var/spool/cron) are bind mounts out of the private volume that is
+        # already mounted on /rw, shown as "<rw device>[/bind-dirs/<path>]". Same storage as /rw,
+        # so the same verdict; any other source still fails (first dispVM run, 2026-09-25).
+        rw_source = next((str(m.get("source", "")) for m in mounts
+                          if isinstance(m, dict) and m.get("target") == "/rw"), "")
         qubes_rw_prefixes = ("/rw", "/home", "/usr/local") if profile.startswith("qubes-") else ()
         for mount in mounts:
             if not isinstance(mount, dict):
@@ -208,6 +213,9 @@ def evaluate(snapshot: dict[str, object]) -> tuple[str | None, list[str], list[s
             opts = str(mount.get("options", ""))
             fstype = str(mount.get("fstype", ""))
             expected_qubes_mount = any(target == prefix or target.startswith(prefix + "/") for prefix in qubes_rw_prefixes)
+            if profile.startswith("qubes-") and rw_source \
+                    and str(mount.get("source", "")).startswith(rw_source + "[/bind-dirs/"):
+                expected_qubes_mount = True
             # Qubes mounts the dom0-provided kernel modules image (lowerdir /tmp/modules) under an
             # overlay on /usr/lib/modules in every VM; its upper layer is the root volume, which a
             # disposable discards.

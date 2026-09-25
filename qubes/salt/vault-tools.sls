@@ -47,7 +47,7 @@ vault-tools-apt:
       - cups-filters       # PNG/text -> printer; without it a QR page cannot be rendered
       - ipp-usb            # driverless IPP-over-USB (most current USB lasers)
       - ghostscript        # PostScript rendering for the recovery card and non-PS printers
-      - printer-driver-brlaser   # Brother monochrome lasers that are not IPP-everywhere
+      - printer-driver-brlaser   # some older Brother monochrome models (Debian lists which)
       - python3-pyscard    # sle4442-manager: SLE-4442 chip cards over PC/SC
       - v4l-utils          # v4l2-ctl: find/focus the webcam used to scan printed QR back
 
@@ -256,6 +256,27 @@ vault-journald-volatile:
 # - nothing automounts storage. systemd's GPT auto-generator mounts the template disk's EFI
 #   partition on /efi on first access (a Qubes VM boots the dom0-provided kernel and never needs
 #   it), and udisks2 automounts removable media. A mask in /etc outranks the generated unit.
+# - no swap. Qubes gives every VM a swap partition on its volatile disk and turns it on twice:
+#   dev-xvdc1-swap.service (swapon early in boot) and the unit systemd generates from the
+#   "/dev/xvdc1 swap" line qubes-core-agent ships in /etc/fstab. With either, ceremony RAM can be
+#   paged to disk; the in-VM preflight failed on it in the first real disposable (2026-09-25).
+#   Masks in /etc outrank both; the fstab conffile is left untouched.
+vault-no-swap:
+  cmd.run:
+    - name: systemctl mask dev-xvdc1-swap.service dev-xvdc1.swap
+    - unless: 'test "$(readlink /etc/systemd/system/dev-xvdc1-swap.service)" = /dev/null && test "$(readlink /etc/systemd/system/dev-xvdc1.swap)" = /dev/null'
+
+# - a UTF-8 locale. debian-13-minimal sets none, so the disposable's xterm ran in a single-byte
+#   locale and showed every "—" in the scripts' messages as "â" (first real disposable,
+#   2026-09-25). qvm-run sessions get their environment from /etc/default/locale (pam_env in
+#   /etc/pam.d/qrexec); C.UTF-8 is built into Debian's libc, so no locales package is needed.
+vault-utf8-locale:
+  file.managed:
+    - name: /etc/default/locale
+    - mode: "0644"
+    - contents: |
+        LANG=C.UTF-8
+
 vault-no-automount:
   cmd.run:
     - name: systemctl mask efi.automount udisks2.service

@@ -220,7 +220,7 @@ if needs printer; then
       ok "a USB/local print queue is present:"; lpstat -v 2>/dev/null | sed 's/^/     /'
     fi
   else
-    bad "no CUPS print queue — add the USB Brother laser before the paper steps."
+    bad "no CUPS print queue — add the USB laser printer before the paper steps."
   fi
 fi
 

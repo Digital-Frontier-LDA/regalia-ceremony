@@ -99,6 +99,25 @@ class EnvironmentPreflightTests(unittest.TestCase):
          "options": "rw,relatime,lowerdir=/tmp/modules,upperdir=/sysroot/lib/modules,workdir=/sysroot/lib/.modules_work"},
     ]
 
+    BIND_DIRS = [
+        {"target": "/rw", "source": "/dev/xvdb", "fstype": "ext4", "options": "rw,nosuid,nodev,relatime,discard"},
+        {"target": "/var/spool/cron", "source": "/dev/xvdb[/bind-dirs/var/spool/cron]", "fstype": "ext4",
+         "options": "rw,nosuid,nodev,relatime,discard"},
+    ]
+
+    def test_qubes_bind_dirs_from_the_rw_volume_pass(self):
+        snap = safe(qdb={"/qubes-vm-type": "DispVM", "/qubes-vm-persistence": "none"},
+                    root_mount=self.REAL_QUBES_MOUNTS[0], mounts=self.REAL_QUBES_MOUNTS + self.BIND_DIRS)
+        _, failures, _ = MODULE.evaluate(snap)
+        self.assertEqual(failures, [])
+
+    def test_a_bind_from_another_device_still_fails(self):
+        other = {"target": "/var/spool/cron", "source": "/dev/xvdd[/bind-dirs/var/spool/cron]", "fstype": "ext4", "options": "rw"}
+        snap = safe(qdb={"/qubes-vm-type": "DispVM", "/qubes-vm-persistence": "none"},
+                    root_mount=self.REAL_QUBES_MOUNTS[0], mounts=self.REAL_QUBES_MOUNTS + self.BIND_DIRS[:1] + [other])
+        _, failures, _ = MODULE.evaluate(snap)
+        self.assertTrue(any("/var/spool/cron" in f for f in failures))
+
     def test_a_real_qubes_vm_mount_table_passes(self):
         snap = safe(qdb={"/qubes-vm-type": "DispVM", "/qubes-vm-persistence": "none"},
                     root_mount=self.REAL_QUBES_MOUNTS[0], mounts=self.REAL_QUBES_MOUNTS)
