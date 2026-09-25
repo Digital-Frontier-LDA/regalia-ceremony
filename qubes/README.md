@@ -156,7 +156,8 @@ longer needs; the wizard runs one step at a time, so nothing needs a hub.
 
 **Wallet seed entropy (wizard step `e`).** A new seed is never taken from one random source: the
 wizard collects at least 100 rolls of a fair six-sided die (typed hidden, ~258 bits, hashed with
-SHA-256), 32 bytes from the attached Nitrokey HSM's hardware RNG, and 32 bytes of `/dev/urandom`,
+SHA-256), 32 bytes from the attached HSM's hardware RNG (Nitrokey HSM 2 or Pico HSM, read directly
+over PC/SC with `hsm-random.py`), and 32 bytes of `/dev/urandom`,
 XORs them (`entropy-mix.py`), and encodes the result as a 24-word BIP39 mnemonic for step 3 c. It
 refuses without the dice or without the HSM.
 

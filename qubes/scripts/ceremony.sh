@@ -1042,16 +1042,9 @@ step_hsm_funding() {
   info "FUNDING ADDRESS (public, key-control PROVEN + backup RESTORE-VERIFIED — record + fund): $addr"
 }
 
-# Slot index of the first attached SmartCard-HSM token (Nitrokey HSM 2 / Pico HSM), for its RNG.
-hsm_rng_slot() {
-  timeout 60 pkcs11-tool -L 2>/dev/null | awk '
-    /^Slot [0-9]+ / { idx=$2; name=$0; sub(/^Slot [0-9]+ \([^)]*\): /, "", name) }
-    /token manufacturer/ && /CardContact/ && !found { print idx; found=1 }'
-}
-
 step_entropy_seed() {
-  b "Generate a NEW wallet seed from dice + Nitrokey HSM + OS randomness"
-  info "Three independent sources are mixed (XOR): your DICE, the Nitrokey HSM's hardware RNG and"
+  b "Generate a NEW wallet seed from dice + HSM + OS randomness"
+  info "Three independent sources are mixed (XOR): your DICE, the HSM's hardware RNG (Nitrokey or Pico) and"
   info "/dev/urandom. The result is at least as unpredictable as the best of them, so no single"
   info "flawed or backdoored source decides the seed. Dice are always required on top of the HSM."
   local f="$WORK/secret.in"
@@ -1068,18 +1061,17 @@ step_entropy_seed() {
   info "     reaches 100. Typing is hidden. A mistyped line is discarded whole — just retype it."
   python3 "$HERE/dice-entropy.py" --out "$d" || { err "dice entropy not collected — no seed generated."; return 1; }
 
-  info "2/3  NITROKEY HSM — 32 bytes from its hardware random number generator (no PIN needed)."
-  local slot; slot="$(hsm_rng_slot)"
-  if [ -z "$slot" ]; then
-    err "no Nitrokey HSM / Pico HSM found — attach it with 'qvm-usb attach' and run this step again."
-    err "The seed is never generated without the HSM's randomness (dice + HSM, both required)."
+  info "2/3  HSM — 32 bytes from the Nitrokey HSM / Pico HSM hardware random generator (no PIN)."
+  # Direct PC/SC (SELECT + GET CHALLENGE), not pkcs11-tool: OpenSC enumeration wedged a Pico HSM
+  # on the bench while the direct commands answered on both devices (2026-09-25).
+  local hout
+  if ! hout="$(timeout 60 python3 "$HERE/hsm-random.py" --out "$h" 2>&1)" || [ "$(wc -c < "$h" 2>/dev/null)" != 32 ]; then
+    printf '%s\n' "$hout" | sed 's/^/     /' >&2
+    err "no random bytes from an HSM — attach the Nitrokey HSM or Pico HSM with 'qvm-usb attach'"
+    err "and run this step again. The seed is never generated without them (dice + HSM, both required)."
     return 1
   fi
-  if ! timeout 60 pkcs11-tool --slot-index "$slot" --generate-random 32 --output-file "$h" >/dev/null 2>&1 \
-     || [ "$(wc -c < "$h" 2>/dev/null)" != 32 ]; then
-    err "the HSM did not return 32 random bytes — no seed generated."; return 1
-  fi
-  info "     32 bytes read from the HSM in slot $slot."
+  info "     $hout"
 
   info "3/3  OPERATING SYSTEM — 32 bytes from /dev/urandom."
   head -c 32 /dev/urandom > "$o" && chmod 600 "$o"
@@ -2070,7 +2062,7 @@ main() {
    0) Set HSM PIN defaults from a file (PROD: required before step 7; DEV: optional, warns)
    1) YubiKey  — hardware ops age/SOPS identity
    2) Nitrokey HSM 2 — cold funding key + DKEK 4-of-6 backup
-   e) Entropy: generate a NEW wallet seed from dice + Nitrokey HSM + OS randomness (then step 3 c)
+   e) Entropy: generate a NEW wallet seed from dice + HSM (Nitrokey/Pico) + OS randomness (then step 3 c)
    3) Shamir split a recovery root (breakglass age key / mnemonic) + print shares
    4) Archive to M-DISC (burn + readback verify)
    7) Tier-0 recovery payload -> encrypt + archival QR codes
