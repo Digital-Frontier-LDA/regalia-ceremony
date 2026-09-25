@@ -1048,13 +1048,14 @@ step_entropy_seed() {
   info "/dev/urandom. The result is at least as unpredictable as the best of them, so no single"
   info "flawed or backdoored source decides the seed. Dice are always required on top of the HSM."
   local f="$WORK/secret.in"
+  local staged="$WORK/secret.in.new"
   if [ -s "$f" ]; then
     warn "$f already holds a secret."
     ask "REPLACE it with a newly generated seed?" || return 0
   fi
   local d="$WORK/dice.hex" h="$WORK/hsm.bin" o="$WORK/os.bin" m="$WORK/mixed.hex"
   # shellcheck disable=SC2064
-  trap "rm -f '$d' '$h' '$o' '$m' '$WORK/seed.err'" RETURN
+  trap "rm -f '$d' '$h' '$o' '$m' '$staged' '$WORK/seed.err'" RETURN
 
   info "1/3  DICE — at least 100 rolls of a fair six-sided die (100 x 2.585 = 258 bits)."
   info "     Roll, type the digits you see (spaces are fine), press Enter; repeat until the counter"
@@ -1078,9 +1079,10 @@ step_entropy_seed() {
 
   python3 "$HERE/entropy-mix.py" --out "$m" "$d" "$h" "$o" \
     || { err "mixing refused the sources (identical or empty) — no seed generated."; return 1; }
-  if ! python3 "$HERE/bip39-slip39-backup.py" --from-entropy --in "$m" --out "$f" 2>"$WORK/seed.err"; then
-    sed 's/^/     /' "$WORK/seed.err" >&2; err "could not encode the mixed entropy as a mnemonic."; rm -f "$f"; return 1
+  if ! python3 "$HERE/bip39-slip39-backup.py" --from-entropy --in "$m" --out "$staged" 2>"$WORK/seed.err"; then
+    sed 's/^/     /' "$WORK/seed.err" >&2; err "could not encode the mixed entropy as a mnemonic."; return 1
   fi
+  chmod 600 "$staged" && mv -f "$staged" "$f" || { err "could not install the new mnemonic; the existing seed was preserved."; return 1; }
   chmod 600 "$f"
   info "NEW 24-word wallet seed written to $f (RAM only; never shown). Fingerprint:"
   info "     $(sha256sum < "$f" | cut -c1-16)"
