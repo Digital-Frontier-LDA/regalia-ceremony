@@ -266,6 +266,17 @@ vault-no-swap:
     - name: systemctl mask dev-xvdc1-swap.service dev-xvdc1.swap
     - unless: 'test "$(readlink /etc/systemd/system/dev-xvdc1-swap.service)" = /dev/null && test "$(readlink /etc/systemd/system/dev-xvdc1.swap)" = /dev/null'
 
+# - a UTF-8 locale. debian-13-minimal sets none, so the disposable's xterm ran in a single-byte
+#   locale and showed every "—" in the scripts' messages as "â" (first real disposable,
+#   2026-09-25). qvm-run sessions get their environment from /etc/default/locale (pam_env in
+#   /etc/pam.d/qrexec); C.UTF-8 is built into Debian's libc, so no locales package is needed.
+vault-utf8-locale:
+  file.managed:
+    - name: /etc/default/locale
+    - mode: "0644"
+    - contents: |
+        LANG=C.UTF-8
+
 vault-no-automount:
   cmd.run:
     - name: systemctl mask efi.automount udisks2.service
