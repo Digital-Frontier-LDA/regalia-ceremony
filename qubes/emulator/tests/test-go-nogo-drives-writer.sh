@@ -188,6 +188,22 @@ else
   F "a read-only lone drive passed because a verify drive was declared"
 fi
 
+hdr "CEREMONY_VERIFY_DEV names an optical drive that is NOT attached -> STOP (review of #54)"
+out="$(CEREMONY_VERIFY_DEV=/dev/sr1 run1 "$FAKE/cdinfo-single-writer")"
+if grep -qi 'CEREMONY_VERIFY_DEV=/dev/sr1 is not attached' <<< "$out" && grep -qi 'NO-GO' <<< "$out"; then
+  P "a configured readback drive that is absent STOPs instead of pointing the readback at nothing"
+else
+  F "an absent configured readback drive was accepted"
+fi
+
+hdr "CEREMONY_VERIFY_DEV names an attached second drive -> the gate reports THAT drive"
+out="$(CEREMONY_VERIFY_DEV=/dev/sr1 GONOGO_CDROM_INFO="$FAKE/cdinfo-one-writer" "$GN" --need drives 2>&1 || true)"
+if grep -qi 'the readback uses /dev/sr1 (CEREMONY_VERIFY_DEV)' <<< "$out"; then
+  P "the gate names the configured readback drive, as step_archive will use it"
+else
+  F "the gate did not report the configured readback drive"
+fi
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] && exit 0 || exit 1

@@ -170,8 +170,8 @@ else warn "lp/lpstat not installed — paper steps will only write files."; fi
 
 echo "== Optical drives (M-DISC archive) =="
 drives=$(ls /dev/sr* 2>/dev/null | wc -l | tr -d ' ')
-if [ "$drives" -ge 2 ]; then ok "$drives optical drives — burn on one, read back on the other."
-elif [ "$drives" -eq 1 ]; then ok "1 optical drive — burn, push the tray shut, read back on the same drive (ADR-0002 D9)."
+if [ "$drives" -ge 2 ]; then ok "$drives optical drives present — burn on one, read back on another (write capability: go-nogo.sh)."
+elif [ "$drives" -eq 1 ]; then ok "1 optical drive present (its write capability is checked by go-nogo.sh --need drives); the burn is read back on it (ADR-0002 D9)."
 else warn "no /dev/sr* optical drive seen — attach the internal/external DVD writer for M-DISC archive."; fi
 
 echo "== Chip cards (SLE-4442) =="

@@ -234,10 +234,18 @@ if needs drives; then
   # is used for the readback when present, but is not required.
   vdev="${CEREMONY_VERIFY_DEV:-}"
   if [ "$n" -ge 1 ]; then
-    if [ "$n" -ge 2 ]; then ok "$n optical drives present (/dev/sr*) — the readback uses the second"
-    elif [ -n "$vdev" ]; then ok "1 optical drive to burn on; the readback uses $vdev (qvm-block, attached at the verify step)"
-    else ok "1 optical drive — burn, push the tray shut, read back on the same drive (ADR-0002 D9)"
-    fi
+    case "$vdev" in
+      "") if [ "$n" -ge 2 ]; then ok "$n optical drives present (/dev/sr*) — the readback uses another one"
+          else ok "1 optical drive — burn, push the tray shut, read back on the same drive (ADR-0002 D9)"; fi ;;
+      /dev/sr*)
+        # a configured optical readback drive must be here now; step_archive would point at it
+        # present = among the drives enumerated above (the same list the count came from)
+        vpresent=0
+        for d in $optglob; do [ "${d##*/}" = "${vdev##*/}" ] && vpresent=1; done
+        if [ "$vpresent" = 1 ]; then ok "the readback uses $vdev (CEREMONY_VERIFY_DEV)"
+        else bad "CEREMONY_VERIFY_DEV=$vdev is not attached — the burn could not be read back as instructed. Attach it or unset CEREMONY_VERIFY_DEV."; fi ;;
+      *) ok "the readback uses $vdev (qvm-block, attached at the verify step)" ;;
+    esac
     # Presence is NOT capability, and a total writer COUNT is not enough either. A read-only
     # DVD-ROM reader exposes a /dev/srN node exactly like a writer, so two DVD-ROM readers count
     # as 2 nodes here yet cannot burn. Worse, step_archive HARDCODES `growisofs -Z /dev/sr0`, so

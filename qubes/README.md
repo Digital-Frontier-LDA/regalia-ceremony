@@ -203,9 +203,10 @@ sealing.
 
 ## Hardware notes (T430-class airgap host)
 
-- **One optical writer is enough** (ADR-0002 D9): `ceremony.sh` step 4 burns with
-  `growisofs -dvd-compat` (closes the disc) and every file is read back and checked against the
-  manifest. A second drive, when attached, does the readback instead and also catches a disc only
+- **One optical writer is enough** (ADR-0002 D9). `ceremony.sh` step 4 **shows** the burn
+  (`growisofs -dvd-compat`, which closes the disc) and the readback (`sha256sum -c` of every file
+  against the manifest); it does not run them. **Run both, and seal the disc only after the
+  checksum check reports every file OK.** A second drive, when attached, does the readback instead and also catches a disc only
   the burning drive can read; the recovery drill and seal checks read the disc on other drives later.
 - **M-DISC:** DVD M-DISC is written like DVD+R and most burners handle it, but confirm the
   drive's M-DISC support. DVD M-DISC ≈ 4.7 GB — vastly more than a key/shares need. (T430

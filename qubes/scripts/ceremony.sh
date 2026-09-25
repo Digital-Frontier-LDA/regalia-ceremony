@@ -1885,8 +1885,12 @@ step_archive() {
   # `qvm-block`, as /dev/xvdX: set CEREMONY_VERIFY_DEV to that node. It can read, never burn.
   local bdev="${CEREMONY_BURN_DEV:-/dev/sr0}" vdev="${CEREMONY_VERIFY_DEV:-}"
   if [ -z "$vdev" ]; then
-    # A second optical drive if one is attached, else the burning drive itself (ADR-0002 D9).
-    if [ "$bdev" != /dev/sr1 ] && [ -b /dev/sr1 ]; then vdev=/dev/sr1; else vdev="$bdev"; fi
+    # Any other attached optical drive, else the burning drive itself (ADR-0002 D9).
+    local d
+    for d in /dev/sr[0-9]*; do
+      if [ -b "$d" ] && [ "$d" != "$bdev" ]; then vdev="$d"; break; fi
+    done
+    vdev="${vdev:-$bdev}"
   fi
   # -dvd-compat CLOSES a DVD-R/DVD+R: an open (appendable) disc reads badly in some drives, and an
   # archive disc is written once. Proven on a Verbatim AZO DVD-R, 2026-09-25: status "complete".
