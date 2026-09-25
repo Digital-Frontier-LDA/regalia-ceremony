@@ -137,10 +137,22 @@ else bad "no growisofs/xorriso — cannot burn the M-DISC archive; add it to the
 
 echo "== Smartcard reader / tokens =="
 if command -v opensc-tool >/dev/null 2>&1; then
-  if grep -qi "reader" <<< "$(timeout 5 opensc-tool -l 2>/dev/null)"; then
-    ok "a PC/SC reader is visible (opensc-tool -l)."
+  # Count the numbered reader rows. With nothing attached opensc-tool prints "No smart card
+  # readers found." — the old test grepped for "reader", matched that sentence and reported a
+  # reader present (owner's first disposable, 2026-09-25).
+  readers="$(timeout 5 opensc-tool -l 2>/dev/null | grep -E '^[0-9]+[[:space:]]' || true)"
+  if [ -n "$readers" ]; then
+    ok "$(grep -c . <<< "$readers") PC/SC reader(s) visible (opensc-tool -l)."
   else
-    warn "no reader seen by opensc-tool — attach it with 'qvm-usb attach' from dom0."
+    warn "no smart-card reader or token seen — attach it with 'qvm-usb attach' from dom0."
+  fi
+  # The HSM itself, named: Nitrokey HSM 2 and Pico HSM both present as SmartCard-HSM readers.
+  hsms="$(grep -iE 'nitrokey hsm|smartcard-hsm|pico' <<< "$readers" \
+          | sed -E 's/^[0-9]+[[:space:]]+(Yes|No)[[:space:]]+//; s/[[:space:]]+/ /g' || true)"
+  if [ -n "$hsms" ]; then
+    ok "HSM token(s) present: $(tr '\n' ';' <<< "$hsms" | sed 's/;$//')"
+  else
+    warn "no Nitrokey HSM or Pico HSM seen — attach it with 'qvm-usb attach' if this ceremony uses one."
   fi
 else
   warn "opensc-tool not found — install opensc (reader check skipped)."
