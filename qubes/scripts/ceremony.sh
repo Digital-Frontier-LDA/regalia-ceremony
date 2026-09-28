@@ -1852,7 +1852,7 @@ step_archive() {
   info "One writer is enough (ADR-0002 D9): burn, push the tray shut, read the disc back and"
   info "check every file against the manifest. If a second drive is attached it is used for the"
   info "readback instead, which also catches a disc only the burning drive can read."
-  warn "Archival disc (ADR-0002 D10): a Verbatim AZO archival DVD-R, which any DVD writer burns,"
+  warn "Archival disc (ADR-0002 D10): a Verbatim AZO archival DVD-R, which any DVD-R-capable writer burns,"
   warn "or an M-DISC, which needs a writer on the M-DISC compatibility list. 4.7 GB either way —"
   warn "far more than any key/shares need. SD cards / USB flash are NOT archival (charge leaks"
   warn "over years) — use the archive disc + paper only."

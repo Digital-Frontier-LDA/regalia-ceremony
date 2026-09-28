@@ -299,7 +299,7 @@ cat <<'SHEET'
     [ ] YubiKey PIV PIN + PUK + management key chosen; touch policy = ALWAYS.
     [ ] SLE-4442 PSC (and whether you change it from FFFFFF) decided; 3 wrong = locked.
     [ ] Funding address will be recorded on paper AND verified on-chain afterwards.
-    [ ] archive discs on hand: Verbatim AZO DVD-R (any writer) or M-DISC (a listed writer); spare blanks.
+    [ ] archive discs on hand: Verbatim AZO DVD-R (a DVD-R-capable writer) or M-DISC (a listed writer); spare blanks.
     [ ] Printer page memory will be power-cycled after printing.
 SHEET
 

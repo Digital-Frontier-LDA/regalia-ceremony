@@ -215,7 +215,7 @@ sealing.
   against the manifest); it does not run them. **Run both, and seal the disc only after the
   checksum check reports every file OK.** A second drive, when attached, does the readback instead and also catches a disc only
   the burning drive can read; the recovery drill and seal checks read the disc on other drives later.
-- **Archive disc (ADR-0002 D10):** a **Verbatim AZO archival DVD-R** (any DVD writer; proven on a
+- **Archive disc (ADR-0002 D10):** a **Verbatim AZO archival DVD-R** (any DVD-R-capable writer; proven on a
   TSSTcorp SE-S084F, 2026-09-25) or an **M-DISC** (needs a writer on the M-DISC compatibility
   list). 4.7 GB — vastly more than a key/shares need.
 - **SD / USB flash is NOT archival.** Flash loses charge over years unpowered — fine as
