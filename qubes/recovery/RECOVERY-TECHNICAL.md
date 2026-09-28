@@ -3,7 +3,7 @@
 **Read `RECOVERY-START-HERE.txt` first if you are not technical.** This document is for the
 person who will actually run the commands (a custodian, the named technical helper, or a
 trusted crypto-recovery professional). It is **self-contained**: everything you need is on
-this M-DISC — you do **not** need the GitHub repo or any network.
+this archive disc (an M-DISC or an archival AZO DVD-R) — you do **not** need the GitHub repo or any network.
 
 > SCOPE: this recovers the custodial **wallet seeds** so funds can be moved to safety, and
 > (optionally) the SOPS config vault. It is a 4-of-6 scheme: you need the shares from **any
@@ -21,7 +21,7 @@ For each case, before opening, check the seal serial against the contact sheet /
 and that the seal is intact; a broken seal or wrong serial → note it, the contents may be
 compromised (you may still recover, but rotate afterward).
 
-Each case contains: an **M-DISC** (this toolkit + ciphertext + `payload.age`), a **recovery
+Each case contains: an **archive disc** (DVD: M-DISC or archival AZO DVD-R; this toolkit + ciphertext + `payload.age`), a **recovery
 card**, **QR sheets** on cotton archival paper (the Tier-0 payload — see Section 3C), an
 **SLE-4442 chip card** holding this case's share, and the
 share material — printed **SLIP-39 word-shares** and/or **stamped metal plates** (4-letter
@@ -45,7 +45,7 @@ card after it is padded with `00` bytes, which the command strips:
 Recovery must be **air-gapped** (no network) — the seeds appear in plaintext during recovery.
 Two options:
 - Boot a clean Linux from a USB (e.g. Tails) on a spare PC, **disconnect networking**, then
-  copy this M-DISC's `recovery-kit/` folder to it and `cd` into it (the tools, `wheels/`, and
+  copy this disc's `recovery-kit/` folder to it and `cd` into it (the tools, `wheels/`, and
   `requirements.txt` all live there, so the relative commands below resolve); or
 - Boot the Qubes `vault-tools` image / any offline Linux. Verify air-gap: `ip route` shows
   no default route.
@@ -127,7 +127,7 @@ of roots that never change, and everything else is recovered *through* them.
 **The payload is on three media, any one is enough:**
   * the **QR sheets** (cotton paper) — scan every symbol, then follow `INSTRUCTIONS.txt`
     printed alongside them (join the base64 fields in index order, `base64 -d`, check sha256)
-  * `payload.age` on the **M-DISC**
+  * `payload.age` on the **archive disc**
   * (the chip cards hold a SHARE, not the payload — an SLE-4442 has only 256 bytes)
 
 **Decrypt it with the breakglass age key** — the same key the 4-of-6 `ssss` shares rebuild,

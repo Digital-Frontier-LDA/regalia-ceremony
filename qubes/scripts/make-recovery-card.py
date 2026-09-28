@@ -2,7 +2,7 @@
 """Generate a print-ready BREAK-GLASS RECOVERY instruction card (PostScript).
 
 The card carries the *procedure* for reconstructing the custodial wallet from the
-Shamir shares + M-DISC — NO secrets. It prints with a dashed cut-guide + corner
+Shamir shares + archive disc — NO secrets. It prints with a dashed cut-guide + corner
 crop marks sized to fit inside a standard DVD keep-case, so you print it, cut along
 the line, and slip it in beside the M-DISC.
 

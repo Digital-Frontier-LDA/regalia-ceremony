@@ -133,7 +133,7 @@ fi
 # The M-DISC archive (step 4) burns with growisofs (or xorriso). Missing means no archival
 # copy AND no way to install it on the air-gapped qube — catch it before the ceremony.
 if command -v growisofs >/dev/null 2>&1 || command -v xorriso >/dev/null 2>&1; then ok "optical burner (growisofs/xorriso)"
-else bad "no growisofs/xorriso — cannot burn the M-DISC archive; add it to the template build."; fi
+else bad "no growisofs/xorriso — cannot burn the archive disc; add it to the template build."; fi
 
 echo "== Smartcard reader / tokens =="
 if command -v opensc-tool >/dev/null 2>&1; then
@@ -183,11 +183,11 @@ if command -v lpstat >/dev/null 2>&1; then
   else warn "no CUPS print queue — add the USB laser printer (no network, no internal storage) if you'll print paper shares."; fi
 else warn "lp/lpstat not installed — paper steps will only write files."; fi
 
-echo "== Optical drives (M-DISC archive) =="
+echo "== Optical drives (archive disc) =="
 drives=$(ls /dev/sr* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$drives" -ge 2 ]; then ok "$drives optical drives present — burn on one, read back on another (write capability: go-nogo.sh)."
 elif [ "$drives" -eq 1 ]; then ok "1 optical drive present (its write capability is checked by go-nogo.sh --need drives); the burn is read back on it (ADR-0002 D9)."
-else warn "no /dev/sr* optical drive seen — attach the internal/external DVD writer for M-DISC archive."; fi
+else warn "no /dev/sr* optical drive seen — attach the internal/external DVD writer for the archive disc."; fi
 
 echo "== Chip cards (SLE-4442) =="
 # The chip-card step needs the manager AND pyscard; the manager exits at import without pyscard,
