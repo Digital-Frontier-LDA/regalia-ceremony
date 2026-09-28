@@ -225,7 +225,7 @@ if needs printer; then
 fi
 
 if needs drives; then
-  hdr "An optical WRITER for the M-DISC burn (+ readback)"
+  hdr "An optical WRITER for the archive disc (+ readback)"
   # GONOGO_OPTICAL_GLOB overrides the device glob for tests only; defaults to the real nodes.
   optglob="${GONOGO_OPTICAL_GLOB:-/dev/sr*}"
   n=$(ls $optglob 2>/dev/null | wc -l | tr -d ' ')
