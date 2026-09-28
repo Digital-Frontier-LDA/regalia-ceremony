@@ -771,7 +771,7 @@ step_hsm_funding() {
     return 1
   fi
   warn "OPTION A: record each password share with a custodian; dkek.pbe is password-protected,"
-  warn "so copy it to archival media (M-DISC) freely."
+  warn "so copy it to the archive disc freely."
   warn "OPTION B: do NEITHER. Destroy dkek.pbe with the rest of the ceremony scratch — the seed"
   warn "is the backup, and a DKEK that no longer exists can never end up beside a PIN."
   info "2) Initialise the HSM with one DKEK share and import it (DESTROYS existing keys):"
@@ -871,7 +871,7 @@ step_hsm_funding() {
     err "the wrap produced an EMPTY backup blob — do NOT fund; the funding key has no usable backup."
     return 1
   fi
-  warn "OPTION A: store funding-wrapped.bin + dkek.pbe on M-DISC; the 4-of-6 shares are the secret."
+  warn "OPTION A: store funding-wrapped.bin + dkek.pbe on the archive disc; the 4-of-6 shares are the secret."
   warn "OPTION B: this blob is a convenience, not the backup — the seed is. Do not escrow the DKEK."
   # RESTORE-VERIFY — a wrapped blob you have never unwrapped is NOT a backup. `--wrap-key` can
   # return 0 yet leave an UNRESTORABLE blob (a truncated write, faulty EEPROM/firmware, a DKEK a
@@ -1517,7 +1517,7 @@ TPL
   warn "PRINT the symbols AND INSTRUCTIONS.txt on archival (cotton rag) stock with the LASER"
   warn "printer — toner is fused plastic, inkjet dye fades and runs. Store the sheets FLAT:"
   warn "toner cracks along a fold, and a fold through a symbol is the realistic failure mode."
-  warn "The M-DISC gets payload.age itself (step 4); the chip cards get a SHARE, not this"
+  warn "The archive disc gets payload.age itself (step 4); the chip cards get a SHARE, not this"
   warn "payload — an SLE-4442 holds 256 bytes and this file is several times that."
   if [ -n "$PRINTER" ] && ask "print the QR sheet (INSTRUCTIONS.txt + every symbol) to $PRINTER now?"; then
     run "lp -d '$PRINTER' '$qrdir/INSTRUCTIONS.txt' '$qrdir'/qr-*.png" \
@@ -1795,7 +1795,7 @@ step_chipcard() {
   if [ "$nbytes" -gt 224 ]; then
     err "that file is $nbytes bytes; an SLE-4442 holds 224 writable bytes (256 minus its 32-byte"
     err "factory area). A share fits (~140 B) — an encrypted payload does not. Put the payload on"
-    err "the M-DISC and the QR sheets instead."
+    err "the archive disc and the QR sheets instead."
     return 1
   fi
   info "share is $nbytes bytes — fits in the card's 224 writable bytes (from byte 32)."
@@ -1848,13 +1848,14 @@ step_chipcard() {
 }
 
 step_archive() {
-  b "Archive to M-DISC (burn, then read every file back and checksum it)"
+  b "Archive disc (burn, then read every file back and checksum it)"
   info "One writer is enough (ADR-0002 D9): burn, push the tray shut, read the disc back and"
   info "check every file against the manifest. If a second drive is attached it is used for the"
   info "readback instead, which also catches a disc only the burning drive can read."
-  warn "Confirm the drive is M-DISC capable (DVD M-DISC is written like DVD+R by most burners;"
-  warn "check the M-DISC logo/firmware). DVD M-DISC ≈ 4.7 GB — far more than any key/shares need."
-  warn "SD cards / USB flash are NOT archival (charge leaks over years) — use M-DISC + paper only."
+  warn "Archival disc (ADR-0002 D10): a Verbatim AZO archival DVD-R, which any DVD writer burns,"
+  warn "or an M-DISC, which needs a writer on the M-DISC compatibility list. 4.7 GB either way —"
+  warn "far more than any key/shares need. SD cards / USB flash are NOT archival (charge leaks"
+  warn "over years) — use the archive disc + paper only."
   # Stage a DEDICATED burn directory so the disc carries ONLY non-secret / encrypted
   # artifacts — NEVER the plaintext Shamir shares (w*, slip39.txt, secret.in, shares.txt,
   # sh*) or their print_share() text/QR (*.txt / *.png) that step 3 leaves loose in $WORK.
@@ -1885,7 +1886,7 @@ step_archive() {
       && { mkdir -p "$kit/wheels" && cp "$wsrc"/*.whl "$kit/wheels/" 2>/dev/null; break; }
   done
   if ls "$kit"/wheels/*.whl >/dev/null 2>&1; then
-    info "Staged offline-recovery wheels for the M-DISC (pip install --no-index --find-links wheels/)."
+    info "Staged offline-recovery wheels for the archive disc (pip install --no-index --find-links wheels/)."
   else
     warn "No wheels/ staged — the CLEAN-MACHINE (Tails) recovery path will need network for the"
     warn "shamir-mnemonic/mnemonic packages. Bake wheels into the image (vault-tools.sls) or set"
@@ -1904,9 +1905,9 @@ step_archive() {
     [ -e "$WORK/$art" ] && cp "$WORK/$art" "$burn/" 2>/dev/null || true
   done
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then
-    info "Staged recovery kit for the M-DISC (RECOVERY-START-HERE.txt + RECOVERY-TECHNICAL.md + toolkit): $kit"
+    info "Staged recovery kit for the archive disc (RECOVERY-START-HERE.txt + RECOVERY-TECHNICAL.md + toolkit): $kit"
   else
-    warn "recovery kit not found next to the script — manually add recovery/ + scripts to the M-DISC."
+    warn "recovery kit not found next to the script — manually add recovery/ + scripts to the archive disc."
   fi
   # SAFETY NET: refuse to burn if any plaintext-share artifact slipped into the burn tree.
   # The allowlist copy above should never stage one; this catches a future regression before
@@ -1925,7 +1926,7 @@ step_archive() {
     return 1
   fi
   warn "Also burn the SEALED custodian-contact sheet's content is NOT on the disc — it is the"
-  warn "printed sheet sealed in each case (your chosen model). Keep it sealed, not on the M-DISC."
+  warn "printed sheet sealed in each case (your chosen model). Keep it sealed, not on the archive disc."
   info "Typical (review paths/devices first):"
   # Burn and verify drives. Two USB drives are /dev/sr0 + /dev/sr1. With ONE USB writer and a
   # laptop's internal bay drive, the bay belongs to dom0 and reaches this qube read-only through
@@ -1969,8 +1970,8 @@ step_drill() {
 
 step_recovery_card() {
   b "Break-glass recovery instruction card (DVD-case sized — NO secrets)"
-  info "Prints the recovery PROCEDURE (how to reconstruct from the shares + M-DISC)."
-  info "Cut along the dashed line; it fits inside a DVD keep-case beside the M-DISC."
+  info "Prints the recovery PROCEDURE (how to reconstruct from the shares + archive disc)."
+  info "Cut along the dashed line; it fits inside a DVD keep-case beside the archive disc."
   local ps="$WORK/recovery-card.ps" cid serial hsm_flag=""
   read -r -p "   case id for this case (e.g. DF-BG-01, blank=none): " cid
   read -r -p "   holographic sticker serial on this case (blank=none): " serial
@@ -2066,7 +2067,7 @@ main() {
    2) Nitrokey HSM 2 — cold funding key + DKEK 4-of-6 backup
    e) Entropy: generate a NEW wallet seed from dice + HSM (Nitrokey/Pico) + OS randomness (then step 3 c)
    3) Shamir split a recovery root (breakglass age key / mnemonic) + print shares
-   4) Archive to M-DISC (burn + readback verify)
+   4) Archive disc — AZO DVD-R or M-DISC (burn + readback verify)
    7) Tier-0 recovery payload -> encrypt + archival QR codes
    8) Write a SLIP-39 share to an SLE-4442 chip card
    9) Import the seed-derived funding key into the HSM (supported custody path)

@@ -77,7 +77,7 @@ qvm-shutdown --wait vault-tools
 #    (the TEMPLATE needs net to install; the vault AppVM below will not)
 sudo cp -r salt/* /srv/salt/ ; sudo cp -r scripts /srv/salt/vault-ceremony-scripts
 sudo cp requirements.txt /srv/salt/vault-ceremony-requirements.txt   # hash-pinned pip deps
-sudo cp -r recovery /srv/salt/vault-ceremony-recovery               # break-glass runbooks (go on each M-DISC)
+sudo cp -r recovery /srv/salt/vault-ceremony-recovery               # break-glass runbooks (go on each archive disc)
 sudo qubesctl --skip-dom0 --targets=vault-tools state.apply vault-tools
 
 # 3. create the AIR-GAPPED vault qube (no netvm) from that template
@@ -128,7 +128,7 @@ notes the `cargo install --locked` alternative for newer versions).
 qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 
 # in the vault qube — the GUIDED script walks every step (preflight, YubiKey, HSM,
-# Shamir, printing, M-DISC archive, drill), shows each command, and confirms before running:
+# Shamir, printing, archive disc, drill), shows each command, and confirms before running:
 /opt/vault-ceremony/ceremony.sh
 
 # or run the pieces by hand (it just orchestrates these):
@@ -149,7 +149,7 @@ longer needs; the wizard runs one step at a time, so nothing needs a hub.
 
 - **Webcam** (printed-QR scan-back) and a **built-in reader** are internal USB: no port used.
 - **HSM funding** needs both Nitrokeys at once; every other step needs at most one token.
-- **M-DISC:** burn on the USB writer (`qvm-usb`), push the slim tray shut, and read the disc back
+- **Archive disc:** burn on the USB writer (`qvm-usb`), push the slim tray shut, and read the disc back
   on the same drive (ADR-0002 D9: one writer is enough). A second drive is optional: a second USB
   drive is used automatically, and a laptop's bay drive (dom0's, read-only through
   `qvm-block attach --ro <dispvm> dom0:sr0`) is used with `CEREMONY_VERIFY_DEV=/dev/xvdi`.
@@ -168,8 +168,8 @@ flow file → `qrencode`/`lp`; workdir is tmpfs in RAM, shredded on exit).
 
 **Recovery instruction card (menu step 6 / `make-recovery-card.py`):** prints a
 DVD-case-sized card with the break-glass *procedure* — how to reconstruct from the Shamir
-shares + M-DISC — with a dashed cut-guide + corner crop marks. Cut along the line and slip
-it into the DVD keep-case beside the M-DISC. It contains **no secrets**, so it prints
+shares + archive disc — with a dashed cut-guide + corner crop marks. Cut along the line and slip
+it into the DVD keep-case beside the archive disc. It contains **no secrets**, so it prints
 freely (default 120×180 mm on Letter; `--paper a4`, `--width-mm/--height-mm` to resize).
 Pass `--case-id DF-BG-01 --seal-serial HOLO-000001` (step 6 prompts for these) to print the
 case ↔ holographic-sticker binding on the card, so a swapped card/case is detectable.
@@ -180,7 +180,7 @@ prefixes back to catch a mis-stamp before you rely on the plate. See SECRETS.md 
 "Metal-plate (punch-set) backups".
 
 **Break-glass / incapacitation:** [`recovery/`](recovery/) holds the runbooks that must be
-**burned onto every M-DISC** so a recoverer needs no repo/network: `RECOVERY-START-HERE.txt`
+**burned onto every archive disc** so a recoverer needs no repo/network: `RECOVERY-START-HERE.txt`
 (plain-English, for a non-technical heir → engage the named helper), `RECOVERY-TECHNICAL.md`
 (the exact offline recipe), and `custodian-contact-sheet.example.txt` (the **sealed sheet
 placed in each case** — your chosen model — listing all 6 custodians, the executor, the
@@ -215,12 +215,12 @@ sealing.
   against the manifest); it does not run them. **Run both, and seal the disc only after the
   checksum check reports every file OK.** A second drive, when attached, does the readback instead and also catches a disc only
   the burning drive can read; the recovery drill and seal checks read the disc on other drives later.
-- **M-DISC:** DVD M-DISC is written like DVD+R and most burners handle it, but confirm the
-  drive's M-DISC support. DVD M-DISC ≈ 4.7 GB — vastly more than a key/shares need. (T430
-  internal is DVD-multi: DVD M-DISC only, no Blu-ray.)
+- **Archive disc (ADR-0002 D10):** a **Verbatim AZO archival DVD-R** (any DVD writer; proven on a
+  TSSTcorp SE-S084F, 2026-09-25) or an **M-DISC** (needs a writer on the M-DISC compatibility
+  list). 4.7 GB — vastly more than a key/shares need.
 - **SD / USB flash is NOT archival.** Flash loses charge over years unpowered — fine as
   working/transfer media (the internal card reader), **never** for cold escrow. Archive
-  only to **M-DISC + paper**.
+  only to the **archive disc + paper**.
 - **Two reader types, don't confuse them:** the *smartcard* reader (for the HSM / YubiKey
   as a CCID device) vs. the *SD card* reader. Pass the smartcard/USB token through to the
   vault with `qvm-usb`.

@@ -273,21 +273,21 @@ if needs drives; then
       if [ -n "$col" ]; then
         can=$(printf '%s' "$wrow" | awk -v c="$col" '{print $c}')
         if [ "${can:-0}" = "1" ]; then
-          ok "the burn drive $burnnode advertises a DVD writer profile (writers=$writers) — the M-DISC burn can run"
+          ok "the burn drive $burnnode advertises a DVD writer profile (writers=$writers) — the archive burn can run"
         elif [ "${writers:-0}" -ge 1 ]; then
           bad "the ceremony burns to $burnnode but THAT drive is read-only — the DVD writer is on another node (writers=$writers, kernel lists drives reversed vs /dev/srN). \`growisofs -Z $burnnode\` will fail. Swap so $burnnode IS the writer (or point the burn at the writer)."
         else
-          bad "optical drives are present but NONE can WRITE (read-only DVD-ROM) — the M-DISC burn (growisofs -Z) will fail. Attach a DVD/M-DISC WRITER, not a DVD-ROM reader."
+          bad "optical drives are present but NONE can WRITE (read-only DVD-ROM) — the archive burn (growisofs -Z) will fail. Attach a DVD WRITER, not a DVD-ROM reader."
         fi
       elif [ "${writers:-0}" -ge 1 ]; then
         warn "a DVD writer is present (writers=$writers) but the capability table has no 'drive name:' row to confirm it is the burn drive $burnnode — verify by hand that $burnnode is the writer before the burn."
       else
-        bad "optical drives are present but NONE can WRITE (read-only DVD-ROM) — the M-DISC burn (growisofs -Z) will fail. Attach a DVD/M-DISC WRITER, not a DVD-ROM reader."
+        bad "optical drives are present but NONE can WRITE (read-only DVD-ROM) — the archive burn (growisofs -Z) will fail. Attach a DVD WRITER, not a DVD-ROM reader."
       fi
     else
-      warn "could not read optical write-capability table ($cdinfo) — confirm at least one drive is a DVD/M-DISC WRITER before the burn (a read-only DVD-ROM cannot burn a share)."
+      warn "could not read optical write-capability table ($cdinfo) — confirm at least one drive is a DVD WRITER before the burn (a read-only DVD-ROM cannot burn a share)."
     fi
-  else bad "no /dev/sr* optical drive — attach the M-DISC writer(s)."; fi
+  else bad "no /dev/sr* optical drive — attach the DVD writer."; fi
 fi
 
 hdr "Operator decisions to CONFIRM before touching keys (do not improvise these)"
@@ -299,7 +299,7 @@ cat <<'SHEET'
     [ ] YubiKey PIV PIN + PUK + management key chosen; touch policy = ALWAYS.
     [ ] SLE-4442 PSC (and whether you change it from FFFFFF) decided; 3 wrong = locked.
     [ ] Funding address will be recorded on paper AND verified on-chain afterwards.
-    [ ] M-DISC media on hand (DVD M-DISC, not DVD+R); a writer (on the M-DISC list for M-DISC media); spare blanks.
+    [ ] archive discs on hand: Verbatim AZO DVD-R (any writer) or M-DISC (a listed writer); spare blanks.
     [ ] Printer page memory will be power-cycled after printing.
 SHEET
 
