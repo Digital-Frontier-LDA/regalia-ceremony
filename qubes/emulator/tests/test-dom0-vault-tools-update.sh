@@ -120,6 +120,15 @@ hdr "--install copies the verified script to ~/bin"
 out="$(run --install vt-test "$SHA")"; rc=$?
 [ "$rc" = 0 ] && [ -x "$T/home/bin/vault-tools-update" ] && cmp -s "$T/home/bin/vault-tools-update" "$UPD" && P "installed, identical to the tag's copy" || F "not installed: $out"
 
+hdr "every look inside the root-only Salt dir goes through sudo (holds even when this test runs as root)"
+# The mode-000 fake above only bites for a non-root runner; run-tests.sh may run under sudo. This
+# reads the updater itself: any test/cmp/[ ]/cat/grep/ls/cp/mv/rm naming $SALT_DIR, $STAGE or $PREV
+# must be on a sudo command.
+bad="$(grep -nE '(\[ -[a-z]|\btest |\bcmp |\bcat |\bgrep |\bls |\bcp |\bmv |\brm |\bmkdir )[^|;&]*"?\$\{?(SALT_DIR|STAGE|PREV)' "$UPD" \
+       | grep -vE '^[0-9]+:[[:space:]]*#' \
+       | grep -vE '\bsudo (-n )?(test|cmp|cat|grep|ls|cp|mv|rm|mkdir) [^|;&]*"?\$\{?(SALT_DIR|STAGE|PREV)' || true)"
+[ -z "$bad" ] && P "no unsudoed access to the Salt dir" || F "access without sudo: $bad"
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
