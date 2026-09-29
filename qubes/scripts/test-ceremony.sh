@@ -40,7 +40,8 @@ for a in "$@"; do case "$a" in *.pbe|*.bin) : >"$a";; esac; done
 case "$*" in
   *--create-dkek-share*)
     # six placeholder shares in OpenSC's format, for the wizard's share round trip (#464)
-    for i in 1 2 3 4 5 6; do
+    n=6; prev=""; for a in "$@"; do [ "$prev" = --pwd-shares-total ] && n="$a"; prev="$a"; done   # the n asked for
+    for i in $(seq 1 "$n"); do
       printf '\nPrime       : 7f:00:00:00:00:00:00:6b\nShare ID    : %s\nShare value : 0%s:0%s\n' "$i" "$i" "$i"
     done;;
   *--import-dkek-share*--pwd-shares-total*) cat >/dev/null;;
@@ -137,10 +138,10 @@ out="$(step_archive 2>&1)"; echo "$out" >>"$CAP"
 # The archive now burns a CURATED staging dir ($WORK/mdisc), not the whole tmpfs workdir,
 # so plaintext share files from step 3 are never committed to disc. Manifest lives there.
 [ -f "$WORK/mdisc/manifest.sha256" ] && P "sha256 manifest generated (in the curated burn dir)" || F "no manifest"
-if ls "$WORK"/sh[1-9] "$WORK"/w[1-9] "$WORK"/secret.in "$WORK"/slip39.txt >/dev/null 2>&1; then
+if ls "$WORK"/sh[0-9]* "$WORK"/w[0-9]* "$WORK"/secret.in "$WORK"/slip39.txt >/dev/null 2>&1; then
   # Catch EVERY plaintext-secret artifact the wizard can leave in the workdir: ssss shares
   # (sh1..sh6), SLIP-39 word-shares (w1..w6) + slip39.txt from step 3b/c, and secret.in.
-  grep -qE 'sh[1-9]|w[1-9]|secret\.in|slip39\.txt' "$WORK/mdisc/manifest.sha256" 2>/dev/null \
+  grep -qE 'sh[0-9]+|w[0-9]+|secret\.in|slip39\.txt' "$WORK/mdisc/manifest.sha256" 2>/dev/null \
     && F "plaintext share/secret files are in the M-DISC burn manifest — they'd be burned to disc" \
     || P "no plaintext share/secret files in the burn set (curated staging excludes them)"
 fi

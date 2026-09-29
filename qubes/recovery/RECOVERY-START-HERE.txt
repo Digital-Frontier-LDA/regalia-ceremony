@@ -31,7 +31,7 @@ YOU WILL LIKELY NEED TECHNICAL HELP — THAT'S NORMAL
       Technical helper:  [NAME + how to reach]          <-- fill in
   If they're unavailable, hire a reputable, bonded crypto-recovery
   professional. Give them:
-     (1) the four cases you gathered,
+     (1) the cases you gathered (as many as SCHEME.txt says),
      (2) the disc from this case (it has the step-by-step instructions
          file "RECOVERY-TECHNICAL.md" and all the software),
      (3) this sheet.

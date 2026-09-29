@@ -89,6 +89,14 @@ fi
 docs="$(cat "$SCRIPTS/../recovery/RECOVERY-TECHNICAL.md" "$SCRIPTS/../recovery/RECOVERY-START-HERE.txt" 2>/dev/null)"
 grep -qE 'four-shares|any \*\*4\*\*|\*\*4\*\* cases|YOU NEED 4 OF 6|4 of the 6 sealed' <<< "$docs" && F "a recovery document still assumes 4-of-6" || P "recovery documents read k-of-n (SCHEME.txt)"
 
+hdr "no share-count LOGIC fixed at 4 or 6 in the ceremony scripts (the message check above missed these)"
+logic="$(cd "$SCRIPTS" && grep -n -E '"?\$\(grep -c[^)]*Share ID[^)]*\)"? *!= *6\b|w\[1-9\]|sh\[1-9\]|feed_shares [^|]* 4\b|--pwd-shares-total 4\b|--pwd-shares-threshold 4\b|ssss-(split|combine) [^|]*-t 4\b|for i in 1 2 3 4 5 6; do$' \
+         ceremony.sh prove-ceremony.sh recital-ceremony.sh test-ceremony.sh simulate-ceremony.sh hsm-recovery-drill.sh 2>/dev/null \
+         | grep -v -E '^[^:]*:[0-9]+:\s*#' || true)"
+[ -z "$logic" ] && P "no fixed share-count logic (guards, globs, imports, stubs)" || F "fixed share-count logic: $logic"
+docs2="$(cat "$SCRIPTS/../recovery/RECOVERY-TECHNICAL.md" 2>/dev/null)"
+grep -qE -- '--pwd-shares-total 4($|[^0-9])|ssss-combine -t 4\b|the 4 full word-shares' <<< "$docs2" && F "a recovery command still fixes k at 4" || P "recovery commands take k from SCHEME.txt"
+
 hdr "the default is unchanged: 4-of-6"
 unset CEREMONY_THRESHOLD CEREMONY_SHARES
 ( source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; [ "$(K)-of-$(N)" = 4-of-6 ] ) && P "default 4-of-6" || F "default changed"

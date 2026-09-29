@@ -704,7 +704,7 @@ init_scratch || exit 1
 restore_ok=0
 if [ "$AUTO" = 1 ]; then
   printf '  AUTO: importing the break-glass DKEK with the shares fed from the file (rep #1).\n'
-  out="$(feed_shares "$SHARES_FILE" 4 | sc-hsm-tool --reader "$READER" \
+  out="$(feed_shares "$SHARES_FILE" "$KK" | sc-hsm-tool --reader "$READER" \
       --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" 2>&1)"; rc=$?
   grep -q 'Please enter prime' <<< "$(printf '%s\n' "$out")" \
     && P "the corrected command entered the share-reconstruction prompt path (RECOVERY-TECHNICAL.md 3B)" \
@@ -771,7 +771,7 @@ init_scratch || exit 1
 if [ "$AUTO" = 1 ]; then
   printf '  NEGATIVE CONTROL (auto): feeding 4 shares with share 1 CORRUPTED — the import must FAIL\n'
   printf '  at the decipher step, before the card is ever touched.\n'
-  out="$(feed_shares "$SHARES_FILE" 4 wrong | sc-hsm-tool --reader "$READER" \
+  out="$(feed_shares "$SHARES_FILE" "$KK" wrong | sc-hsm-tool --reader "$READER" \
       --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then
     F "the card ACCEPTED a wrong DKEK share — the break-glass path has no integrity check"
@@ -815,7 +815,7 @@ printf '  documented break-glass path does not work and RECOVERY-TECHNICAL.md 3B
 init_scratch || exit 1
 if [ "$AUTO" = 1 ]; then
   printf '  AUTO: correct restore (rep #2 — 4 CORRECT shares fed from the file).\n'
-  out="$(feed_shares "$SHARES_FILE" 4 | sc-hsm-tool --reader "$READER" \
+  out="$(feed_shares "$SHARES_FILE" "$KK" | sc-hsm-tool --reader "$READER" \
       --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then
     P "$KK-of-$NN shares restored the DKEK — the corrected command works as documented"

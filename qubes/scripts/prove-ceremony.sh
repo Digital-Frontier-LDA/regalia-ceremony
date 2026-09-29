@@ -53,8 +53,9 @@ mkf sc-hsm-tool <<'S'
 for a in "$@"; do case "$a" in *.pbe|*.bin) : >"$a";; esac; done
 case "$*" in
   *--create-dkek-share*)
-    # six placeholder shares in OpenSC's format, for the wizard's share round trip (#464)
-    for i in 1 2 3 4 5 6; do
+    # n placeholder shares in OpenSC's format, for the wizard's share round trip (#464)
+    n=6; prev=""; for a in "$@"; do [ "$prev" = --pwd-shares-total ] && n="$a"; prev="$a"; done   # the n asked for
+    for i in $(seq 1 "$n"); do
       printf '\nPrime       : 7f:00:00:00:00:00:00:6b\nShare ID    : %s\nShare value : 0%s:0%s\n' "$i" "$i" "$i"
     done;;
   *--import-dkek-share*--pwd-shares-total*) cat >/dev/null;;
@@ -139,7 +140,7 @@ say "   sha256(rebuilt from the last $KK shares) : $(shas "$RB")"
 # ---- PROOF 3: derivation-root mnemonic, SLIP-0039 k-of-n ---------------------
 say ""; say "PROOF 3 — derivation-root mnemonic split $KK-of-$NN (SLIP-0039) and recovered"
 printf 'b\n' | step_shamir >/dev/null 2>&1
-cp "$WORK"/w[1-9] "$PROOF/" 2>/dev/null
+for i in $(seq 1 "$NN"); do cp "$WORK/w$i" "$PROOF/" 2>/dev/null; done   # w1..wN (n may be up to 16)
 # slip39-mint.py intentionally NEVER writes the minted master secret (that was the old
 # `shamir create` leak), so there is no on-disk reference to compare against. Prove
 # recoverability WITHOUT a reference — exactly as recital-ceremony.sh does: recover from

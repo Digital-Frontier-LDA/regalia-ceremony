@@ -962,7 +962,7 @@ step_hsm_funding() {
     || { rm -f "$WORK/dkek-shares.txt"; \
          err "DKEK share creation was skipped or failed — aborting the HSM step."; \
          err "A born-in-HSM funding key has NO recoverable backup without a DKEK."; return 1; }
-  if [ "$(grep -cE 'Share ID *: *[0-9]+' "$WORK/dkek-shares.txt" 2>/dev/null)" != 6 ]; then
+  if [ "$(grep -cE 'Share ID *: *[0-9]+' "$WORK/dkek-shares.txt" 2>/dev/null)" != "$(N)" ]; then
     err "the $(N) DKEK password shares were not captured, so step 2 cannot test them. Nothing is on"
     err "the card yet. Do not hand out these shares; re-run this step."
     rm -f "$WORK/dkek.pbe" "$WORK/dkek-shares.txt"

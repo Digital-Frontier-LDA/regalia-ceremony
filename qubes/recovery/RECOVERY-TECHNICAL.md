@@ -70,12 +70,12 @@ plate, expand the stamped 4-letter prefixes back to words first:
 ```
 metal-stamp-worksheet.py --verify --in <stamped-prefixes-of-that-share>
 ```
-Put the 4 full word-shares (one per line) in a file, then recover each wallet mnemonic:
+Put the k full word-shares (one per line) in a file, then recover each wallet mnemonic:
 ```
 bip39-slip39-backup.py --recover --in k-shares-funding.txt      # -> funding BIP39 mnemonic
 bip39-slip39-backup.py --recover --in k-shares-derivation.txt   # -> derivation BIP39 mnemonic
 ```
-(If a case bundles funding + derivation shares together, recover each from its 4 matching shares.)
+(If a case bundles funding + derivation shares together, recover each from its k matching shares.)
 
 > **Passphrase:** these backups use the **empty** SLIP-39 passphrase (the default), so
 > `--recover` needs no passphrase. If — and only if — the custodian sheet records a
@@ -98,12 +98,12 @@ the ceremony) and the disc files `dkek.pbe` + `funding-wrapped.bin`. The key is 
 ```
 # 1) Initialise a FRESH HSM with a DKEK domain (this WIPES that card — use a blank spare):
 sc-hsm-tool --initialize --dkek-shares 1 --label 'akash-funding'
-# 2) Import the DKEK share. `--pwd-shares-total 4` is REQUIRED: without it OpenSC's
+# 2) Import the DKEK share. `--pwd-shares-total <k>` (k from SCHEME.txt) is REQUIRED: without it OpenSC's
 #    import_dkek_share() never enters the share-reconstruction prompt path and the import
 #    cannot be driven. You will then be prompted, per share, for the PRIME, the SHARE ID,
 #    and the SHARE VALUE — k of the n hand-written DKEK PASSWORD shares from ≥k cases, typed at
 #    the prompt, never on the command line:
-sc-hsm-tool --import-dkek-share dkek.pbe --pwd-shares-total 4
+sc-hsm-tool --import-dkek-share dkek.pbe --pwd-shares-total <k>   # e.g. 4 for 4-of-6
 # 3) Unwrap the funding key from the DKEK-wrapped backup into the HSM (key stays in the HSM):
 sc-hsm-tool --unwrap-key funding-wrapped.bin --key-reference 1
 # 4) Export the PUBLIC key (safe) so you can prove which address you now control:
@@ -183,7 +183,7 @@ obligations. Do NOT reuse these seeds afterward — they have been exposed.
 
 ## 6. (Optional) decrypt the SOPS config vault
 If you also need the service configuration: the breakglass **age** key is split the same way
-(`ssss-combine -t 4` over its 4 shares) → an `AGE-SECRET-KEY-1…`; then
+(`ssss-combine -t <k>` over its k shares) → an `AGE-SECRET-KEY-1…`; then
 `SOPS_AGE_KEY=<that key> sops decrypt vault.sops.yaml` (the recovered key is a *value*, so it
 goes in `SOPS_AGE_KEY`; `SOPS_AGE_KEY_FILE` is for a *path* to a key file).
 

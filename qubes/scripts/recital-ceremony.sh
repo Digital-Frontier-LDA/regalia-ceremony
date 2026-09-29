@@ -166,7 +166,7 @@ rm -f "$WORK"/form-*.ps   # the ssss split above left its own forms; count only 
 printf 'b\n' | step_shamir >/dev/null 2>&1
 # the wizard writes each raw share to w1..wN (text) and a BLANK hand-copy form per share
 # (ADR-0002 D12: a share is never printed, so no share page or share QR may exist)
-nshares=$(ls "$WORK"/w[1-9] 2>/dev/null | wc -l | tr -d ' ')
+nshares=0; for i in $(seq 1 16); do [ -f "$WORK/w$i" ] && nshares=$((nshares + 1)); done   # w1..wN (n may be up to 16)
 nforms=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
 [ "$nshares" = "$NN" ] && [ "$nforms" = "$NN" ] && P "$NN SLIP-39 shares emitted, with $NN blank hand-copy forms" || F "expected $NN SLIP-39 shares and $NN forms, got $nshares and $nforms"
 ls "$WORK"/*share*.png >/dev/null 2>&1 && F "a printable share page was rendered (shares are never printed)" || P "no printable share page rendered"
