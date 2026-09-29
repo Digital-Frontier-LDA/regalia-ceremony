@@ -229,10 +229,13 @@ sealing.
   as a CCID device) vs. the *SD card* reader. Pass the smartcard/USB token through to the
   vault with `qvm-usb`.
 - **Printer:** any USB-attached **laser** printer with **no network and no internal storage**
-  (driverless IPP-over-USB covers most current models; `printer-driver-brlaser` is included for
-  some older Brother models (Debian lists which); other brands may need their driver added to the recipe);
-  power-cycle it after printing to clear page memory. The CUPS spool lives in the
-  disposable qube and dies on shutdown.
+  that has a CUPS driver for the plain `usb://` backend. A fresh disposable has no queue: the wizard
+  finds the printer attached with `qvm-usb`, matches an installed driver on its make-and-model, and
+  offers to create the queue `vault-usb` (not shared). `printer-driver-brlaser` is in the recipe,
+  which covers most Brother mono lasers (including the DCP-L2550DW); other brands may need their
+  driver added to the recipe. Driverless IPP-over-USB is NOT used: it appears as `ipp://localhost`,
+  a network URI, which the USB-only gate refuses. Power-cycle the printer after printing to clear
+  its page memory. The CUPS spool lives in the disposable qube and dies on shutdown.
 
 ## Verification status (what's actually been tested)
 

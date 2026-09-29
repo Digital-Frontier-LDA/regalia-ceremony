@@ -301,14 +301,50 @@ require_airgap_and_tools() {
 
 # ---- printer (a USB laser via CUPS) -------------------------------------------
 PRINTER=""
+AUTO_QUEUE="vault-usb"
+# A fresh disposable has no print queue (/etc/cups resets with it). Offer to create one for a
+# printer attached by USB: CUPS lists it with its IEEE-1284 make-and-model, and the installed
+# drivers (brlaser, gutenprint, foomatic, …) are matched on that, so no model is hard-coded.
+# Only usb:// devices are considered — never a network or IPP-over-USB (ipp://localhost) one.
+setup_usb_queue() {
+  command -v lpinfo >/dev/null 2>&1 && command -v lpadmin >/dev/null 2>&1 || return 1
+  local devs uri mm model ppd
+  devs="$(sudo -n lpinfo -l -v 2>/dev/null | awk '
+      /^Device: uri = /{uri=$4; next}
+      /^[ \t]+class = /{cls=$3; next}
+      /^[ \t]+make-and-model = /{sub(/^[ \t]+make-and-model = /,""); if (cls=="direct" && uri ~ /^usb:\/\//) print uri "\t" $0}')"
+  [ -n "$devs" ] || { info "no USB printer detected (is it attached to this qube: qvm-usb attach?)"; return 1; }
+  if [ "$(wc -l <<< "$devs")" -gt 1 ]; then warn "more than one USB printer attached — using the first; detach the others to choose"; fi
+  uri="$(head -1 <<< "$devs" | cut -f1)"; mm="$(head -1 <<< "$devs" | cut -f2)"
+  # The URI and the driver name come from the device and the driver files; they reach lpadmin
+  # as plain arguments (no eval), and must still look like what they claim to be.
+  [[ "$uri" =~ ^usb://[A-Za-z0-9%/?=._\&+-]+$ ]] || { warn "odd USB printer URI '$uri' — not using it"; return 1; }
+  model="${mm#* }"; model="${model% series}"          # "Brother DCP-L2550DW series" -> "DCP-L2550DW"
+  ppd="$(sudo -n lpinfo --make-and-model "$mm" -m 2>/dev/null \
+        | grep -vE '^(everywhere|driverless)' | grep -F -- "$model" | head -1 | cut -d' ' -f1)"
+  [ -n "$ppd" ] || { warn "found '$mm' on USB, but no installed driver lists it — create a queue by hand (lpadmin)"; return 1; }
+  [[ "$ppd" =~ ^[A-Za-z0-9:/._+-]+$ ]] || { warn "odd driver name '$ppd' — not using it"; return 1; }
+  info "USB printer: $mm"
+  info "     device: $uri"
+  info "     driver: $ppd"
+  ask "create print queue '$AUTO_QUEUE' for it (USB only, not shared)?" || return 1
+  sudo -n lpadmin -p "$AUTO_QUEUE" -E -v "$uri" -m "$ppd" -o printer-is-shared=false \
+    || { warn "lpadmin failed — no queue created"; return 1; }
+  info "queue '$AUTO_QUEUE' created"
+}
+
 pick_printer() {
   b "Printer"
   warn "Print ONLY to a USB-attached printer with NO network and NO internal storage."
   warn "After printing, power-cycle the printer to clear its page memory. The CUPS"
   warn "spool lives in this disposable qube and dies when you power it off."
   if ! command -v lpstat >/dev/null 2>&1; then warn "CUPS (lp/lpstat) not installed; skipping print steps"; return 1; fi
-  info "Detected print queues:"; lpstat -p 2>/dev/null | sed 's/^/     /' || true
+  local queues; queues="$(lpstat -p 2>/dev/null || true)"
+  if [ -z "$queues" ] && setup_usb_queue; then queues="$(lpstat -p 2>/dev/null || true)"; fi
+  info "Detected print queues:"; sed 's/^/     /' <<< "${queues:-(none)}"
+  if [ -n "$queues" ] && [ "$(wc -l <<< "$queues")" = 1 ]; then info "(only one: press Enter to use it)"; fi
   read -r -p "   printer queue name (blank = skip printing): " PRINTER
+  if [ -z "$PRINTER" ] && [ -n "$queues" ] && [ "$(wc -l <<< "$queues")" = 1 ]; then PRINTER="$(awk '{print $2}' <<< "$queues")"; fi
   [ -n "$PRINTER" ] || { warn "no printer chosen; paper steps will only write files for you to print manually"; return 1; }
   # the queue name is later embedded in an lp command; restrict it to CUPS-legal
   # characters so it can't inject shell metacharacters.
