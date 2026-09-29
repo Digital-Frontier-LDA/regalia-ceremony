@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """pin-card-form.py — print a BLANK paper PIN card: the day-to-day PINs are written on it BY HAND.
 
-  pin-card-form.py -o pin-card.ps                      # HSM A, B, C (10 digits) + YubiKey (8)
-  pin-card-form.py -o pin-card.ps --hsms a,b --hsm-digits 10 --yubikey-digits 8 --paper a4
+  pin-card-form.py -o pin-card.ps                      # HSM A, B, C (10 digits) + YubiKey A, B, C (8)
+  pin-card-form.py -o pin-card.ps --hsms a,b --yubikeys a --hsm-digits 10 --yubikey-digits 8 --paper a4
 
 WHAT IT IS (owner, 2026-09-29; ADR-0002 D16): step 0 generates the day-to-day PINs and shows each
 once; they are copied onto this card by hand, then typed back. The card is what carries each site's
@@ -39,7 +39,7 @@ def esc(s):
     return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
 
 
-def emit(hsms, hsm_digits, yk_digits, paper):
+def emit(hsms, yubikeys, hsm_digits, yk_digits, paper):
     W, H = PAPER[paper]
     m = 42.0
     out = ["%!PS-Adobe-3.0", "%%%%BoundingBox: 0 0 %d %d" % (W, H),
@@ -68,17 +68,18 @@ def emit(hsms, hsm_digits, yk_digits, paper):
     line(m + 305, y - 2, W - m)
     y -= 26
 
-    rows = [("HSM %s - user PIN" % h.upper(), hsm_digits) for h in hsms] + [("YubiKey - PIV PIN", yk_digits)]
+    rows = [("HSM %s - user PIN" % h.upper(), hsm_digits) for h in hsms] + \
+           [("YubiKey %s - PIV PIN" % y.upper(), yk_digits) for y in yubikeys]
     cell = 20.0
     for label, digits in rows:
         text(m, y, label, "Helvetica-Bold", 10.5)
         text(m + 190, y, "Serial:", "Helvetica-Bold", 9)
         line(m + 225, y - 2, W - m)
-        y -= 30
+        y -= 28
         for i in range(digits):
             box(m + i * (cell + 4), y, cell, 24)
         text(m + digits * (cell + 4) + 10, y + 8, "Typed back and matched: [  ]", "Helvetica", 9)
-        y -= 26
+        y -= 22
 
     lh = 11.0
     ib_h = lh * len(RULES) + 12
@@ -97,17 +98,20 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--hsms", default="a,b,c", help="HSM letters, comma separated (default a,b,c)")
+    ap.add_argument("--yubikeys", default="a,b,c", help="YubiKey letters, comma separated (default a,b,c)")
     ap.add_argument("--hsm-digits", type=int, default=10, help="HSM user PIN length (default 10)")
     ap.add_argument("--yubikey-digits", type=int, default=8, help="YubiKey PIN length (default 8)")
     ap.add_argument("--paper", choices=list(PAPER), default="letter")
     a = ap.parse_args()
     hsms = [h for h in a.hsms.split(",") if h]
-    if not hsms or any(len(h) != 1 or not h.isalpha() for h in hsms) or len(hsms) > 6:
-        sys.exit("pin-card-form: --hsms is 1-6 single letters, e.g. a,b,c")
+    yubikeys = [y for y in a.yubikeys.split(",") if y]
+    for name, lst in (("--hsms", hsms), ("--yubikeys", yubikeys)):
+        if not lst or any(len(x) != 1 or not x.isalpha() for x in lst) or len(lst) > 3:
+            sys.exit("pin-card-form: %s is 1-3 single letters, e.g. a,b,c" % name)
     if not 6 <= a.hsm_digits <= 16 or not 6 <= a.yubikey_digits <= 8:
         sys.exit("pin-card-form: HSM PINs are 6-16 digits, a YubiKey PIN 6-8")
     try:
-        page = emit(hsms, a.hsm_digits, a.yubikey_digits, a.paper)
+        page = emit(hsms, yubikeys, a.hsm_digits, a.yubikey_digits, a.paper)
     except ValueError as exc:
         sys.exit("pin-card-form: %s; nothing written" % exc)
     with open(a.out, "w") as fh:

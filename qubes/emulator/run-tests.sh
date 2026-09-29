@@ -274,6 +274,7 @@ say "DOM0 TEMPLATE UPDATE — one command: verified download, Salt copy without 
 
 say "HANDWRITTEN SHARES — the printer gets a blank form, never a share; the copy is typed back (ADR-0002 D12)"
 "$HERE/tests/test-handwritten-share.sh" || suite_failed "test-handwritten-share.sh"
+"$HERE/tests/test-pin-card-form.sh" || suite_failed "test-pin-card-form.sh"
 
 say "PREFLIGHT TOKENS — 'No smart card readers found' is not a reader, and a missing HSM is said"
 "$HERE/tests/test-preflight-token-readers.sh" || suite_failed "test-preflight-token-readers.sh"
