@@ -153,6 +153,7 @@ say "PROVE-CEREMONY SLIP-39 proof (PROOF 3: the 4-of-6 SLIP-0039 backup really r
 say "CEREMONY pick_printer USB-only gate (network device-uri must not print a plaintext share over the wire)"
 "$HERE/tests/test-ceremony-pick-printer-uri.sh" || suite_failed "test-ceremony-pick-printer-uri.sh"
 "$HERE/tests/test-printer-usb-autoqueue.sh" || suite_failed "test-printer-usb-autoqueue.sh"
+"$HERE/tests/test-ccid-add-reader.sh" || suite_failed "test-ccid-add-reader.sh"
 
 say "PRINTER network-uri fail-closed gate (ANY non-local device-uri refused, not just a blocklist)"
 "$HERE/tests/test-printer-network-uri.sh" || suite_failed "test-printer-network-uri.sh"

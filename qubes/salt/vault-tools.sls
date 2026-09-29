@@ -226,6 +226,17 @@ ceremony-scripts:
     # in the real ceremony image (they prepend a fake-bin of STUBBED tools to PATH). Regex-anchor it.
     - exclude_pat: 'E@(test-ceremony|recital-ceremony|simulate-ceremony|prove-ceremony)\.sh$'
 
+# libccid only opens readers its /etc/libccid_Info.plist lists, and Debian 13's libccid 1.6.2 does
+# not list the Pico HSM (2e8a:10fd), so pcscd ignored a Pico attached to the vault (owner's
+# disposable, 2026-09-29). Add it; the Nitrokey HSM (20a0:4230) is already listed.
+vault-ccid-pico-hsm:
+  cmd.run:
+    - name: python3 /opt/vault-ceremony/ccid-add-reader.py --plist /etc/libccid_Info.plist --vid 0x2E8A --pid 0x10FD --name "Pol Henarejos Pico Key"
+    - unless: python3 /opt/vault-ceremony/ccid-add-reader.py --plist /etc/libccid_Info.plist --vid 0x2E8A --pid 0x10FD --check
+    - require:
+      - pkg: vault-tools-apt
+      - file: ceremony-scripts
+
 # Enable the smartcard daemon and the print spooler so a reader, token or USB printer attached
 # with qvm-usb just works in the disposable (its spool is discarded with it).
 # `systemctl enable` only writes unit symlinks and needs no running systemd, so it behaves the same

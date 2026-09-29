@@ -194,6 +194,12 @@ jobs:
             python3 -c "import mnemonic, shamir_mnemonic, smartcard, cryptography, Crypto" \
               || { echo "the vault python cannot import the ceremony modules"; exit 1; }
             python3 /opt/vault-ceremony/payload-qr.py --selftest
+            # libccid must list the Pico HSM, or pcscd ignores it (it lists the Nitrokey HSM itself)
+            python3 /opt/vault-ceremony/ccid-add-reader.py --plist /etc/libccid_Info.plist --vid 0x2E8A --pid 0x10FD --check \
+              || { echo "libccid does not list the Pico HSM 2e8a:10fd"; exit 1; }
+            python3 /opt/vault-ceremony/ccid-add-reader.py --plist /etc/libccid_Info.plist --vid 0x20A0 --pid 0x4230 --check \
+              || { echo "libccid does not list the Nitrokey HSM 20a0:4230"; exit 1; }
+            python3 -c "import plistlib; d=plistlib.load(open(\"/etc/libccid_Info.plist\",\"rb\")); assert len({len(d[k]) for k in (\"ifdVendorID\",\"ifdProductID\",\"ifdFriendlyName\")}) == 1"
             ls /opt/vault-ceremony/wheels/*.whl >/dev/null 2>&1 && echo "offline recovery wheels baked in"
             # the stubbed test/sim/proof harnesses MUST NOT ship in the real image
             for h in test-ceremony recital-ceremony simulate-ceremony prove-ceremony; do

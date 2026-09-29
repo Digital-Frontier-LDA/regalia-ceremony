@@ -244,7 +244,9 @@ sealing.
   only to the **archive disc + paper**.
 - **Two reader types, don't confuse them:** the *smartcard* reader (for the HSM / YubiKey
   as a CCID device) vs. the *SD card* reader. Pass the smartcard/USB token through to the
-  vault with `qvm-usb`.
+  vault with `qvm-usb`. The Pico HSM (USB `2e8a:10fd`) is not in Debian 13's libccid reader list,
+  so the recipe adds it to `/etc/libccid_Info.plist` (`ccid-add-reader.py`); without that, pcscd
+  ignores an attached Pico. The Nitrokey HSM 2 is already listed.
 - **Printer:** any USB-attached **laser** printer with **no network and no internal storage**
   that has a CUPS driver for the plain `usb://` backend. A fresh disposable has no queue: the wizard
   finds the printer attached with `qvm-usb`, matches an installed driver on its make-and-model, and
