@@ -173,7 +173,11 @@ the 128-bit backstop the dice provide on top of the HSM and the OS; hashed with
 SHA-256), 32 bytes from the attached HSM's hardware RNG (Nitrokey HSM 2 or Pico HSM, read directly
 over PC/SC with `hsm-random.py`), and 32 bytes of `/dev/urandom`,
 XORs them (`entropy-mix.py`), and encodes the result as a 24-word BIP39 mnemonic for step 3 c. It
-refuses without the dice or without the HSM.
+refuses without the dice or without the HSM. The dice values are checked for fairness: two faces
+never appearing, counts too uneven (chi-square, p < 1e-4), no back-to-back repeat at all, or a
+repeating pattern is refused (real dice: about once in 3,000 runs; roll again). That catches a bad
+die or naive made-up typing, not a deliberate cheater, and fake dice cannot weaken the seed anyway,
+because of the XOR with the HSM and the OS.
 
 `ceremony.sh` is built for **both** tokens: a YubiKey step (PIV/P-256 `ops` age identity)
 **and** a Nitrokey HSM 2 step (DKEK 4-of-6 backup + on-device secp256k1 funding key). It

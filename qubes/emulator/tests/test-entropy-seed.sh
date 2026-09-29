@@ -28,7 +28,10 @@ with open(out, "wb") as fh:
     fh.write(b"" if os.environ.get("SHORT_RNG") else os.urandom(32))
 print("hsm-random: 32 bytes from Nitrokey Nitrokey HSM (DENK00000000000) 00 00")
 PY
-python3 -c "import random;r=random.SystemRandom();print('\n'.join(''.join(r.choice('123456') for _ in range(10)) for _ in range(10)))" > "$T/rolls"
+# Fixed rolls, two dice per line as the wizard asks: random ones would trip the fairness check
+# (correctly) about once in 3,000 runs and make this test flaky.
+F50=35116424236655142311453662245135524611326443155226
+for i in $(seq 0 2 48); do echo "${F50:$i:2}"; done > "$T/rolls"
 
 run(){ # $1 = stdin file; env passes through. Prints the step's output then "WORK: <files>" and a mnemonic check.
   ( PATH="$T/bin:$PATH"; source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1
@@ -65,6 +68,11 @@ hdr "no dice (input ends): REFUSE before touching the HSM"
 : > "$T/empty"
 out="$(run "$T/empty")"
 grep -q "dice entropy not collected" <<< "$out" && P "no dice, no seed" || F "went on without dice"
+
+hdr "made-up digits with no repeat in a row: REFUSED, nothing written"
+printf '%s\n' 3516 4236 5142 3145 3625 1352 4613 2643 1524 1326 4351 6245 45 > "$T/typed"
+o="$(python3 "$SCRIPTS/dice-entropy.py" --from-stdin --out "$T/typed.hex" < "$T/typed" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q "twice in a row" <<< "$o" && [ ! -e "$T/typed.hex" ] && P "refused, no file" || F "typed digits accepted: $o"
 
 hdr "dice-entropy selftest"
 python3 "$SCRIPTS/dice-entropy.py" --selftest >/dev/null && P "selftest passes" || F "selftest failed"
