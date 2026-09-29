@@ -13,6 +13,7 @@ export CALLS="$ROOT/calls" PATH="$ROOT/bin:$PATH"
 cat > "$ROOT/bin/ykman" <<'S'
 #!/usr/bin/env bash
 echo "ykman $*" >> "$CALLS"
+[ "$*" = "info" ] && { echo "Device type: YubiKey 5 NFC"; echo "Serial number: ${YK_SERIAL:-36345471}"; }
 if [ "$*" = "piv info" ]; then
   printf '%s\n' "PIV version:              5.7.4" "PIN tries remaining:      3/3" \
     "Management key algorithm: AES192" "WARNING: Using default PIN!" "WARNING: Using default PUK!" \
@@ -43,13 +44,13 @@ out="$(step_yubikey_ops 2>&1)"; rc=$?
 
 : > "$CALLS"
 # shellcheck disable=SC2034  # read by the sourced step_yubikey_ops
-yubikey_piv_pin=24681357 yubikey_piv_puk=24681357
+yubikey_a_piv_pin=24681357 yubikey_a_piv_puk=24681357
 out="$(step_yubikey_ops 2>&1)"; rc=$?
 [ "$rc" != 0 ] && ! grep -q "change-pin" "$CALLS" && P "an escrowed PIN equal to the PUK is refused" || F "equal PIN and PUK accepted"
 
 : > "$CALLS"
 # shellcheck disable=SC2034  # read by the sourced step_yubikey_ops
-yubikey_piv_pin=24681357 yubikey_piv_puk=97531864
+yubikey_a_piv_pin=24681357 yubikey_a_piv_puk=97531864
 out="$(step_yubikey_ops 2>&1)"; rc=$?
 [ "$rc" = 0 ] && P "the step succeeds on a factory card with step 0's values" || F "the step failed (rc=$rc): $out"
 order="$(grep -oE 'change-pin -P [0-9]+ -n [0-9]+|change-puk -p [0-9]+ -n [0-9]+|change-management-key -a TDES --protect|--generate' "$CALLS" | tr '\n' ';')"
@@ -57,13 +58,25 @@ order="$(grep -oE 'change-pin -P [0-9]+ -n [0-9]+|change-puk -p [0-9]+ -n [0-9]+
   && P "escrowed PIN, then escrowed PUK, then the binding proof, then a protected TDES key, then generate" \
   || F "wrong sequence: '$order'"
 grep -q "PIN BINDING PROVEN" <<< "$out" && P "the binding proof is reported" || F "no binding proof"
+grep -q "serial 36345471) is YubiKey A" <<< "$out" && P "the first token is YubiKey A, named with its serial" || F "set A not named: $(grep -i 'is YubiKey' <<< "$out")"
 grep -qE "24681357|97531864" <<< "$out" && F "a PIN or PUK was printed" || P "no PIN or PUK is printed"
 
-# A second factory token in the same run must not receive the same escrowed PIN.
+# Three YubiKeys, three credential sets: a second factory token in the same run gets SET B (its own
+# PIN and PUK), never set A's; the same token run again keeps its set; a fourth token is refused.
+# shellcheck disable=SC2034  # read by the sourced step_yubikey_ops
+yubikey_b_piv_pin=13572468 yubikey_b_piv_puk=86427531
 : > "$CALLS"
-out="$(yubikey_pins_set_this_run=1 step_yubikey_ops 2>&1)"; rc=$?
-[ "$rc" != 0 ] && ! grep -q "change-pin" "$CALLS" && grep -q "separate run" <<< "$out" \
-  && P "a second factory token in the same run is refused before its PIN is set" || F "second token got the same PIN (rc=$rc)"
+out="$( YK_SET_OF[36345471]=a; YK_SERIAL=36344616 step_yubikey_ops 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q "change-pin -P 123456 -n 13572468" "$CALLS" && grep -q "change-puk -p 12345678 -n 86427531" "$CALLS" \
+  && ! grep -q -- "-n 24681357" "$CALLS" && P "a second token gets set B's own PIN and PUK" || F "second token (rc=$rc): $(tr '\n' ';' < "$CALLS")"
+grep -q "serial 36344616) is YubiKey B" <<< "$out" && P "and is named YubiKey B" || F "set B not named"
+: > "$CALLS"
+out="$( YK_SET_OF[36345471]=a; YK_SET_OF[36344616]=b; YK_SERIAL=36345471 step_yubikey_ops 2>&1)"; rc=$?
+grep -q "change-pin -P 123456 -n 24681357" "$CALLS" && P "the same token run again keeps set A" || F "a re-run changed the set: $(tr '\n' ';' < "$CALLS")"
+: > "$CALLS"
+# shellcheck disable=SC2034  # YK_SET_OF is read by the sourced step_yubikey_ops
+out="$( YK_SET_OF[1]=a; YK_SET_OF[2]=b; YK_SET_OF[3]=c; YK_SERIAL=35718625 step_yubikey_ops 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q "change-pin" "$CALLS" && grep -q "fourth token" <<< "$out" && P "a fourth token is refused before any change" || F "fourth token (rc=$rc)"
 
 : > "$CALLS"
 out="$(PLUGIN_FAILS=1 step_yubikey_ops 2>&1)"; rc=$?

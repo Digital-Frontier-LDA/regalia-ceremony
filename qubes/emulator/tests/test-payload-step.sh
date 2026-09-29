@@ -59,7 +59,9 @@ EOF
 # change catches the dev defaults.
 CEREMONY_MODE=dev
 write_dev_pins() {
-  printf 'hsm_a_user_pin=648219\nhsm_a_so_pin=3537363231383830\nhsm_b_user_pin=648219\nhsm_b_so_pin=3537363231383830\nhsm_c_user_pin=648219\nhsm_c_so_pin=3537363231383830\nyubikey_piv_pin=123456\nyubikey_piv_puk=12345678\nyubikey_mgmt_key=010203040506070801020304050607080102030405060708\n' > "$WORK/pins.env"
+  printf 'hsm_a_user_pin=648219\nhsm_a_so_pin=3537363231383830\nhsm_b_user_pin=648219\nhsm_b_so_pin=3537363231383830\nhsm_c_user_pin=648219\nhsm_c_so_pin=3537363231383830\n' > "$WORK/pins.env"
+  # Three YubiKeys, each with the docs' dev defaults (DEV mode warns about the repeats, as intended).
+  for y in a b c; do printf 'yubikey_%s_piv_pin=123456\nyubikey_%s_piv_puk=12345678\nyubikey_%s_mgmt_key=010203040506070801020304050607080102030405060708\n' "$y" "$y" "$y"; done >> "$WORK/pins.env"
 }
 reset_state(){
   rm -rf "$WORK/payload.txt" "$WORK/payload.age" "$WORK/payload-qr" "$WORK/breakglass.key" "$WORK/pins.env"
@@ -120,7 +122,8 @@ reset_state
 state_step0_done=1
 rm -f "$WORK/payload.txt"
 unset hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin hsm_c_user_pin hsm_c_so_pin
-unset yubikey_piv_pin yubikey_piv_puk yubikey_mgmt_key
+unset yubikey_a_piv_pin yubikey_a_piv_puk yubikey_a_mgmt_key yubikey_b_piv_pin yubikey_b_piv_puk yubikey_b_mgmt_key \
+      yubikey_c_piv_pin yubikey_c_piv_puk yubikey_c_mgmt_key
 cat > "$WORK/payload.txt" <<'EOF'
 # EXAMPLE SERVICE — TIER-0 RECOVERY ROOTS
 derivation_wallet_mnemonic_v2:
@@ -133,10 +136,16 @@ hsm_b_user_pin:
 hsm_b_so_pin:
 hsm_c_user_pin:
 hsm_c_so_pin:
+yubikey_a_piv_pin:
+yubikey_a_piv_puk:
+yubikey_a_mgmt_key:
+yubikey_b_piv_pin:
+yubikey_b_piv_puk:
+yubikey_b_mgmt_key:
+yubikey_c_piv_pin:
+yubikey_c_piv_puk:
+yubikey_c_mgmt_key:
 sle4442_psc:
-yubikey_piv_pin:
-yubikey_piv_puk:
-yubikey_mgmt_key:
 EOF
 out="$(BREAKGLASS_RECIPIENT="$RECIP" step_payload 2>&1)"
 grep -qiE "no filled-in values|empty label" <<< "$out" \
