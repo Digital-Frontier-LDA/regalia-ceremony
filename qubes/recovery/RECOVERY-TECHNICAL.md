@@ -14,12 +14,14 @@ Confirm you are entitled to do this and the trigger condition is met (see the se
 **custodian-contact sheet** in each case, and the executor named there). An unauthorized
 break-glass is theft. Two-person rule: do this with a second authorized person present.
 
-## 1. Gather ≥4 of the 6 cases
-Each case has a numbered holographic seal + a sealed custodian-contact sheet listing all
-six custodians and the executor. Contact custodians until you physically hold **4** cases.
-For each case, before opening, check the seal serial against the contact sheet / registry
-and that the seal is intact; a broken seal or wrong serial → note it, the contents may be
-compromised (you may still recover, but rotate afterward).
+## 1. Gather ≥k of the n cases (4 of 6 by default)
+Each case has a numbered holographic seal + a sealed custodian-contact sheet that names the
+**executor only**, never the other holders, so one lost or coerced case does not lead to the
+rest. The **executor** holds the directory of cases (who, where, which seal serial) and gathers
+them: contact holders until you physically hold **k** cases. For each case, before opening,
+check the seal serial against the directory / seal registry and that the seal is intact; a
+broken seal or wrong serial → note it, the contents may be compromised (you may still recover,
+but rotate afterward).
 
 Each case contains: an **archive disc** (DVD: M-DISC or archival AZO DVD-R; this toolkit + ciphertext + `payload.age`), a **recovery
 card**, **QR sheets** on cotton archival paper (the Tier-0 payload — see Section 3C), an
