@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dice-entropy.py — collect physical dice rolls and turn them into 256 bits of entropy.
 
-  dice-entropy.py --out dice.hex            # guided: roll, type, Enter … until 100 rolls
+  dice-entropy.py --out dice.hex            # guided: roll, type, Enter … until 50 dice values
   dice-entropy.py --selftest
 
 WHY DICE AT ALL: the ceremony never trusts one random source. The owner's rule (2026-09-25):
@@ -9,11 +9,15 @@ the wallet seed always has physical dice mixed in on top of the Nitrokey HSM's h
 a flawed or backdoored RNG alone cannot determine the seed. entropy-mix.py XORs this with the
 HSM and /dev/urandom; the result is at least as unpredictable as the best of the three.
 
-HOW MANY ROLLS: a fair six-sided die gives log2(6) = 2.585 bits per roll, so 100 rolls carry
-258 bits, just over the 256 the seed needs. The rolls are hashed with SHA-256, as hardware
-wallets do with dice (Coldcard): the exact digits, in order, become one 32-byte value. Typing
-fewer rolls than asked, or the same digit over and over, is refused rather than accepted as
-less entropy than it looks.
+HOW MANY ROLLS: 50 dice values (owner, 2026-09-29; ADR-0002 D11). A fair six-sided die gives
+log2(6) = 2.585 bits per value, so 50 values carry 129 bits. That is the right target because the
+dice are never the only source: they are XORed with the HSM's RNG and /dev/urandom, and exist so
+that the seed stays out of reach even if BOTH of those are flawed. 128 bits is the standard
+security level for that. (Wallets that use dice ALONE ask for 99-100 rolls, to fill all 256 bits.)
+Several dice may be thrown at once: 2 dice x 25 throws is 50 values (one Enter per throw). The values are hashed with
+SHA-256, as hardware wallets do with dice (Coldcard): the exact digits, in order, become one
+32-byte value. Fewer values than asked, or the same digit over and over, is refused rather than
+accepted as less entropy than it looks.
 
 WHAT IS KEPT: only the 32-byte hash, written 0600 to --out. The rolls are read with echo off,
 never printed, and never written anywhere. The hash's own SHA-256 prefix is printed as a
@@ -26,7 +30,7 @@ import os
 import sys
 
 FACES = "123456"
-MIN_ROLLS = 100          # 100 * log2(6) = 258.5 bits >= 256
+MIN_ROLLS = 50           # 50 * log2(6) = 129 bits >= 128: the security level the dice back up
 
 
 def check_line(line):
@@ -40,13 +44,13 @@ def check_line(line):
 
 
 def sanity(rolls):
-    """Refuse input that cannot have come from fair dice read honestly: a face that never
-    appears in 100+ rolls happens with fair dice about once in 10^7 runs; one face making up
-    over half the rolls is far outside chance. Either means a stuck die, a mis-read, or a
-    keyboard pattern — not entropy."""
+    """Refuse input that cannot have come from fair dice read honestly. In 50 fair rolls ONE face
+    never appearing happens about once in 1,500 runs, so that alone is allowed; TWO faces never
+    appearing is about once in 10^8, and one face making up over half the rolls is far outside
+    chance. Either of those means a stuck die, a mis-read, or a keyboard pattern — not entropy."""
     counts = {f: rolls.count(f) for f in FACES}
     missing = [f for f, n in counts.items() if n == 0]
-    if missing:
+    if len(missing) >= 2:
         return "face(s) %s never appeared — that is not fair dice; roll again" % ",".join(missing)
     top = max(counts.values())
     if top * 2 > len(rolls):
@@ -90,12 +94,13 @@ def selftest():
     assert check_line("1 2 3 4 5 6") == "123456"
     assert check_line("12a4") is None and check_line("7") is None and check_line("   ") is None
     assert sanity("1" * 100) is not None                   # stuck die
-    assert sanity("12345" * 20) is not None                # a face never seen
+    assert sanity("1234" * 25) is not None                 # two faces never seen
+    assert sanity("12345" * 10) is None                    # one face missing in 50: chance, allowed
     assert sanity("1" * 60 + "23456" * 8) is not None      # one face > half
     assert sanity(rolls) is None
     lines = iter(["123456", "12x", "6543216543", "1" * 90, ""])
     out = []
-    got = collect(lambda _p: next(lines, None), out.append, min_rolls=100)
+    got = collect(lambda _p: next(lines, None), out.append, min_rolls=100)   # a larger minimum still works
     assert got == "123456" + "6543216543" + "1" * 90, "discarded line must not contribute"
     assert any("DISCARDED" in s for s in out)
     print("dice-entropy selftest: OK")
@@ -114,7 +119,7 @@ def main():
         selftest()
         return
     if a.min_rolls < MIN_ROLLS:
-        sys.exit("dice-entropy: fewer than %d rolls cannot carry 256 bits" % MIN_ROLLS)
+        sys.exit("dice-entropy: fewer than %d dice values cannot carry 128 bits" % MIN_ROLLS)
     if a.from_stdin:
         read_line = lambda _p: (sys.stdin.readline() or None)
     else:

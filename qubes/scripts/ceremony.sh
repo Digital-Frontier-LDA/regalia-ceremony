@@ -1128,9 +1128,10 @@ step_entropy_seed() {
   # shellcheck disable=SC2064
   trap "rm -f '$d' '$h' '$o' '$m' '$staged' '$WORK/seed.err'" RETURN
 
-  info "1/3  DICE — at least 100 rolls of a fair six-sided die (100 x 2.585 = 258 bits)."
-  info "     Roll, type the digits you see (spaces are fine), press Enter; repeat until the counter"
-  info "     reaches 100. Typing is hidden. A mistyped line is discarded whole — just retype it."
+  info "1/3  DICE — 50 values from fair six-sided dice (50 x 2.585 = 129 bits; mixed with the HSM"
+  info "     and the OS, so 128 bits is the target). Throw 2 dice at a time: 25 throws."
+  info "     For each throw type both values, left die first (e.g. 5 2), press Enter; repeat until the"
+  info "     counter reaches 50. Typing is hidden. A mistyped line is discarded whole — just retype it."
   python3 "$HERE/dice-entropy.py" --out "$d" || { err "dice entropy not collected — no seed generated."; return 1; }
 
   info "2/3  HSM — 32 bytes from the Nitrokey HSM / Pico HSM hardware random generator (no PIN)."
