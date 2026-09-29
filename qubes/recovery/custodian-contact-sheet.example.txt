@@ -16,12 +16,18 @@ AUTHORIZATION / TRIGGER (when a break-glass is permitted):
     [e.g. "death or medical incapacity of the owner, confirmed by the
      executor; or written instruction from the owner"]            <-- fill in
 
-EXECUTOR (start here; confirms authorization):
+WHO MAY ASK FOR THIS CASE (nobody else):
+  PRINCIPAL (the owner), in person, checked with your shared question:
     Name:     [____]
-    Reach:    [phone / email / lawyer firm + matter ref]
-    Backup:   [second executor]
+  EXECUTOR, in person, with the ORIGINAL official certificate (death or
+  incapacity of the principal):
+    Name:     [____]
+    Reach:    [phone / email / law firm + matter ref]
+    Backup:   [backup executor]
 
-TECHNICAL HELPER (runs the offline recovery; see RECOVERY-TECHNICAL.md):
+TECHNICAL DIRECTOR (coordinates the technical work with the principal,
+and helps the executor afterwards; runs the offline recovery, see
+RECOVERY-TECHNICAL.md). NEVER hand this case to them alone:
     Name:     [____]
     Reach:    [____]
     Fallback: [reputable crypto-recovery firm]
