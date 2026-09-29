@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# test-ceremony-parametric-scheme.sh — the Shamir scheme is a PARAMETER (owner, 2026-09-29: "maybe a
+# user wants 3 of 5 or 3 of 4"). CEREMONY_THRESHOLD / CEREMONY_SHARES (default 4 / 6) drive every split,
+# its reconstruct-verify, the share forms and the recovery card; nonsense schemes are refused before
+# anything is split. Runs natively (ssss; SLIP-39 cases when shamir_mnemonic imports).
+set -uo pipefail
+export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"
+pass=0; fail=0
+P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
+F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
+hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
+command -v ssss-split >/dev/null 2>&1 || { echo "ssss not installed — skipping"; exit 0; }
+FAKE="$(mktemp -d)"; export PATH="$FAKE:$PATH"
+printf '#!/usr/bin/env bash\n[ "$1" = "-o" ] && : > "$2"; exit 0\n' > "$FAKE/qrencode"; chmod +x "$FAKE/qrencode"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE/lp"; chmod +x "$FAKE/lp"
+trap 'rm -rf "$FAKE" "${WORK:-}"' EXIT
+source "$SCRIPTS/ceremony.sh"
+ask(){ return 0; }; pause(){ :; }
+# shellcheck disable=SC2034  # PRINTER is read by the sourced ceremony.sh
+PRINTER=""
+init_work
+
+hdr "valid schemes are accepted; nonsense is refused before anything is split"
+for kn in "4 6" "3 5" "3 4" "2 3" "16 16"; do set -- $kn
+  CEREMONY_THRESHOLD=$1 CEREMONY_SHARES=$2 check_scheme >/dev/null 2>&1 && P "$1-of-$2 accepted" || F "$1-of-$2 refused"
+done
+out="$(CEREMONY_THRESHOLD=3 CEREMONY_SHARES=3 check_scheme 2>&1)"; grep -q "losing ONE share loses the secret" <<< "$out" && P "3-of-3 warns: no loss tolerance" || F "k = n not warned"
+for kn in "1 6" "7 6" "4 17" "x 6" "4 " "0 0"; do set -- $kn
+  out="$(CEREMONY_THRESHOLD="${1:-}" CEREMONY_SHARES="${2:-}" check_scheme 2>&1)" && F "'$kn' accepted" || P "'$kn' refused"
+done
+printf 'AGE-SECRET-KEY-1EXAMPLE0param0scheme0test' > "$WORK/secret.in"
+rm -f "$WORK/shares.txt"; out="$(CEREMONY_THRESHOLD=1 CEREMONY_SHARES=6 step_shamir <<< 'a' 2>&1)"
+[ ! -e "$WORK/shares.txt" ] && grep -q "not allowed" <<< "$out" && P "step_shamir refuses 1-of-6 and splits nothing" || F "1-of-6 split: $(tail -3 <<< "$out")"
+
+for kn in "3 5" "3 4" "2 3" "5 8"; do set -- $kn; k=$1; n=$2
+  hdr "ssss path, $k-of-$n: n shares, verified; any k recover, k-1 do not"
+  rm -f "$WORK/shares.txt"
+  out="$(CEREMONY_THRESHOLD=$k CEREMONY_SHARES=$n step_shamir <<< 'a' 2>&1)"
+  grep -qi "reconstruct-verify OK" <<< "$out" && P "reconstruct-verified" || F "not verified: $(tail -4 <<< "$out")"
+  [ "$(grep -c . "$WORK/shares.txt" 2>/dev/null)" = "$n" ] && P "$n shares" || F "expected $n shares, got $(grep -c . "$WORK/shares.txt" 2>/dev/null)"
+  secret="$(cat "$WORK/secret.in")"
+  [ "$(sed -n "2,$((k + 1))p" "$WORK/shares.txt" | ssss-combine -t "$k" -q 2>&1)" = "$secret" ] && P "shares 2..$((k + 1)) recover it" || F "$k shares did not recover"
+  [ "$(head -n $((k - 1)) "$WORK/shares.txt" | ssss-combine -t $((k - 1)) -q 2>&1)" != "$secret" ] && P "$((k - 1)) shares do not" || F "$((k - 1)) shares recovered the secret"
+  grep -q "Shamir share 1 of $n (need $k)" <<< "$out" && P "share labels say 'of $n (need $k)'" || F "labels not parametric: $(grep -o 'share 1 of [0-9]* (need [0-9]*)' <<< "$out" | head -1)"
+done
+
+hdr "the printed share form follows the scheme (3-of-5)"
+f="$(ls "$WORK"/form-*.ps 2>/dev/null | head -1)"
+if [ -n "$f" ]; then
+  rm -f "$WORK"/form-*.ps; CEREMONY_THRESHOLD=3 CEREMONY_SHARES=5 step_shamir <<< 'a' >/dev/null 2>&1
+  f="$(ls "$WORK"/form-*.ps 2>/dev/null | head -1)"
+  grep -q "ONE of 5 shares" "$f" && grep -q "any 3 of them" "$f" && P "form says 'ONE of 5', 'any 3'" || F "form not parametric"
+else
+  # record_share builds the form only when it runs; build one exactly as it does
+  CEREMONY_THRESHOLD=3 CEREMONY_SHARES=5; python3 "$SCRIPTS/share-form.py" --label t --kind chars --count 40 --threshold "$(K)" --total "$(N)" -o "$WORK/f.ps"
+  grep -q "ONE of 5 shares" "$WORK/f.ps" && grep -q "any 3 of them" "$WORK/f.ps" && P "form says 'ONE of 5', 'any 3'" || F "form not parametric"
+  # shellcheck disable=SC2034  # read by the sourced K/N
+  CEREMONY_THRESHOLD=4 CEREMONY_SHARES=6
+fi
+
+hdr "the recovery card follows the scheme (3-of-4); an impossible one is refused"
+python3 "$SCRIPTS/make-recovery-card.py" -o "$WORK/c.ps" --threshold 3 --shares 4 >/dev/null
+grep -q "SCHEME 3-of-4: you need 3 of the 4 cases" "$WORK/c.ps" && grep -q "ssss-combine -t 3" "$WORK/c.ps" && P "card says 3-of-4" || F "card not parametric"
+python3 "$SCRIPTS/make-recovery-card.py" -o "$WORK/c2.ps" --threshold 5 --shares 4 >/dev/null 2>&1 && F "5-of-4 card made" || P "5-of-4 card refused"
+
+hdr "SLIP-39 mint path, 3-of-4"
+if python3 -c "import shamir_mnemonic" 2>/dev/null; then
+  rm -f "$WORK/slip39.txt"
+  out="$(CEREMONY_THRESHOLD=3 CEREMONY_SHARES=4 step_shamir <<< 'b' 2>&1)"
+  grep -q "every 3-of-4 subset recovers" <<< "$out" && P "minted and verified 3-of-4" || F "mint not verified: $(tail -4 <<< "$out")"
+  [ "$(grep -cE '^[a-z]+( [a-z]+){15,}$' "$WORK/slip39.txt" 2>/dev/null)" = 4 ] && P "4 SLIP-39 shares" || F "expected 4 SLIP-39 shares"
+else
+  echo "  (shamir_mnemonic not importable here: SLIP-39 cases skipped; CI's emulator job has it)"
+fi
+
+hdr "the default is unchanged: 4-of-6"
+unset CEREMONY_THRESHOLD CEREMONY_SHARES
+( source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; [ "$(K)-of-$(N)" = 4-of-6 ] ) && P "default 4-of-6" || F "default changed"
+
+hdr "RESULT"
+printf '  %d passed, %d failed\n' "$pass" "$fail"
+[ "$fail" -eq 0 ]

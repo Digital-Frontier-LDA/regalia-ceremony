@@ -430,7 +430,8 @@ record_share() {
     kind=chars; count="${#share}"
   fi
   form="$WORK/form-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_').ps"
-  python3 "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" -o "$form" \
+  python3 "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" \
+    --threshold "$(K)" --total "$(N)" -o "$form" \
     || { err "could not build the blank form for '$label'"; return 1; }
   # EVERY prompt here reads /dev/tty, never stdin: step 3 calls this inside
   # `while read … done < shares.txt`, where stdin is the shares file — a prompt reading stdin would
@@ -833,9 +834,9 @@ step_hsm_funding() {
   # blob plus a compatible SmartCard-HSM.
   if [ "${CEREMONY_ALLOW_BORN_IN_HSM:-0}" != 1 ]; then
     err "born-in-HSM key generation is UNSUPPORTED under the current custody model."
-    err "A key generated in the HSM is NOT reconstructible from the 4-of-6 Shamir shares — its"
+    err "A key generated in the HSM is NOT reconstructible from the $(K)-of-$(N) Shamir shares — its"
     err "only backup is the DKEK blob, which needs a compatible SmartCard-HSM to restore onto."
-    err "Use step 3 option (c): mint the seed from mixed entropy and split it 4-of-6."
+    err "Use step 3 option (c): mint the seed from mixed entropy and split it $(K)-of-$(N)."
     err "NOTE: OpenSC cannot IMPORT a key into this card (sc_hsm_store_key returns"
     err "SC_ERROR_NOT_SUPPORTED; there is no import flag). The CARD does accept an imported key"
     err "as a DKEK-wrapped blob — Nitrokey documents converting a PKCS#12 key to that format —"
@@ -847,7 +848,7 @@ step_hsm_funding() {
   fi
   warn "RUNNING THE UNSUPPORTED born-in-HSM PATH (CEREMONY_ALLOW_BORN_IN_HSM=1)."
   warn "The key produced here is recoverable ONLY from its DKEK backup onto a compatible"
-  warn "SmartCard-HSM — NOT from the 4-of-6 Shamir shares."
+  warn "SmartCard-HSM — NOT from the $(K)-of-$(N) Shamir shares."
   warn "OPTION B (chosen): the funding seed's recovery is its Shamir/metal/DVD backup"
   warn "(step 3 option c), NOT this HSM. This step is the OPTIONAL hardware-signer path"
   warn "(born-in-HSM + DKEK). Losing/breaking the HSM is survivable from the seed backup."
@@ -878,11 +879,12 @@ step_hsm_funding() {
   # So on Option B: do NOT escrow these shares and do NOT archive dkek.pbe. You would be taking
   # custody of key-equivalent material — PIN + DKEK exports every key on the token, see
   # doc/HSM-THREAT-MODEL.md — in exchange for nothing.
-  info "1) Create a DKEK share whose password is split 4-of-6 (OPTION A ONLY — see above):"
+  check_scheme || return 1
+  info "1) Create a DKEK share whose password is split $(K)-of-$(N) (OPTION A ONLY — see above):"
   # Teed into the RAM-only workdir (umask 077) because step 2 feeds the shares straight back into
   # the import (#464). The capture holds all six shares, so it never leaves $WORK: the M-DISC
   # stage copies an allowlist and refuses any *share*.txt, and the workdir is shredded on exit.
-  run_tee "$WORK/dkek-shares.txt" "sc-hsm-tool --create-dkek-share '$WORK/dkek.pbe' --pwd-shares-threshold 4 --pwd-shares-total 6" \
+  run_tee "$WORK/dkek-shares.txt" "sc-hsm-tool --create-dkek-share '$WORK/dkek.pbe' --pwd-shares-threshold $(K) --pwd-shares-total $(N)" \
     || { rm -f "$WORK/dkek-shares.txt"; \
          err "DKEK share creation was skipped or failed — aborting the HSM step."; \
          err "A born-in-HSM funding key has NO recoverable backup without a DKEK."; return 1; }
@@ -923,7 +925,7 @@ step_hsm_funding() {
   #
   # Tee this import too: its key check value identifies the DKEK domain for step 6.
   local import_rc=0
-  run_tee "$WORK/kcv-a.log" "feed_dkek_shares '$WORK/dkek-shares.txt' 1 2 3 4 | sc-hsm-tool --import-dkek-share '$WORK/dkek.pbe' --pwd-shares-total 4" \
+  run_tee "$WORK/kcv-a.log" "feed_dkek_shares '$WORK/dkek-shares.txt' $(seq -s ' ' 1 "$(K)") | sc-hsm-tool --import-dkek-share '$WORK/dkek.pbe' --pwd-shares-total $(K)" \
     || import_rc=$?
   if [ "$import_rc" = 100 ]; then
     err "DKEK import was skipped — aborting before key generation."
@@ -993,7 +995,7 @@ step_hsm_funding() {
     err "the wrap produced an EMPTY backup blob — do NOT fund; the funding key has no usable backup."
     return 1
   fi
-  warn "OPTION A: store funding-wrapped.bin + dkek.pbe on the archive disc; the 4-of-6 shares are the secret."
+  warn "OPTION A: store funding-wrapped.bin + dkek.pbe on the archive disc; the $(K)-of-$(N) shares are the secret."
   warn "OPTION B: this blob is a convenience, not the backup — the seed is. Do not escrow the DKEK."
   # RESTORE-VERIFY — a wrapped blob you have never unwrapped is NOT a backup. `--wrap-key` can
   # return 0 yet leave an UNRESTORABLE blob (a truncated write, faulty EEPROM/firmware, a DKEK a
@@ -1091,9 +1093,9 @@ step_hsm_funding() {
     run "$b_env sc-hsm-tool $b_sc --initialize --dkek-shares 1 --label 'akash-funding'" \
       || { err "second-HSM --initialize was skipped or failed — no clone was made. The primary key"; \
            err "and its wrapped backup are untouched; re-run this step with the spare inserted."; return 1; }
-    # Shares 3-6, not 1-4: the clone is rebuilt by a second custodian quorum, from the same
+    # The LAST k shares, not the first k: the clone is rebuilt by a second custodian quorum, from the same
     # capture, through the same --pwd-shares-total path a recovery uses.
-    run_tee "$WORK/kcv-b.log" "feed_dkek_shares '$WORK/dkek-shares.txt' 3 4 5 6 | $b_env sc-hsm-tool $b_sc --import-dkek-share '$WORK/dkek.pbe' --pwd-shares-total 4" \
+    run_tee "$WORK/kcv-b.log" "feed_dkek_shares '$WORK/dkek-shares.txt' $(seq -s ' ' "$(( $(N) - $(K) + 1 ))" "$(N)") | $b_env sc-hsm-tool $b_sc --import-dkek-share '$WORK/dkek.pbe' --pwd-shares-total $(K)" \
       || { err "DKEK import onto the second HSM was skipped or failed — it cannot receive the"; \
            err "clone. Do NOT treat it as a backup device."; return 1; }
     # KCV EQUALITY — two SmartCard-HSMs hold the same DKEK iff their key check values match.
@@ -1150,15 +1152,15 @@ step_hsm_funding() {
     warn "PIN. Set a DIFFERENT User PIN on each and seal them at different sites — separate PINs are"
     warn "the only dual-control this token gives you (OpenSC cannot drive its m-of-n public-key auth)."
     warn "Do NOT pre-initialise the remaining SPARE. A blank spare forces a real restore (dkek.pbe +"
-    warn "4-of-6 custodian shares); a spare already holding the DKEK lets anyone with it and the"
+    warn "$(K)-of-$(N) custodian shares); a spare already holding the DKEK lets anyone with it and the"
     warn "wrapped blob rebuild the key with NO custodian threshold involved."
   else
     warn "The restore-verify left a scratch copy of the key at key-reference 2 on this card; delete it"
     warn "before sealing:  pkcs11-tool --login --delete-object --type privkey --id 02"
   fi
-  warn "Real restore = fresh HSM, then: sc-hsm-tool --import-dkek-share dkek.pbe --pwd-shares-total 4"
+  warn "Real restore = fresh HSM, then: sc-hsm-tool --import-dkek-share dkek.pbe --pwd-shares-total $(K)"
   warn "(without --pwd-shares-total OpenSC never enters the share prompt path; it asks prime +"
-  warn "share-ID + share-value per share, 4 of 6 custodians), then sc-hsm-tool --unwrap-key. The key"
+  warn "share-ID + share-value per share, $(K) of $(N) custodians), then sc-hsm-tool --unwrap-key. The key"
   warn "is rebuilt INSIDE the HSM and never appears in host RAM."
   info "7) Backup PROVEN to restore. The funding address is now safe to record and fund:"
   info "FUNDING ADDRESS (public, key-control PROVEN + backup RESTORE-VERIFIED — record + fund): $addr"
@@ -1209,11 +1211,12 @@ step_entropy_seed() {
   chmod 600 "$f"
   info "NEW 24-word wallet seed written to $f (RAM only; never shown). Fingerprint:"
   info "     $(sha256sum < "$f" | cut -c1-16)"
-  info "Next: step 3, option c — split it into 4-of-6 SLIP-39 shares and record its funding address."
+  info "Next: step 3, option c — split it into $(K)-of-$(N) SLIP-39 shares and record its funding address."
 }
 
 step_shamir() {
-  b "Shamir split a recovery root (4-of-6)"
+  check_scheme || return 1
+  b "Shamir split a recovery root ($(K)-of-$(N))"
   # DETERMINISTIC MINT: neutralize any ambient SLIP-39 passphrase (a dry-run leftover, or one set
   # in the vault-qube profile) BEFORE minting. slip39-mint.py / bip39-slip39-backup.py resolve
   # SLIP39_PASSPHRASE from env with highest priority; an unnoticed value would silently bind the
@@ -1259,11 +1262,13 @@ step_shamir() {
       if [ "$nbytes" -gt 128 ]; then
         err "secret is ${nbytes} bytes; ssss handles ~128 max. Use option c (SLIP-39)."; return 0
       fi
-      run "ssss-split -t 4 -n 6 -q < '$f' > '$WORK/shares.txt'" || return 0
+      run "ssss-split -t $(K) -n $(N) -q < '$f' > '$WORK/shares.txt'" || return 0
       # RECONSTRUCT-VERIFY *before* distributing — an unverified split is not a backup. Recover
       # from a 4-subset and compare in-shell (no value is ever printed; ssss-combine emits the
       # secret on stderr and appends a newline, which $(...) strips).
-      if [ "$(sed -n '1p;3p;4p;6p' "$WORK/shares.txt" | ssss-combine -t 4 -q 2>&1)" = "$(cat "$f")" ]; then
+      # Two different quorums must rebuild it: the first k shares and the last k shares.
+      if [ "$(head -n "$(K)" "$WORK/shares.txt" | ssss-combine -t "$(K)" -q 2>&1)" = "$(cat "$f")" ] \
+         && [ "$(tail -n "$(K)" "$WORK/shares.txt" | ssss-combine -t "$(K)" -q 2>&1)" = "$(cat "$f")" ]; then
         info "reconstruct-verify OK: any 4 of the 6 shares rebuild the EXACT secret."
       else
         err "RECONSTRUCT-VERIFY FAILED — 4 shares did NOT rebuild the secret; refusing to distribute."
@@ -1271,39 +1276,39 @@ step_shamir() {
         rm -f "$WORK/shares.txt"; return 1
       fi
       info "6 shares written + verified. Copy each BY HAND onto its printed blank form (ADR-0002 D12):"
-      local i=0; while IFS= read -r line; do i=$((i+1)); printf '%s' "$line" > "$WORK/sh$i"; record_share "Breakglass age key — Shamir share $i of 6 (need 4)" "$WORK/sh$i" || unverified="$unverified $i"; done < "$WORK/shares.txt"
+      local i=0; while IFS= read -r line; do i=$((i+1)); printf '%s' "$line" > "$WORK/sh$i"; record_share "Breakglass age key — Shamir share $i of $(N) (need $(K))" "$WORK/sh$i" || unverified="$unverified $i"; done < "$WORK/shares.txt"
       ;;
     b)
       warn "MINTS a NEW master secret (recoverable ONLY from these shares; verify + distribute)."
       # Use slip39-mint.py, NOT 'shamir create': the CLI prints the master secret to stdout
       # (it would land in the shares file) and does no reconstruct-verify. The minter never
-      # emits the master secret and proves every 4-of-6 subset recovers before writing.
-      show "slip39-mint.py --threshold 4 --shares 6 --out slip39.txt"
-      if python3 "$HERE/slip39-mint.py" --threshold 4 --shares 6 --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
-        info "Minted + reconstruct-verified (every 4-of-6 subset recovers). Copy each share BY HAND onto its form:"
+      # emits the master secret and proves every k-of-n subset recovers before writing.
+      show "slip39-mint.py --threshold $(K) --shares $(N) --out slip39.txt"
+      if python3 "$HERE/slip39-mint.py" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
+        info "Minted + reconstruct-verified (every $(K)-of-$(N) subset recovers). Copy each share BY HAND onto its form:"
       else
         err "mint/verify FAILED — refusing to distribute:"; sed 's/^/     /' "$WORK/mint.err" >&2; rm -f "$WORK/slip39.txt"; return 1
       fi
       # A SLIP-39 share is a line of >=16 space-separated lowercase words (header has #/digits).
       local n=0; while IFS= read -r line; do
         if [[ "$line" =~ ^[a-z]+([[:space:]][a-z]+){15,}$ ]]; then
-          n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "SLIP-0039 share $n of 6 (need 4)" "$WORK/w$n" || unverified="$unverified $n"
+          n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "SLIP-0039 share $n of $(N) (need $(K))" "$WORK/w$n" || unverified="$unverified $n"
         fi
       done < "$WORK/slip39.txt"
       ;;
     c)
       # Option B: back up an EXISTING BIP39 wallet mnemonic (funding/derivation) as SLIP-39
       # word-shares. Exact round-trip; recover with NO HSM. secret.in must hold the mnemonic.
-      show "bip39-slip39-backup.py --in secret.in --threshold 4 --shares 6 -> SLIP-39 shares"
+      show "bip39-slip39-backup.py --in secret.in --threshold $(K) --shares $(N) -> SLIP-39 shares"
       # Surface the tool's stderr to the operator (do NOT swallow it): if a passphrase is somehow
       # still in effect it WARNS that recovery requires the EXACT passphrase — that safeguard must
       # reach the operator, not vanish into /dev/null. Mirror option b (capture then echo).
-      if python3 "$HERE/bip39-slip39-backup.py" --in "$f" --threshold 4 --shares 6 --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
+      if python3 "$HERE/bip39-slip39-backup.py" --in "$f" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
         [ -s "$WORK/bkp.err" ] && sed 's/^/     /' "$WORK/bkp.err" >&2
         info "BIP39 mnemonic split into 6 SLIP-39 word-shares (any 4 recover the EXACT mnemonic)."
         local n=0; while IFS= read -r line; do
           if [[ "$line" =~ ^[a-z]+([[:space:]][a-z]+){15,}$ ]]; then
-            n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "Wallet seed — SLIP-0039 share $n of 6 (need 4)" "$WORK/w$n" || unverified="$unverified $n"
+            n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "Wallet seed — SLIP-0039 share $n of $(N) (need $(K))" "$WORK/w$n" || unverified="$unverified $n"
           fi
         done < "$WORK/slip39.txt"
         info "Stamp each share to metal: metal-stamp-worksheet.py --in <share>. Recover the"
@@ -1370,6 +1375,26 @@ DEV_DEFAULT_PINS_REGEX='^(648219|3537363231383830|123456|12345678|01020304050607
 # applied: once the default lands, CEREMONY_MODE is always non-empty and the distinction is
 # unrecoverable. main() uses this to decide whether prompting is appropriate at all.
 CEREMONY_MODE_EXPLICIT=0
+
+# ---- the Shamir scheme: k-of-n, a PARAMETER (owner, 2026-09-29) ------------------------------------
+# Default 4-of-6. Any 2 <= k <= n <= 16 (SLIP-39 allows at most 16 shares in a group); k = 1 is not
+# Shamir (any share IS the secret). Every split, form, card and count in the ceremony reads these two.
+CEREMONY_THRESHOLD="${CEREMONY_THRESHOLD:-4}"
+CEREMONY_SHARES="${CEREMONY_SHARES:-6}"
+check_scheme() {
+  local k="$CEREMONY_THRESHOLD" n="$CEREMONY_SHARES"
+  # Each on its own: checked together, "4" + "" looks like a number, and a later [ -gt "" ] fails
+  # silently, which accepted an empty share count (caught by the test).
+  [[ "$k" =~ ^[0-9]+$ ]] && [[ "$n" =~ ^[0-9]+$ ]] \
+    || { err "CEREMONY_THRESHOLD='$k' and CEREMONY_SHARES='$n' must be whole numbers"; return 1; }
+  if [ "$k" -lt 2 ] || [ "$k" -gt "$n" ] || [ "$n" -gt 16 ]; then
+    err "the scheme ${k}-of-${n} is not allowed: need 2 <= threshold <= shares <= 16"; return 1
+  fi
+  [ "$k" -lt "$n" ] || warn "${k}-of-${n}: every share is needed; losing ONE share loses the secret."
+  return 0
+}
+K() { printf '%s' "$CEREMONY_THRESHOLD"; }
+N() { printf '%s' "$CEREMONY_SHARES"; }
 [ -n "${CEREMONY_MODE:-}" ] && CEREMONY_MODE_EXPLICIT=1
 CEREMONY_MODE="${CEREMONY_MODE:-prod}"
 
@@ -2180,7 +2205,7 @@ step_archive() {
 step_drill() {
   b "Recovery drill (do this BEFORE relying on any share set)"
   info "Reconstruct from exactly k shares on THIS air-gapped qube, prove it works, re-seal."
-  info "ssss:        feed any 4 of the 6 share lines to:   ssss-combine -t 4 -q"
+  info "ssss:        feed any $(K) of the $(N) share lines to:   ssss-combine -t $(K) -q"
   info "SLIP-0039:   shamir recover   (paste any 4 word-shares)"
   info "age/HSM:     decrypt a sops file to /dev/null with the recovered key, or unwrap into a"
   info "             spare HSM and sign a test message. Then shred this qube."
@@ -2232,8 +2257,9 @@ step_recovery_card() {
   else
     info "card will carry the default SLIP-39 funding-seed recovery procedure."
   fi
-  show "make-recovery-card.py -o recovery-card.ps --case-id '$cid' --seal-serial '$serial' $hsm_flag"
-  if python3 "$HERE/make-recovery-card.py" -o "$ps" --date "$(date +%F)" --case-id "$cid" --seal-serial "$serial" $hsm_flag >/dev/null 2>&1; then
+  show "make-recovery-card.py -o recovery-card.ps --case-id '$cid' --seal-serial '$serial' --threshold $(K) --shares $(N) $hsm_flag"
+  if python3 "$HERE/make-recovery-card.py" -o "$ps" --date "$(date +%F)" --case-id "$cid" --seal-serial "$serial" \
+       --threshold "$(K)" --shares "$(N)" $hsm_flag >/dev/null 2>&1; then
     info "card written: $ps"
   else
     warn "card generation failed (need python3 + make-recovery-card.py)"; return 0
@@ -2249,6 +2275,9 @@ step_recovery_card() {
 main() {
   b "Custodial-wallet key ceremony — interactive guide"
   warn "Run this on the AIR-GAPPED vault qube only. Real keys = no undo. First run = dry run."
+  check_scheme || return 1
+  info "Shamir scheme: any $(K) of $(N) shares recover each secret (set CEREMONY_THRESHOLD and"
+  info "CEREMONY_SHARES before starting to change it; every split, form and card follows it)."
   # MODE — the operator must type it explicitly. Default is prod (safe); typing prod again is
   # the no-op confirmation; typing dev opts OUT of the dev-default PIN guard. The mode is logged
   # so the audit trail records which mode the ceremony ran in.
@@ -2283,7 +2312,7 @@ main() {
     cat <<MENU
    0) Set HSM PIN defaults from a file (PROD: required before step 7; DEV: optional, warns)
    1) YubiKey  — hardware ops age/SOPS identity
-   2) Nitrokey HSM 2 — cold funding key + DKEK 4-of-6 backup
+   2) Nitrokey HSM 2 — cold funding key + DKEK $(K)-of-$(N) backup
    e) Entropy: generate a NEW wallet seed from dice + HSM (Nitrokey/Pico) + OS randomness (then step 3 c)
    3) Shamir split a recovery root (breakglass age key / mnemonic) + print shares
    4) Archive disc — AZO DVD-R or M-DISC (burn + readback verify)

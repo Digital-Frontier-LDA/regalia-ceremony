@@ -26,7 +26,7 @@ def esc(s: str) -> str:
 
 # (text, font, size, gap_before_pt). Empty text = blank line. Lines are wrapped
 # to fit the card width; keep them short so the card stays one cuttable sheet.
-def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding: bool = False):
+def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding: bool = False, k: int = 4, n: int = 6):
     D = date or "____-__-__"
     body = [
         ("BREAK-GLASS RECOVERY", "Courier-Bold", 11, 0),
@@ -47,19 +47,19 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
         ("- 1x M-DISC: full recovery docs + toolkit + ciphertext.", "Courier", 7.5, 0),
         ("- This card; a sealed custodian-contact sheet.", "Courier", 7.5, 0),
         ("- Tamper seal: if broken, assume compromise, ROTATE.", "Courier", 7.5, 0),
-        ("SCHEME 4-of-6: you need 4 of the 6 cases.", "Courier-Bold", 8, 2),
+        ("SCHEME %d-of-%d: you need %d of the %d cases." % (k, n, k, n), "Courier-Bold", 8, 2),
         ("Technical steps below + full RECOVERY-TECHNICAL.md on disc.", "Courier", 7, 0),
         ("", "Courier", 7.5, 0),
         ("OFFLINE / AIR-GAPPED ONLY (Qubes vault qube,", "Courier-Bold", 8, 2),
         ("netvm=none). NEVER on a networked machine.", "Courier-Bold", 8, 0),
         ("", "Courier", 7.5, 0),
-        ("1. Gather >=4 of the 6 sealed cases' shares.", "Courier", 7.5, 1),
+        ("1. Gather >=%d of the %d sealed cases' shares." % (k, n), "Courier", 7.5, 1),
         ("   Metal plate? expand prefixes to words first:", "Courier", 7, 0),
         ("     metal-stamp-worksheet.py --verify", "Courier", 7, 0),]
     if hsm_funding:
         # Born-in-HSM funding custody (RECOVERY-TECHNICAL.md 3B). The funding key was born
         # NON-EXPORTABLE inside the Nitrokey HSM 2: it has NO SLIP-39 word-shares and NO
-        # plaintext seed. Its only backup is the DKEK-wrapped blob + 4-of-6 DKEK password
+        # plaintext seed. Its only backup is the DKEK-wrapped blob + k-of-n DKEK password
         # shares, so step 2 must REPLACE the seed recovery with the DKEK/unwrap restore
         # (the seed path here would strand the operator on non-existent artifacts).
         body += [
@@ -67,7 +67,7 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
             ("     sc-hsm-tool --initialize --dkek-shares 1 \\", "Courier", 7, 0),
             ("       --label akash-funding   (blank spare HSM)", "Courier", 7, 0),
             ("     sc-hsm-tool --import-dkek-share dkek.pbe \\", "Courier", 7, 0),
-            ("       --pwd-shares-total 4  (prompts prime/id/value)", "Courier", 7, 0),
+            ("       --pwd-shares-total %d  (prompts prime/id/value)" % k, "Courier", 7, 0),
             ("     sc-hsm-tool --unwrap-key funding-wrapped.bin \\", "Courier", 7, 0),
             ("       --key-reference 1   (key stays in HSM)", "Courier", 7, 0),
             ("     pkcs11-tool --read-object --type pubkey -o funding-pub.der", "Courier", 7, 0),]
@@ -75,15 +75,15 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
         body += [
             ("2. Funding seed - the money - NO HSM needed:", "Courier", 7.5, 1),
             ("     bip39-slip39-backup.py --recover \\", "Courier", 7.5, 0),
-            ("       --in funding-shares.txt   (4 SLIP-39)", "Courier", 7.5, 0),
+            ("       --in funding-shares.txt   (%d SLIP-39)" % k, "Courier", 7.5, 0),
             ("     -> funding BIP39 mnemonic; import to a wallet.", "Courier", 7.5, 0),]
     body += [
-        ("3. Derivation root seed (its OWN 4 SLIP-39 shares):", "Courier", 7.5, 1),
+        ("3. Derivation root seed (its OWN %d SLIP-39 shares):" % k, "Courier", 7.5, 1),
         ("     bip39-slip39-backup.py --recover \\", "Courier", 7.5, 0),
         ("       --in derivation-shares.txt", "Courier", 7.5, 0),]
     body += [
         ("4. Breakglass age key (only to decrypt the vault):", "Courier", 7.5, 1),
-        ("     ssss-combine -t 4   (paste 4 ssss shares)", "Courier", 7.5, 0),
+        ("     ssss-combine -t %d   (paste %d ssss shares)" % (k, k), "Courier", 7.5, 0),
         ("     -> AGE-SECRET-KEY-1... (recovery key)", "Courier", 7.5, 0),
         ("5. Decrypt vault with the recovered age key:", "Courier", 7.5, 1),
         ("     SOPS_AGE_KEY=<key> sops decrypt \\", "Courier", 7.5, 0),
@@ -109,7 +109,7 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
     ]
     return body
 
-def emit(width_mm, height_mm, paper, date, case_id="", seal_serial="", hsm_funding=False):
+def emit(width_mm, height_mm, paper, date, case_id="", seal_serial="", hsm_funding=False, k=4, n=6):
     pw, ph = PAPER[paper]
     cw, ch = width_mm * MM, height_mm * MM
     bx, by = (pw - cw) / 2.0, (ph - ch) / 2.0      # card box origin (centered)
@@ -140,7 +140,7 @@ def emit(width_mm, height_mm, paper, date, case_id="", seal_serial="", hsm_fundi
     descender = 2.0  # pt of headroom below the last baseline for glyph descenders
     y = by + ch - margin
     placements = []
-    for text, font, size, gap in build_lines(date, case_id, seal_serial, hsm_funding):
+    for text, font, size, gap in build_lines(date, case_id, seal_serial, hsm_funding, k, n):
         y -= gap
         y -= size * 1.25
         placements.append((text, font, size, y))
@@ -193,12 +193,16 @@ def main():
     ap.add_argument("--date", default=datetime.date.today().isoformat())
     ap.add_argument("--case-id", default="", help="case id printed on the card (e.g. DF-BG-01)")
     ap.add_argument("--seal-serial", default="", help="holographic sticker serial for this case")
+    ap.add_argument("--threshold", type=int, default=4, help="k: shares needed (the ceremony's CEREMONY_THRESHOLD)")
+    ap.add_argument("--shares", type=int, default=6, help="n: shares made (the ceremony's CEREMONY_SHARES)")
     ap.add_argument("--hsm-funding", action="store_true",
                     help="ONLY if the optional Nitrokey HSM funding-signer path (step_hsm_funding) "
                          "was actually performed. Default (Option B) recovers the funding seed from "
                          "its SLIP-39 shares with no HSM.")
     a = ap.parse_args()
-    ps = emit(a.width_mm, a.height_mm, a.paper, a.date, a.case_id, a.seal_serial, a.hsm_funding)
+    if not 2 <= a.threshold <= a.shares <= 16:
+        sys.exit("make-recovery-card: need 2 <= --threshold <= --shares <= 16")
+    ps = emit(a.width_mm, a.height_mm, a.paper, a.date, a.case_id, a.seal_serial, a.hsm_funding, a.threshold, a.shares)
     with open(a.out, "w") as f:
         f.write(ps)
     print("wrote %s  (%gx%gmm cut card on %s)" % (a.out, a.width_mm, a.height_mm, a.paper))
