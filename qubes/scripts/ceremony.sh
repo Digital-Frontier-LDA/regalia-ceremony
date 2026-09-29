@@ -584,24 +584,48 @@ step_yubikey_ops() {
   #   - on the default PIN it forces a new PIN AND SETS THE PUK TO IT, merging two credentials the
   #     ceremony keeps apart (regalia#28). So the PIN and a distinct PUK are set here, first.
   # Only acted on when ykman reports a real card; a stub that prints no management-key line is left alone.
-  local info rc serial letter y pinv pukv pin puk
-  info="$(ykman piv info 2>/dev/null || true)"
+  local info rc serial letter y pinv pukv pin puk used
+  # THE TOKEN, BY SERIAL, AND EVERY LATER COMMAND BOUND TO IT (--device / --serial): a token swapped
+  # after this point makes the commands fail instead of changing a different card.
+  serial="$(ykman info 2>/dev/null | sed -n 's/^Serial number: *//p' | head -1 | tr -d ' ')"
+  [[ "$serial" =~ ^[0-9]{6,10}$ ]] || { err "cannot read this YubiKey's serial (ykman info): refusing, because every change must be bound to one identified token"; return 1; }
+  info="$(ykman --device "$serial" piv info 2>/dev/null)" \
+    || { err "YubiKey $serial does not answer (removed or swapped?): nothing was changed"; return 1; }
   # WHICH CREDENTIAL SET. Three YubiKeys, each with its own PIN/PUK/management key from step 0
-  # (yubikey_<a|b|c>_*). A token, known by its serial, gets the next free set, A then B then C; the
-  # same token run again keeps its set. The operator labels the token and the PIN card row with it.
-  serial="$(ykman info 2>/dev/null | sed -n 's/^Serial number: *//p' | head -1)"
-  serial="${serial:-unknown-$((${#YK_SET_OF[@]} + 1))}"
+  # (yubikey_<a|b|c>_*). The same token keeps its set within a run. A new token:
+  #   - takes the next free set (A, B, C) when step 0 GENERATED the sets in this run, since then
+  #     no earlier run can have used them;
+  #   - otherwise (the sets were loaded from a file, possibly already used in an earlier run) the
+  #     operator names the set, CEREMONY_YUBIKEY_SET or at the prompt, and confirms it has never
+  #     been put on another token: the wizard cannot see earlier runs.
+  # The serial -> set map is written into the tier-0 payload (yubikey_<set>_serial).
   letter="${YK_SET_OF[$serial]:-}"
-  if [ -z "$letter" ]; then
-    for y in $YUBIKEYS; do
-      case " ${YK_SET_OF[*]} " in *" $y "*) ;; *) letter="$y"; break;; esac
-    done
-    [ -n "$letter" ] || { err "every YubiKey credential set (${YUBIKEYS// /, }) is already used this run: this is a fourth token"; return 1; }
+  used=" ${YK_SET_OF[*]} "
+  if [ -z "$letter" ] && [ -n "${state_step0_done:-}" ]; then
+    if [ "${state_pins_generated_this_run:-0}" = 1 ]; then
+      for y in $YUBIKEYS; do case "$used" in *" $y "*) ;; *) letter="$y"; break;; esac; done
+      [ -n "$letter" ] || { err "every YubiKey credential set (${YUBIKEYS// /, }) is already used this run: this is a fourth token"; return 1; }
+    else
+      letter="${CEREMONY_YUBIKEY_SET:-}"
+      if [ -z "$letter" ]; then
+        { : </dev/tty; } 2>/dev/null || { err "the credential sets were loaded from a file: name this token's set with CEREMONY_YUBIKEY_SET (a, b or c)"; return 1; }
+        read -r -p "   which credential set does YubiKey $serial take (${YUBIKEYS// /, }), one NEVER put on another token? " letter </dev/tty
+      fi
+      letter="$(tr 'A-Z' 'a-z' <<< "$letter")"
+      case " $YUBIKEYS " in *" $letter "*) ;; *) err "'$letter' is not one of the sets ${YUBIKEYS// /, }"; return 1;; esac
+      case "$used" in *" $letter "*) err "set ${letter^^} is already on another token in this run"; return 1;; esac
+      ask "confirm set ${letter^^} has never been put on any other YubiKey, in this run or an earlier one?" || { err "set not confirmed"; return 1; }
+    fi
     YK_SET_OF[$serial]="$letter"
   fi
-  info "This token (serial $serial) is YubiKey ${letter^^}: write that on its label and on the PIN card row."
-  pinv="yubikey_${letter}_piv_pin"; pukv="yubikey_${letter}_piv_puk"
-  pin="${!pinv:-}"; puk="${!pukv:-}"
+  pin=""; puk=""
+  if [ -n "$letter" ]; then
+    info "This token (serial $serial) is YubiKey ${letter^^}: write that on its label and on the PIN card row."
+    pinv="yubikey_${letter}_piv_pin"; pukv="yubikey_${letter}_piv_puk"
+    pin="${!pinv:-}"; puk="${!pukv:-}"
+  else
+    pinv="yubikey_<set>_piv_pin"; pukv="yubikey_<set>_piv_puk"   # names for messages only (no step 0)
+  fi
   # The card's PIN and PUK are set to the values step 0 loaded for ESCROW (pins.env →
   # yubikey_<set>_piv_pin / _piv_puk → the tier-0 payload), never to values typed at a prompt:
   # otherwise the payload can hold a PIN this card does not answer to, discovered on recovery day.
@@ -618,19 +642,19 @@ step_yubikey_ops() {
       # factory token in the same run gets set B or C, never set A again.
       show "ykman piv access change-pin -P <factory PIN> -n <$pinv from step 0>"
       ask "set the card's PIN to the escrowed value?" || { err "the factory PIN was kept, so age-plugin-yubikey would replace it with an unescrowed one"; return 1; }
-      ykman piv access change-pin -P 123456 -n "$pin" >/dev/null || { err "PIN change failed"; return 1; }
+      ykman --device "$serial" piv access change-pin -P 123456 -n "$pin" >/dev/null || { err "PIN change failed"; return 1; }
     fi
     if grep -q "Using default PUK" <<< "$info"; then
       show "ykman piv access change-puk -p <factory PUK> -n <$pukv from step 0>"
       ask "set the card's PUK to the escrowed value?" || { err "the factory PUK was kept"; return 1; }
-      ykman piv access change-puk -p 12345678 -n "$puk" >/dev/null || { err "PUK change failed"; return 1; }
+      ykman --device "$serial" piv access change-puk -p 12345678 -n "$puk" >/dev/null || { err "PUK change failed"; return 1; }
     fi
   fi
   # PIN-BINDING PROOF, as for the HSM in step_payload: present the escrowed PIN to the card now,
   # while both are known. Changing the PIN to itself verifies it; a wrong value costs one try here
   # instead of one on recovery day.
   if [ -n "$pin" ] && grep -q "Management key algorithm" <<< "$info"; then
-    ykman piv access change-pin -P "$pin" -n "$pin" >/dev/null 2>&1 \
+    ykman --device "$serial" piv access change-pin -P "$pin" -n "$pin" >/dev/null 2>&1 \
       || { err "PIN BINDING FAILED: the escrowed $pinv does not open this YubiKey"; return 1; }
     info "   PIN BINDING PROVEN — the escrowed $pinv opens YubiKey ${letter^^}."
   else
@@ -640,11 +664,11 @@ step_yubikey_ops() {
   if grep -q "Management key algorithm" <<< "$info" && ! grep -q "protected by PIN" <<< "$info"; then
     warn "age-plugin-yubikey needs a PIN-protected TDES management key; this card's is not. It becomes a"
     warn "random key stored on the card behind the PIN, so the escrowed PIN also recovers it."
-    run "ykman piv access change-management-key -a TDES --protect"; rc=$?
+    run "ykman --device $serial piv access change-management-key -a TDES --protect"; rc=$?
     [ "$rc" = 0 ] || { err "the management key was not changed, so age-plugin-yubikey would refuse this card"; return 1; }
   fi
   # A declined step (100) is the operator's choice; a FAILED generation is not a success.
-  run "age-plugin-yubikey --generate --pin-policy $pin_policy --touch-policy $touch_policy"; rc=$?
+  run "age-plugin-yubikey --generate --serial $serial --pin-policy $pin_policy --touch-policy $touch_policy"; rc=$?
   [ "$rc" = 100 ] && return 0
   [ "$rc" = 0 ] || { err "age-plugin-yubikey --generate failed (exit $rc): no identity was created"; return 1; }
   warn "Copy the printed  age1yubikey1…  recipient into every repo's .sops.yaml as the"
@@ -1648,6 +1672,7 @@ step_set_pins() {
     fi
     if [ "$how" != e ] && [ "$how" != E ]; then
       generate_pins "$pfile" || return 1
+      state_pins_generated_this_run=1
     fi
   fi
   if [ ! -s "$pfile" ]; then
@@ -1772,6 +1797,7 @@ funding_wallet_mnemonic_v2:
 ops_age_key:
 API_KEY_HASH_SECRET:
 $(for k in $PIN_FIELDS; do printf '%s: %s\n' "$k" "${!k-}"; done)
+$(for y in $YUBIKEYS; do s=""; for k in "${!YK_SET_OF[@]}"; do [ "${YK_SET_OF[$k]}" = "$y" ] && s="$k"; done; printf 'yubikey_%s_serial: %s\n' "$y" "$s"; done)
 sle4442_psc:
 TPL
     chmod 600 "$plain"
