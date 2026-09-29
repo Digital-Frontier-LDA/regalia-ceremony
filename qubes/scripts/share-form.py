@@ -50,8 +50,8 @@ HOLDER = [
     "   principal named above, AND the executor asks you for this share IN PERSON.",
     "2. The principal named above asks you IN PERSON - never by phone, message, e-mail or video call.",
     "   Ask a question only the two of you know the answer to (agreed face to face, never written down).",
-    "   If the answer is wrong, or they seem forced, rushed or watched: hand NOTHING over, leave, and",
-    "   contact the police.",
+    "   If the answer is wrong, or they give the agreed DISTRESS answer, or seem forced, rushed or",
+    "   watched: hand NOTHING over, say you need time, leave, and contact the police.",
     "In every other case, keep the case sealed. Nobody can authorize its release remotely.",
 ]
 RECOVER = [

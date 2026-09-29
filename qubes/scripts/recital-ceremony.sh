@@ -70,6 +70,9 @@ done
 
 # shellcheck disable=SC1090
 source "$HERE/ceremony.sh"   # sourcing guard => main() does not auto-run
+# The recital follows the ceremony's scheme (CEREMONY_THRESHOLD / CEREMONY_SHARES, default 4-of-6).
+check_scheme || exit 1
+KK="$(K)"; NN="$(N)"
 # sourcing re-armed ceremony.sh's `trap cleanup EXIT`, replacing ours — redefine
 # cleanup to mirror the real shred-then-remove AND also drop the fake-bin dir.
 cleanup(){ [ -n "${WORK:-}" ] && find "$WORK" -type f -exec shred -u {} + 2>/dev/null; rm -rf "${WORK:-}" "$FAKE" 2>/dev/null; }
@@ -150,28 +153,29 @@ hdr "REAL ROUND-TRIP 1 — ssss shares the wizard emitted reconstruct (multiple 
 init_work
 printf '%s' "$MARKER" > "$WORK/secret.in"
 printf 'a\n' | step_shamir >/dev/null 2>&1
-[ "$(wc -l < "$WORK/shares.txt" | tr -d ' ')" = 6 ] && P "6 ssss shares emitted" || F "expected 6 shares"
-r1=$( (sed -n '1p;2p;3p;4p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )
-r2=$( (sed -n '3p;4p;5p;6p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )
-[ "$r1" = "$MARKER" ] && P "subset {1,2,3,4} reconstructs" || F "subset {1,2,3,4} failed"
-[ "$r2" = "$MARKER" ] && P "subset {3,4,5,6} reconstructs (any 4 work)" || F "subset {3,4,5,6} failed"
-r2bad=$( (sed -n '1p;2p;3p' "$WORK/shares.txt") | ssss-combine -t 3 -q 2>&1 | tr -d '\n' )
-[ "$r2bad" = "$MARKER" ] && F "THREE shares leaked the secret" || P "three shares (below threshold) do NOT reveal the secret"
+[ "$(wc -l < "$WORK/shares.txt" | tr -d ' ')" = "$NN" ] && P "$NN ssss shares emitted" || F "expected $NN shares"
+r1=$(head -n "$KK" "$WORK/shares.txt" | ssss-combine -t "$KK" -q 2>&1 )
+r2=$(tail -n "$KK" "$WORK/shares.txt" | ssss-combine -t "$KK" -q 2>&1 )
+[ "$r1" = "$MARKER" ] && P "the first $KK shares reconstruct" || F "the first $KK shares failed"
+[ "$r2" = "$MARKER" ] && P "the last $KK shares reconstruct (any $KK work)" || F "the last $KK shares failed"
+r2bad=$(head -n "$((KK - 1))" "$WORK/shares.txt" | ssss-combine -t "$((KK - 1))" -q 2>&1 | tr -d '\n' )
+[ "$r2bad" = "$MARKER" ] && F "$((KK - 1)) shares leaked the secret" || P "$((KK - 1)) shares (below threshold) do NOT reveal the secret"
 
 hdr "REAL ROUND-TRIP 2 — SLIP-0039 shares the wizard emitted recover the master secret"
+rm -f "$WORK"/form-*.ps   # the ssss split above left its own forms; count only this split's
 printf 'b\n' | step_shamir >/dev/null 2>&1
 # the wizard writes each raw share to w1..wN (text) and a BLANK hand-copy form per share
 # (ADR-0002 D12: a share is never printed, so no share page or share QR may exist)
-nshares=$(ls "$WORK"/w[1-9] 2>/dev/null | wc -l | tr -d ' ')
+nshares=0; for i in $(seq 1 16); do [ -f "$WORK/w$i" ] && nshares=$((nshares + 1)); done   # w1..wN (n may be up to 16)
 nforms=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
-[ "$nshares" = 6 ] && [ "$nforms" = 6 ] && P "6 SLIP-39 shares emitted, with 6 blank hand-copy forms" || F "expected 6 SLIP-39 shares and 6 forms, got $nshares and $nforms"
+[ "$nshares" = "$NN" ] && [ "$nforms" = "$NN" ] && P "$NN SLIP-39 shares emitted, with $NN blank hand-copy forms" || F "expected $NN SLIP-39 shares and $NN forms, got $nshares and $nforms"
 ls "$WORK"/*share*.png >/dev/null 2>&1 && F "a printable share page was rendered (shares are never printed)" || P "no printable share page rendered"
 # The minted master secret is (correctly) NOT written anywhere — slip39-mint.py never
 # emits it (that was the old `shamir create` leak). So verify recoverability WITHOUT a
 # reference: recover from two DIFFERENT 4-subsets and assert they agree + are non-empty.
-gotA=$(printf '%s\n%s\n%s\n%s\n' "$(cat "$WORK/w1")" "$(cat "$WORK/w2")" "$(cat "$WORK/w3")" "$(cat "$WORK/w4")" | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
-gotB=$(printf '%s\n%s\n%s\n%s\n' "$(cat "$WORK/w3")" "$(cat "$WORK/w4")" "$(cat "$WORK/w5")" "$(cat "$WORK/w6")" | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
-[ -n "$gotA" ] && [ "$gotA" = "$gotB" ] && P "two different 4-share subsets recover the SAME secret (consistent, any-4-of-6)" || F "SLIP-39 recover mismatch (A=$gotA B=$gotB)"
+gotA=$(for i in $(seq 1 "$KK"); do cat "$WORK/w$i"; echo; done | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
+gotB=$(for i in $(seq "$((NN - KK + 1))" "$NN"); do cat "$WORK/w$i"; echo; done | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
+[ -n "$gotA" ] && [ "$gotA" = "$gotB" ] && P "two different $KK-share subsets recover the SAME secret (consistent, any-$KK-of-$NN)" || F "SLIP-39 recover mismatch (A=$gotA B=$gotB)"
 grep -qiE "master secret|using master" "$WORK/slip39.txt" && F "master secret LEAKED into the shares file" || P "minted master secret is not written to the shares file"
 
 hdr "DERIVE — akash address helper (offline, cosmjs-verified known vector)"
@@ -193,11 +197,11 @@ if python3 -c "import mnemonic, shamir_mnemonic" 2>/dev/null; then
   bt="$(mktemp -d)"
   BMN="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
   printf '%s' "$BMN" > "$bt/m.in"
-  python3 "$HERE/bip39-slip39-backup.py" --in "$bt/m.in" --out "$bt/sh.txt" 2>/dev/null
+  python3 "$HERE/bip39-slip39-backup.py" --in "$bt/m.in" --threshold "$KK" --shares "$NN" --out "$bt/sh.txt" 2>/dev/null
   grep -q "RECONSTRUCT-VERIFIED" "$bt/sh.txt" && P "split auto reconstruct-verifies before emitting shares" || F "no reconstruct-verify"
-  grep -vE '^#|^$' "$bt/sh.txt" | sed -n '1p;3p;5p;6p' > "$bt/c.txt"   # any 4 of 6
+  grep -vE '^#|^$' "$bt/sh.txt" | tail -n "$KK" > "$bt/c.txt"   # any k of n: the last k
   brec=$(python3 "$HERE/bip39-slip39-backup.py" --recover --in "$bt/c.txt" 2>/dev/null)
-  [ "$brec" = "$BMN" ] && P "BIP39 -> SLIP-39 4-of-6 -> recover returns the EXACT mnemonic (HSM-free)" || F "Option B round-trip mismatch"
+  [ "$brec" = "$BMN" ] && P "BIP39 -> SLIP-39 $KK-of-$NN -> recover returns the EXACT mnemonic (HSM-free)" || F "Option B round-trip mismatch"
   # dice/external entropy: all-zero 32B entropy must encode to the known BIP39 vector
   printf '%064d' 0 > "$bt/e.hex"
   fe=$(python3 "$HERE/bip39-slip39-backup.py" --from-entropy --in "$bt/e.hex" 2>/dev/null | awk '{print $1,$NF}')
@@ -215,7 +219,7 @@ ms="$(mktemp -d)"
 # emits ONLY the shares (reconstruct-verified, 0600, master secret never written), which is
 # all the worksheet round-trip needs: one 20-word share line, same shape `shamir create`
 # used to produce among its leaky output.
-python3 "$HERE/slip39-mint.py" --threshold 4 --shares 6 --out "$ms/s.txt" 2>/dev/null
+python3 "$HERE/slip39-mint.py" --threshold "$KK" --shares "$NN" --out "$ms/s.txt" 2>/dev/null
 sh=$(grep -E '^[a-z]+( [a-z]+){15,}$' "$ms/s.txt" | head -1); printf '%s' "$sh" > "$ms/share.in"
 python3 "$HERE/metal-stamp-worksheet.py" --in "$ms/share.in" 2>/dev/null | grep -E '^[0-9]' | grep -oE '[0-9]{2} [A-Z]{4}' | awk '{print $2}' > "$ms/pref.txt"
 rec=$(python3 "$HERE/metal-stamp-worksheet.py" --verify --in "$ms/pref.txt" 2>/dev/null | tail -2 | head -1)

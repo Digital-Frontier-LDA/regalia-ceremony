@@ -31,7 +31,7 @@ YOU WILL LIKELY NEED TECHNICAL HELP — THAT'S NORMAL
       Technical helper:  [NAME + how to reach]          <-- fill in
   If they're unavailable, hire a reputable, bonded crypto-recovery
   professional. Give them:
-     (1) the four cases you gathered,
+     (1) the cases you gathered (as many as SCHEME.txt says),
      (2) the disc from this case (it has the step-by-step instructions
          file "RECOVERY-TECHNICAL.md" and all the software),
      (3) this sheet.
@@ -42,7 +42,8 @@ YOU WILL LIKELY NEED TECHNICAL HELP — THAT'S NORMAL
 
 WHAT THE HELPER WILL DO (so you can sanity-check them)
   - Work on a computer with the internet TURNED OFF.
-  - Combine the share-words from your 4 cases to rebuild the wallet.
+  - Combine the share-words from the cases you gathered (four by default;
+    SCHEME.txt on the disc says how many) to rebuild the wallet.
   - Confirm the rebuilt wallet matches the address recorded on the
     SEALED custodian-contact sheet (proof it's correct).
   - Move the funds to the agreed safe address:

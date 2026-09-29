@@ -70,7 +70,7 @@ key under different DKEKs, so a wrapped backup from one site cannot be restored 
 and the one it backs up to), step 6 refuses mismatched key check values. When a KCV cannot be
 parsed it only warns, and its unwrap-and-compare of the restored public key is the gate.
 
-**9. DKEK passwords are split 4-of-6 across custodians and never written whole.** *Verified by:* the
+**9. DKEK passwords are split k-of-n across custodians (4-of-6 by default) and never written whole.** *Verified by:* the
 share step's `--pwd-shares-threshold 4 --pwd-shares-total 6`. A restore must also prove it rebuilt
 the **same** DKEK. `sc-hsm-tool` accepts a wrong share set whenever the result happens to pad
 correctly, about 1 time in 256, so the key check value is compared. Test: `test-dkek-kcv-control.sh`

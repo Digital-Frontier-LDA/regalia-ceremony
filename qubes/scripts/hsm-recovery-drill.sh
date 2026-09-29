@@ -70,6 +70,10 @@ CEREMONY_VENV="${CEREMONY_VENV:-$HOME/.local/share/akash-hsm-venv}"
 [ -x "$CEREMONY_VENV/bin/python3" ] && PATH="$CEREMONY_VENV/bin:$PATH"
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# The drill follows the ceremony's Shamir scheme (CEREMONY_THRESHOLD / CEREMONY_SHARES, ADR-0002 D13).
+KK="${CEREMONY_THRESHOLD:-4}"; NN="${CEREMONY_SHARES:-6}"
+[[ "$KK" =~ ^[0-9]+$ && "$NN" =~ ^[0-9]+$ ]] && [ "$KK" -ge 2 ] && [ "$KK" -le "$NN" ] && [ "$NN" -le 16 ] \
+  || { echo "hsm-recovery-drill: the scheme $KK-of-$NN is not allowed (2 <= k <= n <= 16)" >&2; exit 2; }
 VERIFY="$HERE/verify-hsm-control.py"
 DERIVE="$HERE/derive-akash-address.py"
 SLIP39="$HERE/bip39-slip39-backup.py"
@@ -674,7 +678,7 @@ sc-hsm-tool --reader "$READER" --wrap-key "$WRAPPED" --key-reference "$FUNDING_R
 # A carrier blob is wrapped under it NOW (via a throwaway ON-CARD key — B2's never-generate rule
 # governs the funding key, not a drill blob-carrier; the funding key itself was imported above).
 # =================================================================================================
-hdr "Setup — the 4-of-6 break-glass DKEK and its carrier blob"
+hdr "Setup — the $KK-of-$NN break-glass DKEK and its carrier blob"
 printf '  FAILURE CONDITION: share creation fails, or the carrier blob cannot be wrapped — the\n'
 printf '  restore in step 1 would have nothing to prove itself against.\n'
 DKEK_PBE="$WORK/dkek.pbe"; SHARES_FILE="$WORK/dkek-shares.txt"
@@ -685,7 +689,7 @@ DKEK_PBE="$WORK/dkek.pbe"; SHARES_FILE="$WORK/dkek-shares.txt"
 # indefinitely is worse than one that fails: a failure gets recorded and the suite moves on.
 # Every other card call in this script is already wrapped this way; this one was missed.
 if perl -e 'alarm 120; exec @ARGV' -- sc-hsm-tool -r "$READER" --create-dkek-share "$DKEK_PBE" \
-     --pwd-shares-threshold 4 --pwd-shares-total 6 < /dev/null \
+     --pwd-shares-threshold "$KK" --pwd-shares-total "$NN" < /dev/null \
      > "$SHARES_FILE.raw" 2>&1 && [ -s "$DKEK_PBE" ]; then
   chmod 600 "$SHARES_FILE.raw"; mv "$SHARES_FILE.raw" "$SHARES_FILE"
   P "break-glass DKEK share created; the 6 password shares are in $SHARES_FILE (0600)"
@@ -700,8 +704,8 @@ init_scratch || exit 1
 restore_ok=0
 if [ "$AUTO" = 1 ]; then
   printf '  AUTO: importing the break-glass DKEK with the shares fed from the file (rep #1).\n'
-  out="$(feed_shares "$SHARES_FILE" 4 | sc-hsm-tool --reader "$READER" \
-      --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 2>&1)"; rc=$?
+  out="$(feed_shares "$SHARES_FILE" "$KK" | sc-hsm-tool --reader "$READER" \
+      --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" 2>&1)"; rc=$?
   grep -q 'Please enter prime' <<< "$(printf '%s\n' "$out")" \
     && P "the corrected command entered the share-reconstruction prompt path (RECOVERY-TECHNICAL.md 3B)" \
     || F "the import never asked for shares — the prompt path the fix depends on is absent"
@@ -718,8 +722,8 @@ if [ "$AUTO" = 1 ]; then
 else
   printf '  Importing the break-glass DKEK interactively — this is rep #1 of the share prompt.\n'
   printf '\n  \033[1mType at the prompts:\033[0m the PRIME, then per share the SHARE ID and SHARE VALUE —\n'
-  printf '  any 4 of the 6 shares from %s.\n' "$SHARES_FILE"
-  if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 < /dev/tty; then
+  printf '  any %s of the %s shares from %s.\n' "$KK" "$NN" "$SHARES_FILE"
+  if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" < /dev/tty; then
     restore_ok=1; P "break-glass DKEK imported (rep #1)"
     # The value step 1's restore has to reproduce. Recorded here, while the domain is known good.
     BREAKGLASS_KCV="$(dkek_kcv_now || true)"
@@ -759,7 +763,7 @@ if cmp -s "$BLOB_S" "$WRAPPED"; then
 fi
 
 # =================================================================================================
-hdr "STEP 1 — BREAK-GLASS DKEK RESTORE: --import-dkek-share dkek.pbe --pwd-shares-total 4"
+hdr "STEP 1 — BREAK-GLASS DKEK RESTORE: --import-dkek-share dkek.pbe --pwd-shares-total $KK"
 printf '  Simulating the dead card: wipe, then restore the DKEK from the typed shares.\n'
 printf '  FAILURE CONDITION (negative control): the card ACCEPTS a wrong share — a restore path\n'
 printf '  that cannot reject bad material is not a control.\n'
@@ -767,8 +771,8 @@ init_scratch || exit 1
 if [ "$AUTO" = 1 ]; then
   printf '  NEGATIVE CONTROL (auto): feeding 4 shares with share 1 CORRUPTED — the import must FAIL\n'
   printf '  at the decipher step, before the card is ever touched.\n'
-  out="$(feed_shares "$SHARES_FILE" 4 wrong | sc-hsm-tool --reader "$READER" \
-      --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 2>&1)"; rc=$?
+  out="$(feed_shares "$SHARES_FILE" "$KK" wrong | sc-hsm-tool --reader "$READER" \
+      --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then
     F "the card ACCEPTED a wrong DKEK share — the break-glass path has no integrity check"
     # Keep the evidence. This fired once in the #397 repro loop and the output was discarded, so that
@@ -798,7 +802,7 @@ else
   printf '\n  \033[1mNEGATIVE CONTROL — type a DELIBERATELY WRONG value at the first share prompt.\033[0m\n'
   printf '  Expected: the import FAILS (decryption/reconstruction error). Press Enter to begin. > '
   IFS= read -r _
-  if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 < /dev/tty; then
+  if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" < /dev/tty; then
     F "the card ACCEPTED a wrong DKEK share — the break-glass path has no integrity check"
   else
     P "a wrong share is REFUSED — the negative control holds"
@@ -811,10 +815,10 @@ printf '  documented break-glass path does not work and RECOVERY-TECHNICAL.md 3B
 init_scratch || exit 1
 if [ "$AUTO" = 1 ]; then
   printf '  AUTO: correct restore (rep #2 — 4 CORRECT shares fed from the file).\n'
-  out="$(feed_shares "$SHARES_FILE" 4 | sc-hsm-tool --reader "$READER" \
-      --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 2>&1)"; rc=$?
+  out="$(feed_shares "$SHARES_FILE" "$KK" | sc-hsm-tool --reader "$READER" \
+      --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" 2>&1)"; rc=$?
   if [ "$rc" = 0 ]; then
-    P "4-of-6 shares restored the DKEK — the corrected command works as documented"
+    P "$KK-of-$NN shares restored the DKEK — the corrected command works as documented"
     # EXIT STATUS IS NOT INTEGRITY (regalia#460). --import-dkek-share exits 0 whenever the
     # decrypted share passes padding validation, which a WRONG password does about 1 time in 256.
     # The key check value is what says the restored domain is the domain that was built.
@@ -831,8 +835,8 @@ if [ "$AUTO" = 1 ]; then
   fi
 else
   printf '  Press Enter to begin the correct restore (rep #2 — 4 CORRECT shares). > '; IFS= read -r _
-  if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total 4 < /dev/tty; then
-    P "4-of-6 shares restored the DKEK — the corrected command works as documented"
+  if sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_PBE" --pwd-shares-total "$KK" < /dev/tty; then
+    P "$KK-of-$NN shares restored the DKEK — the corrected command works as documented"
     # EXIT STATUS IS NOT INTEGRITY (regalia#460). --import-dkek-share exits 0 whenever the
     # decrypted share passes padding validation, which a WRONG password does about 1 time in 256.
     # The key check value is what says the restored domain is the domain that was built.
@@ -994,14 +998,14 @@ else
     && P "throwaway seed minted from /dev/urandom entropy" || F "seed mint failed"
   ADDR_ORIG="$(python3 "$DERIVE" --mnemonic-file "$WORK/seed.mnemonic" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
   [ -n "$ADDR_ORIG" ] && P "original address: $ADDR_ORIG" || F "no address from the minted seed"
-  python3 "$SLIP39" --in "$WORK/seed.mnemonic" --threshold 4 --shares 6 --out "$WORK/slip39.txt" 2>/dev/null \
-    && P "split 4-of-6 (reconstruct-verified by the tool itself)" || F "SLIP-39 split failed"
+  python3 "$SLIP39" --in "$WORK/seed.mnemonic" --threshold "$KK" --shares "$NN" --out "$WORK/slip39.txt" 2>/dev/null \
+    && P "split $KK-of-$NN (reconstruct-verified by the tool itself)" || F "SLIP-39 split failed"
   grep -v '^#' "$WORK/slip39.txt" | grep . > "$WORK/shares.txt"
   n=0; : > "$WORK/q1.txt"; : > "$WORK/q2.txt"
   while IFS= read -r line; do
     n=$((n+1))
-    [ "$n" -le 4 ] && printf '%s\n' "$line" >> "$WORK/q1.txt"
-    [ "$n" -ge 3 ] && printf '%s\n' "$line" >> "$WORK/q2.txt"
+    [ "$n" -le "$KK" ] && printf '%s\n' "$line" >> "$WORK/q1.txt"
+    [ "$n" -ge "$((NN - KK + 1))" ] && printf '%s\n' "$line" >> "$WORK/q2.txt"
   done < "$WORK/shares.txt"
   for q in q1 q2; do
     if ! python3 "$SLIP39" --recover --in "$WORK/$q.txt" --out "$WORK/$q.mnemonic" 2>/dev/null; then
@@ -1015,15 +1019,15 @@ else
       F "quorum $q recovered a DIFFERENT mnemonic"
     fi
   done
-  head -3 "$WORK/shares.txt" > "$WORK/three.txt"
+  head -n "$((KK - 1))" "$WORK/shares.txt" > "$WORK/three.txt"   # one share short of the threshold
   if python3 "$SLIP39" --recover --in "$WORK/three.txt" --out "$WORK/three.mnemonic" 2>/dev/null; then
     if [ "$(tr -d '[:space:]' < "$WORK/three.mnemonic")" = "$(tr -d '[:space:]' < "$WORK/seed.mnemonic")" ]; then
-      F "3 of 6 shares RECOVERED the seed — the 4-of-6 threshold is not enforced (B5 fails)"
+      F "$((KK - 1)) of $NN shares RECOVERED the seed — the $KK-of-$NN threshold is not enforced (B5 fails)"
     else
-      P "3 shares yield only a WRONG seed — but SILENTLY; record that the tool did not error"
+      P "$((KK - 1)) shares yield only a WRONG seed — but SILENTLY; record that the tool did not error"
     fi
   else
-    P "3 of 6 shares fail to reconstruct (B5: below threshold leaks nothing)"
+    P "$((KK - 1)) of $NN shares fail to reconstruct (B5: below threshold leaks nothing)"
   fi
 fi
 

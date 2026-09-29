@@ -516,7 +516,7 @@ HSM_PKCS11_MODULE="$P11" "$HERE/hsm-recovery-drill.sh" --run --slot "$SLOTID" --
 erc="${PIPESTATUS[0]}"
 dline="$(grep -E '^  [0-9]+ passed, [0-9]+ failed, [0-9]+ unverified' "$eout" | tail -1 | sed 's/^  //')"
 grep -q 'entered the share-reconstruction prompt path' "$eout" \
-  && P "the corrected --pwd-shares-total 4 command really entered the share prompt path" \
+  && P "the corrected --pwd-shares-total <k> command really entered the share prompt path" \
   || F "the share prompt path was never entered — the 3B fix is not validated"
 grep -q 'a wrong share is REFUSED' "$eout" \
   && P "wrong-share negative control held" || F "wrong-share negative control did not hold"

@@ -1,6 +1,6 @@
 # Ceremony execution profiles
 
-All real ceremonies use the same scripts, key algorithms, 4-of-6 recovery
+All real ceremonies use the same scripts, key algorithms, k-of-n recovery (4-of-6 by default)
 thresholds, two-person approvals, output verification, and teardown. A profile
 changes only how the operating system proves isolation and how it is destroyed.
 The profile is detected from platform evidence; an operator-supplied label is not

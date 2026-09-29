@@ -155,7 +155,7 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 #   sc-hsm-tool --create-dkek-share dkek.pbe --pwd-shares-threshold 4 --pwd-shares-total 6
 #   slip39-mint.py --threshold 4 --shares 6  # SLIP-0039 shares -> qrencode -> archival paper
 #   (NEVER `shamir create` — the CLI prints the master secret to stdout; the minter never
-#    emits it and reconstruct-verifies every 4-of-6 subset before writing)
+#    emits it and reconstruct-verifies every k-of-n subset before writing)
 # hand-copy + verify shares onto their printed blank forms, seal them, power off (RAM wiped).
 ```
 
@@ -184,7 +184,7 @@ die or naive made-up typing, not a deliberate cheater, and fake dice cannot weak
 because of the XOR with the HSM and the OS.
 
 `ceremony.sh` is built for **both** tokens: a YubiKey step (PIV/P-256 `ops` age identity)
-**and** a Nitrokey HSM 2 step (DKEK 4-of-6 backup + on-device secp256k1 funding key). It
+**and** a Nitrokey HSM 2 step (DKEK k-of-n backup + on-device secp256k1 funding key). It
 never prints a Shamir share (ADR-0002 D12): the printer gets a BLANK form per share, and the share
 is shown on screen once, copied by hand, cleared from the screen and its scrollback, and typed back
 to verify. That deliberate display is the only time a secret reaches the terminal; the printer only
@@ -266,8 +266,8 @@ sealing.
 | Tool | Status |
 |---|---|
 | `sops` 3.13.1, `age`, age recipient round-trip | ✅ exercised on real files (`age` v1.3.1 on macOS; the vault image ships Debian bookworm's `age` 1.1.1) |
-| `ssss` 4-of-6 split/combine | ✅ recovers with 4, does **not** leak with 3 |
-| SLIP-0039 `shamir` 4-of-6 | ✅ master secret recovered from a 4-subset |
+| `ssss` k-of-n split/combine | ✅ recovers with k, does **not** leak with k−1 (run at 4-of-6, 3-of-5, 3-of-4, 2-of-3, 5-of-8) |
+| SLIP-0039 `shamir` k-of-n | ✅ master secret recovered from a k-subset (run at 4-of-6 and 3-of-4) |
 | `qrencode` (encode) | ✅ produces scannable PNG |
 | `simulate-ceremony.sh` interactive rehearsal | ✅ boots through preflight, real menu drives, HSM step derives + "prints" the real funding address, Shamir/QR/age real |
 | `prove-ceremony.sh` automated proof run | ✅ 12/12 proven: address == cosmjs-canonical; ssss & SLIP-39 4-of-6 reconstruct (hash-identical) and 3 shares leak nothing; age round-trip; QR valid PNG; no leak; workdir shredded |

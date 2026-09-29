@@ -962,8 +962,8 @@ step_hsm_funding() {
     || { rm -f "$WORK/dkek-shares.txt"; \
          err "DKEK share creation was skipped or failed — aborting the HSM step."; \
          err "A born-in-HSM funding key has NO recoverable backup without a DKEK."; return 1; }
-  if [ "$(grep -cE 'Share ID *: *[0-9]+' "$WORK/dkek-shares.txt" 2>/dev/null)" != 6 ]; then
-    err "the six DKEK password shares were not captured, so step 2 cannot test them. Nothing is on"
+  if [ "$(grep -cE 'Share ID *: *[0-9]+' "$WORK/dkek-shares.txt" 2>/dev/null)" != "$(N)" ]; then
+    err "the $(N) DKEK password shares were not captured, so step 2 cannot test them. Nothing is on"
     err "the card yet. Do not hand out these shares; re-run this step."
     rm -f "$WORK/dkek.pbe" "$WORK/dkek-shares.txt"
     return 1
@@ -1012,7 +1012,7 @@ step_hsm_funding() {
     err "the rebuilt password, which happens to 1 share file in 128 (#460)."
     err "No key has been generated. RE-MINT NOW, before anyone leaves the room:"
     err "  * every custodian destroys the share they just wrote down — it opens nothing;"
-    err "  * re-run this step from 1): a new share file, six new shares, the card re-initialised."
+    err "  * re-run this step from 1): a new share file, $(N) new shares, the card re-initialised."
     rm -f "$WORK/dkek.pbe" "$WORK/dkek-shares.txt"
     return 1
   fi
@@ -1343,13 +1343,13 @@ step_shamir() {
       # Two different quorums must rebuild it: the first k shares and the last k shares.
       if [ "$(head -n "$(K)" "$WORK/shares.txt" | ssss-combine -t "$(K)" -q 2>&1)" = "$(cat "$f")" ] \
          && [ "$(tail -n "$(K)" "$WORK/shares.txt" | ssss-combine -t "$(K)" -q 2>&1)" = "$(cat "$f")" ]; then
-        info "reconstruct-verify OK: any 4 of the 6 shares rebuild the EXACT secret."
+        info "reconstruct-verify OK: any $(K) of the $(N) shares rebuild the EXACT secret."
       else
         err "RECONSTRUCT-VERIFY FAILED — 4 shares did NOT rebuild the secret; refusing to distribute."
         err "(A trailing newline in secret.in is dropped by ssss — recreate it with no trailing newline.)"
         rm -f "$WORK/shares.txt"; return 1
       fi
-      info "6 shares written + verified. Copy each BY HAND onto its printed blank form (ADR-0002 D12):"
+      info "$(N) shares written + verified. Copy each BY HAND onto its printed blank form (ADR-0002 D12):"
       local i=0; while IFS= read -r line; do i=$((i+1)); printf '%s' "$line" > "$WORK/sh$i"; record_share "Breakglass age key — Shamir share $i of $(N) (need $(K))" "$WORK/sh$i" || unverified="$unverified $i"; done < "$WORK/shares.txt"
       ;;
     b)
@@ -1379,7 +1379,7 @@ step_shamir() {
       # reach the operator, not vanish into /dev/null. Mirror option b (capture then echo).
       if python3 "$HERE/bip39-slip39-backup.py" --in "$f" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
         [ -s "$WORK/bkp.err" ] && sed 's/^/     /' "$WORK/bkp.err" >&2
-        info "BIP39 mnemonic split into 6 SLIP-39 word-shares (any 4 recover the EXACT mnemonic)."
+        info "BIP39 mnemonic split into $(N) SLIP-39 word-shares (any $(K) recover the EXACT mnemonic)."
         local n=0; while IFS= read -r line; do
           if [[ "$line" =~ ^[a-z]+([[:space:]][a-z]+){15,}$ ]]; then
             n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "Wallet seed — SLIP-0039 share $n of $(N) (need $(K))" "$WORK/w$n" || unverified="$unverified $n"
@@ -1414,8 +1414,8 @@ step_shamir() {
     err "share(s)$unverified were NOT verified against their handwritten copy. Do not seal them;"
     err "run this step again for a fresh, fully verified set."
   fi
-  warn "Distribute the 6 shares across media × geography × people. No single share leaks;"
-  warn "any 4 reconstruct; you may lose up to 2."
+  warn "Distribute the $(N) shares across media × geography × people, at most $(( $(N) - $(K) )) per region. No"
+  warn "single share leaks; any $(K) reconstruct; you may lose up to $(( $(N) - $(K) ))."
 }
 
 # ── Dev default PIN guard ───────────────────────────────────────────────────────
@@ -1606,7 +1606,7 @@ generate_pins() {
     val[yubikey_${y}_piv_puk]="$(gen_secret digits:8)"; val[yubikey_${y}_mgmt_key]="$(gen_secret hex:48)"
   done
   info "Generated: every HSM SO-PIN and every YubiKey PUK and management key. They are NOT shown: they go"
-  info "only into the encrypted tier-0 payload (any 4 of the 6 shares open it)."
+  info "only into the encrypted tier-0 payload (any $(K) of the $(N) shares open it)."
   local a; read -r -p "   type the $(wc -w <<< "$DAY_PINS") day-to-day PINs (every HSM and every YubiKey) yourself instead of generating them? [y/N] " a <"$tty"
   if [ "$a" = y ] || [ "$a" = Y ]; then
     typed_day=1
@@ -1829,7 +1829,7 @@ TPL
     || { err "encryption failed or was skipped — nothing was archived."; return 1; }
   [ -s "$enc" ] || { err "age produced an empty file — do NOT proceed."; return 1; }
 
-  run "python3 '$HERE/payload-qr.py' --split '$enc' --outdir '$qrdir'" \
+  run "python3 '$HERE/payload-qr.py' --split '$enc' --outdir '$qrdir' --threshold $(K) --shares $(N)" \
     || { err "QR emission failed — the payload has no paper copy."; return 1; }
 
   # ROUND-TRIP PROOF. An encrypted payload nobody has ever decrypted is not a backup. If the
@@ -2213,6 +2213,10 @@ step_archive() {
   # a chip card needs it as much as the rest of the toolkit.
   cp "$sdir/sle4442-manager" "$kit/" 2>/dev/null || true
   cp "$sdir/requirements.txt" "$kit/" 2>/dev/null || cp "$sdir/../requirements.txt" "$kit/" 2>/dev/null || true
+  # SCHEME.txt: THIS ceremony's k and n, which the recovery documents refer to instead of assuming
+  # 4-of-6 (the scheme is a parameter, ADR-0002 D13).
+  printf 'SCHEME: %s-of-%s\nYou need the shares from any %s of the %s sealed cases.\nThe breakglass ssss key: ssss-combine -t %s\nSLIP-39 and DKEK password shares: any %s.\n' \
+    "$(K)" "$(N)" "$(K)" "$(N)" "$(K)" "$(K)" > "$kit/SCHEME.txt"
   # Stage the HASH-PINNED wheels (shamir-mnemonic + mnemonic + their deps) so the
   # CLEAN-MACHINE / Tails recovery path RECOVERY-TECHNICAL.md endorses works with NO network:
   #   pip install --no-index --find-links wheels/ --require-hashes -r requirements.txt
@@ -2365,6 +2369,19 @@ step_recovery_card() {
     run "lp -d '$PRINTER' '$ps'" && info "sent recovery card to $PRINTER (cut along the dashed line)" || warn "print skipped"
   else
     warn "no printer set — print it yourself: lp -d <queue> $ps"
+  fi
+  # THE OUTER LABEL (owner, 2026-09-29): the release rules on the OUTSIDE of the case, so a holder can
+  # check them, and refuse, without breaking the seal. It says nothing about what is inside, and the
+  # distress answer itself is never printed: only what to do when it is given.
+  local label="$WORK/case-label.ps"
+  if python3 "$HERE/case-label.py" -o "$label"; then
+    if [ -n "$PRINTER" ]; then
+      run "lp -d '$PRINTER' '$label'" && info "sent the outer case label to $PRINTER: write the case ID and seal serial on it, stick it OUTSIDE the case" || warn "label print skipped"
+    else
+      warn "no printer set — print the outer case label yourself: lp -d <queue> $label"
+    fi
+  else
+    warn "could not build the outer case label"
   fi
 }
 
