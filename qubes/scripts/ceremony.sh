@@ -795,6 +795,45 @@ manifest_record() {
   info "qualified manifest: $out — review it, then commit it to regalia-kms."
 }
 
+# ---- HSM initialisation: hardened (ADR-0002 D15) -----------------------------------------------------
+# `sc-hsm-tool --initialize` leaves RESET RETRY COUNTER on: the SO-PIN alone then sets a new user PIN
+# and uses every key, and the card records nothing (measured on a Nitrokey, DENK0404144, 2026-09-29,
+# regalia#11). A real card is therefore initialised with hsm-init-hardened.sh --rrc off (the same
+# command is refused, 6D00) and --retries 10 (a 10-digit PIN with a 10-try counter, PLAN.md 1.3),
+# with the PINs step 0 generated, passed in its environment and never on argv. The card must identify
+# itself as a Nitrokey (EF 2F02 carries DENK…): a Pico never holds a real key, and an unidentified
+# card is not erased. Under the emulator (CEREMONY_SIMULATE=1, stubbed tools) there is no applet to
+# send the raw APDUs to, so the modelled sc-hsm-tool --initialize runs instead, as documented in
+# qubes/emulator/bin/sc-hsm-tool; hsm-init-hardened.sh has its own byte-exact test.
+#   init_hsm <what> <reader index or ""> <user-PIN var> <SO-PIN var> [emulator env prefix] [default reader]
+# Under the emulator the command is exactly the one this step always ran (no --reader when none given).
+HSM_INIT_RETRIES=10
+init_hsm() {
+  local what="$1" reader="$2" upin="${!3:-}" sopin="${!4:-}" envp="${5:-}" dflt="${6:-}" chr serial rc
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+    local cmd="sc-hsm-tool${reader:+ --reader $reader} --initialize --dkek-shares 1 --label 'akash-funding'"
+    run "${envp:+$envp }$cmd"; return
+  fi
+  reader="${reader:-$dflt}"
+  if [ "${state_step0_done:-0}" != 1 ] || [ -z "$upin" ] || [ -z "$sopin" ]; then
+    err "$what is initialised with the PINs step 0 generated: run step 0 first."; return 1
+  fi
+  [[ "$reader" =~ ^[0-9]+$ ]] || { err "no PC/SC reader index for $what (got '$reader'): refusing to guess which card to erase."; return 1; }
+  chr="$(bash "$HERE/hsm-devaut-read.sh" --reader "$reader" 2>/dev/null | sed -n 's/^DEVAUT_CHR=//p' | head -1)"
+  serial="$(grep -oE 'DENK[0-9]{7}' <<< "$chr" | head -1)"
+  if [ -z "$serial" ]; then
+    err "reader $reader does not identify as a Nitrokey HSM (EF 2F02: '${chr:-unreadable}')."
+    err "Refusing to erase it: an unidentified card, or a Pico (which never holds a real key)."; return 1
+  fi
+  info "$what: reader $reader holds $serial."
+  show "HSM_SO_PIN=<from step 0> HSM_USER_PIN=<from step 0> hsm-init-hardened.sh --reader $reader --expect-serial $serial --rrc off --retries $HSM_INIT_RETRIES --dkek-shares 1 --label akash-funding"
+  ask "ERASE $serial and initialise it (PIN reset by SO-PIN disabled, $HSM_INIT_RETRIES tries)?" || { warn "skipped"; return 100; }
+  HSM_SO_PIN="$sopin" HSM_USER_PIN="$upin" bash "$HERE/hsm-init-hardened.sh" --reader "$reader" --expect-serial "$serial" \
+    --rrc off --retries "$HSM_INIT_RETRIES" --dkek-shares 1 --label akash-funding; rc=$?
+  upin=""; sopin=""
+  return $rc
+}
+
 step_hsm_funding() {
   b "Nitrokey HSM 2 — cold funding wallet (secp256k1, DKEK threshold backup)"
   # ── UNSUPPORTED PATH — OFF BY DEFAULT ───────────────────────────────────────────────────
@@ -906,8 +945,8 @@ step_hsm_funding() {
   # without a PIN) and fails CLOSED on an unreadable card — see its definition above.
   assert_expected_device "the funding HSM" || return 1
   assert_hsm_blank "this device" "pkcs11-tool" || return 1
-  run "sc-hsm-tool --initialize --dkek-shares 1 --label 'akash-funding'" \
-    || { err "HSM --initialize was skipped or failed — aborting before key generation."; \
+  init_hsm "the funding HSM (A)" "${HSM_READER:-}" hsm_a_user_pin hsm_a_so_pin "" 0 \
+    || { err "HSM initialisation was skipped or failed — aborting before key generation."; \
          err "No DKEK domain means the funding key would have no recoverable backup."; return 1; }
   # THE SHARE ROUND TRIP (#464). Import through the share path, exactly as a recovery does:
   # shares 1-4 from the capture, fed to --pwd-shares-total 4. Without that flag OpenSC asks for a
@@ -1091,8 +1130,8 @@ step_hsm_funding() {
     # SAFETY: never --initialize a device that already holds a funding key. If the reader/slot
     # selector is wrong this would otherwise WIPE the primary card we just generated the key on.
     assert_hsm_blank "the SECOND HSM (${b_sc:-$b_env})" "$b_env pkcs11-tool $b_p11" || return 1
-    run "$b_env sc-hsm-tool $b_sc --initialize --dkek-shares 1 --label 'akash-funding'" \
-      || { err "second-HSM --initialize was skipped or failed — no clone was made. The primary key"; \
+    init_hsm "the SECOND HSM (B)" "${HSM_B_READER:-}" hsm_b_user_pin hsm_b_so_pin "$b_env" \
+      || { err "second-HSM initialisation was skipped or failed — no clone was made. The primary key"; \
            err "and its wrapped backup are untouched; re-run this step with the spare inserted."; return 1; }
     # The LAST k shares, not the first k: the clone is rebuilt by a second custodian quorum, from the same
     # capture, through the same --pwd-shares-total path a recovery uses.
