@@ -34,7 +34,17 @@ cat > "$T/bin/qubesctl" <<'SH'
 echo "qubesctl $*" >> "$CALLS"
 if [ -n "${SALT_FAIL:-}" ]; then printf 'Summary for vault-tools\nSucceeded: 16\nFailed:     2\n'; exit 1; fi
 printf 'Summary for vault-tools\n------------\nSucceeded: 18 (changed=3)\nFailed:     0\n'
+exit "${SALT_RC:-0}"
 SH
+# cp / mv that fail when an argument contains a chosen string, to exercise the staging and the rollback.
+for c in cp mv; do
+cat > "$T/bin/$c" <<SH
+#!/bin/bash
+v="FAIL_$(tr a-z A-Z <<< "$c")"; pat="\${!v:-}"
+if [ -n "\$pat" ] && [[ "\$*" == *"\$pat"* ]]; then echo "$c: simulated failure" >&2; exit 1; fi
+exec /bin/$c "\$@"
+SH
+done
 printf '#!/bin/sh\nexec "$@"\n' > "$T/bin/sudo"
 chmod +x "$T/bin"/*
 
@@ -71,6 +81,25 @@ out="$(FAIL_DL=1 run vt-test "$SHA")"; rc=$?
 hdr "Salt reports failures: the run FAILS and says how to find them"
 out="$(SALT_FAIL=1 run vt-test "$SHA")"; rc=$?
 [ "$rc" != 0 ] && grep -q "Failed: 2" <<< "$out" && grep -q "Result: False" <<< "$out" && P "fails, names the count and where to look" || F "a failed apply passed: $out"
+
+hdr "qubesctl exits non-zero although the summary says Failed: 0: the run FAILS"
+: > "$T/calls"
+out="$(SALT_RC=3 run vt-test "$SHA")"; rc=$?
+[ "$rc" != 0 ] && grep -q "qubesctl exited 3" <<< "$out" && ! grep -q "^DONE" <<< "$out" && P "fails" || F "a non-zero qubesctl passed: $out"
+grep -q "qvm-shutdown" "$T/calls" && F "template shut down after a failed apply" || P "template not shut down"
+
+hdr "a copy into staging fails: the installed files are NOT touched"
+echo "sentinel" > "$T/salt/vault-ceremony-scripts/ceremony.sh"; echo keep > "$T/salt/other.sls"
+out="$(FAIL_CP=vault-ceremony-recovery run vt-test "$SHA")"; rc=$?
+[ "$rc" != 0 ] && grep -q "NOT changed" <<< "$out" && P "fails, says nothing changed" || F "staging failure not reported: $out"
+[ "$(cat "$T/salt/vault-ceremony-scripts/ceremony.sh")" = sentinel ] && [ -d "$T/salt/vault-ceremony-recovery" ] && P "previous files intact" || F "previous files damaged"
+[ ! -e "$T/salt/.vault-tools-stage" ] && [ ! -e "$T/work/vault-tools-vt-test.tgz" ] && [ ! -e "$T/work/vault-tools-vt-test" ] && P "staging and download removed on failure" || F "temporary files left behind"
+
+hdr "a move during the swap fails: the previous files are put back"
+out="$(FAIL_MV=.vault-tools-stage/vault-ceremony-recovery run vt-test "$SHA")"; rc=$?
+[ "$rc" != 0 ] && grep -q "previous files restored" <<< "$out" && P "fails, says restored" || F "swap failure not reported: $out"
+[ "$(cat "$T/salt/vault-ceremony-scripts/ceremony.sh")" = sentinel ] && [ -d "$T/salt/vault-ceremony-recovery" ] && [ -f "$T/salt/vault-tools.sls" ] && P "previous files restored" || F "rollback incomplete: $(ls -A "$T/salt")"
+[ "$(cat "$T/salt/other.sls")" = keep ] && P "unrelated Salt files untouched" || F "an unrelated Salt file changed"
 
 hdr "bad input is refused before anything runs"
 : > "$T/calls"
