@@ -208,8 +208,9 @@ prefixes back to catch a mis-stamp before you rely on the plate. See SECRETS.md 
 **burned onto every archive disc** so a recoverer needs no repo/network: `RECOVERY-START-HERE.txt`
 (plain-English, for a non-technical heir → engage the named helper), `RECOVERY-TECHNICAL.md`
 (the exact offline recipe), and `custodian-contact-sheet.example.txt` (the **sealed sheet
-placed in each case** — your chosen model — listing all 6 custodians, the executor, the
-authorization trigger, the recorded funding address, and the safe sweep destination; fill in
+placed in each case** — it names the executor and a backup, the authorization trigger, the
+recorded funding address, the safe sweep destination, and THIS case's ID and seal serial; it
+deliberately does not list the other holders, whose directory only the executor holds; fill in
 the placeholders). The archive step stages this kit automatically; the recovery card points
 to it. Fill the placeholders ([OWNER], executor, helper, custodians, safe destination) before
 sealing.

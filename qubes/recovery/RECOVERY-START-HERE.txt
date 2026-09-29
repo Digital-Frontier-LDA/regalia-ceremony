@@ -19,10 +19,11 @@ ARE YOU ALLOWED TO DO THIS?
   If you are not that person, contact the executor. Doing this without
   authorization is theft.
 
-YOU NEED 4 OF 6
-  There are SIX of these cases. You need any FOUR of them to recover.
-  The sealed custodian-contact sheet lists all six holders and how to
-  reach them. Gather four cases.
+YOU NEED ENOUGH CASES (4 OF 6 UNLESS THE CARD SAYS OTHERWISE)
+  There are several of these cases (six by default); the recovery card
+  says how many are needed (four by default). No case lists the others:
+  only the EXECUTOR knows who holds them and where, and gathers them.
+  Contact the executor.
 
 YOU WILL LIKELY NEED TECHNICAL HELP — THAT'S NORMAL
   Recovering crypto safely needs someone comfortable with a computer

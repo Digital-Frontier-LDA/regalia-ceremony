@@ -1,14 +1,15 @@
 ================================================================
-  SEALED CUSTODIAN-CONTACT SHEET   (one copy sealed in EVERY case)
-  CONFIDENTIAL — this lists who holds the shares. Keep sealed.
+  SEALED CUSTODIAN-CONTACT SHEET   (one sealed in EVERY case)
+  It names the EXECUTOR, never the other holders. Keep sealed.
 ================================================================
-This sheet is how a recoverer finds the other custodians (you chose to
-seal a copy in each case). It is opsec-sensitive: anyone with it knows
-whom to approach. The 4-of-6 threshold is the protection — no single
-custodian (or this sheet alone) can move funds.
+This sheet tells whoever holds this case whom to contact: the executor.
+It deliberately does NOT list the other cases or their holders: one
+stolen or coerced case must not lead to the rest. The executor alone
+holds the directory of cases (kept by a notary or lawyer, and
+encrypted), and receives it only when the trigger below has happened.
 
 WALLET / OWNER:        [OWNER NAME / COMPANY]
-SCHEME:                4-of-6  (need any 4 of the 6 cases)
+SCHEME:                [k]-of-[n]  (need any k of the n cases; default 4-of-6)
 RECORDED FUNDING ADDR: [akash1... — must match what recovery derives]
 
 AUTHORIZATION / TRIGGER (when a break-glass is permitted):
@@ -28,17 +29,16 @@ TECHNICAL HELPER (runs the offline recovery; see RECOVERY-TECHNICAL.md):
 SAFE DESTINATION for swept funds:
     [akash1... cold address, or "executor will provide at recovery time"]
 
-THE SIX CUSTODIANS / CASES (need any 4):
-    Case      Holo serial    Custodian        How to reach        Location
-    DF-BG-01  HOLO-000001    [name]           [phone/email]       [city / box]
-    DF-BG-02  HOLO-000002    [name]           [____]              [____]
-    DF-BG-03  HOLO-000003    [name]           [____]              [____]
-    DF-BG-04  HOLO-000004    [name]           [____]              [____]
-    DF-BG-05  HOLO-000005    [name]           [____]              [____]
-    DF-BG-06  HOLO-000006    [name]           [____]              [____]
+THIS CASE ONLY:
+    Case ID:       [DF-BG-0x]
+    Holo serial:   [HOLO-00000x]
 
 NOTES
-  - Verify each case's holo serial against this list before opening it;
-    a wrong/broken seal ⇒ assume tampering, recover then rotate.
+  - The executor checks every case's holo serial against the directory
+    before opening it; a wrong/broken seal => assume tampering, recover
+    then rotate.
+  - Hand this case over ONLY as the share form in it says: on the
+    original official certificate plus the executor's in-person request,
+    or the owner's in-person request checked with your shared question.
   - Keep this sheet sealed inside the case; do not photograph it.
 ================================================================
