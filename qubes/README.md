@@ -97,6 +97,19 @@ qvm-features vault appmenus-dispvm 1
 qvm-backup --dest-vm <backup-store> vault-tools
 ```
 
+### Updating the template to a new release (one command)
+
+`dom0/vault-tools-update.sh` does step 0 and step 2 above for a release tag: download in a
+throwaway disposable, **refuse unless the sha256 matches**, replace the Salt files, apply, check
+`Failed: 0`, shut the template down. Every step prints one `OK`/`FAIL` line.
+
+```bash
+# first time: after fetching and checking a tag by hand as in step 0, from the unpacked copy
+bash /tmp/vault-ceremony/qubes/dom0/vault-tools-update.sh --install <tag> <sha256>
+# every later release
+~/bin/vault-tools-update <tag> <sha256>        # e.g. vt-0929 d500b9a46416… (at least 16 hex)
+```
+
 To start a ceremony, open a terminal in a fresh disposable, then find its name (`dispNNNN`) to
 attach devices to it:
 
