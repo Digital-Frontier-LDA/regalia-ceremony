@@ -39,7 +39,8 @@ hdr "a Nitrokey on reader 2: hardened init with --rrc off --retries 10, PINs in 
 grep -q "RC=0" <<< "$out" && P "succeeds" || F "failed: $out"
 grep -qx "init-argv --reader 2 --expect-serial DENK0404144 --rrc off --retries 10 --dkek-shares 1 --label akash-funding" "$T/rec" && P "exact arguments" || F "arguments: $(grep init-argv "$T/rec")"
 grep -qx "init-env-so $SO_A" "$T/rec" && grep -qx "init-env-user $USER_A" "$T/rec" && P "both PINs reach it through the environment" || F "PINs not in the environment"
-grep "init-argv" "$T/rec" | grep -qE "$USER_A|$SO_A" && F "a PIN is on argv" || P "no PIN on argv"
+argv_lines="$(grep "init-argv" "$T/rec")"
+grep -qE "$USER_A|$SO_A" <<< "$argv_lines" && F "a PIN is on argv" || P "no PIN on argv"
 grep -qE "$USER_A|$SO_A" <<< "$out" && F "a PIN was printed" || P "no PIN printed"
 grep -q "reader 2 holds DENK0404144" <<< "$out" && P "names the card before erasing it" || F "card not named"
 
