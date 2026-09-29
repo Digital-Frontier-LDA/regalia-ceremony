@@ -127,7 +127,7 @@ if needs sle4442; then
 fi
 
 if needs hsm; then
-  hdr "SmartCard-HSM (Nitrokey HSM 2) present + PKCS#11 visible"
+  hdr "SmartCard-HSM (Nitrokey HSM 2 or Pico HSM) present + PKCS#11 visible"
   # Gate on the FUNDING-KEY HSM specifically, not the generic words 'token'/'present'. Any
   # OpenSC-visible PKCS#11 token (notably the YubiKey PIV, which this same ceremony needs for
   # the ops-identity step and enumerates through opensc-pkcs11.so) prints 'token label'/
@@ -137,9 +137,25 @@ if needs hsm; then
   #   * an already-initialised device (and the SoftHSM2 emulator) carries the 'akash-funding'
   #     token the ceremony creates.
   # A YubiKey PIV / generic token matches neither, so it can no longer produce a false GO.
-  if command -v pkcs11-tool >/dev/null 2>&1 && \
-     grep -qiE 'SmartCard-HSM|akash-funding' <<< "$(timeout 8 pkcs11-tool --list-slots 2>/dev/null)"; then
-    ok "the funding-key HSM (SmartCard-HSM) is present"
+  #
+  # The label alone is NOT enough (owner's vault, 2026-09-29): OpenSC shows 'SmartCard-HSM' only as
+  # a FALLBACK when the device has no label of its own (pkcs15-sc-hsm.c). A Nitrokey initialised
+  # with a label, and every Pico HSM ('Pico-HSM', manufacturer 'Pol Henarejos'), show their own —
+  # so a working HSM read NO-GO. What is fixed is the card type OpenSC's driver detects:
+  # `opensc-tool -r N -n` names a SmartCard-HSM applet 'SmartCard-HSM …' on both devices (checked
+  # on a Pico: 'SmartCard-HSM version 6.6'); a YubiKey is 'PIV-II card'. Find the first reader
+  # whose card is that type, and read the PIN counters from THAT reader below.
+  hsm_reader=""
+  if command -v opensc-tool >/dev/null 2>&1; then
+    while read -r n _; do
+      case "$(timeout 8 opensc-tool -r "$n" -n 2>/dev/null)" in
+        SmartCard-HSM*) hsm_reader="$n"; break;;
+      esac
+    done < <(timeout 5 opensc-tool -l 2>/dev/null | grep -E '^[0-9]+[[:space:]]+Yes[[:space:]]' || true)
+  fi
+  if [ -n "$hsm_reader" ] || { command -v pkcs11-tool >/dev/null 2>&1 && \
+     grep -qiE 'SmartCard-HSM|akash-funding' <<< "$(timeout 8 pkcs11-tool --list-slots 2>/dev/null)"; }; then
+    ok "the funding-key HSM (SmartCard-HSM) is present${hsm_reader:+ in reader $hsm_reader}"
     timeout 8 pkcs11-tool --list-slots 2>/dev/null | grep -iE 'Slot|token label|SmartCard-HSM|akash-funding|present' | sed 's/^/     /'
     # PIN-retry gate — the piece the presence probe above CANNOT see. Prior handling can
     # leave the user-PIN retry counter at 1 (two earlier mistyped PINs); the token still
@@ -153,7 +169,8 @@ if needs hsm; then
     # spends the USER PIN, so that is the counter that governs the brick risk. (Do NOT match the
     # SO-PIN line: a healthy SO-PIN counter would mask a near-locked user PIN and yield a false GO.)
     if command -v sc-hsm-tool >/dev/null 2>&1; then
-      hsm_ret="$(timeout 8 sc-hsm-tool 2>/dev/null | grep -iE 'User PIN tries left' | grep -oE '[0-9]+' | head -1)"
+      hsm_info="$(timeout 8 sc-hsm-tool ${hsm_reader:+-r "$hsm_reader"} 2>/dev/null)"
+      hsm_ret="$(printf '%s\n' "$hsm_info" | grep -iE 'User PIN tries left' | grep -oE '[0-9]+' | head -1)"
       case "${hsm_ret:-}" in
         ''|*[!0-9]*) warn "could not read the SmartCard-HSM PIN retry counter — confirm it manually before keygen (a blocked user PIN needs the SO-PIN; repeated wrong PIN/SO-PIN BRICKS the HSM and loses the funding key)";;
         0)  bad "SmartCard-HSM PIN retries = 0 — the user PIN is BLOCKED; unblock with the SO-PIN before proceeding (a wrong SO-PIN also bricks the HSM).";;
@@ -168,7 +185,7 @@ if needs hsm; then
       # unblock" (OpenSC SmartCardHSM wiki). Block both and the funding key is gone unless a DKEK
       # backup exists. The published counter is also inconsistent — the wiki text says 15 while its
       # own pkcs15-tool dump shows 3 — so READ IT OFF THE DEVICE and trust that, not the docs.
-      so_ret="$(timeout 8 sc-hsm-tool 2>/dev/null | grep -iE 'SO-PIN tries left' | grep -oE '[0-9]+' | head -1)"
+      so_ret="$(printf '%s\n' "$hsm_info" | grep -iE 'SO-PIN tries left' | grep -oE '[0-9]+' | head -1)"
       case "${so_ret:-}" in
         ''|*[!0-9]*) warn "could not read the SmartCard-HSM SO-PIN retry counter — read it off the device before the ceremony; the docs disagree (15 vs 3) and a blocked SO-PIN can never be unblocked.";;
         0)  bad "SmartCard-HSM SO-PIN tries left = 0 — the SO-PIN is BLOCKED and cannot be unblocked. This token can no longer re-initialise or unblock its user PIN; do NOT generate a funding key on it.";;
@@ -179,7 +196,7 @@ if needs hsm; then
       warn "sc-hsm-tool missing — cannot read the SmartCard-HSM PIN retry counter; confirm it manually before keygen (wrong PINs can BRICK the HSM)."
     fi
   else
-    bad "no SmartCard-HSM funding token visible — attach the Nitrokey HSM 2 (qvm-usb attach) and confirm pcscd is running. (A YubiKey PIV or other PKCS#11 token does NOT satisfy this gate.)"
+    bad "no SmartCard-HSM funding token visible — attach the Nitrokey HSM 2 or Pico HSM (qvm-usb attach) and confirm pcscd is running. (A YubiKey PIV or other PKCS#11 token does NOT satisfy this gate.)"
   fi
 fi
 

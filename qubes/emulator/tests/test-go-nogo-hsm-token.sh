@@ -38,7 +38,28 @@ cat > "$FAKE/pkcs11-tool" <<'EOS'
 #!/usr/bin/env bash
 case "$*" in
   *--list-slots*)
-    if [ "${STUB_SLOTS:-hsm}" = "yubikey" ]; then
+    if [ "${STUB_SLOTS:-hsm}" = "pico" ]; then
+      cat <<'OUT'
+Available slots:
+Slot 0 (0x0): Pol Henarejos Pico Key [HID Interface] (8625B32841D722E2) 00 00
+  token label        : Pico-HSM
+  token manufacturer : Pol Henarejos
+  token model        : PKCS#15 emulated
+  token state:   present
+OUT
+    elif [ "${STUB_SLOTS:-hsm}" = "labelled" ]; then
+      cat <<'OUT'
+Available slots:
+Slot 0 (0x0): Yubico YubiKey OTP+FIDO+CCID 00 00
+  token label        : user_pin (PIV Card Holder pin)
+  token manufacturer : piv_II
+Slot 1 (0x4): Nitrokey Nitrokey HSM (DENK0404144000000        ) 01 00
+  token label        : staging-4144 (UserPIN)
+  token manufacturer : www.CardContact.de
+  token model        : PKCS#15 emulated
+  token state:   present
+OUT
+    elif [ "${STUB_SLOTS:-hsm}" = "yubikey" ]; then
       cat <<'OUT'
 Available slots:
 Slot 0 (0x0): Yubico YubiKey OTP+FIDO+CCID 00 00
@@ -63,7 +84,36 @@ OUT
 esac
 exit 0
 EOS
-chmod +x "$FAKE/timeout" "$FAKE/pkcs11-tool"
+# opensc-tool stub: the readers (-l) and each reader's card type (-r N -n) for $STUB_SLOTS, as
+# OpenSC 0.26 prints them (Pico checked on the device: 'SmartCard-HSM version 6.6'). Always
+# stubbed, so a real reader on the test machine cannot change the result.
+cat > "$FAKE/opensc-tool" <<'EOS'
+#!/usr/bin/env bash
+case "${STUB_SLOTS:-hsm}" in
+  pico)     r0="Pol Henarejos Pico Key [HID Interface] (8625B32841D722E2) 00 00"; n0="SmartCard-HSM version 6.6";;
+  labelled) r0="Yubico YubiKey OTP+FIDO+CCID 00 00"; n0="PIV-II card"
+            r1="Nitrokey Nitrokey HSM (DENK0404144000000        ) 01 00"; n1="SmartCard-HSM version 4.1";;
+  yubikey)  r0="Yubico YubiKey OTP+FIDO+CCID 00 00"; n0="PIV-II card";;
+  *)        r0="";;   # 'hsm': only the pkcs11 label path (fresh device, 'SmartCard-HSM' label)
+esac
+if [ "$*" = "-l" ]; then
+  [ -n "$r0" ] || { echo "No smart card readers found."; exit 0; }
+  echo "# Detected readers (pcsc)"; echo "Nr.  Card  Features  Name"
+  echo "0    Yes             $r0"; [ -n "${r1:-}" ] && echo "1    Yes             $r1"
+  exit 0
+fi
+if [ "$1" = -r ] && [ "$3" = -n ]; then v="n$2"; [ -n "${!v:-}" ] && echo "${!v}" && exit 0; exit 1; fi
+exit 0
+EOS
+# sc-hsm-tool stub: records which reader it was asked about; counters per reader.
+cat > "$FAKE/sc-hsm-tool" <<'EOS'
+#!/usr/bin/env bash
+echo "$*" >> "$FAKE_CALLS"
+if [ "${STUB_SLOTS:-}" = labelled ] && [ "$*" != "-r 1" ]; then echo "Card is not a SmartCard-HSM" >&2; exit 1; fi
+printf 'SO-PIN tries left    : 15\nUser PIN tries left  : 3\n'
+EOS
+chmod +x "$FAKE/timeout" "$FAKE/pkcs11-tool" "$FAKE/opensc-tool" "$FAKE/sc-hsm-tool"
+export FAKE_CALLS="$FAKE/calls"
 
 run(){ STUB_SLOTS="$1" "$GN" --need hsm 2>&1 || true; }
 
@@ -76,7 +126,7 @@ else
   P "did not accept a generic PKCS#11 token as the HSM"
 fi
 grep -qi 'no SmartCard-HSM funding token visible' <<< "$(echo "$out")" \
-  && P "STOPs and tells the operator to attach the Nitrokey HSM 2" \
+  && P "STOPs and tells the operator to attach the HSM" \
   || { F "no STOP when the SmartCard-HSM is absent"; echo "$out" | sed 's/^/      /'; }
 
 hdr "the real SmartCard-HSM (Nitrokey HSM 2) is visible -> HSM gate says GO"
@@ -84,6 +134,16 @@ out="$(run hsm)"
 grep -qi 'funding-key HSM .*is present' <<< "$(echo "$out")" \
   && P "accepts the SmartCard-HSM token" \
   || { F "did not accept a genuine SmartCard-HSM token (would false NO-GO the ceremony)"; echo "$out" | sed 's/^/      /'; }
+
+hdr "a Pico HSM (label 'Pico-HSM', manufacturer 'Pol Henarejos') -> GO by card type"
+out="$(run pico)"
+grep -qi 'funding-key HSM .*is present in reader 0' <<< "$out" && P "Pico accepted" || { F "Pico refused (the owner's NO-GO)"; echo "$out" | sed 's/^/      /'; }
+
+hdr "a Nitrokey initialised with its own label, behind a YubiKey -> GO, counters from ITS reader"
+: > "$FAKE_CALLS"; out="$(run labelled)"
+grep -qi 'funding-key HSM .*is present in reader 1' <<< "$out" && P "labelled Nitrokey found in reader 1" || { F "labelled Nitrokey refused"; echo "$out" | sed 's/^/      /'; }
+grep -qx -- "-r 1" "$FAKE_CALLS" && ! grep -qvx -- "-r 1" "$FAKE_CALLS" && P "sc-hsm-tool asked about reader 1 only (not the YubiKey)" || F "sc-hsm-tool calls: $(tr '\n' '|' < "$FAKE_CALLS")"
+grep -q 'PIN retries = 3' <<< "$out" && P "user PIN counter read" || F "user PIN counter not read: $(grep -i 'retr' <<< "$out")"
 
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
