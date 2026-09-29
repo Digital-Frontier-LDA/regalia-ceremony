@@ -78,6 +78,7 @@ Q="$SRC/qubes"
 for f in salt/vault-tools.sls scripts/ceremony.sh requirements.txt recovery; do
   [ -e "$Q/$f" ] || fail "the tarball lacks qubes/$f"
 done
+# /srv/salt is root-only in dom0: every look inside it (test, cmp) goes through sudo, like the writes.
 # Stage first (same filesystem as $SALT_DIR, so the swap below is a set of renames). A failed copy
 # here leaves the installed files untouched.
 sudo rm -rf "$STAGE" "$PREV" && sudo mkdir -p "$STAGE" "$PREV" || fail "cannot create $STAGE"
@@ -86,14 +87,14 @@ sudo cp "$Q/salt/vault-tools.sls" "$Q/salt/vault-tools.top" "$STAGE/" \
   && sudo cp "$Q/requirements.txt" "$STAGE/vault-ceremony-requirements.txt" \
   && sudo cp -r "$Q/recovery" "$STAGE/vault-ceremony-recovery" \
   || fail "copying the recipe into $STAGE failed — the installed files were NOT changed"
-for i in "${ITEMS[@]}"; do [ -e "$STAGE/$i" ] || fail "staging lacks $i — the installed files were NOT changed"; done
-cmp -s "$Q/scripts/ceremony.sh" "$STAGE/vault-ceremony-scripts/ceremony.sh" \
+for i in "${ITEMS[@]}"; do sudo test -e "$STAGE/$i" || fail "staging lacks $i — the installed files were NOT changed"; done
+sudo cmp -s "$Q/scripts/ceremony.sh" "$STAGE/vault-ceremony-scripts/ceremony.sh" \
   || fail "the staged ceremony.sh differs from the tag's — the installed files were NOT changed"
 # Swap: old item -> $PREV, staged item -> $SALT_DIR. On any failure, undo what was moved.
 rollback() {   # $1 = what went wrong
   local bad=0
   for i in "${ITEMS[@]}"; do
-    if [ -e "$PREV/$i" ]; then
+    if sudo test -e "$PREV/$i"; then
       sudo rm -rf "${SALT_DIR:?}/$i"; sudo mv "$PREV/$i" "$SALT_DIR/$i" || bad=1
     fi
   done
@@ -101,11 +102,11 @@ rollback() {   # $1 = what went wrong
   fail "$1 — AND restoring failed: the previous files are in $PREV; move them back by hand"
 }
 for i in "${ITEMS[@]}"; do
-  if [ -e "$SALT_DIR/$i" ]; then sudo mv "$SALT_DIR/$i" "$PREV/$i" || rollback "could not move the old $i aside"; fi
+  if sudo test -e "$SALT_DIR/$i"; then sudo mv "$SALT_DIR/$i" "$PREV/$i" || rollback "could not move the old $i aside"; fi
   sudo mv "$STAGE/$i" "$SALT_DIR/$i" || rollback "could not move the new $i in"
 done
 sudo rm -rf "$PREV" "$STAGE"
-cmp -s "$Q/scripts/ceremony.sh" "$SALT_DIR/vault-ceremony-scripts/ceremony.sh" \
+sudo cmp -s "$Q/scripts/ceremony.sh" "$SALT_DIR/vault-ceremony-scripts/ceremony.sh" \
   || fail "$SALT_DIR does not hold this tag's ceremony.sh after the swap"
 ok "recipe from $TAG is in $SALT_DIR"
 

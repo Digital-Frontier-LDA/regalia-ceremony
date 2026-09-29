@@ -45,11 +45,17 @@ if [ -n "\$pat" ] && [[ "\$*" == *"\$pat"* ]]; then echo "$c: simulated failure"
 exec /bin/$c "\$@"
 SH
 done
-printf '#!/bin/sh\nexec "$@"\n' > "$T/bin/sudo"
+# dom0's /srv/salt is root-only. The fake Salt dir is mode 000 while the updater runs, and only
+# this sudo opens it for the one command: any look inside it without sudo fails, as in dom0.
+cat > "$T/bin/sudo" <<'SH'
+#!/bin/bash
+chmod 755 "$SALT_DIR"; "$@"; rc=$?; chmod 000 "$SALT_DIR"; exit $rc
+SH
 chmod +x "$T/bin"/*
 
-run(){ PATH="$T/bin:$PATH" CALLS="$T/calls" RELEASE="$T/release.tgz" SALT_DIR="$T/salt" WORK="$T/work" \
-       HOME="$T/home" bash "$UPD" "$@" 2>&1; }
+run(){ mkdir -p "$T/salt"; chmod 000 "$T/salt"
+       PATH="$T/bin:$PATH" CALLS="$T/calls" RELEASE="$T/release.tgz" SALT_DIR="$T/salt" WORK="$T/work" \
+       HOME="$T/home" bash "$UPD" "$@" 2>&1; local rc=$?; chmod 755 "$T/salt"; return $rc; }
 
 hdr "a good tag and sha256: downloaded, verified, copied, applied, template shut down"
 : > "$T/calls"
