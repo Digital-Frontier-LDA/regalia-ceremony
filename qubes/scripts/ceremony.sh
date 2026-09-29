@@ -1544,6 +1544,18 @@ generate_pins() {
         printf '%s=%s\n' "$k" "${val[$k]}"
       done; } > "$pfile" )
   if [ "$typed_day" = 0 ]; then
+    # The paper PIN card (ADR-0002 D16): a blank form with a row per device; the PINs are written on
+    # it by hand. The printer sees only the blank form, never a PIN.
+    local card="$WORK/pin-card.ps"
+    if python3 "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")"; then
+      if [ -n "${PRINTER:-}" ]; then
+        run "lp -d '$PRINTER' '$card'" <"$tty" && info "blank PIN card sent to $PRINTER (it holds no PIN)"
+      else
+        warn "no printer set — print the blank PIN card yourself (no PIN in it): lp -d <queue> $card"
+      fi
+    else
+      warn "could not build the blank PIN card; use a plain sheet, one line per device"
+    fi
     warn "Next: each day-to-day PIN is shown ONCE. Write it on your PIN card by hand. Make sure nobody"
     warn "else can see this screen, and no camera points at it."
     for k in $DAY_PINS; do show_day_pin "$k" "${val[$k]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
