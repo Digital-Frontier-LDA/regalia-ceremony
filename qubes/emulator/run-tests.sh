@@ -154,6 +154,7 @@ say "CEREMONY pick_printer USB-only gate (network device-uri must not print a pl
 "$HERE/tests/test-ceremony-pick-printer-uri.sh" || suite_failed "test-ceremony-pick-printer-uri.sh"
 "$HERE/tests/test-printer-usb-autoqueue.sh" || suite_failed "test-printer-usb-autoqueue.sh"
 "$HERE/tests/test-ccid-add-reader.sh" || suite_failed "test-ccid-add-reader.sh"
+"$HERE/tests/test-step0-generated-credentials.sh" || suite_failed "test-step0-generated-credentials.sh"
 
 say "PRINTER network-uri fail-closed gate (ANY non-local device-uri refused, not just a blocklist)"
 "$HERE/tests/test-printer-network-uri.sh" || suite_failed "test-printer-network-uri.sh"
