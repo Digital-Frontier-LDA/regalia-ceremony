@@ -74,6 +74,31 @@ hdr "share-form.py builds a blank form for both kinds"
 python3 "$SCRIPTS/share-form.py" --label t --kind words --count 33 -o "$T/w.ps" && grep -q "showpage" "$T/w.ps" && P "word form" || F "word form"
 python3 "$SCRIPTS/share-form.py" --label t --kind chars --count 150 -o "$T/c.ps" && grep -q "showpage" "$T/c.ps" && P "character form" || F "character form"
 
+hdr "the form: label, handwrite fields, and the holder/recovery instructions on every page"
+python3 "$SCRIPTS/share-form.py" --label "Wallet seed - share 3 of 6 (need 4)" --kind words --count 33 -o "$T/l.ps"
+for want in "Case ID:" "Seal serial:" "Date sealed:" "Share number:" "Witness" "IF YOU HOLD THIS SHEET" "TO RECOVER" "any 4 of them together" "offline" "Wallet seed - share 3 of 6" \
+            "Principal \(full name\):" "WHEN TO ACT" "ORIGINAL official death certificate" "certificate of incapacity" \
+            "IN PERSON - never by phone, message, e-mail or video call" "only the two of you know" "contact the police" \
+            "Nobody can authorize its release remotely"; do
+  grep -qF "$want" "$T/l.ps" && P "form has: $want" || F "form lacks: $want"
+done
+grep -q "the threshold" "$T/l.ps" && F "the old 'any the threshold' wording is back" || P "no 'any the threshold' wording"
+python3 "$SCRIPTS/share-form.py" --label t --kind words --count 20 --threshold 3 --total 5 -o "$T/t.ps" && grep -qF "any 3 of them" "$T/t.ps" && grep -qF "ONE of 5 shares" "$T/t.ps" && P "--threshold/--total reach the instructions" || F "threshold/total not printed"
+
+hdr "the page size is declared (an undeclared A4 page lost its title under a Letter default)"
+python3 "$SCRIPTS/share-form.py" --label t --kind chars --count 148 --paper a4 -o "$T/a4.ps"
+grep -q "/PageSize \[595.28 841.89\]" "$T/a4.ps" && P "A4 declared" || F "A4 page size not declared"
+grep -q "/PageSize \[612.00 792.00\]" "$T/w.ps" && P "Letter declared" || F "Letter page size not declared"
+
+hdr "a share too long to fit above the instructions: refused, nothing written (never printed without them)"
+rm -f "$T/big.ps"; o="$(python3 "$SCRIPTS/share-form.py" --label t --kind chars --count 400 -o "$T/big.ps" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q "do not fit" <<< "$o" && [ ! -e "$T/big.ps" ] && P "refused, no file" || F "oversize share: rc=$rc $o"
+
+if command -v gs >/dev/null 2>&1; then
+  hdr "the forms render (ghostscript)"
+  for f in w c l a4; do gs -q -dSAFER -dBATCH -dNOPAUSE -sDEVICE=nullpage "$T/$f.ps" >/dev/null 2>&1 && P "$f.ps renders" || F "$f.ps does not render"; done
+fi
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
