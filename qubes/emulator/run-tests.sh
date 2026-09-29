@@ -220,6 +220,7 @@ say "RACK COMMISSIONING — cannot-evaluate must FAIL, and a swapped genuine car
 "$HERE/tests/test-tool-helper-paths.sh" || suite_failed "test-tool-helper-paths.sh"
 "$HERE/tests/test-dev-image-bootstrap.sh" || suite_failed "test-dev-image-bootstrap.sh"
 "$HERE/tests/test-hsm-init-hardened.sh" || suite_failed "test-hsm-init-hardened.sh"
+"$HERE/tests/test-wizard-hardened-hsm-init.sh" || suite_failed "test-wizard-hardened-hsm-init.sh"
 "$HERE/tests/test-hsm-unwrap-key.sh" || suite_failed "test-hsm-unwrap-key.sh"
 "$HERE/tests/test-ceremony-python-resolver.sh" || suite_failed "test-ceremony-python-resolver.sh"
 "$HERE/tests/test-dkek-kcv-control.sh" || suite_failed "test-dkek-kcv-control.sh"

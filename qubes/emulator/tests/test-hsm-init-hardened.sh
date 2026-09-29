@@ -220,6 +220,15 @@ else
   F "the child inherited a PIN: $(grep -o 'SO=.* USER=.*' "$BIN/stdin.txt" | head -1)"
 fi
 
+hdr "a Pico gets NO label write to EF 2F03 (GHSA-wq3w-g2fj-q2jq); a Nitrokey still does"
+out="$(run_init "${PINS[@]}" STUB_CHR=ESPICOHSMTR000 -- --reader 0 --expect-serial ESPICOHSMTR)"
+[ -n "$(init_apdu)" ] && [ -z "$(label_apdu)" ] && P "Pico by serial: INITIALIZE sent, no 00D72F03" || F "Pico by serial: label=$(label_apdu) init=$(init_apdu)"
+grep -q "label: NOT written — this is a Pico" <<< "$out" && P "says why the label was skipped" || F "no Pico label message: $(tail -3 <<< "$out")"
+out="$(run_init "${PINS[@]}" HSM_EXPECT_BOARD=E6614103E7A1B2C3 HSM_BOARD_VERIFIED=1 -- --reader 0 --expect-serial ESPA1B2C3)"
+[ -n "$(init_apdu)" ] && [ -z "$(label_apdu)" ] && P "blank Pico by board id: no 00D72F03" || F "blank Pico: label=$(label_apdu) init=$(init_apdu) out=$(tail -2 <<< "$out")"
+out="$(run_init "${PINS[@]}" STUB_CHR=DENK040414400000 -- --reader 0 --expect-serial DENK0404144)"
+[ -n "$(label_apdu)" ] && P "Nitrokey: the label is still written" || F "Nitrokey lost its label write"
+
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ] || exit 1

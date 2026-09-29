@@ -142,6 +142,18 @@ if [ -n "$EXPECT_SERIAL" ]; then
   fi
 fi
 
+# ---- a Pico gets NO label write ------------------------------------------------------------------
+# The label goes to EF 2F03 (TokenInfo). On a Pico HSM that file is GENERATED (FILE_DATA_FUNC): stock
+# firmware accepts the write, stores it over the generator, and from then on every SELECT of 2F03
+# runs the stored bytes and hard-faults the card (GHSA-wq3w-g2fj-q2jq, measured on an RP2350,
+# 2026-09-28); our fixed firmware refuses it with 6986. So a Pico is initialised without it and shows
+# its own label ('Pico-HSM'). A Pico is: an expected serial starting ESP, or a blank board identified
+# by HSM_EXPECT_BOARD.
+IS_PICO=0
+case "$EXPECT_SERIAL" in ESP*) IS_PICO=1;; esac
+[ -n "${HSM_EXPECT_BOARD:-}" ] && IS_PICO=1
+case "${got:-}" in *ESP*) IS_PICO=1;; esac
+
 # ---- build INITIALIZE DEVICE ------------------------------------------------------------------
 # 80 50 00 00 Lc <TLVs>, exactly the structure SmartCardHSMInitializer builds (SmartCardHSM.js
 # initialize(): the SEQUENCE's VALUE, not the wrapper):
@@ -194,7 +206,8 @@ send_init(){
   # and 6A86 on a Pico HSM (measured on both benches 2026-09-22), so the P2=0C form made this
   # script Nitrokey-only, silently: the same defect hsm-unwrap-key.sh had, in the script that runs
   # FIRST. An initialisation that cannot select the application wipes nothing and says 6A86.
-  printf 'apdu 00A404000B%s00\napdu %s\napdu %s\nquit\n' "$AID" "$apdu" "$lapdu" \
+  local label_line=""; [ "$IS_PICO" = 1 ] || label_line="apdu $lapdu"
+  printf 'apdu 00A404000B%s00\napdu %s\n%s\nquit\n' "$AID" "$apdu" "$label_line" \
     | env -u HSM_SO_PIN -u HSM_USER_PIN perl -e 'alarm 120; exec @ARGV' -- \
         opensc-explorer -r "$READER" 2>&1
 }
@@ -220,7 +233,9 @@ case "$sw" in
         die "INITIALIZE DEVICE answered SW=$sw — the card was NOT initialised" ;;
 esac
 
-case "$(printf '%s' "${lsw:-}" | tr 'a-f' 'A-F')" in
+case "$( [ "$IS_PICO" = 1 ] && echo pico || printf '%s' "${lsw:-}" | tr 'a-f' 'A-F')" in
+  pico) say "label: NOT written — this is a Pico, where writing EF 2F03 corrupts its generated TokenInfo"
+        say "       (GHSA-wq3w-g2fj-q2jq); it keeps its own label, 'Pico-HSM'" ;;
   9000) say "label: '$LABEL' written to EF 2F03" ;;
   # A KNOWN ERROR IS NOT COSMETIC. The label is what `pkcs11-tool -L` shows and what the drills and
   # the restore match on, so a card that answered 6982 and a script that says "complete" disagree
