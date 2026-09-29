@@ -42,7 +42,12 @@ grep -q "supplies must be confirmed at a terminal" <<< "$out" && P "refused with
 
 hdr "a non-numeric share count is refused"
 out="$(drive six 'y\ny\ny\ny\ny\n'; CEREMONY_SHARES=six setsid bash "$GN" --need supplies </dev/null 2>&1 | sed $'s/\033\\[[0-9;]*m//g')"
-grep -q "CEREMONY_SHARES='six' is not a number" <<< "$out" && P "refused" || F "bad count accepted"
+grep -q "CEREMONY_SHARES='six' must be a whole number" <<< "$out" && P "refused" || F "bad count accepted"
+for bad in 0 1 010 17 ""; do
+  o="$(CEREMONY_SHARES="$bad" setsid bash "$GN" --need supplies </dev/null 2>&1 | sed $'s/\033\\[[0-9;]*m//g')"
+  if [ -z "$bad" ]; then grep -q "Supplies on the table — count them (6 shares)" <<< "$o" && P "empty -> the default 6" || F "empty count mishandled"
+  else grep -q "CEREMONY_SHARES='$bad' must be a whole number" <<< "$o" && P "'$bad' refused" || F "'$bad' accepted: $(grep -i shares <<< "$o" | head -2)"; fi
+done
 
 hdr "the old free-text sheet is gone"
 grep -q "Operator decisions to CONFIRM" "$GN" && F "the old sheet is still there" || P "removed"

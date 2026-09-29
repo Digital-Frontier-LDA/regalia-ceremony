@@ -2207,7 +2207,7 @@ step_drill() {
   b "Recovery drill (do this BEFORE relying on any share set)"
   info "Reconstruct from exactly k shares on THIS air-gapped qube, prove it works, re-seal."
   info "ssss:        feed any $(K) of the $(N) share lines to:   ssss-combine -t $(K) -q"
-  info "SLIP-0039:   shamir recover   (paste any 4 word-shares)"
+  info "SLIP-0039:   shamir recover   (paste any $(K) word-shares)"
   info "age/HSM:     decrypt a sops file to /dev/null with the recovered key, or unwrap into a"
   info "             spare HSM and sign a test message. Then shred this qube."
   warn "An untested share set is not a backup. Re-drill after any redistribution."
@@ -2348,9 +2348,11 @@ MENU
   done
   manifest_record || return 1
   b "Done — workdir shredded on exit. Seal your media, clear the printer memory, power off the qube."
-  info "Before funding: on an ONLINE machine, look up the funding address you wrote on paper in a block"
-  info "explorer (or send a tiny test amount and see it arrive). It proves the address is the one the"
-  info "shares control; a typo in the written address would send funds nobody can recover."
+  info "Before funding, compare the funding address character by character in THREE places: the one"
+  info "you wrote on paper, the one this vault derived when the seed was split (step 3), and the one"
+  info "the recovery drill re-derives from exactly $(K) shares (derive-akash-address.py). Fund only if"
+  info "all three are identical: that proves the shares control the address you will send to. An"
+  info "explorer lookup or a test deposit proves only that the address exists, not who controls it."
 }
 
 # Run the wizard only when executed directly; sourcing (e.g. the test harness)

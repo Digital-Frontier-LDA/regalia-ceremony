@@ -315,7 +315,11 @@ fi
 # with a number in it, and any "no" is a STOP. Needs a terminal: a scripted run cannot count discs.
 if needs supplies; then
   n="${CEREMONY_SHARES:-6}"
-  case "$n" in ''|*[!0-9]*) bad "CEREMONY_SHARES='$n' is not a number of shares"; n=0;; esac
+  # The same rule ceremony.sh's check_scheme applies (2..16), written canonically: "0" would skip
+  # every question silently, and "010" is octal to $(( )) (8, not 10).
+  if [[ "$n" =~ ^[1-9][0-9]?$ ]] && [ "$n" -ge 2 ] && [ "$n" -le 16 ]; then :; else
+    bad "CEREMONY_SHARES='$n' must be a whole number of shares from 2 to 16 (the ceremony's k-of-n)"; n=0
+  fi
   hdr "Supplies on the table — count them (${n} shares)"
   if [ "$n" -gt 0 ] && { : </dev/tty; } 2>/dev/null; then
     supply(){ local a; read -r -p "   $1 [y/N] " a </dev/tty
