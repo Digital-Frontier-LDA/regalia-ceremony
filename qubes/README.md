@@ -143,6 +143,10 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 # in the vault qube — the GUIDED script walks every step (preflight, YubiKey, HSM,
 # Shamir, printing, archive disc, drill), shows each command, and confirms before running:
 /opt/vault-ceremony/ceremony.sh
+# The Shamir scheme is a setting, 4-of-6 by default. For 3-of-5, start the wizard (and go-nogo) as:
+#   CEREMONY_THRESHOLD=3 CEREMONY_SHARES=5 /opt/vault-ceremony/ceremony.sh
+# Any 2 <= threshold <= shares <= 16. Every split, its reconstruct-verify, the share forms, the
+# recovery card and the go-nogo supply counts follow it; anything else is refused before a split.
 
 # or run the pieces by hand (it just orchestrates these):
 /opt/vault-ceremony/preflight.sh             # tools + reader + printer + drives + air-gap (fails closed)
