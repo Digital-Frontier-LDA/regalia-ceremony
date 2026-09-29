@@ -62,10 +62,11 @@ def emit(label, kind, count, paper):
             out.append("%.1f %.1f %.1f %.1f rectstroke" % (x + 20, top - 20, col_w - 30, 19))
         y -= rows * box_h + 12
     else:
-        group, per_row, cell = 4, 8, 14.5        # groups of 4 characters, 8 groups a row
+        group, cell = 4, 14.5                     # groups of 4 characters
+        gw = group * cell + 10
+        per_row = max(1, int((W - 2 * m - 24 + 10) // gw))   # as many groups as fit this paper width
         groups = -(-count // group)
         rows = -(-groups // per_row)
-        gw = group * cell + 10
         for g in range(groups):
             r, c = g // per_row, g % per_row
             x, top = m + 24 + c * gw, y - r * 30

@@ -381,16 +381,26 @@ record_share() {
   form="$WORK/form-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_').ps"
   python3 "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" -o "$form" \
     || { err "could not build the blank form for '$label'"; return 1; }
+  # EVERY prompt here reads /dev/tty, never stdin: step 3 calls this inside
+  # `while read … done < shares.txt`, where stdin is the shares file — a prompt reading stdin would
+  # swallow the next share. A scripted run has no controlling terminal: its prompts read /dev/null
+  # (so they answer "no") and the share is not shown.
+  local tty=/dev/tty
+  if ! { : </dev/tty; } 2>/dev/null || ! [ -t 1 ]; then tty=/dev/null; fi
+  local printed=0
   if [ -n "$PRINTER" ]; then
-    run "lp -d '$PRINTER' '$form'" && info "blank form for '$label' sent to $PRINTER (it holds no secret)"
+    run "lp -d '$PRINTER' '$form'" <"$tty" && { printed=1; info "blank form for '$label' sent to $PRINTER (it holds no secret)"; }
   else
     warn "no printer set — print the blank form yourself (no secret in it): lp -d <queue> $form"
   fi
-  # The keyboard is /dev/tty, not stdin: step 3 calls this inside `while read … done < shares.txt`,
-  # where stdin is the shares file. A scripted run has no controlling terminal and skips this.
-  if ! { : </dev/tty; } 2>/dev/null || ! [ -t 1 ]; then
+  if [ "$tty" = /dev/null ]; then
     warn "no terminal: '$label' was NOT shown or verified for hand-copying (scripted run)."
     return 0
+  fi
+  # The share is copied onto its printed form; without one, stop this share.
+  if [ "$printed" != 1 ]; then
+    local a; read -r -p "   is the blank form for '$label' printed (another way)? [y/N] " a <"$tty"
+    [ "$a" = y ] || [ "$a" = Y ] || { err "no blank form for '$label' — this share was not shown; print the form and run step 3 again."; return 1; }
   fi
   warn "Make sure nobody else can see this screen, and no camera points at it."
   local tries=0

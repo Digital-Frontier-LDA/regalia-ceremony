@@ -164,7 +164,7 @@ printf 'b\n' | step_shamir >/dev/null 2>&1
 # (ADR-0002 D12: a share is never printed, so no share page or share QR may exist)
 nshares=$(ls "$WORK"/w[1-9] 2>/dev/null | wc -l | tr -d ' ')
 nforms=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
-[ "$nshares" = 6 ] && P "6 SLIP-39 shares emitted (and $nforms blank hand-copy forms)" || F "expected 6 SLIP-39 shares, got $nshares"
+[ "$nshares" = 6 ] && [ "$nforms" = 6 ] && P "6 SLIP-39 shares emitted, with 6 blank hand-copy forms" || F "expected 6 SLIP-39 shares and 6 forms, got $nshares and $nforms"
 ls "$WORK"/*share*.png >/dev/null 2>&1 && F "a printable share page was rendered (shares are never printed)" || P "no printable share page rendered"
 # The minted master secret is (correctly) NOT written anywhere — slip39-mint.py never
 # emits it (that was the old `shamir create` leak). So verify recoverability WITHOUT a
