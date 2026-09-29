@@ -151,7 +151,7 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 # or run the pieces by hand (it just orchestrates these):
 /opt/vault-ceremony/preflight.sh             # tools + reader + printer + drives + air-gap (fails closed)
 #   age-plugin-yubikey --generate --pin-policy once --touch-policy never  # unattended ops identity
-#   # For an explicitly interactive ceremony only: set CEREMONY_YUBI_TOUCH_POLICY=always
+#   # Touch is always never: the YubiKey runs in a remote KMS, PIN-only (ADR-0002). Other values are refused.
 #   sc-hsm-tool --create-dkek-share dkek.pbe --pwd-shares-threshold 4 --pwd-shares-total 6
 #   slip39-mint.py --threshold 4 --shares 6  # SLIP-0039 shares -> qrencode -> archival paper
 #   (NEVER `shamir create` — the CLI prints the master secret to stdout; the minter never
