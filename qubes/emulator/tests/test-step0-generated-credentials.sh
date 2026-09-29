@@ -24,7 +24,7 @@ if pid == 0:
     os.environ["TERM"] = "xterm"
     os.execvp("bash", ["bash", "-c", cmd])
 screen, shown, pending = "", {}, ""
-typed = {"hsm_a_user_pin": "73100482", "hsm_b_user_pin": "55120963", "yubikey_piv_pin": "908172"}
+typed = {"hsm_a_user_pin": "7310048261", "hsm_b_user_pin": "5512096374", "hsm_c_user_pin": "4096128803", "yubikey_piv_pin": "908172"}
 def send(s): os.write(fd, s.encode())
 deadline = time.time() + 60
 ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r")
@@ -65,17 +65,18 @@ field(){ sed -n "s/^$1=//p" "$2.kept"; }
 hdr "generate: recovery credentials generated and never shown; day-to-day PINs shown once, typed back"
 W="$T/gen"; mkdir -p "$W"; out="$(drive gen-ok "$W")"
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds (PROD mode)" || F "step 0 failed: $(tail -15 <<< "$out")"
-[ "$(grep -c '^DRIVER: shown' <<< "$out")" = 3 ] && P "three day-to-day PINs shown" || F "shown: $(grep DRIVER <<< "$out")"
+[ "$(grep -c '^DRIVER: shown' <<< "$out")" = 4 ] && P "four day-to-day PINs shown (HSM A, B, C, YubiKey)" || F "shown: $(grep DRIVER <<< "$out")"
 [ -f "$W.kept" ] && [ "$(stat -c %a "$W.kept")" = 600 ] && P "pins.env is 0600" || F "pins.env missing or wrong mode"
 ok=1
-for k in hsm_a_so_pin hsm_b_so_pin; do [[ "$(field $k "$W")" =~ ^[0-9A-F]{16}$ ]] || ok=0; done
+for k in hsm_a_so_pin hsm_b_so_pin hsm_c_so_pin; do [[ "$(field $k "$W")" =~ ^[0-9A-F]{16}$ ]] || ok=0; done
 [[ "$(field yubikey_mgmt_key "$W")" =~ ^[0-9A-F]{48}$ ]] || ok=0
 [[ "$(field yubikey_piv_puk "$W")" =~ ^[0-9]{8}$ ]] || ok=0
-for k in hsm_a_user_pin hsm_b_user_pin yubikey_piv_pin; do [[ "$(field $k "$W")" =~ ^[0-9]{8}$ ]] || ok=0; done
+for k in hsm_a_user_pin hsm_b_user_pin hsm_c_user_pin; do [[ "$(field $k "$W")" =~ ^[0-9]{10}$ ]] || ok=0; done
+[[ "$(field yubikey_piv_pin "$W")" =~ ^[0-9]{8}$ ]] || ok=0
 [ "$ok" = 1 ] && P "every field has its device's shape" || F "a field is malformed"
-leak=0; for k in hsm_a_so_pin hsm_b_so_pin yubikey_piv_puk yubikey_mgmt_key; do grep -qF "$(field $k "$W")" <<< "$(grep -v '^DRIVER' <<< "$out")" && leak=1; done
+leak=0; for k in hsm_a_so_pin hsm_b_so_pin hsm_c_so_pin yubikey_piv_puk yubikey_mgmt_key; do grep -qF "$(field $k "$W")" <<< "$(grep -v '^DRIVER' <<< "$out")" && leak=1; done
 [ "$leak" = 0 ] && P "no SO-PIN, PUK or management key appeared on the screen" || F "a recovery credential was shown"
-match=1; for k in hsm_a_user_pin hsm_b_user_pin yubikey_piv_pin; do grep -qx "DRIVER: shown $k=$(field $k "$W")" <<< "$out" || match=0; done
+match=1; for k in hsm_a_user_pin hsm_b_user_pin hsm_c_user_pin yubikey_piv_pin; do grep -qx "DRIVER: shown $k=$(field $k "$W")" <<< "$out" || match=0; done
 [ "$match" = 1 ] && P "the PINs shown are the PINs stored" || F "shown and stored PINs differ"
 grep -q "every loaded credential is distinct" <<< "$out" && P "credential separation passed" || F "separation not reported"
 
@@ -90,14 +91,14 @@ grep -q "RC=1" <<< "$out" && [ ! -e "$W.kept" ] && grep -q "three mismatches" <<
 hdr "typed: the operator chooses the day-to-day PINs; recovery credentials still generated"
 W="$T/typed"; mkdir -p "$W"; out="$(drive typed "$W")"
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed path failed: $(tail -10 <<< "$out")"
-[ "$(field hsm_a_user_pin "$W")" = 73100482 ] && [ "$(field hsm_b_user_pin "$W")" = 55120963 ] && [ "$(field yubikey_piv_pin "$W")" = 908172 ] && P "typed PINs stored" || F "typed PINs not stored"
-[[ "$(field hsm_a_so_pin "$W")" =~ ^[0-9A-F]{16}$ ]] && P "SO-PIN still generated" || F "SO-PIN not generated"
+[ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_b_user_pin "$W")" = 5512096374 ] && [ "$(field hsm_c_user_pin "$W")" = 4096128803 ] && [ "$(field yubikey_piv_pin "$W")" = 908172 ] && P "typed PINs stored" || F "typed PINs not stored"
+[[ "$(field hsm_c_so_pin "$W")" =~ ^[0-9A-F]{16}$ ]] && P "SO-PINs still generated" || F "SO-PIN not generated"
 grep -q '^DRIVER: shown' <<< "$out" && F "a typed PIN was displayed" || P "typed PINs are not displayed"
-grep -qE "73100482|55120963|908172" <<< "$out" && F "a typed PIN was echoed" || P "typed PINs not echoed"
+grep -qE "7310048261|5512096374|4096128803|908172" <<< "$out" && F "a typed PIN was echoed" || P "typed PINs not echoed"
 
 hdr "an existing pins.env is loaded as before (hand-made files still work)"
 W="$T/file"; mkdir -p "$W"
-printf 'hsm_a_user_pin=31415926\nhsm_a_so_pin=A1B2C3D4E5F60718\nhsm_b_user_pin=27182818\nhsm_b_so_pin=0F1E2D3C4B5A6978\nyubikey_piv_pin=161803\nyubikey_piv_puk=14142135\nyubikey_mgmt_key=%s\n' "$(printf 'AB%.0s' {1..24})" > "$W/pins.env"   # a 48-hex placeholder, built so no key-shaped literal sits in the repo
+printf 'hsm_a_user_pin=3141592653\nhsm_a_so_pin=A1B2C3D4E5F60718\nhsm_b_user_pin=2718281828\nhsm_b_so_pin=0F1E2D3C4B5A6978\nhsm_c_user_pin=1414213562\nhsm_c_so_pin=7E8F90A1B2C3D4E5\nyubikey_piv_pin=161803\nyubikey_piv_puk=17320508\nyubikey_mgmt_key=%s\n' "$(printf 'AB%.0s' {1..24})" > "$W/pins.env"   # a 48-hex placeholder, built so no key-shaped literal sits in the repo
 # shellcheck disable=SC2034  # WORK and CEREMONY_MODE are read by the sourced step_set_pins
 out="$( ( source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; HERE="$SCRIPTS"; WORK="$W"; CEREMONY_MODE=prod; step_set_pins </dev/null; echo "RC=$?" ) 2>&1 )"
 grep -q "RC=0" <<< "$out" && ! grep -q "generate the credentials" <<< "$out" && P "loaded without asking to generate" || F "file path changed: $(tail -5 <<< "$out")"
