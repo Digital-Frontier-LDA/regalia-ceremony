@@ -80,6 +80,9 @@ trap 'rm -rf "$FAKE" "${WORK:-/nonexistent}" 2>/dev/null' EXIT
 
 # shellcheck disable=SC1090
 source "$HERE/ceremony.sh"
+# The proof follows the ceremony's scheme (CEREMONY_THRESHOLD / CEREMONY_SHARES, default 4-of-6).
+check_scheme || exit 1
+KK="$(K)"; NN="$(N)"
 ask(){ return 0; }; pause(){ :; }
 
 say "=============================================================="
@@ -115,26 +118,26 @@ else
   no "wizard neither surfaced the canonical address nor failed closed"
 fi
 
-# ---- PROOF 2: breakglass age key, ssss 4-of-6 round-trip ---------------------
-say ""; say "PROOF 2 — breakglass age key split 4-of-6 (ssss) and reconstructed"
+# ---- PROOF 2: breakglass age key, ssss k-of-n round-trip ---------------------
+say ""; say "PROOF 2 — breakglass age key split $KK-of-$NN (ssss) and reconstructed"
 # deliberately NOT formatted like a real age key (avoids tripping gitleaks/scanners)
 BG="NOTAREAL-breakglass-age-key-PROOFTEST-do-not-use-0000000000000000"
 printf '%s' "$BG" > "$WORK/secret.in"
 H0=$(shas "$BG")
 printf 'a\n' | step_shamir >/dev/null 2>&1
 cp "$WORK/shares.txt" "$PROOF/ssss-shares.txt" 2>/dev/null
-RA=$( (sed -n '1p;2p;3p;4p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )
-RB=$( (sed -n '3p;4p;5p;6p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )
-R3=$( (sed -n '1p;2p;3p'    "$WORK/shares.txt") | ssss-combine -t 3 -q 2>&1 | tr -d '\n' )
-say "   sha256(original secret)            : $H0"
-say "   sha256(rebuilt from shares 1,2,3,4): $(shas "$RA")"
-say "   sha256(rebuilt from shares 3,4,5,6): $(shas "$RB")"
+RA=$(head -n "$KK" "$WORK/shares.txt" | ssss-combine -t "$KK" -q 2>&1 )
+RB=$(tail -n "$KK" "$WORK/shares.txt" | ssss-combine -t "$KK" -q 2>&1 )
+R3=$(head -n "$((KK - 1))" "$WORK/shares.txt" | ssss-combine -t "$((KK - 1))" -q 2>&1 | tr -d '\n' )
+say "   sha256(original secret)                 : $H0"
+say "   sha256(rebuilt from the first $KK shares): $(shas "$RA")"
+say "   sha256(rebuilt from the last $KK shares) : $(shas "$RB")"
 [ "$(shas "$RA")" = "$H0" ] && [ "$(shas "$RB")" = "$H0" ] \
-  && ok "any 4 of 6 shares reconstruct the exact secret (hash-identical)" || no "4-of-6 reconstruction failed"
-[ "$R3" = "$BG" ] && no "THREE shares (below threshold) leaked the secret" || ok "three shares do NOT reveal the secret (threshold holds)"
+  && ok "any $KK of $NN shares reconstruct the exact secret (hash-identical)" || no "$KK-of-$NN reconstruction failed"
+[ "$R3" = "$BG" ] && no "$((KK - 1)) shares (below threshold) leaked the secret" || ok "$((KK - 1)) shares do NOT reveal the secret (threshold holds)"
 
-# ---- PROOF 3: derivation-root mnemonic, SLIP-0039 4-of-6 ---------------------
-say ""; say "PROOF 3 — derivation-root mnemonic split 4-of-6 (SLIP-0039) and recovered"
+# ---- PROOF 3: derivation-root mnemonic, SLIP-0039 k-of-n ---------------------
+say ""; say "PROOF 3 — derivation-root mnemonic split $KK-of-$NN (SLIP-0039) and recovered"
 printf 'b\n' | step_shamir >/dev/null 2>&1
 cp "$WORK"/w[1-9] "$PROOF/" 2>/dev/null
 # slip39-mint.py intentionally NEVER writes the minted master secret (that was the old
@@ -142,12 +145,12 @@ cp "$WORK"/w[1-9] "$PROOF/" 2>/dev/null
 # recoverability WITHOUT a reference — exactly as recital-ceremony.sh does: recover from
 # two DIFFERENT 4-of-6 subsets and assert they agree and are non-empty; then separately
 # assert the master secret never lands in the shares file.
-GOTA=$(printf '%s\n%s\n%s\n%s\n' "$(cat "$WORK/w1")" "$(cat "$WORK/w2")" "$(cat "$WORK/w3")" "$(cat "$WORK/w4")" | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
-GOTB=$(printf '%s\n%s\n%s\n%s\n' "$(cat "$WORK/w3")" "$(cat "$WORK/w4")" "$(cat "$WORK/w5")" "$(cat "$WORK/w6")" | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
-say "   recovered from shares 1,2,3,4  sha256: $(shas "$GOTA")"
-say "   recovered from shares 3,4,5,6  sha256: $(shas "$GOTB")"
+GOTA=$(for i in $(seq 1 "$KK"); do cat "$WORK/w$i"; echo; done | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
+GOTB=$(for i in $(seq "$((NN - KK + 1))" "$NN"); do cat "$WORK/w$i"; echo; done | shamir recover 2>&1 | grep -ioE '[0-9a-f]{32}' | tail -1)
+say "   recovered from the first $KK shares  sha256: $(shas "$GOTA")"
+say "   recovered from the last $KK shares   sha256: $(shas "$GOTB")"
 [ -n "$GOTA" ] && [ "$GOTA" = "$GOTB" ] \
-  && ok "4 SLIP-0039 word-shares recover the exact master secret (two subsets agree, any-4-of-6)" \
+  && ok "$KK SLIP-0039 word-shares recover the exact master secret (two subsets agree, any-$KK-of-$NN)" \
   || no "SLIP-39 recovery mismatch"
 grep -qiE "master secret" "$WORK/slip39.txt" \
   && no "minted master secret LEAKED into the shares file" \
@@ -242,7 +245,7 @@ say ""; say "=============================================================="
 say " RESULT: $pass proven, $fail failed"
 say " Proof bundle (inspect, then delete): $PROOF"
 say "   - PROOF-REPORT.txt   (this report)"
-say "   - ssss-shares.txt    (6 breakglass shares; any 4 rebuild it)"
+say "   - ssss-shares.txt    ($NN breakglass shares; any $KK rebuild it)"
 say "   - w1..w6             (6 SLIP-39 word-shares)"
 say "   - qr-share1.png      (printable QR of a share)"
 say "=============================================================="

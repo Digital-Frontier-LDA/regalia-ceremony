@@ -7,7 +7,7 @@ container the SmartCard-HSM import path consumes.
 
 WHY THIS EXISTS: a key generated INSIDE the HSM is recoverable only from its DKEK blob, restored
 onto a compatible SmartCard-HSM. The custody model requires every secret to be reconstructible
-from the 4-of-6 Shamir shares alone. So the key is derived FROM THE SEED and imported into the
+from the k-of-n Shamir shares alone. So the key is derived FROM THE SEED and imported into the
 device: the seed on metal stays authoritative, the HSM protects the key in operation, and losing
 every device costs an import rather than the funds.
 

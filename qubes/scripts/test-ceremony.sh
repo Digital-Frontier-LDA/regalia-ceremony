@@ -77,6 +77,9 @@ done
 # ---- source the real ceremony.sh, then neutralise interactivity -------------
 # shellcheck disable=SC1090
 source "$HERE/ceremony.sh"          # sourcing guard means main() does NOT run
+# The dry run follows the ceremony's scheme (CEREMONY_THRESHOLD / CEREMONY_SHARES, default 4-of-6).
+check_scheme || exit 1
+KK="$(K)"; NN="$(N)"
 ask(){ return 0; }                  # auto-yes every confirmation
 pause(){ :; }                       # no waiting
 # sourcing re-armed `trap cleanup EXIT` (ceremony.sh's), replacing ours — so redefine
@@ -107,27 +110,27 @@ grep -q "born-in-HSM key generation is UNSUPPORTED" <<< "$out" && P "born-in-HSM
 grep -q "CEREMONY_ALLOW_BORN_IN_HSM=1" <<< "$out" && P "refusal names the deliberate opt-in" || F "refusal banner does not name the opt-in"
 [ ! -f "$WORK/dkek.pbe" ] && P "no dkek.pbe produced while gated" || F "gated step still produced dkek.pbe"
 out="$(CEREMONY_ALLOW_BORN_IN_HSM=1 step_hsm_funding 2>&1)"; echo "$out" >>"$CAP"
-grep -q "pwd-shares-threshold 4 --pwd-shares-total 6" <<< "$out" && P "DKEK 4-of-6 threshold command shown/run (opt-in)" || F "no DKEK threshold"
+grep -q "pwd-shares-threshold $KK --pwd-shares-total $NN" <<< "$out" && P "DKEK $KK-of-$NN threshold command shown/run (opt-in)" || F "no DKEK threshold"
 grep -q "EC:secp256k1" <<< "$out" && P "secp256k1 on-device keygen (opt-in)" || F "no secp256k1 keygen"
 [ -f "$WORK/dkek.pbe" ] && P "dkek.pbe produced (stub, opt-in)" || F "no dkek.pbe"
 
 hdr "STEP 3a — Shamir split (ssss, age-key string)"
 printf '%s' "$MARKER" > "$WORK/secret.in"
 out="$(printf 'a\n' | step_shamir 2>&1)"; echo "$out" >>"$CAP"
-[ "$(wc -l < "$WORK/shares.txt" | tr -d ' ')" = 6 ] && P "ssss produced 6 shares" || F "expected 6 ssss shares"
+[ "$(wc -l < "$WORK/shares.txt" | tr -d ' ')" = "$NN" ] && P "ssss produced $NN shares" || F "expected $NN ssss shares"
 # ADR-0002 D12: each share gets a BLANK form to copy it onto by hand; no share page or share QR exists
 n=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" = 6 ] && P "6 blank hand-copy forms built for the ssss shares" || F "expected 6 blank forms, got $n"
+[ "$n" = "$NN" ] && P "$NN blank hand-copy forms built for the ssss shares" || F "expected $NN blank forms, got $n"
 ls "$WORK"/*.png >/dev/null 2>&1 && F "a share PNG was rendered (shares are never printed)" || P "no share QR/PNG rendered"
 # real round-trip: any 4 ssss shares reconstruct the marker
-R=$( (sed -n '1p;3p;5p;6p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )
-[ "$R" = "$MARKER" ] && P "4-of-6 ssss shares reconstruct the secret" || F "ssss reconstruct mismatch"
+R=$(tail -n "$KK" "$WORK/shares.txt" | ssss-combine -t "$KK" -q 2>&1 )
+[ "$R" = "$MARKER" ] && P "$KK-of-$NN ssss shares reconstruct the secret" || F "ssss reconstruct mismatch"
 rm -f "$WORK"/*.png "$WORK"/*.txt "$WORK"/form-*.ps "$WORK/shares.txt"
 
 hdr "STEP 3b — Shamir split (SLIP-0039 mnemonic)"
 out="$(printf 'b\n' | step_shamir 2>&1)"; echo "$out" >>"$CAP"
 n=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" = 6 ] && P "exactly 6 SLIP-39 share forms (header not miscounted)" || F "expected 6 SLIP-39 share forms, got $n"
+[ "$n" = "$NN" ] && P "exactly $NN SLIP-39 share forms (header not miscounted)" || F "expected $NN SLIP-39 share forms, got $n"
 
 hdr "STEP 4 — M-DISC archive manifest"
 out="$(step_archive 2>&1)"; echo "$out" >>"$CAP"
@@ -144,7 +147,7 @@ fi
 
 hdr "STEP 5 — recovery drill guidance"
 out="$(step_drill 2>&1)"; echo "$out" >>"$CAP"
-grep -qi "ssss-combine -t 4" <<< "$out" && P "drill explains ssss recover" || F "no drill guidance"
+grep -qi "ssss-combine -t $KK" <<< "$out" && P "drill explains ssss recover" || F "no drill guidance"
 
 hdr "SECRET-LEAK SCAN (the important one)"
 if grep -q "$MARKER" "$CAP"; then

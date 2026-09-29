@@ -14,7 +14,7 @@ manual sequence is still the fallback when `hsm-auto-import.sh` cannot run.
 > a separate implementation — repeat on a scratch Nitrokey before opening the gate for real
 > custody. `CEREMONY_ALLOW_HSM_IMPORT=1` stays closed until then.
 
-Everything in the custody model rests on the funding key being *derived from the 4-of-6-backed
+Everything in the custody model rests on the funding key being *derived from the k-of-n-backed
 seed* rather than born on the card. That requirement is now **structural, not just preferred**:
 a born-on-card key is non-exportable by construction, so N devices would hold N *different* keys
 and N different akash addresses. A shared DKEK domain plus wrapped import is the **only** way a
