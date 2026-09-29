@@ -336,6 +336,7 @@ say "OPTICAL fault injection (optical-verify --fault must go red on a corrupted 
 
 say "GO/NO-GO false-GO guard (a typo'd --need device must not skip a check)"
 "$HERE/tests/test-go-nogo-guard.sh" || suite_failed "test-go-nogo-guard.sh"
+"$HERE/tests/test-go-nogo-supplies.sh" || suite_failed "test-go-nogo-supplies.sh"
 
 say "GO/NO-GO HSM-token guard (--need hsm must require the SmartCard-HSM, not any PKCS#11 token)"
 "$HERE/tests/test-go-nogo-hsm-token.sh" || suite_failed "test-go-nogo-hsm-token.sh"

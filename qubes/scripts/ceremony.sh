@@ -571,9 +571,10 @@ step_yubikey_ops() {
   local pin_policy="${CEREMONY_YUBI_PIN_POLICY:-once}"
   local touch_policy="${CEREMONY_YUBI_TOUCH_POLICY:-never}"
   case "$pin_policy" in once|always) ;; *) err "CEREMONY_YUBI_PIN_POLICY must be once or always"; return 1 ;; esac
-  case "$touch_policy" in never|always|cached) ;; *) err "CEREMONY_YUBI_TOUCH_POLICY must be never, always, or cached"; return 1 ;; esac
+  # Touch is NEVER (owner, 2026-09-29): a YubiKey in a KMS sits in a remote server where nobody can
+  # touch it, so it is PIN-only; the KMS manifest validator refuses any other touch policy too.
+  [ "$touch_policy" = never ] || { err "CEREMONY_YUBI_TOUCH_POLICY must be never: the YubiKey runs in a remote KMS, PIN-only (ADR-0002)"; return 1; }
   info "and unattended decrypts use PIN policy $pin_policy with touch policy $touch_policy."
-  info "The default is touch=never; set CEREMONY_YUBI_TOUCH_POLICY=always for an interactive ceremony."
   command -v age-plugin-yubikey >/dev/null || { err "age-plugin-yubikey missing"; return 1; }
   # Two things age-plugin-yubikey 0.5.0 does to a factory card, measured on YubiKey 5.7.4
   # (regalia doc/drills/2026-09-23-yubikey-multi-enrollment.md):
@@ -638,7 +639,7 @@ step_yubikey_ops() {
   warn "Copy the printed  age1yubikey1…  recipient into every repo's .sops.yaml as the"
   warn "ops recipient, then on a NETWORKED admin box run:"
   show "git ls-files '*.sops.*' | grep -vE '(^|/)\\.sops\\.yaml\$' | while read -r f; do sops updatekeys -y \"\$f\"; done"
-  warn "Keep the old laptop keys.txt recipient until you've proven a touch-decrypt, and"
+  warn "Keep the old laptop keys.txt recipient until you've proven a decrypt with the YubiKey (PIN only), and"
   warn "register a SECOND YubiKey the same way before retiring it (loss resilience)."
 }
 
@@ -2318,6 +2319,9 @@ MENU
   done
   manifest_record || return 1
   b "Done — workdir shredded on exit. Seal your media, clear the printer memory, power off the qube."
+  info "Before funding: on an ONLINE machine, look up the funding address you wrote on paper in a block"
+  info "explorer (or send a tiny test amount and see it arrive). It proves the address is the one the"
+  info "shares control; a typo in the written address would send funds nobody can recover."
 }
 
 # Run the wizard only when executed directly; sourcing (e.g. the test harness)

@@ -7,10 +7,10 @@
 # a single optical drive). Ends in one verdict so you never start a key-touching step with
 # a setup that was going to fail three commands in.
 #
-#   /opt/vault-ceremony/go-nogo.sh --need yubikey,hsm,sle4442,printer,drives
+#   /opt/vault-ceremony/go-nogo.sh --need yubikey,hsm,sle4442,printer,drives,supplies
 #   /opt/vault-ceremony/go-nogo.sh --need printer,drives      # a paper+archive-only run
 #
-# --need takes a comma list of: yubikey hsm sle4442 printer drives. Anything not listed is
+# --need takes a comma list of: yubikey hsm sle4442 printer drives supplies. Anything not listed is
 # checked best-effort (warn only). With nothing listed, every probe is advisory.
 set -uo pipefail
 # The vault-tools image keeps its pinned tools in /opt/vault-bin (sops, shamir, sle4442-manager)
@@ -34,7 +34,7 @@ done
 # Validate --need tokens. An UNRECOGNISED token (typo like 'sle442') would otherwise make
 # `needs <device>` silently false -> that device's check is skipped -> a false GO. For a
 # set-once ceremony that is unacceptable: reject unknown tokens hard, before any probe.
-KNOWN_NEEDS="yubikey hsm sle4442 printer drives"
+KNOWN_NEEDS="yubikey hsm sle4442 printer drives supplies"
 if [ -n "$NEED" ]; then
   IFS=',' read -r -a _need_arr <<< "$NEED"
   for _t in "${_need_arr[@]}"; do
@@ -307,18 +307,28 @@ if needs drives; then
   else bad "no /dev/sr* optical drive — attach the DVD writer."; fi
 fi
 
-hdr "Operator decisions to CONFIRM before touching keys (do not improvise these)"
-cat <<'SHEET'
-  These are decided in advance and verified now — NOT chosen at the prompt:
-    [ ] HSM SO-PIN + user PIN written down (sealed); retry counters understood
-        (wrong SO-PIN/PIN repeatedly BRICKS the SmartCard-HSM — no recovery).
-    [ ] DKEK 4-of-6 password-share custodians + transfer method agreed.
-    [ ] YubiKey PIV PIN + PUK + management key chosen; touch policy = ALWAYS.
-    [ ] SLE-4442 PSC (and whether you change it from FFFFFF) decided; 3 wrong = locked.
-    [ ] Funding address will be recorded on paper AND verified on-chain afterwards.
-    [ ] archive discs on hand: Verbatim AZO DVD-R (a DVD-R-capable writer) or M-DISC (a listed writer); spare blanks.
-    [ ] Printer page memory will be power-cycled after printing.
-SHEET
+# SUPPLIES — the part no probe can see. The old free-text "decisions to confirm" sheet was open to
+# interpretation (owner, 2026-09-29), and most of it is now decided by the code: step 0 GENERATES the
+# PINs, PUK and management key; touch policy is fixed to never (a KMS YubiKey is PIN-only, nobody is
+# there to touch it); the DKEK custodian split applies only to the born-in-HSM option, which the
+# ceremony does not use. What is left is physical and countable, so each item is ONE yes/no question
+# with a number in it, and any "no" is a STOP. Needs a terminal: a scripted run cannot count discs.
+if needs supplies; then
+  n="${CEREMONY_SHARES:-6}"
+  case "$n" in ''|*[!0-9]*) bad "CEREMONY_SHARES='$n' is not a number of shares"; n=0;; esac
+  hdr "Supplies on the table — count them (${n} shares)"
+  if [ "$n" -gt 0 ] && { : </dev/tty; } 2>/dev/null; then
+    supply(){ local a; read -r -p "   $1 [y/N] " a </dev/tty
+      case "$a" in y|Y) ok "$1";; *) bad "NOT CONFIRMED: $1";; esac; }
+    supply "At least $((n + 2)) BLANK archive discs (Verbatim AZO DVD-R or M-DISC): one per case, two spare?"
+    supply "$n holographic seal stickers, with their serials written in the seal registry BEFORE today?"
+    supply "Two six-sided dice (for 25 throws of two)?"
+    supply "A black pen, one blank paper PIN card and one tamper-evident envelope for it?"
+    supply "A FULL paper tray (50 sheets or more) in the printer, and toner that does not report low?"
+  elif [ "$n" -gt 0 ]; then
+    bad "supplies must be confirmed at a terminal (no /dev/tty): run go-nogo.sh interactively"
+  fi
+fi
 
 echo
 if [ "$stop" -eq 0 ]; then
