@@ -364,7 +364,78 @@ scan_back_share() {
   return 1
 }
 
+# ---- a Shamir share is written BY HAND (ADR-0002 D12) ----------------------------
+# The printer never receives a share: it keeps pages in memory, and a share is part of the way
+# to the secret. It prints a BLANK form (share-form.py: label, numbered boxes, instructions — no
+# secret); the operator copies the share into it from the screen; the screen and its scrollback
+# are cleared; the operator types the share back from the paper, which must match exactly.
+# Returns 1 if the copy could not be verified — the share must not be sealed then.
+record_share() {
+  local label="$1" secret_file="$2" share kind count form typed want
+  share="$(cat "$secret_file")"
+  if [[ "$share" =~ ^[a-z]+([[:space:]]+[a-z]+)+$ ]]; then
+    kind=words; count="$(wc -w <<< "$share")"
+  else
+    kind=chars; count="${#share}"
+  fi
+  form="$WORK/form-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_').ps"
+  python3 "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" -o "$form" \
+    || { err "could not build the blank form for '$label'"; return 1; }
+  # EVERY prompt here reads /dev/tty, never stdin: step 3 calls this inside
+  # `while read … done < shares.txt`, where stdin is the shares file — a prompt reading stdin would
+  # swallow the next share. A scripted run has no controlling terminal: its prompts read /dev/null
+  # (so they answer "no") and the share is not shown.
+  local tty=/dev/tty
+  if ! { : </dev/tty; } 2>/dev/null || ! [ -t 1 ]; then tty=/dev/null; fi
+  local printed=0
+  if [ -n "$PRINTER" ]; then
+    run "lp -d '$PRINTER' '$form'" <"$tty" && { printed=1; info "blank form for '$label' sent to $PRINTER (it holds no secret)"; }
+  else
+    warn "no printer set — print the blank form yourself (no secret in it): lp -d <queue> $form"
+  fi
+  if [ "$tty" = /dev/null ]; then
+    warn "no terminal: '$label' was NOT shown or verified for hand-copying (scripted run)."
+    return 0
+  fi
+  # The share is copied onto its printed form; without one, stop this share.
+  if [ "$printed" != 1 ]; then
+    local a; read -r -p "   is the blank form for '$label' printed (another way)? [y/N] " a <"$tty"
+    [ "$a" = y ] || [ "$a" = Y ] || { err "no blank form for '$label' — this share was not shown; print the form and run step 3 again."; return 1; }
+  fi
+  warn "Make sure nobody else can see this screen, and no camera points at it."
+  local tries=0
+  while :; do
+    read -r -p "   press Enter to SHOW '$label' for copying onto its form… " _ </dev/tty
+    clear
+    b "$label — copy into the form, in order"
+    if [ "$kind" = words ]; then
+      local i=0 w; for w in $share; do i=$((i+1)); printf '   %2d %-12s' "$i" "$w"; [ $((i % 3)) -eq 0 ] && echo; done; echo
+    else
+      local i; for ((i=0; i<count; i+=4)); do [ $((i % 32)) -eq 0 ] && printf '\n   %3d ' "$((i+1))"; printf '%s ' "${share:i:4}"; done; echo
+    fi
+    echo
+    read -r -p "   written it all down? press Enter to CLEAR the screen… " _ </dev/tty
+    clear; printf '\033[3J'              # the screen AND the terminal's scrollback
+    info "Now type '$label' back FROM YOUR PAPER (hidden), then Enter."
+    read -r -s -p "   > " typed </dev/tty; echo
+    if [ "$kind" = words ]; then
+      want="$(tr -s '[:space:]' ' ' <<< "$share" | sed 's/^ //; s/ $//')"
+      typed="$(tr '[:upper:]' '[:lower:]' <<< "$typed" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+    else
+      want="$share"; typed="$(tr -d '[:space:]' <<< "$typed")"
+    fi
+    if [ "$typed" = "$want" ]; then
+      typed=""; want=""; info "   '$label': your copy MATCHES. Tick 'Checked' on the form."; return 0
+    fi
+    typed=""; want=""; tries=$((tries+1))
+    err "your copy does NOT match what was shown — find the difference on the paper."
+    [ "$tries" -ge 3 ] && { err "three mismatches: '$label' is NOT verified. Do not seal it; start this share again."; return 1; }
+    info "The share will be shown again so you can correct the paper."
+  done
+}
+
 # print a single labelled artifact (text words + a QR PNG of the same string).
+# NOTE: since ADR-0002 D12 no step passes a Shamir share here; shares go through record_share.
 # arg1 = human label, arg2 = path to a file holding the secret string (one line).
 print_share() {
   local label="$1" secret_file="$2"
@@ -1099,6 +1170,7 @@ step_shamir() {
   # != the recorded anchor -> STOP, and the sole Option-B backup is unrecoverable. A set-once
   # custodial backup must use the empty default; unset it so the ceremony is reproducible.
   unset SLIP39_PASSPHRASE 2>/dev/null || true
+  local unverified=""
   # DETERMINISTIC ANCHOR: neutralize any ambient BIP39_PASSPHRASE (25th-word) the same way.
   # Option c splits the raw mnemonic (bip39-slip39-backup.py ignores BIP39 passphrases), but
   # the recovery anchor below runs derive-akash-address.py, which reads BIP39_PASSPHRASE with
@@ -1146,8 +1218,8 @@ step_shamir() {
         err "(A trailing newline in secret.in is dropped by ssss — recreate it with no trailing newline.)"
         rm -f "$WORK/shares.txt"; return 1
       fi
-      info "6 shares written + verified. Printing each on its own sealed page:"
-      local i=0; while IFS= read -r line; do i=$((i+1)); printf '%s' "$line" > "$WORK/sh$i"; print_share "Breakglass age key — Shamir share $i of 6 (need 4)" "$WORK/sh$i"; done < "$WORK/shares.txt"
+      info "6 shares written + verified. Copy each BY HAND onto its printed blank form (ADR-0002 D12):"
+      local i=0; while IFS= read -r line; do i=$((i+1)); printf '%s' "$line" > "$WORK/sh$i"; record_share "Breakglass age key — Shamir share $i of 6 (need 4)" "$WORK/sh$i" || unverified="$unverified $i"; done < "$WORK/shares.txt"
       ;;
     b)
       warn "MINTS a NEW master secret (recoverable ONLY from these shares; verify + distribute)."
@@ -1156,14 +1228,14 @@ step_shamir() {
       # emits the master secret and proves every 4-of-6 subset recovers before writing.
       show "slip39-mint.py --threshold 4 --shares 6 --out slip39.txt"
       if python3 "$HERE/slip39-mint.py" --threshold 4 --shares 6 --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
-        info "Minted + reconstruct-verified (every 4-of-6 subset recovers). Printing shares:"
+        info "Minted + reconstruct-verified (every 4-of-6 subset recovers). Copy each share BY HAND onto its form:"
       else
         err "mint/verify FAILED — refusing to distribute:"; sed 's/^/     /' "$WORK/mint.err" >&2; rm -f "$WORK/slip39.txt"; return 1
       fi
       # A SLIP-39 share is a line of >=16 space-separated lowercase words (header has #/digits).
       local n=0; while IFS= read -r line; do
         if [[ "$line" =~ ^[a-z]+([[:space:]][a-z]+){15,}$ ]]; then
-          n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; print_share "SLIP-0039 share $n of 6 (need 4)" "$WORK/w$n"
+          n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "SLIP-0039 share $n of 6 (need 4)" "$WORK/w$n" || unverified="$unverified $n"
         fi
       done < "$WORK/slip39.txt"
       ;;
@@ -1179,7 +1251,7 @@ step_shamir() {
         info "BIP39 mnemonic split into 6 SLIP-39 word-shares (any 4 recover the EXACT mnemonic)."
         local n=0; while IFS= read -r line; do
           if [[ "$line" =~ ^[a-z]+([[:space:]][a-z]+){15,}$ ]]; then
-            n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; print_share "Wallet seed — SLIP-0039 share $n of 6 (need 4)" "$WORK/w$n"
+            n=$((n+1)); printf '%s' "$line" > "$WORK/w$n"; record_share "Wallet seed — SLIP-0039 share $n of 6 (need 4)" "$WORK/w$n" || unverified="$unverified $n"
           fi
         done < "$WORK/slip39.txt"
         info "Stamp each share to metal: metal-stamp-worksheet.py --in <share>. Recover the"
@@ -1207,6 +1279,10 @@ step_shamir() {
       ;;
     *) warn "no choice made";;
   esac
+  if [ -n "$unverified" ]; then
+    err "share(s)$unverified were NOT verified against their handwritten copy. Do not seal them;"
+    err "run this step again for a fresh, fully verified set."
+  fi
   warn "Distribute the 6 shares across media × geography × people. No single share leaks;"
   warn "any 4 reconstruct; you may lose up to 2."
 }

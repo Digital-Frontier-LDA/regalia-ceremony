@@ -115,7 +115,7 @@ TRANSCRIPT="$(mktemp)"
 # step 6 now asks the funding-custody model (hsm/seed) since the stub HSM fails closed and
 # leaves no funding-wrapped.bin artifact to auto-detect; answer 'seed' (default SLIP-39 path).
 { printf 'FakeBrother\n'; printf '1\n'; printf '2\n'; printf '3\na\n'; printf '4\n'; printf '5\n'; printf '6\nDF-BG-01\nHOLO-000001\nseed\n'; printf 'zzz\n'; printf 'q\n'; } | main >"$TRANSCRIPT" 2>&1 || true
-for sig in "YubiKey" "Nitrokey HSM 2" "Shamir split" "Archive to M-DISC" "Recovery drill" "recovery instruction card"; do
+for sig in "YubiKey" "Nitrokey HSM 2" "Shamir split" "Archive disc" "Recovery drill" "recovery instruction card"; do
   grep -q "$sig" "$TRANSCRIPT" && P "menu reached: $sig" || F "menu never reached: $sig"
 done
 grep -qE "pick 1-[0-9]+ or q" "$TRANSCRIPT" && P "rejects an invalid menu choice" || F "bad choice not handled"
@@ -160,10 +160,12 @@ r2bad=$( (sed -n '1p;2p;3p' "$WORK/shares.txt") | ssss-combine -t 3 -q 2>&1 | tr
 
 hdr "REAL ROUND-TRIP 2 — SLIP-0039 shares the wizard emitted recover the master secret"
 printf 'b\n' | step_shamir >/dev/null 2>&1
-# the wizard writes each raw share to w1..wN (text) and a printable PNG per label
+# the wizard writes each raw share to w1..wN (text) and a BLANK hand-copy form per share
+# (ADR-0002 D12: a share is never printed, so no share page or share QR may exist)
 nshares=$(ls "$WORK"/w[1-9] 2>/dev/null | wc -l | tr -d ' ')
-npages=$(ls "$WORK"/SLIP-0039_share_*.png 2>/dev/null | wc -l | tr -d ' ')
-[ "$nshares" = 6 ] && P "6 SLIP-39 shares emitted (and $npages printable QR pages)" || F "expected 6 SLIP-39 shares, got $nshares"
+nforms=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
+[ "$nshares" = 6 ] && [ "$nforms" = 6 ] && P "6 SLIP-39 shares emitted, with 6 blank hand-copy forms" || F "expected 6 SLIP-39 shares and 6 forms, got $nshares and $nforms"
+ls "$WORK"/*share*.png >/dev/null 2>&1 && F "a printable share page was rendered (shares are never printed)" || P "no printable share page rendered"
 # The minted master secret is (correctly) NOT written anywhere — slip39-mint.py never
 # emits it (that was the old `shamir create` leak). So verify recoverability WITHOUT a
 # reference: recover from two DIFFERENT 4-subsets and assert they agree + are non-empty.

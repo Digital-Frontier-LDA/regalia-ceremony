@@ -115,16 +115,19 @@ hdr "STEP 3a — Shamir split (ssss, age-key string)"
 printf '%s' "$MARKER" > "$WORK/secret.in"
 out="$(printf 'a\n' | step_shamir 2>&1)"; echo "$out" >>"$CAP"
 [ "$(wc -l < "$WORK/shares.txt" | tr -d ' ')" = 6 ] && P "ssss produced 6 shares" || F "expected 6 ssss shares"
-ls "$WORK"/*.png >/dev/null 2>&1 && P "QR PNGs rendered for shares" || F "no QR PNGs"
+# ADR-0002 D12: each share gets a BLANK form to copy it onto by hand; no share page or share QR exists
+n=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
+[ "$n" = 6 ] && P "6 blank hand-copy forms built for the ssss shares" || F "expected 6 blank forms, got $n"
+ls "$WORK"/*.png >/dev/null 2>&1 && F "a share PNG was rendered (shares are never printed)" || P "no share QR/PNG rendered"
 # real round-trip: any 4 ssss shares reconstruct the marker
 R=$( (sed -n '1p;3p;5p;6p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )
 [ "$R" = "$MARKER" ] && P "4-of-6 ssss shares reconstruct the secret" || F "ssss reconstruct mismatch"
-rm -f "$WORK"/*.png "$WORK"/*.txt "$WORK/shares.txt"
+rm -f "$WORK"/*.png "$WORK"/*.txt "$WORK"/form-*.ps "$WORK/shares.txt"
 
 hdr "STEP 3b — Shamir split (SLIP-0039 mnemonic)"
 out="$(printf 'b\n' | step_shamir 2>&1)"; echo "$out" >>"$CAP"
-n=$(ls "$WORK"/*.png 2>/dev/null | wc -l | tr -d ' ')
-[ "$n" = 6 ] && P "exactly 6 SLIP-39 shares rendered (header not miscounted)" || F "expected 6 SLIP-39 shares, got $n"
+n=$(ls "$WORK"/form-*.ps 2>/dev/null | wc -l | tr -d ' ')
+[ "$n" = 6 ] && P "exactly 6 SLIP-39 share forms (header not miscounted)" || F "expected 6 SLIP-39 share forms, got $n"
 
 hdr "STEP 4 — M-DISC archive manifest"
 out="$(step_archive 2>&1)"; echo "$out" >>"$CAP"

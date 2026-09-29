@@ -24,14 +24,14 @@ compromised (you may still recover, but rotate afterward).
 Each case contains: an **archive disc** (DVD: M-DISC or archival AZO DVD-R; this toolkit + ciphertext + `payload.age`), a **recovery
 card**, **QR sheets** on cotton archival paper (the Tier-0 payload — see Section 3C), an
 **SLE-4442 chip card** holding this case's share, and the
-share material — printed **SLIP-39 word-shares** and/or **stamped metal plates** (4-letter
+share material — hand-written **SLIP-39 word-shares** (on a printed form) and/or **stamped metal plates** (4-letter
 UPPERCASE prefixes of the SLIP-39 words). **If the optional born-in-HSM funding path was
 used** (the recovery card is stamped with the HSM-restore steps, and the disc carries
-`funding-wrapped.bin` + `dkek.pbe`), the funding key's share material is instead the printed
+`funding-wrapped.bin` + `dkek.pbe`), the funding key's share material is instead the hand-written
 **DKEK password shares** (4-of-6) — there are **no** SLIP-39 funding word-shares; recover it
 with **Section 3B** below, not Section 3.
 
-**Reading the chip card** (only if you need this case's share from it — the printed and metal
+**Reading the chip card** (only if you need this case's share from it — the hand-written and metal
 copies hold the same share). You need a PC/SC reader that supports SLE-4442 memory cards (e.g.
 ACS ACR39U with the `libacsccid1` driver); ordinary chip-card readers cannot power these cards.
 No PSC is needed to read. The share is plain ASCII text stored from **byte 32**; the rest of the
@@ -85,7 +85,7 @@ bip39-slip39-backup.py --recover --in four-shares-derivation.txt   # -> derivati
 optional Nitrokey HSM 2 funding-signer path was performed and the recovery card shows the
 HSM-restore steps). In that path the funding key was **born non-exportable inside the HSM**,
 so it has **no SLIP-39 word-shares and no plaintext seed** — its only backup is the
-DKEK-wrapped blob on the disc plus the **4-of-6 DKEK password shares** printed in the cases.
+DKEK-wrapped blob on the disc plus the **4-of-6 DKEK password shares** hand-written in the cases.
 Section 3 (SLIP-39) does **not** apply to this funding key; the **derivation** root is still
 recovered via Section 3.
 
@@ -98,7 +98,7 @@ sc-hsm-tool --initialize --dkek-shares 1 --label 'akash-funding'
 # 2) Import the DKEK share. `--pwd-shares-total 4` is REQUIRED: without it OpenSC's
 #    import_dkek_share() never enters the share-reconstruction prompt path and the import
 #    cannot be driven. You will then be prompted, per share, for the PRIME, the SHARE ID,
-#    and the SHARE VALUE — 4 of the 6 printed DKEK PASSWORD shares from ≥4 cases, typed at
+#    and the SHARE VALUE — 4 of the 6 hand-written DKEK PASSWORD shares from ≥4 cases, typed at
 #    the prompt, never on the command line:
 sc-hsm-tool --import-dkek-share dkek.pbe --pwd-shares-total 4
 # 3) Unwrap the funding key from the DKEK-wrapped backup into the HSM (key stays in the HSM):

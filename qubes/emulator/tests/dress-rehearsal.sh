@@ -69,7 +69,8 @@ export EMU_AGE_IDENTITY_DIR="$_emu_age/age"
 # route-coverage (which also inits an 'akash-funding' token), the wizard's unqualified
 # `pkcs11-tool --keypairgen --id 01` lands on the other suite's slot-0 token and collides.
 _SHSM_TOKENS="$(mktemp -d)"
-export SOFTHSM2_CONF="$(mktemp -d)/softhsm2.conf"
+SOFTHSM2_CONF="$(mktemp -d)/softhsm2.conf"
+export SOFTHSM2_CONF
 printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$_SHSM_TOKENS" > "$SOFTHSM2_CONF"
 softhsm2-util --init-token --free --label akash-funding \
   --so-pin 3537363231383830 --pin "$EMU_HSM_PIN" >/dev/null 2>&1
@@ -145,7 +146,7 @@ hdr "WIZARD STEP 3 — step_shamir (ssss 4-of-6) + real printing of each share"
 printf '%s' "$MARKER" > "$WORK/secret.in"
 out="$(printf 'a\n' | step_shamir 2>&1)"; echo "$out" >>"$CAP"
 [ "$(grep -c . "$WORK/shares.txt" 2>/dev/null)" = 6 ] && P "wizard split into 6 ssss shares" || F "expected 6 ssss shares"
-# the wizard's print_share sends each share to cups-pdf — assert real PDFs landed. The first
+# the wizard sends each share's BLANK form (ADR-0002 D12) to cups-pdf — assert real PDFs landed. The first
 # job after a cold cupsd compiles filters and can take >10s, so poll up to 30s.
 npdf=0
 for _ in $(seq 1 60); do
@@ -153,7 +154,7 @@ for _ in $(seq 1 60); do
   [ "${npdf:-0}" -ge 1 ] && break
   sleep 0.5
 done
-[ "${npdf:-0}" -ge 1 ] && P "wizard's print_share produced real PDF(s) via cups-pdf ($npdf in outdir)" || F "no PDF produced by the wizard's print path"
+[ "${npdf:-0}" -ge 1 ] && P "wizard's blank share forms produced real PDF(s) via cups-pdf ($npdf in outdir)" || F "no PDF produced by the wizard's print path"
 # real round-trip from the wizard's OWN shares
 R="$( (sed -n '1p;3p;4p;6p' "$WORK/shares.txt") | ssss-combine -t 4 -q 2>&1 )"
 [ "$R" = "$MARKER" ] && P "4 of the wizard's 6 shares reconstruct the secret" || F "wizard shares do not reconstruct (got '$R')"
