@@ -139,7 +139,7 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 #   slip39-mint.py --threshold 4 --shares 6  # SLIP-0039 shares -> qrencode -> archival paper
 #   (NEVER `shamir create` — the CLI prints the master secret to stdout; the minter never
 #    emits it and reconstruct-verifies every 4-of-6 subset before writing)
-# print/seal shares, then power off the disposable (RAM wiped).
+# hand-copy + verify shares onto their printed blank forms, seal them, power off (RAM wiped).
 ```
 
 ### Ceremony media on a laptop (few USB ports, no hub)
@@ -163,8 +163,11 @@ refuses without the dice or without the HSM.
 
 `ceremony.sh` is built for **both** tokens: a YubiKey step (PIV/P-256 `ops` age identity)
 **and** a Nitrokey HSM 2 step (DKEK 4-of-6 backup + on-device secp256k1 funding key). It
-prints paper shares to a CUPS printer and never echoes a secret to the terminal (secrets
-flow file → `qrencode`/`lp`; workdir is tmpfs in RAM, shredded on exit).
+never prints a Shamir share (ADR-0002 D12): the printer gets a BLANK form per share, and the share
+is shown on screen once, copied by hand, cleared from the screen and its scrollback, and typed back
+to verify. That deliberate display is the only time a secret reaches the terminal; the printer only
+ever receives ciphertext (the payload QR sheet), blank forms and instructions. The workdir is tmpfs
+in RAM, shredded on exit.
 
 **Recovery instruction card (menu step 6 / `make-recovery-card.py`):** prints a
 DVD-case-sized card with the break-glass *procedure* — how to reconstruct from the Shamir

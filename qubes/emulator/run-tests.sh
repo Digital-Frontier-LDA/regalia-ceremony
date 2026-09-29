@@ -265,6 +265,9 @@ say "PREFLIGHT AIR-GAP — a missing route tool must never read as 'air-gapped'"
 say "PREFLIGHT LIVE INTERFACE — a routable address with no default route must FAIL, not WARN"
 "$HERE/tests/test-preflight-live-iface.sh" || suite_failed "test-preflight-live-iface.sh"
 
+say "HANDWRITTEN SHARES — the printer gets a blank form, never a share; the copy is typed back (ADR-0002 D12)"
+"$HERE/tests/test-handwritten-share.sh" || suite_failed "test-handwritten-share.sh"
+
 say "PREFLIGHT TOKENS — 'No smart card readers found' is not a reader, and a missing HSM is said"
 "$HERE/tests/test-preflight-token-readers.sh" || suite_failed "test-preflight-token-readers.sh"
 
