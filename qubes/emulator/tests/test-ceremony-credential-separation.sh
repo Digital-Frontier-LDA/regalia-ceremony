@@ -17,16 +17,19 @@ pause(){ :; }
 ask(){ return 1; }   # never open an editor
 init_work
 
-GOOD_A_USER=417293 GOOD_A_SO=9F3C2A7710B4E6D5 GOOD_B_USER=860531 GOOD_B_SO=2B7E151628AED2A6
+# HSM user PINs are 10-15 digits (a 10-try counter, ADR-0002 D15); three HSMs (D17).
+GOOD_A_USER=4172935068 GOOD_A_SO=9F3C2A7710B4E6D5 GOOD_B_USER=8605314927 GOOD_B_SO=2B7E151628AED2A6
+GOOD_C_USER=3094718265 GOOD_C_SO=6D1F83A0C4E29B57
 GOOD_PIN=73920514 GOOD_PUK=58204718 GOOD_MGMT=5A0C9E3B71D24F86A1E0735C2B9D4F6081A7C3E5920B6D4F
 pins(){ # pins KEY=VALUE overrides...
-  local a_user=$GOOD_A_USER a_so=$GOOD_A_SO b_user=$GOOD_B_USER b_so=$GOOD_B_SO pin=$GOOD_PIN puk=$GOOD_PUK mgmt=$GOOD_MGMT kv
+  local a_user=$GOOD_A_USER a_so=$GOOD_A_SO b_user=$GOOD_B_USER b_so=$GOOD_B_SO c_user=$GOOD_C_USER c_so=$GOOD_C_SO
+  local pin=$GOOD_PIN puk=$GOOD_PUK mgmt=$GOOD_MGMT kv
   for kv in "$@"; do eval "${kv%%=*}=\${kv#*=}"; done
-  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nyubikey_piv_pin=%s\nyubikey_piv_puk=%s\nyubikey_mgmt_key=%s\n' \
-    "$a_user" "$a_so" "$b_user" "$b_so" "$pin" "$puk" "$mgmt" > "$WORK/pins.env"
+  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_piv_pin=%s\nyubikey_piv_puk=%s\nyubikey_mgmt_key=%s\n' \
+    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" > "$WORK/pins.env"
 }
 run_step0(){ ( CEREMONY_MODE="$1" step_set_pins 2>&1 ); }
-leaks(){ grep -qE "$GOOD_A_USER|$GOOD_A_SO|$GOOD_B_USER|$GOOD_B_SO|$GOOD_PIN|$GOOD_PUK|$GOOD_MGMT|111111" <<< "$1"; }
+leaks(){ grep -qE "$GOOD_A_USER|$GOOD_A_SO|$GOOD_B_USER|$GOOD_B_SO|$GOOD_C_USER|$GOOD_C_SO|$GOOD_PIN|$GOOD_PUK|$GOOD_MGMT|111111" <<< "$1"; }
 
 pins; out="$(run_step0 prod)"; rc=$?
 [ "$rc" = 0 ] && grep -q "every loaded credential is distinct" <<< "$out" && P "a distinct, well-formed file is accepted" || F "good file refused: $out"
@@ -43,7 +46,10 @@ refuses "the same SO PIN on both cards, in another case" "hsm_a_so_pin and hsm_b
 refuses "a YubiKey PIN equal to its PUK" "yubikey_piv_pin and yubikey_piv_puk hold the same value" puk=$GOOD_PIN
 refuses "a YubiKey PIN reused as an HSM user PIN" "hsm_a_user_pin and yubikey_piv_pin hold the same value" pin=$GOOD_A_USER
 refuses "an SO PIN that is not 16 hex digits" "hsm_b_so_pin: a SmartCard-HSM SO PIN is exactly 16 hex digits" b_so=2B7E1516
-refuses "a user PIN longer than 15" "hsm_a_user_pin: a SmartCard-HSM user PIN is 6-15" a_user=4172934172934172
+refuses "a user PIN longer than 15" "hsm_a_user_pin: a production HSM user PIN is 10-15 digits" a_user=4172934172934172
+refuses "a 6-digit HSM user PIN (too short for a 10-try counter)" "hsm_a_user_pin: a production HSM user PIN is 10-15 digits" a_user=417293
+refuses "card C's user PIN reused from card A" "hsm_a_user_pin and hsm_c_user_pin hold the same value" c_user=$GOOD_A_USER
+refuses "card C's SO PIN reused from card B" "hsm_b_so_pin and hsm_c_so_pin hold the same value" c_so=$GOOD_B_SO
 refuses "a 5-character YubiKey PIN" "yubikey_piv_pin: a YubiKey PIV PIN or PUK is 6-8" pin=11111
 refuses "a malformed management key" "yubikey_mgmt_key: a PIV management key" mgmt=0102
 
