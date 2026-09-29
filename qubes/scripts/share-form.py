@@ -38,12 +38,21 @@ def ascii_only(s):
 
 # The instruction block printed at the foot of every form. It is for whoever holds or finds the
 # sheet later, not for the ceremony: what it is, what to do, and how a recovery goes.
+# The holder's rule (owner, 2026-09-29): when, and ONLY when, to hand the share over. Remote
+# requests are never enough, and an in-person request by the principal is checked against duress.
 HOLDER = [
     "IF YOU HOLD THIS SHEET",
     "- This is ONE of {n} shares. Alone it reveals nothing; any {k} of them together rebuild the secret.",
     "- Keep it sealed in its case. Never open, copy, photograph, scan or type it anywhere.",
-    "- Open the case only when the executor asks, with the written authorization; check its seal serial first.",
     "- If the seal is broken, or the sheet or case is lost, tell the executor at once.",
+    "WHEN TO ACT - ONLY IN ONE OF THESE TWO CASES:",
+    "1. You are shown the ORIGINAL official death certificate, or a legal certificate of incapacity, of the",
+    "   principal named above, AND the executor asks you for this share IN PERSON.",
+    "2. The principal named above asks you IN PERSON - never by phone, message, e-mail or video call.",
+    "   Ask a question only the two of you know the answer to (agreed face to face, never written down).",
+    "   If the answer is wrong, or they seem forced, rushed or watched: hand NOTHING over, leave, and",
+    "   contact the police.",
+    "In every other case, keep the case sealed. Nobody can authorize its release remotely.",
 ]
 RECOVER = [
     "TO RECOVER (executor and operator)",
@@ -82,12 +91,18 @@ def emit(label, kind, count, paper, k=4, n=6):
     y -= 10
 
     # ---- handwrite fields: filled in by hand at the ceremony, so the printer never sees them ------
-    fields = [("Case ID", "Seal serial"), ("Date sealed", "Share number"),
+    # The principal's name is hand-written too: the printer never sees whose share this is.
+    fields = [("Principal (full name)",), ("Case ID", "Seal serial"), ("Date sealed", "Share number"),
               ("Written by (initials)", "Witness (initials)")]
     fh, fw = 22.0, (W - 2 * m) / 2
     top = y - 4
     box(m, top - fh * len(fields) - 6, W - 2 * m, fh * len(fields) + 6)
     for r, pair in enumerate(fields):
+        if len(pair) == 1:                       # one field across the whole width
+            x, yy = m + 6, top - (r + 1) * fh + 4
+            text(x, yy + 2, pair[0] + ":", "Helvetica-Bold", 8.5)
+            out.append("%.1f %.1f moveto %.1f %.1f lineto stroke" % (x + 105, yy, W - m - 12, yy))
+            continue
         for c, name in enumerate(pair):
             x, yy = m + 6 + c * fw, top - (r + 1) * fh + 4
             text(x, yy + 2, name + ":", "Helvetica-Bold", 8.5)
@@ -136,7 +151,7 @@ def emit(label, kind, count, paper, k=4, n=6):
     yy = ib_top - 14
     for ln in lines:
         if ln:
-            bold = ln.isupper() or ln.startswith("TO RECOVER")
+            bold = ln.isupper() or ln.startswith(("TO RECOVER", "WHEN TO ACT", "In every other case"))
             text(m + 8, yy, ln, "Helvetica-Bold" if bold else "Helvetica", 8.5)
         yy -= lh
     out += ["showpage", "%%EOF"]

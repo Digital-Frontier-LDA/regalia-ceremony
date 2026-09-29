@@ -76,7 +76,10 @@ python3 "$SCRIPTS/share-form.py" --label t --kind chars --count 150 -o "$T/c.ps"
 
 hdr "the form: label, handwrite fields, and the holder/recovery instructions on every page"
 python3 "$SCRIPTS/share-form.py" --label "Wallet seed - share 3 of 6 (need 4)" --kind words --count 33 -o "$T/l.ps"
-for want in "Case ID:" "Seal serial:" "Date sealed:" "Share number:" "Witness" "IF YOU HOLD THIS SHEET" "TO RECOVER" "any 4 of them together" "offline" "Wallet seed - share 3 of 6"; do
+for want in "Case ID:" "Seal serial:" "Date sealed:" "Share number:" "Witness" "IF YOU HOLD THIS SHEET" "TO RECOVER" "any 4 of them together" "offline" "Wallet seed - share 3 of 6" \
+            "Principal \(full name\):" "WHEN TO ACT" "ORIGINAL official death certificate" "certificate of incapacity" \
+            "IN PERSON - never by phone, message, e-mail or video call" "only the two of you know" "contact the police" \
+            "Nobody can authorize its release remotely"; do
   grep -qF "$want" "$T/l.ps" && P "form has: $want" || F "form lacks: $want"
 done
 grep -q "the threshold" "$T/l.ps" && F "the old 'any the threshold' wording is back" || P "no 'any the threshold' wording"
