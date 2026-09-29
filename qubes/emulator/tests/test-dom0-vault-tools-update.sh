@@ -45,11 +45,17 @@ if [ -n "\$pat" ] && [[ "\$*" == *"\$pat"* ]]; then echo "$c: simulated failure"
 exec /bin/$c "\$@"
 SH
 done
-printf '#!/bin/sh\nexec "$@"\n' > "$T/bin/sudo"
+# dom0's /srv/salt is root-only. The fake Salt dir is mode 000 while the updater runs, and only
+# this sudo opens it for the one command: any look inside it without sudo fails, as in dom0.
+cat > "$T/bin/sudo" <<'SH'
+#!/bin/bash
+chmod 755 "$SALT_DIR"; "$@"; rc=$?; chmod 000 "$SALT_DIR"; exit $rc
+SH
 chmod +x "$T/bin"/*
 
-run(){ PATH="$T/bin:$PATH" CALLS="$T/calls" RELEASE="$T/release.tgz" SALT_DIR="$T/salt" WORK="$T/work" \
-       HOME="$T/home" bash "$UPD" "$@" 2>&1; }
+run(){ mkdir -p "$T/salt"; chmod 000 "$T/salt"
+       PATH="$T/bin:$PATH" CALLS="$T/calls" RELEASE="$T/release.tgz" SALT_DIR="$T/salt" WORK="$T/work" \
+       HOME="$T/home" bash "$UPD" "$@" 2>&1; local rc=$?; chmod 755 "$T/salt"; return $rc; }
 
 hdr "a good tag and sha256: downloaded, verified, copied, applied, template shut down"
 : > "$T/calls"
@@ -113,6 +119,15 @@ out="$(run vt-test "$(tr 'a-f' 'A-F' <<< "${SHA:0:20}")")"; rc=$?
 hdr "--install copies the verified script to ~/bin"
 out="$(run --install vt-test "$SHA")"; rc=$?
 [ "$rc" = 0 ] && [ -x "$T/home/bin/vault-tools-update" ] && cmp -s "$T/home/bin/vault-tools-update" "$UPD" && P "installed, identical to the tag's copy" || F "not installed: $out"
+
+hdr "every look inside the root-only Salt dir goes through sudo (holds even when this test runs as root)"
+# The mode-000 fake above only bites for a non-root runner; run-tests.sh may run under sudo. This
+# reads the updater itself: any test/cmp/[ ]/cat/grep/ls/cp/mv/rm naming $SALT_DIR, $STAGE or $PREV
+# must be on a sudo command.
+bad="$(grep -nE '(\[ -[a-z]|\btest |\bcmp |\bcat |\bgrep |\bls |\bcp |\bmv |\brm |\bmkdir )[^|;&]*"?\$\{?(SALT_DIR|STAGE|PREV)' "$UPD" \
+       | grep -vE '^[0-9]+:[[:space:]]*#' \
+       | grep -vE '\bsudo (-n )?(test|cmp|cat|grep|ls|cp|mv|rm|mkdir) [^|;&]*"?\$\{?(SALT_DIR|STAGE|PREV)' || true)"
+[ -z "$bad" ] && P "no unsudoed access to the Salt dir" || F "access without sudo: $bad"
 
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"
