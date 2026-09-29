@@ -69,7 +69,8 @@ export EMU_AGE_IDENTITY_DIR="$_emu_age/age"
 # route-coverage (which also inits an 'akash-funding' token), the wizard's unqualified
 # `pkcs11-tool --keypairgen --id 01` lands on the other suite's slot-0 token and collides.
 _SHSM_TOKENS="$(mktemp -d)"
-export SOFTHSM2_CONF="$(mktemp -d)/softhsm2.conf"
+SOFTHSM2_CONF="$(mktemp -d)/softhsm2.conf"
+export SOFTHSM2_CONF
 printf 'directories.tokendir = %s\nobjectstore.backend = file\nlog.level = ERROR\n' "$_SHSM_TOKENS" > "$SOFTHSM2_CONF"
 softhsm2-util --init-token --free --label akash-funding \
   --so-pin 3537363231383830 --pin "$EMU_HSM_PIN" >/dev/null 2>&1
