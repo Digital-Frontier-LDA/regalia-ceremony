@@ -147,6 +147,7 @@ say "CUPS print-before-purge with a failing sibling job (purge waits for drain e
 say "CEREMONY ssss reconstruct-verify + input guards (no unverified / truncated backups)"
 "$HERE/tests/test-ceremony-shamir-verify.sh" || suite_failed "test-ceremony-shamir-verify.sh"
 "$HERE/tests/test-ceremony-parametric-scheme.sh" || suite_failed "test-ceremony-parametric-scheme.sh"
+"$HERE/tests/test-case-label.sh" || suite_failed "test-case-label.sh"
 
 say "PROVE-CEREMONY SLIP-39 proof (PROOF 3: the 4-of-6 SLIP-0039 backup really recovers)"
 "$HERE/tests/test-prove-ceremony-slip39.sh" || suite_failed "test-prove-ceremony-slip39.sh"

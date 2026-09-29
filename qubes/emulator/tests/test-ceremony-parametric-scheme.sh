@@ -75,6 +75,20 @@ else
   echo "  (shamir_mnemonic not importable here: SLIP-39 cases skipped; CI's emulator job has it)"
 fi
 
+hdr "no fixed 4 or 6 left in what the operator or a recoverer reads"
+msgs="$(grep -v '^\s*#' "$SCRIPTS/ceremony.sh" | grep -E '^\s*(info|warn|err|b|show) ' || true)"
+fixed="$(grep -E -i '\b4 of (the )?6\b|\b6 shares\b|\bsix (dkek|new|shares)|into 6 slip|any 4 (of|recover|reconstruct)|lose up to 2\b|4-of-6' <<< "$msgs" || true)"
+[ -z "$fixed" ] && P "wizard messages carry no fixed 4/6" || F "fixed numbers in wizard messages: $fixed"
+grep -q 'printf .SCHEME: %s-of-%s' "$SCRIPTS/ceremony.sh" && grep -q '"$(K)" "$(N)" "$(K)" "$(N)"' "$SCRIPTS/ceremony.sh" && P "the archive step writes SCHEME.txt from K and N" || F "SCHEME.txt not written from the scheme"
+grep -q "payload-qr.py' --split '\$enc' --outdir '\$qrdir' --threshold \$(K) --shares \$(N)" "$SCRIPTS/ceremony.sh" && P "the QR split is given the scheme" || F "the QR split is not given the scheme"
+if command -v age >/dev/null 2>&1 && command -v age-keygen >/dev/null 2>&1; then
+  age-keygen -o "$WORK/qk" 2>/dev/null; head -c 2000 /dev/urandom | age -r "$(age-keygen -y "$WORK/qk")" -a -o "$WORK/q.age"
+  python3 "$SCRIPTS/payload-qr.py" --split "$WORK/q.age" --outdir "$WORK/qr35" --threshold 3 --shares 5 >/dev/null 2>&1
+  grep -q "any 3 of the 5 Shamir shares" "$WORK/qr35/INSTRUCTIONS.txt" && P "the QR sheet says 'any 3 of the 5' for 3-of-5" || F "QR instructions not parametric"
+fi
+docs="$(cat "$SCRIPTS/../recovery/RECOVERY-TECHNICAL.md" "$SCRIPTS/../recovery/RECOVERY-START-HERE.txt" 2>/dev/null)"
+grep -qE 'four-shares|any \*\*4\*\*|\*\*4\*\* cases|YOU NEED 4 OF 6|4 of the 6 sealed' <<< "$docs" && F "a recovery document still assumes 4-of-6" || P "recovery documents read k-of-n (SCHEME.txt)"
+
 hdr "the default is unchanged: 4-of-6"
 unset CEREMONY_THRESHOLD CEREMONY_SHARES
 ( source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; [ "$(K)-of-$(N)" = 4-of-6 ] ) && P "default 4-of-6" || F "default changed"

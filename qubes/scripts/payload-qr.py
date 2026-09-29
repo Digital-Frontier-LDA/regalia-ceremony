@@ -58,7 +58,7 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
-def split(payload_path, outdir, allow_plaintext=False, quiet=False):
+def split(payload_path, outdir, allow_plaintext=False, quiet=False, k=4, n=6):
     with open(payload_path, "rb") as fh:
         data = fh.read()
     if not data:
@@ -119,7 +119,7 @@ def split(payload_path, outdir, allow_plaintext=False, quiet=False):
         sys.exit("payload-qr: SELF-CHECK FAILED — the emitted chunks do not rebuild the payload")
 
     with open(os.path.join(outdir, "INSTRUCTIONS.txt"), "w") as fh:
-        fh.write(instructions(total, digest))
+        fh.write(instructions(total, digest, k, n))
 
     if not quiet:
         print("payload-qr: %d symbol(s) in %s (sha256-16 %s)" % (total, outdir, digest))
@@ -127,7 +127,7 @@ def split(payload_path, outdir, allow_plaintext=False, quiet=False):
     return total, digest
 
 
-def instructions(total, digest):
+def instructions(total, digest, k=4, n=6):
     return f"""HOW TO REBUILD THIS PAYLOAD (no special software required)
 
 You are holding {total} QR code(s). Each one decodes to a single line of text that looks like:
@@ -146,7 +146,7 @@ STEPS
      It will begin "{AGE_ARMOR_HEADER}".
   6. Verify: sha256 of payload.age must START with {digest}
        sha256sum payload.age
-  7. Decrypt with the breakglass age key (reconstruct it from any 4 of the 6 Shamir shares):
+  7. Decrypt with the breakglass age key (reconstruct it from any {k} of the {n} Shamir shares):
        age -d -i breakglass.key payload.age > payload.txt
 
 If a QR code is damaged and will not scan, the payload cannot be rebuilt from the remaining
@@ -358,6 +358,8 @@ def main():
                     help="with --verify-scan: decoded lines from FILE ('-' = stdin) instead of the camera")
     ap.add_argument("--device", default="/dev/video0", help="with --verify-scan: the camera")
     ap.add_argument("--outdir", default="./qr")
+    ap.add_argument("--threshold", type=int, default=4, help="with --split: k, printed in the instructions (CEREMONY_THRESHOLD)")
+    ap.add_argument("--shares", type=int, default=6, help="with --split: n, printed in the instructions (CEREMONY_SHARES)")
     ap.add_argument("--out", default="./payload.age")
     ap.add_argument("--allow-plaintext", action="store_true",
                     help="permit splitting input that is not age-armored (DRILLS ONLY)")
@@ -368,7 +370,9 @@ def main():
     elif a.verify_scan:
         verify_scan(a.verify_scan, scans=a.scans, device=a.device)
     elif a.split:
-        split(a.split, a.outdir, allow_plaintext=a.allow_plaintext)
+        if not 2 <= a.threshold <= a.shares <= 16:
+            sys.exit("payload-qr: need 2 <= --threshold <= --shares <= 16")
+        split(a.split, a.outdir, allow_plaintext=a.allow_plaintext, k=a.threshold, n=a.shares)
     else:
         join(a.join, a.out)
 

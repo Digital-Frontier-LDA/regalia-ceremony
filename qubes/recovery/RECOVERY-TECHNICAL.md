@@ -6,8 +6,9 @@ trusted crypto-recovery professional). It is **self-contained**: everything you 
 this archive disc (an M-DISC or an archival AZO DVD-R) — you do **not** need the GitHub repo or any network.
 
 > SCOPE: this recovers the custodial **wallet seeds** so funds can be moved to safety, and
-> (optionally) the SOPS config vault. It is a 4-of-6 scheme: you need the shares from **any
-> 4 of the 6 sealed cases**.
+> (optionally) the SOPS config vault. It is a **k-of-n** scheme: you need the shares from **any k
+> of the n sealed cases**. The numbers for THIS ceremony are in `SCHEME.txt` on this disc and on the
+> recovery card (4-of-6 unless they say otherwise). Below, "k" means that number.
 
 ## 0. Authorization (do not skip)
 Confirm you are entitled to do this and the trigger condition is met (see the sealed
@@ -30,7 +31,7 @@ share material — hand-written **SLIP-39 word-shares** (on a printed form) and/
 UPPERCASE prefixes of the SLIP-39 words). **If the optional born-in-HSM funding path was
 used** (the recovery card is stamped with the HSM-restore steps, and the disc carries
 `funding-wrapped.bin` + `dkek.pbe`), the funding key's share material is instead the hand-written
-**DKEK password shares** (4-of-6) — there are **no** SLIP-39 funding word-shares; recover it
+**DKEK password shares** (k-of-n) — there are **no** SLIP-39 funding word-shares; recover it
 with **Section 3B** below, not Section 3.
 
 **Reading the chip card** (only if you need this case's share from it — the hand-written and metal
@@ -64,15 +65,15 @@ requirements.txt`. (`--require-hashes` makes both paths verify every package aga
 pinned SHA-256s.)
 
 ## 3. Reconstruct the wallet seeds (the important part)
-From any **4** cases, collect each case's SLIP-39 word-share. If a case only has a metal
+From any **k** cases, collect each case's SLIP-39 word-share. If a case only has a metal
 plate, expand the stamped 4-letter prefixes back to words first:
 ```
 metal-stamp-worksheet.py --verify --in <stamped-prefixes-of-that-share>
 ```
 Put the 4 full word-shares (one per line) in a file, then recover each wallet mnemonic:
 ```
-bip39-slip39-backup.py --recover --in four-shares-funding.txt      # -> funding BIP39 mnemonic
-bip39-slip39-backup.py --recover --in four-shares-derivation.txt   # -> derivation BIP39 mnemonic
+bip39-slip39-backup.py --recover --in k-shares-funding.txt      # -> funding BIP39 mnemonic
+bip39-slip39-backup.py --recover --in k-shares-derivation.txt   # -> derivation BIP39 mnemonic
 ```
 (If a case bundles funding + derivation shares together, recover each from its 4 matching shares.)
 
@@ -87,7 +88,7 @@ bip39-slip39-backup.py --recover --in four-shares-derivation.txt   # -> derivati
 optional Nitrokey HSM 2 funding-signer path was performed and the recovery card shows the
 HSM-restore steps). In that path the funding key was **born non-exportable inside the HSM**,
 so it has **no SLIP-39 word-shares and no plaintext seed** — its only backup is the
-DKEK-wrapped blob on the disc plus the **4-of-6 DKEK password shares** hand-written in the cases.
+DKEK-wrapped blob on the disc plus the **k-of-n DKEK password shares** hand-written in the cases.
 Section 3 (SLIP-39) does **not** apply to this funding key; the **derivation** root is still
 recovered via Section 3.
 
@@ -100,7 +101,7 @@ sc-hsm-tool --initialize --dkek-shares 1 --label 'akash-funding'
 # 2) Import the DKEK share. `--pwd-shares-total 4` is REQUIRED: without it OpenSC's
 #    import_dkek_share() never enters the share-reconstruction prompt path and the import
 #    cannot be driven. You will then be prompted, per share, for the PRIME, the SHARE ID,
-#    and the SHARE VALUE — 4 of the 6 hand-written DKEK PASSWORD shares from ≥4 cases, typed at
+#    and the SHARE VALUE — k of the n hand-written DKEK PASSWORD shares from ≥k cases, typed at
 #    the prompt, never on the command line:
 sc-hsm-tool --import-dkek-share dkek.pbe --pwd-shares-total 4
 # 3) Unwrap the funding key from the DKEK-wrapped backup into the HSM (key stays in the HSM):
@@ -132,11 +133,11 @@ of roots that never change, and everything else is recovered *through* them.
   * `payload.age` on the **archive disc**
   * (the chip cards hold a SHARE, not the payload — an SLE-4442 has only 256 bytes)
 
-**Decrypt it with the breakglass age key** — the same key the 4-of-6 `ssss` shares rebuild,
+**Decrypt it with the breakglass age key** — the same key the k-of-n `ssss` shares rebuild,
 so no extra threshold and nothing new to find:
 
 ```sh
-# after reconstructing the breakglass key from any 4 of the 6 password shares:
+# after reconstructing the breakglass key from any k of the n password shares:
 age -d -i breakglass.key payload.age > payload.txt
 ```
 
@@ -162,7 +163,7 @@ shipped tool — it needs no wallet, no network, and no extra packages (pure std
 BIP32 `m/44'/118'/0'/0/0` → secp256k1):
 ```
 # the recovered mnemonic is SECRET — pass it via a file, never on the command line:
-bip39-slip39-backup.py --recover --in four-shares-funding.txt --out funding.mnemonic  # Step 3
+bip39-slip39-backup.py --recover --in k-shares-funding.txt --out funding.mnemonic  # Step 3
 derive-akash-address.py --mnemonic-file funding.mnemonic     # -> akash1…  compare to the record
 ```
 (If instead you recorded/exported the funding **pubkey**, cross-check that form:
