@@ -14,17 +14,17 @@ records nothing.
 
 ## PINs, SO PINs, PUKs and management keys
 
-**1. Every credential the ceremony escrows is its own value.** The seven step-0 fields are
-`hsm_a_user_pin`, `hsm_a_so_pin`, `hsm_b_user_pin`, `hsm_b_so_pin`, `yubikey_piv_pin`,
-`yubikey_piv_puk` and `yubikey_mgmt_key`. All seven are required. No two may be equal, compared
-case-insensitively. Card
-A's PIN is not card B's; a user PIN is not its own SO PIN; a YubiKey PIN is not its PUK, nor any
-HSM PIN.
+**1. Every credential the ceremony escrows is its own value.** The fleet is three HSMs and three
+YubiKeys (ADR-0002 D17), so step 0 has fifteen fields: `hsm_{a,b,c}_user_pin`,
+`hsm_{a,b,c}_so_pin`, and `yubikey_{a,b,c}_piv_pin`, `yubikey_{a,b,c}_piv_puk`,
+`yubikey_{a,b,c}_mgmt_key` (the list is `PIN_FIELDS` in ceremony.sh). All are required. No two may
+be equal, compared case-insensitively. Card A's PIN is not card B's; a user PIN is not its own SO
+PIN; YubiKey A's PIN is not YubiKey B's, nor its own PUK, nor any HSM PIN.
 *Verified by:* `check_credential_separation` in step 0. PROD refuses, DEV warns, and no value is
 printed in either mode. Test: `test-ceremony-credential-separation.sh`.
 
 **2. Each credential has the shape its device accepts.**
-- SmartCard-HSM user PIN: 6–15 characters.
+- SmartCard-HSM user PIN: 10–15 digits (a 10-try counter needs a 10-digit PIN; ADR-0002 D15).
 - SmartCard-HSM SO PIN: exactly 16 hex digits.
 - YubiKey PIV PIN and PUK: 6–8 bytes (checked as bytes: multibyte input is refused).
 - PIV management key: 32, 48 or 64 hex digits.
@@ -46,15 +46,15 @@ answer to fails silently, and only on recovery day.
   proves the PIN before generating. Test: `test-ceremony-yubikey-factory-card.sh`.
 
 **5. Two YubiKeys never share a PIN.** Continuity is multi-enrollment (ADR-0002 D5), and that is
-worth something only if the tokens fail independently. Step 0 holds one `yubikey_piv_pin`, so a
-run sets it on **one** factory token. The second token gets its own run, with its own `pins.env`.
-*Verified by:* `step_yubikey_ops` refuses to set the escrowed PIN on a second factory token in the
-same run. Test: `test-ceremony-yubikey-factory-card.sh`. **Not verified:** that two *separate*
-runs used different values, because no run sees the other's file.
+worth something only if the tokens fail independently. Step 0 holds one credential set per
+YubiKey (A, B, C). `step_yubikey_ops` gives each token, by serial, the next free set, keeps a
+token's set when it is run again, and refuses a fourth token.
+*Verified by:* rule 1's check (all three sets live in the same file, so equal PINs are refused)
+and `step_yubikey_ops`'s set assignment. Test: `test-ceremony-yubikey-factory-card.sh`.
 
 **6. A YubiKey's management key is protected by its PIN and stored on the card.**
 age-plugin-yubikey requires this (measured 2026-09-23, fw 5.7.4). It also means the escrowed PIN
-recovers the management key, so the separately escrowed `yubikey_mgmt_key` is not what opens the
+recovers the management key, so the separately escrowed `yubikey_<set>_mgmt_key` is not what opens the
 card afterwards. *Verified by:* `step_yubikey_ops` refuses to generate until the change succeeds.
 
 ## DKEKs

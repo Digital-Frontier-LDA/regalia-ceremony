@@ -584,57 +584,91 @@ step_yubikey_ops() {
   #   - on the default PIN it forces a new PIN AND SETS THE PUK TO IT, merging two credentials the
   #     ceremony keeps apart (regalia#28). So the PIN and a distinct PUK are set here, first.
   # Only acted on when ykman reports a real card; a stub that prints no management-key line is left alone.
-  local info rc
-  info="$(ykman piv info 2>/dev/null || true)"
+  local info rc serial letter y pinv pukv pin puk used
+  # THE TOKEN, BY SERIAL, AND EVERY LATER COMMAND BOUND TO IT (--device / --serial): a token swapped
+  # after this point makes the commands fail instead of changing a different card.
+  serial="$(ykman info 2>/dev/null | sed -n 's/^Serial number: *//p' | head -1 | tr -d ' ')"
+  [[ "$serial" =~ ^[0-9]{6,10}$ ]] || { err "cannot read this YubiKey's serial (ykman info): refusing, because every change must be bound to one identified token"; return 1; }
+  info="$(ykman --device "$serial" piv info 2>/dev/null)" \
+    || { err "YubiKey $serial does not answer (removed or swapped?): nothing was changed"; return 1; }
+  # WHICH CREDENTIAL SET. Three YubiKeys, each with its own PIN/PUK/management key from step 0
+  # (yubikey_<a|b|c>_*). The same token keeps its set within a run. A new token:
+  #   - takes the next free set (A, B, C) when step 0 GENERATED the sets in this run, since then
+  #     no earlier run can have used them;
+  #   - otherwise (the sets were loaded from a file, possibly already used in an earlier run) the
+  #     operator names the set, CEREMONY_YUBIKEY_SET or at the prompt, and confirms it has never
+  #     been put on another token: the wizard cannot see earlier runs.
+  # The serial -> set map is written into the tier-0 payload (yubikey_<set>_serial).
+  letter="${YK_SET_OF[$serial]:-}"
+  used=" ${YK_SET_OF[*]} "
+  if [ -z "$letter" ] && [ -n "${state_step0_done:-}" ]; then
+    if [ "${state_pins_generated_this_run:-0}" = 1 ]; then
+      for y in $YUBIKEYS; do case "$used" in *" $y "*) ;; *) letter="$y"; break;; esac; done
+      [ -n "$letter" ] || { err "every YubiKey credential set (${YUBIKEYS// /, }) is already used this run: this is a fourth token"; return 1; }
+    else
+      letter="${CEREMONY_YUBIKEY_SET:-}"
+      if [ -z "$letter" ]; then
+        { : </dev/tty; } 2>/dev/null || { err "the credential sets were loaded from a file: name this token's set with CEREMONY_YUBIKEY_SET (a, b or c)"; return 1; }
+        read -r -p "   which credential set does YubiKey $serial take (${YUBIKEYS// /, }), one NEVER put on another token? " letter </dev/tty
+      fi
+      letter="$(tr 'A-Z' 'a-z' <<< "$letter")"
+      case " $YUBIKEYS " in *" $letter "*) ;; *) err "'$letter' is not one of the sets ${YUBIKEYS// /, }"; return 1;; esac
+      case "$used" in *" $letter "*) err "set ${letter^^} is already on another token in this run"; return 1;; esac
+      ask "confirm set ${letter^^} has never been put on any other YubiKey, in this run or an earlier one?" || { err "set not confirmed"; return 1; }
+    fi
+    YK_SET_OF[$serial]="$letter"
+  fi
+  pin=""; puk=""
+  if [ -n "$letter" ]; then
+    info "This token (serial $serial) is YubiKey ${letter^^}: write that on its label and on the PIN card row."
+    pinv="yubikey_${letter}_piv_pin"; pukv="yubikey_${letter}_piv_puk"
+    pin="${!pinv:-}"; puk="${!pukv:-}"
+  else
+    pinv="yubikey_<set>_piv_pin"; pukv="yubikey_<set>_piv_puk"   # names for messages only (no step 0)
+  fi
   # The card's PIN and PUK are set to the values step 0 loaded for ESCROW (pins.env →
-  # yubikey_piv_pin / yubikey_piv_puk → the tier-0 payload), never to values typed at a prompt:
+  # yubikey_<set>_piv_pin / _piv_puk → the tier-0 payload), never to values typed at a prompt:
   # otherwise the payload can hold a PIN this card does not answer to, discovered on recovery day.
   # The commands are shown redacted and run directly, because run() would print the PIN.
   if grep -q "Using default PIN" <<< "$info" || grep -q "Using default PUK" <<< "$info"; then
-    if [ -z "${yubikey_piv_pin:-}" ] || [ -z "${yubikey_piv_puk:-}" ]; then
-      err "This YubiKey still has a factory PIN or PUK, and step 0 has not loaded yubikey_piv_pin and"
-      err "yubikey_piv_puk. Run step 0 first: the values set on the card must be the ones escrowed."
+    if [ -z "$pin" ] || [ -z "$puk" ]; then
+      err "This YubiKey still has a factory PIN or PUK, and step 0 has not loaded $pinv and"
+      err "$pukv. Run step 0 first: the values set on the card must be the ones escrowed."
       return 1
     fi
-    [ "$yubikey_piv_pin" != "$yubikey_piv_puk" ] || { err "yubikey_piv_pin and yubikey_piv_puk are equal; the ceremony keeps them apart"; return 1; }
+    [ "$pin" != "$puk" ] || { err "$pinv and $pukv are equal; the ceremony keeps them apart"; return 1; }
     if grep -q "Using default PIN" <<< "$info"; then
-      # Step 0 holds ONE yubikey_piv_pin. A second factory token in the same run would get the same
-      # PIN, and the fleet needs distinct PINs per token (regalia#17). The second token gets its own
-      # run, with its own pins.env.
-      if [ "${yubikey_pins_set_this_run:-0}" -ge 1 ]; then
-        err "This run already set the escrowed yubikey_piv_pin on a YubiKey. Two tokens must not share a"
-        err "PIN: provision this one in a separate run with its own pins.env (qubes/CREDENTIAL-SEPARATION.md)."
-        return 1
-      fi
-      show "ykman piv access change-pin -P <factory PIN> -n <yubikey_piv_pin from step 0>"
+      # Each token has its own set (regalia#17: distinct PINs per token), so a second or third
+      # factory token in the same run gets set B or C, never set A again.
+      show "ykman piv access change-pin -P <factory PIN> -n <$pinv from step 0>"
       ask "set the card's PIN to the escrowed value?" || { err "the factory PIN was kept, so age-plugin-yubikey would replace it with an unescrowed one"; return 1; }
-      ykman piv access change-pin -P 123456 -n "$yubikey_piv_pin" >/dev/null || { err "PIN change failed"; return 1; }
-      yubikey_pins_set_this_run=$(( ${yubikey_pins_set_this_run:-0} + 1 ))
+      ykman --device "$serial" piv access change-pin -P 123456 -n "$pin" >/dev/null || { err "PIN change failed"; return 1; }
     fi
     if grep -q "Using default PUK" <<< "$info"; then
-      show "ykman piv access change-puk -p <factory PUK> -n <yubikey_piv_puk from step 0>"
+      show "ykman piv access change-puk -p <factory PUK> -n <$pukv from step 0>"
       ask "set the card's PUK to the escrowed value?" || { err "the factory PUK was kept"; return 1; }
-      ykman piv access change-puk -p 12345678 -n "$yubikey_piv_puk" >/dev/null || { err "PUK change failed"; return 1; }
+      ykman --device "$serial" piv access change-puk -p 12345678 -n "$puk" >/dev/null || { err "PUK change failed"; return 1; }
     fi
   fi
   # PIN-BINDING PROOF, as for the HSM in step_payload: present the escrowed PIN to the card now,
   # while both are known. Changing the PIN to itself verifies it; a wrong value costs one try here
   # instead of one on recovery day.
-  if [ -n "${yubikey_piv_pin:-}" ] && grep -q "Management key algorithm" <<< "$info"; then
-    ykman piv access change-pin -P "$yubikey_piv_pin" -n "$yubikey_piv_pin" >/dev/null 2>&1 \
-      || { err "PIN BINDING FAILED: the escrowed yubikey_piv_pin does not open this YubiKey"; return 1; }
-    info "   PIN BINDING PROVEN — the escrowed yubikey_piv_pin opens this YubiKey."
+  if [ -n "$pin" ] && grep -q "Management key algorithm" <<< "$info"; then
+    ykman --device "$serial" piv access change-pin -P "$pin" -n "$pin" >/dev/null 2>&1 \
+      || { err "PIN BINDING FAILED: the escrowed $pinv does not open this YubiKey"; return 1; }
+    info "   PIN BINDING PROVEN — the escrowed $pinv opens YubiKey ${letter^^}."
   else
-    warn "yubikey_piv_pin not loaded (step 0), or no real card: the PIN-binding proof was SKIPPED, not passed."
+    warn "$pinv not loaded (step 0), or no real card: the PIN-binding proof was SKIPPED, not passed."
   fi
+  pin=""; puk=""
   if grep -q "Management key algorithm" <<< "$info" && ! grep -q "protected by PIN" <<< "$info"; then
     warn "age-plugin-yubikey needs a PIN-protected TDES management key; this card's is not. It becomes a"
     warn "random key stored on the card behind the PIN, so the escrowed PIN also recovers it."
-    run "ykman piv access change-management-key -a TDES --protect"; rc=$?
+    run "ykman --device $serial piv access change-management-key -a TDES --protect"; rc=$?
     [ "$rc" = 0 ] || { err "the management key was not changed, so age-plugin-yubikey would refuse this card"; return 1; }
   fi
   # A declined step (100) is the operator's choice; a FAILED generation is not a success.
-  run "age-plugin-yubikey --generate --pin-policy $pin_policy --touch-policy $touch_policy"; rc=$?
+  run "age-plugin-yubikey --generate --serial $serial --pin-policy $pin_policy --touch-policy $touch_policy"; rc=$?
   [ "$rc" = 100 ] && return 0
   [ "$rc" = 0 ] || { err "age-plugin-yubikey --generate failed (exit $rc): no identity was created"; return 1; }
   warn "Copy the printed  age1yubikey1…  recipient into every repo's .sops.yaml as the"
@@ -1393,7 +1427,7 @@ step_shamir() {
 # "fill in to continue" values.
 #
 # Two-mode design. CEREMONY_MODE=prod (default) REFUSES to start the tier-0 payload step while
-# any of the nine PIN fields still holds a recognised dev default. CEREMONY_MODE=dev (only for
+# any of the PIN fields (PIN_FIELDS) still holds a recognised dev default. CEREMONY_MODE=dev (only for
 # the Pico HSM devops path) opts OUT of the guard and warns loudly. The mode is itself logged
 # and the wizard's first prompt asks the operator to type the mode explicitly, so the answer is
 # not "whatever the env happened to be".
@@ -1489,8 +1523,8 @@ check_credential_separation() {
     case "$k" in
       hsm_?_user_pin)  [[ "$v" =~ ^[0-9]{10,15}$ ]] || problems="$problems|$k: a production HSM user PIN is 10-15 digits (a 10-try counter needs a 10-digit PIN; ADR-0002 D15)" ;;
       hsm_?_so_pin)    [[ "$v" =~ ^[0-9A-Fa-f]{16}$ ]] || problems="$problems|$k: a SmartCard-HSM SO PIN is exactly 16 hex digits" ;;
-      yubikey_piv_pin|yubikey_piv_puk) [[ "$v" =~ ^[[:print:]]{6,8}$ ]] || problems="$problems|$k: a YubiKey PIV PIN or PUK is 6-8 characters" ;;
-      yubikey_mgmt_key) [[ "$v" =~ ^[0-9A-Fa-f]{48}$|^[0-9A-Fa-f]{32}$|^[0-9A-Fa-f]{64}$ ]] || problems="$problems|$k: a PIV management key is 32, 48 or 64 hex digits" ;;
+      yubikey_?_piv_pin|yubikey_?_piv_puk) [[ "$v" =~ ^[[:print:]]{6,8}$ ]] || problems="$problems|$k: a YubiKey PIV PIN or PUK is 6-8 characters" ;;
+      yubikey_?_mgmt_key) [[ "$v" =~ ^[0-9A-Fa-f]{48}$|^[0-9A-Fa-f]{32}$|^[0-9A-Fa-f]{64}$ ]] || problems="$problems|$k: a PIV management key is 32, 48 or 64 hex digits" ;;
     esac
     for other in $fields; do
       [[ "$other" > "$k" ]] || continue
@@ -1518,18 +1552,22 @@ check_credential_separation() {
 #   always generated, never shown: HSM SO-PINs (16 hex), YubiKey PUK (8 digits), management key
 #     (48 hex). They exist for recovery and reach only the age-encrypted tier-0 payload, which any
 #     4 of the 6 shares open.
-#   generated by default, or typed: the three day-to-day PINs (HSM user PINs, YubiKey PIN). A
+#   generated by default, or typed: the day-to-day PINs (every HSM user PIN and YubiKey PIN). A
 #     generated one is shown ONCE on the terminal, written down by hand (ADR-0002 D12), then the
 #     screen is cleared and it is typed back from the paper.
 # Three HSMs (ADR-0002 D17: two operational + a spare, or three operational; either way three
-# credential sets) and one YubiKey. Every list of credentials in this file is one of these two.
+# credential sets) and three YubiKeys. Every list of credentials in this file comes from these two.
 HSMS="a b c"
-# YubiKeys: the fleet is three as well (2 operational + a spare, or 3 operational). Step 0 still
-# holds ONE YubiKey credential set; per-device YubiKey credentials are the next change, which
-# extends this list. Everything that lists YubiKeys (the PIN card) follows it.
-YUBIKEYS="a"
-PIN_FIELDS="hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin hsm_c_user_pin hsm_c_so_pin yubikey_piv_pin yubikey_piv_puk yubikey_mgmt_key"
-DAY_PINS="hsm_a_user_pin hsm_b_user_pin hsm_c_user_pin yubikey_piv_pin"
+# YubiKeys: three as well (owner, 2026-09-29: 2 operational + a spare, or 3 operational), each with
+# its OWN PIN, PUK and management key. step_yubikey_ops gives each physical token (by serial) the
+# next free set, A then B then C.
+YUBIKEYS="a b c"
+declare -gA YK_SET_OF=()   # YubiKey serial -> its credential set letter, for this run
+PIN_FIELDS="$(for h in $HSMS; do printf 'hsm_%s_user_pin hsm_%s_so_pin ' "$h" "$h"; done
+  for y in $YUBIKEYS; do printf 'yubikey_%s_piv_pin yubikey_%s_piv_puk yubikey_%s_mgmt_key ' "$y" "$y" "$y"; done)"
+PIN_FIELDS="${PIN_FIELDS% }"
+DAY_PINS="$(for h in $HSMS; do printf 'hsm_%s_user_pin ' "$h"; done; for y in $YUBIKEYS; do printf 'yubikey_%s_piv_pin ' "$y"; done)"
+DAY_PINS="${DAY_PINS% }"
 gen_secret() {   # $1 = digits:N | hex:N
   python3 -c 'import secrets,sys
 kind,n=sys.argv[1].split(":"); n=int(n)
@@ -1564,10 +1602,12 @@ generate_pins() {
   fi
   local -A val
   local h; for h in $HSMS; do val[hsm_${h}_so_pin]="$(gen_secret hex:16)"; done
-  val[yubikey_piv_puk]="$(gen_secret digits:8)"; val[yubikey_mgmt_key]="$(gen_secret hex:48)"
-  info "Generated: the three HSM SO-PINs, the YubiKey PUK and management key. They are NOT shown: they go"
+  local y; for y in $YUBIKEYS; do
+    val[yubikey_${y}_piv_puk]="$(gen_secret digits:8)"; val[yubikey_${y}_mgmt_key]="$(gen_secret hex:48)"
+  done
+  info "Generated: every HSM SO-PIN and every YubiKey PUK and management key. They are NOT shown: they go"
   info "only into the encrypted tier-0 payload (any 4 of the 6 shares open it)."
-  local a; read -r -p "   type the four day-to-day PINs (HSM A, B, C and the YubiKey) yourself instead of generating them? [y/N] " a <"$tty"
+  local a; read -r -p "   type the $(wc -w <<< "$DAY_PINS") day-to-day PINs (every HSM and every YubiKey) yourself instead of generating them? [y/N] " a <"$tty"
   if [ "$a" = y ] || [ "$a" = Y ]; then
     typed_day=1
     for k in $DAY_PINS; do
@@ -1577,7 +1617,7 @@ generate_pins() {
         [ "$v" = "$v2" ] || { err "the two entries differ — again."; continue; }
         case "$k" in
           hsm_?_user_pin) [[ "$v" =~ ^[0-9]{10,15}$ ]] || { err "an HSM user PIN is 10-15 digits (10 tries need 10 digits) — again."; continue; } ;;
-          yubikey_piv_pin) [[ "$v" =~ ^[0-9]{6,8}$ ]] || { err "a YubiKey PIN is 6-8 digits — again."; continue; } ;;
+          yubikey_?_piv_pin) [[ "$v" =~ ^[0-9]{6,8}$ ]] || { err "a YubiKey PIN is 6-8 digits — again."; continue; } ;;
         esac
         val[$k]="$v"; break
       done
@@ -1587,7 +1627,7 @@ generate_pins() {
     # HSM user PINs: 10 digits, for the production 10-try counter (ADR-0002 D15, PLAN.md 1.3). A
     # YubiKey PIN is at most 8 characters.
     for h in $HSMS; do val[hsm_${h}_user_pin]="$(gen_secret digits:10)"; done
-    val[yubikey_piv_pin]="$(gen_secret digits:8)"
+    for y in $YUBIKEYS; do val[yubikey_${y}_piv_pin]="$(gen_secret digits:8)"; done
   fi
   ( umask 077
     { echo "# generated by ceremony.sh step 0 ($(date -u +%FT%TZ)); RAM-only workdir; never echoed"
@@ -1618,7 +1658,7 @@ generate_pins() {
 step_set_pins() {
   b "Step 0 — set HSM PIN defaults from a file"
   info "Mode: $CEREMONY_MODE"
-  info "Tier-0 payload has nine PIN fields. In DEV mode they hold the pico-hsm-tool docs'"
+  info "Tier-0 payload has $(wc -w <<< "$PIN_FIELDS") PIN fields. In DEV mode they hold the pico-hsm-tool docs'"
   info "example values. In PROD mode the ceremony refuses to start the tier-0 payload step while"
   info "any of them still holds a recognised dev default, so this step loads fresh values from a"
   info "file. The file is RAM-only (workdir on tmpfs); no PIN is read from disk after the wizard"
@@ -1632,6 +1672,7 @@ step_set_pins() {
     fi
     if [ "$how" != e ] && [ "$how" != E ]; then
       generate_pins "$pfile" || return 1
+      state_pins_generated_this_run=1
     fi
   fi
   if [ ! -s "$pfile" ]; then
@@ -1639,8 +1680,8 @@ step_set_pins() {
 # HSM PIN defaults — one line per field, format: KEY=value
 # Pin file is read once at step 0; the wizard consumes it and never echoes the values.
 # Pin fields the tier-0 payload step reads:
-#   hsm_a_user_pin, hsm_a_so_pin, hsm_b_user_pin, hsm_b_so_pin, hsm_c_user_pin, hsm_c_so_pin,
-#   yubikey_piv_pin, yubikey_piv_puk, yubikey_mgmt_key
+#   hsm_{a,b,c}_user_pin, hsm_{a,b,c}_so_pin,
+#   yubikey_{a,b,c}_piv_pin, yubikey_{a,b,c}_piv_puk, yubikey_{a,b,c}_mgmt_key
 # HSM user PINs are 10-15 digits (a 10-try counter), SO-PINs exactly 16 hex digits.
   #
   # DEVICES A, B AND C ARE THE THREE PRODUCTION NITROKEYS (ADR-0002 D17). The staging Pico is NOT
@@ -1658,9 +1699,9 @@ EOF
   # the app tier or any subprocess beyond the tier-0 payload step.
   failing_keys=""
   while IFS='=' read -r k v; do
-    case "$k" in
-      hsm_a_user_pin|hsm_a_so_pin|hsm_b_user_pin|hsm_b_so_pin|hsm_c_user_pin|hsm_c_so_pin|\
-      yubikey_piv_pin|yubikey_piv_puk|yubikey_mgmt_key)
+    # Only the names in PIN_FIELDS are ever assigned (the eval is over a known name, never input).
+    case " $PIN_FIELDS " in
+      *" $k "*)
         fail_ceremony_default_pin "$k" "$v" || failing_keys="$failing_keys $k"
         eval "$k=\$v"
         ;;
@@ -1741,7 +1782,7 @@ step_payload() {
   local plain="$WORK/payload.txt" enc="$WORK/payload.age" qrdir="$WORK/payload-qr"
   if [ ! -s "$plain" ]; then
     # Template with EMPTY values: the operator fills it in the editor, inside the RAM workdir,
-    # so no value ever reaches argv, the shell history, or this script's output. The nine
+    # so no value ever reaches argv, the shell history, or this script's output. The PIN
     # PIN fields are PRE-FILLED from step 0 (the operator's PIN file) so the operator does NOT
     # edit those lines — they are the dev-default footgun, and shipping them to a real Nitrokey by
     # accident is the failure mode this whole step prevents. The operator edits only the four
@@ -1755,19 +1796,12 @@ derivation_wallet_mnemonic_v2:
 funding_wallet_mnemonic_v2:
 ops_age_key:
 API_KEY_HASH_SECRET:
-hsm_a_user_pin: ${hsm_a_user_pin-}
-hsm_a_so_pin: ${hsm_a_so_pin-}
-hsm_b_user_pin: ${hsm_b_user_pin-}
-hsm_b_so_pin: ${hsm_b_so_pin-}
-hsm_c_user_pin: ${hsm_c_user_pin-}
-hsm_c_so_pin: ${hsm_c_so_pin-}
+$(for k in $PIN_FIELDS; do printf '%s: %s\n' "$k" "${!k-}"; done)
+$(for y in $YUBIKEYS; do s=""; for k in "${!YK_SET_OF[@]}"; do [ "${YK_SET_OF[$k]}" = "$y" ] && s="$k"; done; printf 'yubikey_%s_serial: %s\n' "$y" "$s"; done)
 sle4442_psc:
-yubikey_piv_pin: ${yubikey_piv_pin-}
-yubikey_piv_puk: ${yubikey_piv_puk-}
-yubikey_mgmt_key: ${yubikey_mgmt_key-}
 TPL
     chmod 600 "$plain"
-    info "Template written to $plain (RAM only). The nine PIN fields are pre-populated"
+    info "Template written to $plain (RAM only). The $(wc -w <<< "$PIN_FIELDS") PIN fields are pre-populated"
     info "from step 0. Fill in the four recovery-root lines above the PIN block:"
     info "  derivation_wallet_mnemonic_v2, funding_wallet_mnemonic_v2, ops_age_key, API_KEY_HASH_SECRET"
     show "\${EDITOR:-nano} '$plain'"
