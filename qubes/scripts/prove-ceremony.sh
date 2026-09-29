@@ -233,7 +233,6 @@ fi
 say ""; say "PROOF 6 — secret hygiene"
 ALL="$hsm_out"
 if grep -Eq "AGE-SECRET-KEY-1[A-Z0-9]{20,}|$BG" <<< "$ALL"; then no "a secret leaked to stdout"; else ok "no secret value printed by the steps"; fi
-secret_pngs=$(ls "$PROOF"/*.png 2>/dev/null | wc -l | tr -d ' ')
 
 # ---- PROOF 7: workdir shred --------------------------------------------------
 say ""; say "PROOF 7 — RAM workdir shredded"
