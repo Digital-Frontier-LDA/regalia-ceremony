@@ -309,7 +309,9 @@ AUTO_QUEUE="vault-usb"
 setup_usb_queue() {
   command -v lpinfo >/dev/null 2>&1 && command -v lpadmin >/dev/null 2>&1 || return 1
   local devs uri mm model ppd
-  devs="$(sudo -n lpinfo -l -v 2>/dev/null | awk '
+  # C locale: lpinfo's long form is translated ("Gerät: URI = …"). Only the usb backend is run
+  # (the network discovery backends never start); class and scheme are still checked below.
+  devs="$(sudo -n env LC_ALL=C lpinfo --include-schemes usb -l -v 2>/dev/null | awk '
       /^Device: uri = /{uri=$4; next}
       /^[ \t]+class = /{cls=$3; next}
       /^[ \t]+make-and-model = /{sub(/^[ \t]+make-and-model = /,""); if (cls=="direct" && uri ~ /^usb:\/\//) print uri "\t" $0}')"
@@ -318,11 +320,19 @@ setup_usb_queue() {
   uri="$(head -1 <<< "$devs" | cut -f1)"; mm="$(head -1 <<< "$devs" | cut -f2)"
   # The URI and the driver name come from the device and the driver files; they reach lpadmin
   # as plain arguments (no eval), and must still look like what they claim to be.
-  [[ "$uri" =~ ^usb://[A-Za-z0-9%/?=._\&+-]+$ ]] || { warn "odd USB printer URI '$uri' — not using it"; return 1; }
-  model="${mm#* }"; model="${model% series}"          # "Brother DCP-L2550DW series" -> "DCP-L2550DW"
-  ppd="$(sudo -n lpinfo --make-and-model "$mm" -m 2>/dev/null \
-        | grep -vE '^(everywhere|driverless)' | grep -F -- "$model" | head -1 | cut -d' ' -f1)"
-  [ -n "$ppd" ] || { warn "found '$mm' on USB, but no installed driver lists it — create a queue by hand (lpadmin)"; return 1; }
+  [[ "$uri" =~ ^usb://[A-Za-z0-9%/?=._\&+-]+$ ]] || { warn "odd USB printer URI — not using it"; return 1; }
+  # make-and-model is the device's own IEEE-1284 text and is shown to the operator: plain
+  # characters only, so a device cannot send terminal escapes to rewrite the confirm prompt.
+  [[ "$mm" =~ ^[A-Za-z0-9][A-Za-z0-9\ ._+/()-]*$ ]] || { warn "odd printer make-and-model — not using it"; return 1; }
+  model="${mm#* }"
+  [ -n "$model" ] && [ "$model" != "$mm" ] || { warn "printer make-and-model '$mm' has no model name — create a queue by hand"; return 1; }
+  # CUPS returns drivers whose make-and-model CONTAINS "$mm", best first. Keep only one that
+  # names exactly this printer — "$mm" then "," / space / end — so "HL-12" never takes HL-1200's.
+  ppd="$(sudo -n env LC_ALL=C lpinfo --exclude-schemes everywhere,driverless --make-and-model "$mm" -m 2>/dev/null \
+        | awk -v mm="$mm" '{ name=$1; rest=substr($0, length($1)+2)
+                             if (index(rest, mm) == 1) { c=substr(rest, length(mm)+1, 1)
+                               if (c == "" || c == "," || c == " ") { print name; exit } } }')"
+  [ -n "$ppd" ] || { warn "found '$mm' on USB, but no installed driver names it exactly — create a queue by hand (lpadmin)"; return 1; }
   [[ "$ppd" =~ ^[A-Za-z0-9:/._+-]+$ ]] || { warn "odd driver name '$ppd' — not using it"; return 1; }
   info "USB printer: $mm"
   info "     device: $uri"
@@ -339,12 +349,17 @@ pick_printer() {
   warn "After printing, power-cycle the printer to clear its page memory. The CUPS"
   warn "spool lives in this disposable qube and dies when you power it off."
   if ! command -v lpstat >/dev/null 2>&1; then warn "CUPS (lp/lpstat) not installed; skipping print steps"; return 1; fi
-  local queues; queues="$(lpstat -p 2>/dev/null || true)"
-  if [ -z "$queues" ] && setup_usb_queue; then queues="$(lpstat -p 2>/dev/null || true)"; fi
-  info "Detected print queues:"; sed 's/^/     /' <<< "${queues:-(none)}"
-  if [ -n "$queues" ] && [ "$(wc -l <<< "$queues")" = 1 ]; then info "(only one: press Enter to use it)"; fi
-  read -r -p "   printer queue name (blank = skip printing): " PRINTER
-  if [ -z "$PRINTER" ] && [ -n "$queues" ] && [ "$(wc -l <<< "$queues")" = 1 ]; then PRINTER="$(awk '{print $2}' <<< "$queues")"; fi
+  # Queue names from "printer NAME …" lines only: lpstat -p adds indented status lines.
+  local names only=""; names="$(LC_ALL=C lpstat -p 2>/dev/null | awk '/^printer /{print $2}' || true)"
+  if [ -z "$names" ] && setup_usb_queue; then names="$(LC_ALL=C lpstat -p 2>/dev/null | awk '/^printer /{print $2}' || true)"; fi
+  info "Detected print queues:"; sed 's/^/     /' <<< "${names:-(none)}"
+  if [ -n "$names" ] && [ "$(wc -l <<< "$names")" = 1 ]; then only="$names"; fi
+  if [ -n "$only" ]; then
+    read -r -p "   printer queue name (Enter = $only, - = skip printing): " PRINTER
+    case "$PRINTER" in "") PRINTER="$only";; -) PRINTER="";; esac
+  else
+    read -r -p "   printer queue name (blank = skip printing): " PRINTER
+  fi
   [ -n "$PRINTER" ] || { warn "no printer chosen; paper steps will only write files for you to print manually"; return 1; }
   # the queue name is later embedded in an lp command; restrict it to CUPS-legal
   # characters so it can't inject shell metacharacters.

@@ -18,21 +18,23 @@ cat > "$T/bin/lpstat" <<'SH'
 #!/bin/bash
 q="$(cat "$STATE/queue" 2>/dev/null)"
 case "${1:-}" in
-  -p) [ -n "$q" ] && echo "printer $q is idle.  enabled since today";;
+  -p) [ -n "$q" ] && printf 'printer %s is idle.  enabled since today\n\tready to print\n' "$q";;   # real lpstat adds status lines
   -v) [ -n "$q" ] && echo "device for $q: $(cat "$STATE/uri")";;
 esac; exit 0
 SH
 cat > "$T/bin/lpinfo" <<'SH'
 #!/bin/bash
-if [ "$*" = "-l -v" ]; then cat "$STATE/devices"; exit 0; fi
-if [ "${1:-}" = --make-and-model ]; then
-  echo "$2" >> "$STATE/mm-asked"
-  case "$2" in
-    "Brother DCP-L2550DW series")
-      echo "everywhere IPP Everywhere"
-      echo "drv:///brlaser.drv/brl2550d.ppd Brother DCP-L2550DW series, using brlaser v6"
-      echo "drv:///brlaser.drv/brl2560d.ppd Brother DCP-L2560DW series, using brlaser v6";;
-  esac
+[ "${LC_ALL:-}" = C ] || { echo "Gerät: URI = usb://translated"; exit 0; }   # long form is translated
+if [ "$*" = "--include-schemes usb -l -v" ]; then cat "$STATE/devices"; exit 0; fi
+if [ "$1 $2" = "--exclude-schemes everywhere,driverless" ] && [ "$3" = --make-and-model ] && [ "$5" = -m ]; then
+  # Like cups-driverd: every driver whose make-and-model CONTAINS the needle (case-insensitive).
+  echo "$4" >> "$STATE/mm-asked"
+  printf '%s\n' \
+    "drv:///brlaser.drv/brl1200.ppd Brother HL-1200 series, using brlaser v6" \
+    "drv:///brlaser.drv/brl2550d.ppd Brother DCP-L2550DW series, using brlaser v6" \
+    "drv:///brlaser.drv/brl2550x.ppd Brother DCP-L2550DWX series, using brlaser v6" \
+    "drv:///brlaser.drv/brl2560d.ppd Brother DCP-L2560DW series, using brlaser v6" \
+    | grep -iF -- "$4"
 fi; exit 0
 SH
 cat > "$T/bin/lpadmin" <<'SH'
@@ -86,13 +88,33 @@ hdr "only network devices (IPP-over-USB, socket): never offered"
 out="$(drive "$NETWORK" '\n')"
 grep -q "no USB printer detected" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "not offered" || F "a network device was offered: $out"
 
+hdr "a USB URI with shell characters and no space: refused"
+out="$(drive "${BROTHER/serial=U64123A8N123456/serial=a;\`touch_$T/pwned\`}" 'y\n\n')"
+grep -q "odd USB printer URI" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "refused" || F "odd URI accepted: $out"
+
+hdr "a make-and-model with a terminal escape: refused, never printed"
+out="$(drive "${BROTHER/make-and-model = Brother/make-and-model = $(printf '\033]52;c;eA==\a')Brother}" 'y\n\n')"
+grep -q "odd printer make-and-model" <<< "$out" && ! grep -q $'\033]52' <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "refused, escape not echoed" || F "escape passed: $(cat -v <<< "$out")"
+
+hdr "a model that is only a prefix of a driver's (HL-12 vs HL-1200): no driver proposed"
+out="$(drive "${BROTHER//DCP-L2550DW series/HL-12}" 'y\n\n')"
+grep -q "no installed driver names it exactly" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "HL-1200's driver not taken" || F "prefix match accepted: $out"
+
+hdr "a make-and-model with no model name: refused"
+out="$(drive "${BROTHER//Brother DCP-L2550DW series/Brother}" 'y\n\n')"
+grep -q "has no model name" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "refused" || F "vendor-only name accepted: $out"
+
 hdr "a USB URI with shell characters: refused"
 out="$(drive "${BROTHER/serial=U64123A8N123456/serial=\$(touch $T/pwned)}" 'y\n\n')"
 grep -q "odd USB printer URI" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && [ ! -e "$T/pwned" ] && P "refused, nothing run" || F "odd URI accepted: $out"
 
 hdr "a USB printer no installed driver lists: says so, creates nothing"
 out="$(drive "${BROTHER//DCP-L2550DW/HL-9999X}" 'y\n\n')"
-grep -q "no installed driver lists it" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "reported" || F "unsupported model not reported: $out"
+grep -q "no installed driver names it exactly" <<< "$out" && [ ! -e "$T/state/lpadmin-args" ] && P "reported" || F "unsupported model not reported: $out"
+
+hdr "one queue (with a status line): '-' skips printing"
+out="$(drive "$BROTHER" 'y\n-\n')"
+[ -e "$T/state/lpadmin-args" ] && grep -q "^PRINTER=$" <<< "$out" && P "queue created, then skipped" || F "'-' did not skip: $(tail -1 <<< "$out")"
 
 hdr "a queue already exists: no setup offered, the existing queue is used"
 rm -rf "$T/state"; mkdir -p "$T/state"; printf '%s\n' "$BROTHER" > "$T/state/devices"; echo mine > "$T/state/queue"; echo 'usb://X/Y' > "$T/state/uri"
