@@ -196,6 +196,14 @@ If you also need the service configuration: the breakglass **age** key is split 
 on the disc understands post-quantum age keys; an older sops may not. (A key split before this
 change starts `AGE-SECRET-KEY-1…` and works the same way.)
 
+## 6b. Keys created after the ceremony
+The sealed cases hold what existed on ceremony day. Keys generated on the HSMs **later** (a release
+signing key, a vault unseal key, a certificate authority) are backed up as **DKEK-wrapped blobs**, kept
+in the operator's private repository and at each site, with a manifest giving each blob's sha256
+and the DKEK check value (KCV). A blob is useless without the DKEK, so it was never secret. To restore
+one: rebuild the DKEK from k shares (above), load it into a card, check the blob's sha256 against the
+manifest, then `sc-hsm-tool --unwrap-key <blob> --key-reference <N>`.
+
 ## 7. After
 - **Rotate**: the seeds were exposed — generate new wallets and move funds again per the plan.
 - **Log it**: record the open in the seal registry's `openings:` list (broken serial → new
