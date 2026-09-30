@@ -354,6 +354,8 @@ say "GO/NO-GO HSM PIN-retry guard (--need hsm must STOP a near-locked HSM before
 say "GO/NO-GO optical write-capability guard (--need drives must STOP a read-only DVD-ROM pair)"
 "$HERE/tests/test-go-nogo-drives-writer.sh" || suite_failed "test-go-nogo-drives-writer.sh"
 
+say "CUSTODY SITES (k-of-n site rules: n-k per region, nobody reaches k, directory holders reach nothing)"
+"$HERE/tests/test-custody-plan-check.sh" || suite_failed "test-custody-plan-check.sh"
 say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"
 "$HERE/tests/test-go-nogo-one-script.sh" || suite_failed "test-go-nogo-one-script.sh"
 
