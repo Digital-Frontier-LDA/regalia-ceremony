@@ -49,6 +49,18 @@ grep -q 'FAIL tech alone reaches 4 sites (1, 2, 3, 4): k is 4' <<< "$(run "$T/a1
   site 1 capital a; site 2 capital; site 3 north c; site 4 north d; site 5 centre e; site 6 centre f; } > "$T/a2.toml"
 grep -q 'FAIL site 2 lists nobody in reach' <<< "$(run "$T/a2.toml")" && P "a site with nobody in reach is a FAIL" || F "empty reach accepted"
 
+hdr "rule 3: the principal may reach k or more (WARN naming the defence), nobody else"
+{ echo 'scheme = "shamir-4-of-6"'; echo 'principal = "boss"'; echo 'directory_holders = ["executor"]'
+  site 1 capital boss; site 2 capital boss tech; site 3 north boss tech; site 4 north boss; site 5 centre boss; site 6 centre boss rel; } > "$T/pr1.toml"
+out="$(run "$T/pr1.toml")"
+grep -q 'WARN boss (the principal) reaches 6 sites (1, 2, 3, 4, 5, 6), k or more by design' <<< "$out" && P "the principal reaching all six is a WARN" || F "principal not a WARN: $out"
+grep -q 'in-person rule' <<< "$out" && P "the WARN names the defence" || F "defence not named"
+[ "$(rc "$T/pr1.toml")" = 0 ] && P "PLAN OK with the principal reaching every site" || F "principal reaching every site failed the plan"
+sed 's/principal = "boss"/principal = "someone-else"/' "$T/pr1.toml" > "$T/pr2.toml"
+grep -q 'FAIL boss alone reaches 6 sites' <<< "$(run "$T/pr2.toml")" && P "the same reach by a non-principal is still a FAIL" || F "non-principal reaching k accepted"
+sed 's/directory_holders = \["executor"\]/directory_holders = ["boss"]/' "$T/pr1.toml" > "$T/pr3.toml"
+grep -q 'FAIL boss holds the directory AND reaches' <<< "$(run "$T/pr3.toml")" && P "the principal holding the directory is still a FAIL (D18)" || F "principal + directory accepted"
+
 hdr "rule 4: the directory holder reaches no site"
 { echo 'scheme = "shamir-4-of-6"'; echo 'directory_holders = ["lawyer"]'
   site 1 capital a; site 2 capital lawyer; site 3 north c; site 4 north d; site 5 centre e; site 6 centre f; } > "$T/d1.toml"

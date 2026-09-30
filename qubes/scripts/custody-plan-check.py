@@ -11,7 +11,8 @@ are, so keep the real one private (next to the directory, not in a public reposi
 
   1. exactly n sites for a k-of-n scheme (2 <= k <= n <= 16);
   2. at most n - k sites in any one region or hazard zone, so losing it still leaves k;
-  3. nobody (a person or an organisation) can reach k sites on their own;
+  3. nobody (a person or an organisation) can reach k sites on their own, except the principal:
+     it is their secret, so reaching k is a WARN naming the defence (the holders' in-person rule);
   4. whoever holds the directory (who holds which case, where) reaches no site;
   5. any two actors who together reach k are reported, so that pair is a deliberate choice (pairs
      with the principal are not: in life every holder hands them a share anyway).
@@ -43,13 +44,13 @@ id = 2
 kind = "datacenter lock box"
 region = "capital"
 zones = ["capital-fault"]
-reach = ["technical-director", "datacenter-a-staff"]
+reach = ["principal", "technical-director", "datacenter-a-staff"]
 
 [[site]]
 id = 3
 kind = "datacenter lock box"
 region = "north"
-reach = ["technical-director", "datacenter-b-staff"]
+reach = ["principal", "technical-director", "datacenter-b-staff"]
 
 [[site]]
 id = 4
@@ -65,9 +66,9 @@ reach = ["principal", "bank-centre"]
 
 [[site]]
 id = 6
-kind = "trusted relative"
+kind = "the principal's trusted relative"
 region = "centre"
-reach = ["relative"]
+reach = ["principal", "relative"]
 """
 
 
@@ -136,9 +137,15 @@ def check(plan):
             out.append(("FAIL", "site %s lists nobody in reach: someone opens every site; name them" % sid))
         for a in actors:
             reach.setdefault(str(a), set()).add(sid)
+    principal = str(plan.get("principal") or "")
     for a in sorted(reach):
         got = sorted(reach[a])
-        if len(got) >= k:
+        if len(got) >= k and a == principal:
+            # It is their secret: in life they may reach every site. Coercing them is the risk that
+            # remains, and the defence is the holders' in-person rule with the shared question.
+            out.append(("WARN", "%s (the principal) reaches %d sites (%s), k or more by design: the defence against "
+                        "coercing them is the holders' in-person rule and the shared question" % (a, len(got), ", ".join(got))))
+        elif len(got) >= k:
             out.append(("FAIL", "%s alone reaches %d sites (%s): k is %d" % (a, len(got), ", ".join(got), k)))
         else:
             out.append(("OK", "%s reaches %d site(s) (%s), below k" % (a, len(got), ", ".join(got))))
@@ -156,7 +163,6 @@ def check(plan):
 
     # Rule 5: pairs that together reach k. The principal is left out: in life every holder hands them
     # a share anyway, so a pair with the principal adds nothing. Alone they are still rule 3.
-    principal = str(plan.get("principal") or "")
     if principal:
         out.append(("OK", "%s is the principal: pairs with them are not listed (they may recover with any holder)" % principal))
     for a, b in itertools.combinations(sorted(x for x in reach if x != principal), 2):
@@ -245,7 +251,7 @@ def interactive(path):
                       % (area, len(regions[area]), k))
         for actor in who:
             reach.setdefault(actor, set()).add(i)
-            if len(reach[actor]) >= k:
+            if len(reach[actor]) >= k and actor != principal:
                 print("   \033[31mFAIL\033[0m %s now reaches %d sites: k is %d." % (actor, len(reach[actor]), k))
             if actor in holders:
                 print("   \033[31mFAIL\033[0m %s keeps the directory and now reaches a site." % actor)

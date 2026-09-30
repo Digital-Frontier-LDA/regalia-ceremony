@@ -26,6 +26,11 @@ Keep the filled-in file private, next to the directory. Every line reads OK, WAR
 3. **Nobody reaches k sites alone.** List everyone who can open each site *without asking its holder*:
    the holder, a datacenter's staff, a bank, whoever has the key. An organisation counts as one actor.
    If one actor reaches k, coercing (or compromising) that one actor recovers the secret.
+   **The principal is the exception:** it is their secret, and in life they may reach every site
+   (datacenters, banks, their own relative). The checker reports that as WARN, not FAIL, because
+   coercing the principal is a risk no site choice removes; the defence is the holders' rule: a share
+   is handed over only in person, after the shared question, and nothing on a wrong answer or any
+   sign of pressure.
 4. **Whoever holds the directory reaches no site.** Otherwise one person knows where every case is and
    already holds one.
 5. **Pairs that together reach k are reported** as WARN, so each such pair is a choice you made on
