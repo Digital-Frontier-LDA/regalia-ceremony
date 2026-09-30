@@ -16,6 +16,9 @@ are, so keep the real one private (next to the directory, not in a public reposi
   4. whoever holds the directory (who holds which case, where) reaches no site;
   5. any two actors who together reach k are reported, so that pair is a deliberate choice (pairs
      with the principal are not: in life every holder hands them a share anyway).
+  6. traces: sites marked logged (a bank, a datacenter) record every opening. If k sites could be
+     opened without any log, that is a WARN; otherwise the report says how many logged sites any
+     recovery must touch.
 
 Every line reads OK, WARN or FAIL; the last line is PLAN OK or PLAN FAILED (exit 1).
 """
@@ -43,6 +46,7 @@ reach = ["principal"]            # everyone who can open it without asking a hol
 id = 2
 kind = "datacenter lock box"
 region = "capital"
+logged = true                    # every opening leaves a record
 zones = ["capital-fault"]
 reach = ["principal", "technical-director", "datacenter-a-staff"]
 
@@ -50,18 +54,21 @@ reach = ["principal", "technical-director", "datacenter-a-staff"]
 id = 3
 kind = "datacenter lock box"
 region = "north"
+logged = true
 reach = ["principal", "technical-director", "datacenter-b-staff"]
 
 [[site]]
 id = 4
 kind = "bank box, company name"
 region = "north"
+logged = true
 reach = ["principal", "bank-north"]
 
 [[site]]
 id = 5
 kind = "bank box, company name"
 region = "centre"
+logged = true
 reach = ["principal", "bank-centre"]
 
 [[site]]
@@ -170,6 +177,15 @@ def check(plan):
         if len(both) >= k and len(reach[a]) < k and len(reach[b]) < k:
             out.append(("WARN", "%s and %s together reach %d sites (%s): make that pair a deliberate choice"
                         % (a, b, len(both), ", ".join(sorted(both)))))
+
+    # Rule 6: traces. A bank or a datacenter logs every opening; a home safe or a relative does not.
+    unlogged = sorted(str(x.get("id")) for x in sites if x.get("logged") is not True)
+    if len(unlogged) >= k:
+        out.append(("WARN", "%d sites keep no access log (%s): k of them could be opened without a trace; "
+                    "mark logged = true where a bank or datacenter records each opening" % (len(unlogged), ", ".join(unlogged))))
+    else:
+        out.append(("OK", "any recovery touches at least %d logged site(s): only %d site(s) (%s) open without a trace"
+                    % (k - len(unlogged), len(unlogged), ", ".join(unlogged) or "none")))
     return out
 
 
@@ -205,6 +221,7 @@ def to_toml(plan):
         if site.get("zones"):
             lines.append("zones = [%s]" % ", ".join(toml_str(z) for z in site["zones"]))
         lines.append("reach = [%s]" % ", ".join(toml_str(r) for r in site["reach"]))
+        lines.append("logged = %s" % ("true" if site.get("logged") else "false"))
         if site.get("station"):
             lines.append("station = %s" % toml_str(site["station"]))
     return "\n".join(lines) + "\n"
@@ -240,9 +257,10 @@ def interactive(path):
         who = []
         while not who:
             who = names(ask("   who can open it (roles, comma-separated)"))
+        logged = ask("   does it keep a log of every opening, like a bank or a datacenter? (y/N)", "n").lower().startswith("y")
         station = ask("   nearest station or road, to plan a collection trip (optional)", "")
         site = {"id": i, "kind": kind or "site %d" % i, "region": region or "unknown",
-                "zones": zones, "reach": who, "station": station}
+                "zones": zones, "reach": who, "logged": logged, "station": station}
         sites.append(site)
         for area in [site["region"]] + zones:
             regions.setdefault(area, []).append(i)

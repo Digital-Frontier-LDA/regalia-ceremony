@@ -61,6 +61,20 @@ grep -q 'FAIL boss alone reaches 6 sites' <<< "$(run "$T/pr2.toml")" && P "the s
 sed 's/directory_holders = \["executor"\]/directory_holders = ["boss"]/' "$T/pr1.toml" > "$T/pr3.toml"
 grep -q 'FAIL boss holds the directory AND reaches' <<< "$(run "$T/pr3.toml")" && P "the principal holding the directory is still a FAIL (D18)" || F "principal + directory accepted"
 
+hdr "rule 6: traces — logged sites (banks, datacenters) mean no silent recovery"
+logged(){ sed "/^\[\[site\]\]/,+1{/^id = \($1\)$/a logged = true
+}" "$2"; }
+{ echo 'scheme = "shamir-4-of-6"'; echo 'directory_holders = ["executor"]'
+  site 1 capital a; site 2 capital b; site 3 north c; site 4 north d; site 5 centre e; site 6 centre f; } > "$T/l0.toml"
+grep -q 'WARN 6 sites keep no access log (1, 2, 3, 4, 5, 6): k of them could be opened without a trace' <<< "$(run "$T/l0.toml")" \
+  && P "no logged site: a silent recovery is a WARN" || F "silent recovery not reported: $(run "$T/l0.toml")"
+logged '2\|3\|4\|5' "$T/l0.toml" > "$T/l1.toml"
+grep -q 'OK   any recovery touches at least 2 logged site(s): only 2 site(s) (1, 6) open without a trace' <<< "$(run "$T/l1.toml")" \
+  && P "four logged of six: every recovery leaves at least 2 traces" || F "trace count wrong: $(run "$T/l1.toml" | grep -i trace)"
+logged '2\|3' "$T/l0.toml" > "$T/l2.toml"
+grep -q 'WARN 4 sites keep no access log (1, 4, 5, 6)' <<< "$(run "$T/l2.toml")" && P "two logged of six (k=4): still a WARN" || F "two logged not reported: $(run "$T/l2.toml" | grep -i log)"
+[ "$(rc "$T/l0.toml")" = 0 ] && P "a trace WARN alone keeps PLAN OK" || F "trace WARN failed the plan"
+
 hdr "rule 4: the directory holder reaches no site"
 { echo 'scheme = "shamir-4-of-6"'; echo 'directory_holders = ["lawyer"]'
   site 1 capital a; site 2 capital lawyer; site 3 north c; site 4 north d; site 5 centre e; site 6 centre f; } > "$T/d1.toml"
@@ -89,13 +103,14 @@ printf 'scheme = [broken\n' > "$T/bad.toml"
 [ "$(rc "$T/bad.toml")" = 2 ] && P "unreadable TOML exits 2" || F "bad TOML exit $(rc "$T/bad.toml")"
 
 hdr "guided --new: asks, checks as it goes, writes a private file that re-checks"
-ans='4\n6\n\nexecutor\nsafe\ncapital\n\nprincipal\n\nbox\ncapital\n\ntech\n\nbox\ncapital\n\ntech\n\nbank\nnorth\n\nprincipal, bank\n\nbank\ncentre\n\nbank2\n\nrelative\ncentre\n\nrelative\nCoimbra\n'
+ans='4\n6\n\nexecutor\nsafe\ncapital\n\nprincipal\nn\n\nbox\ncapital\n\ntech\ny\n\nbox\ncapital\n\ntech\ny\n\nbank\nnorth\n\nprincipal, bank\ny\n\nbank\ncentre\n\nbank2\ny\n\nrelative\ncentre\n\nrelative\nn\nCoimbra\n'
 out="$(printf "$ans" | python3 "$CK" --new "$T/new.toml" 2>&1 | sed $'s/\033\\[[0-9;]*m//g')"
 grep -q 'FAIL capital now holds 3 sites' <<< "$out" && P "warns the moment a region goes over n-k" || F "no live region warning: $out"
 grep -q '^PLAN FAILED' <<< "$out" && P "ends in the full check (PLAN FAILED here)" || F "no final check"
 [ -f "$T/new.toml" ] && [ "$(stat -c %a "$T/new.toml")" = 600 ] && P "writes the plan, mode 0600" || F "plan not written 0600"
 [ "$(rc "$T/new.toml")" = 1 ] && P "the written plan re-checks the same (exit 1)" || F "written plan re-check differs"
 grep -q 'station = "Coimbra"' "$T/new.toml" && P "the station is recorded" || F "station missing"
+[ "$(grep -c '^logged = true' "$T/new.toml")" = 4 ] && P "the four logged answers are recorded" || F "logged flags: $(grep '^logged' "$T/new.toml" | tr '\n' ' ')"
 printf '4\n6\n' | python3 "$CK" --new "$T/new.toml" >/dev/null 2>&1; [ $? = 2 ] && P "refuses to overwrite an existing plan" || F "overwrote a plan"
 printf '4\n6\n' | python3 "$CK" --new "$T/short.toml" >/dev/null 2>&1; e=$?
 [ "$e" = 2 ] && [ ! -e "$T/short.toml" ] && P "input ending early writes nothing (exit 2)" || F "partial input: exit $e, file $(ls "$T/short.toml" 2>&1)"
