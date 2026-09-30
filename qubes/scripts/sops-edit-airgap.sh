@@ -14,7 +14,7 @@ command -v sops >/dev/null || { echo "sops not found"; exit 2; }
 # tmpfs scratch for sops' decrypted temp file. Without a RAM-backed TMPDIR, `sops edit`
 # writes the DECRYPTED vault (custodial seeds) to a disk-backed temp file — on a Qubes
 # AppVM that is the persistent private volume, so the plaintext survives shutdown. Fail
-# CLOSED, exactly like ceremony.sh init_work and preflight.sh: refuse rather than fall
+# CLOSED, exactly like ceremony.sh init_work and go-nogo.sh: refuse rather than fall
 # through to `exec sops edit`. Tests/sims opt in to a non-tmpfs TMPDIR via CEREMONY_ALLOW_NONTMPFS=1.
 mounts_file="${SOPS_EDIT_MOUNTS_FILE:-/proc/mounts}"
 if grep -qs "[[:space:]]/dev/shm[[:space:]]tmpfs[[:space:]]" "$mounts_file" 2>/dev/null; then

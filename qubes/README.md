@@ -118,10 +118,10 @@ qvm-run --dispvm=vault xterm &                  # dom0; in the xterm: /opt/vault
 qvm-ls --class DispVM --running                  # its name, for qvm-usb / qvm-block attach
 ```
 
-Before each real ceremony, run **both** preflights: `preflight-dom0.sh <vault>` in **dom0**
-(asserts netvm/template/`maxmem 0`/DispVM/dom0-swap) and `/opt/vault-ceremony/preflight.sh`
+Before each real ceremony, run **both** checks: `preflight-dom0.sh <vault>` in **dom0**
+(asserts netvm/template/`maxmem 0`/DispVM/dom0-swap) and `/opt/vault-ceremony/go-nogo.sh`
 **inside** the qube (air-gap, swap off, `/dev/shm` tmpfs, no history/core-dumps, USB-only
-printer). The wizard also **fails closed** if `/dev/shm` isn't tmpfs and **refuses to run if a
+printer, every tool's self-test, the hardware this ceremony needs). The wizard also **fails closed** if `/dev/shm` isn't tmpfs and **refuses to run if a
 stubbed tool is on PATH** (guard against the test harnesses). Edit SOPS secrets with
 `sops-edit-airgap.sh` so the editor's temp/swap/undo files stay in tmpfs.
 The in-guest preflight automatically derives the execution profile from QubesDB or
@@ -149,7 +149,7 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 # recovery card and the go-nogo supply counts follow it; anything else is refused before a split.
 
 # or run the pieces by hand (it just orchestrates these):
-/opt/vault-ceremony/preflight.sh             # tools + reader + printer + drives + air-gap (fails closed)
+/opt/vault-ceremony/go-nogo.sh               # air-gap + tools + self-tests + reader/printer/drives (fails closed)
 #   age-plugin-yubikey --generate --pin-policy once --touch-policy never  # unattended ops identity
 #   # Touch is always never: the YubiKey runs in a remote KMS, PIN-only (ADR-0002). Other values are refused.
 #   sc-hsm-tool --create-dkek-share dkek.pbe --pwd-shares-threshold 4 --pwd-shares-total 6
@@ -280,7 +280,7 @@ sealing.
 | ceremony hardware emulators (`emulator/tests/route-coverage.sh` + the Python emulator models) | ✅ every hardware route has a faithful emulator and is driven end-to-end in a Debian image |
 
 ## Hardening notes
-- Confirm `vault` has **no netvm** every time — `preflight.sh` fails closed if it sees a route.
+- Confirm `vault` has **no netvm** every time — `go-nogo.sh` fails closed if it sees a route.
 - Keep the *template* offline too once built (`qvm-prefs vault-tools netvm ''`) and only
   re-attach net for deliberate tool updates.
 - Do reconstruction/drills here as well: plain Shamir reassembles the secret in RAM, so it

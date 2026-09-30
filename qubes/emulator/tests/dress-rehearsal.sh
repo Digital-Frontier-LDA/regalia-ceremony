@@ -86,8 +86,8 @@ cleanup(){ [ -n "${WORK:-}" ] && find "$WORK" -type f -exec shred -u {} + 2>/dev
 CAP="$(mktemp)"   # capture all wizard output for the leak scan
 
 # =====================================================================================
-hdr "WIZARD PREFLIGHT (real preflight.sh; only air-gap faked)"
-if "$SCRIPTS/preflight.sh" >>"$CAP" 2>&1; then P "preflight.sh exits 0 (GO)"; else F "preflight.sh failed — see below"; tail -20 "$CAP" | sed 's/^/      /'; fi
+hdr "WIZARD PREFLIGHT (real go-nogo.sh --env-only; only air-gap faked)"
+if "$SCRIPTS/go-nogo.sh" --env-only >>"$CAP" 2>&1; then P "go-nogo.sh --env-only exits 0 (GO)"; else F "go-nogo.sh --env-only failed — see below"; tail -20 "$CAP" | sed 's/^/      /'; fi
 grep -q "PREFLIGHT OK" "$CAP" && P "preflight reports PREFLIGHT OK" || F "no PREFLIGHT OK"
 
 init_work

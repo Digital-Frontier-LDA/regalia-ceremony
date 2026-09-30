@@ -2,7 +2,7 @@
 # test-printer-network-uri.sh — the "USB-only printer" GO gate must FAIL CLOSED for ANY
 # non-local device-uri, not just the handful in a blocklist. A leftover CUPS queue on
 # smb:// or bluetooth:// would send a plaintext Shamir paper share over the wire off the
-# air-gapped vault qube. go-nogo.sh and preflight.sh must agree with ceremony.sh's actual
+# air-gapped vault qube. go-nogo.sh must agree with ceremony.sh's actual
 # print path, which ALLOWLISTS only usb:// (plus local file:/cups-pdf:/absolute-path).
 # Runs natively, no daemons: we fake `lpstat` (a queue with a chosen device-uri) and `ip`
 # (air-gap probe), and assert the gate's verdict. This is the regression guard for the
@@ -11,7 +11,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"
 GN="$SCRIPTS/go-nogo.sh"
-PRE="$SCRIPTS/preflight.sh"
+PRE="$SCRIPTS/go-nogo.sh"
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 
 pass=0; fail=0
@@ -52,7 +52,7 @@ expect_network() {
     F "go-nogo treated $label ($uri) as USB/local — plaintext share would go over the wire"
     echo "$out" | grep -iE 'printer|usb|network' | sed 's/^/        /'
   fi
-  out="$(EMU_PRINTER_URI="$uri" bash "$PRE" 2>&1 || true)"
+  out="$(EMU_PRINTER_URI="$uri" bash "$PRE" --env-only 2>&1 || true)"
   if grep -qi "a NETWORK printer queue exists" <<< "$(echo "$out")" \
      && ! grep -qi "no network printer queues" <<< "$out"; then
     P "preflight flags $label ($uri) as a NETWORK printer"

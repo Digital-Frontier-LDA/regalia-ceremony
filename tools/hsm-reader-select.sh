@@ -24,7 +24,7 @@
 # then reported "serial 'DENK0404144' != pinned 'ESP41D722E2'" and refused. It refused for the
 # right reason about the wrong card.
 #
-# Search the usual locations, the way preflight.sh and nitrokey-qualify.sh already do, so the
+# Search the usual locations, the way go-nogo.sh and nitrokey-qualify.sh already do, so the
 # resolver works on the Linux bench and the macOS one without either having to be told.
 if [ -z "${HSM_PKCS11_MODULE:-}" ]; then
   for _c in /usr/lib/*/opensc-pkcs11.so /usr/lib/opensc-pkcs11.so \

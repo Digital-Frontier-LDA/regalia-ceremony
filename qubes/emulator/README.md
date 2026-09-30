@@ -177,12 +177,14 @@ python3 qubes/emulator/tests/test_sle4442_model.py   # incl. TestSecretLeak
 
 ## Day-of go/no-go gate ([`../scripts/go-nogo.sh`](../scripts/go-nogo.sh))
 
-Run on the air-gapped vault qube immediately before the ceremony — read-only, touches no
-keys. It runs `preflight.sh`, then turns "this device is missing" warnings into **hard
-gates** for exactly the devices this ceremony needs, with capability probes that catch the
-day-of surprises (a reader that can't talk to the card, a YubiKey one wrong PIN from PUK
-lockout, a network printer, a single optical drive), and ends in one **GO / NO-GO** verdict
-plus an operator decision checklist (PINs/PUK/SO-PIN/PSC to confirm, not improvise):
+The one readiness check. Run it on the air-gapped vault qube on the bench and immediately before
+the ceremony — read-only, touches no keys. In one report (every line OK / WARN / FAIL) it checks
+the environment (air-gap, leak controls, tools; `--env-only` stops there, and is what ceremony.sh
+runs), runs every tool's self-test and renders every printed form, then turns "this device is
+missing" warnings into **hard gates** for exactly the devices this ceremony needs, with capability
+probes that catch the day-of surprises (a reader that can't talk to the card, a YubiKey one wrong
+PIN from PUK lockout, a network printer, a read-only DVD drive). With `--need supplies` it asks
+one yes/no question per countable supply. The last line is **GO** or **NO-GO**:
 
 ```bash
 /opt/vault-ceremony/go-nogo.sh --need yubikey,hsm,sle4442,printer,drives

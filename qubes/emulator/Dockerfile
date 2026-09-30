@@ -70,7 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates procps curl \
   && rm -rf /var/lib/apt/lists/*
 
-# --- sops (hash-pinned, same as salt/vault-tools.sls) — preflight.sh checks for it ----
+# --- sops (hash-pinned, same as salt/vault-tools.sls) — go-nogo.sh checks for it ----
 RUN curl -fsSL -o /usr/local/bin/sops \
       https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 \
  && echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /usr/local/bin/sops" | sha256sum -c - \

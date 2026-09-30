@@ -91,7 +91,7 @@ CAP="$(mktemp)"   # everything the wizard prints goes here too, for leak-scannin
 
 # =============================================================================
 hdr "STEP 0 — preflight (air-gap + tools, with stubs)"
-if "$HERE/preflight.sh" >>"$CAP" 2>&1; then P "preflight exits 0 (air-gap OK via ip stub)"; else F "preflight failed"; fi
+if "$HERE/go-nogo.sh" --env-only >>"$CAP" 2>&1; then P "preflight exits 0 (air-gap OK via ip stub)"; else F "preflight failed"; fi
 grep -q "PREFLIGHT OK" "$CAP" && P "preflight reports OK" || F "no PREFLIGHT OK line"
 
 hdr "STEP 1 — YubiKey ops identity"

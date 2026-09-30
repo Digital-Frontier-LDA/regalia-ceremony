@@ -2,7 +2,7 @@
 # test-preflight-checks-the-ceremonys-python.sh — preflight must report on the interpreter the
 # ceremony will actually run, not on whichever python3 was on ITS path.
 #
-# WHY. preflight.sh proves `import mnemonic` and `import shamir_mnemonic` resolve BEFORE keys are
+# WHY. go-nogo.sh proves `import mnemonic` and `import shamir_mnemonic` resolve BEFORE keys are
 # in RAM, precisely so ceremony step 3c — the funding seed's only Option-B backup — cannot fail
 # mid-ceremony with the money exposed. It proved it for its own python3. ceremony.sh runs bare
 # `python3` too, so on the air-gapped image the two coincide (the wheels are installed
@@ -24,15 +24,15 @@ F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 
 hdr "both resolve the interpreter the same way"
-for f in ceremony.sh preflight.sh; do
+for f in ceremony.sh go-nogo.sh; do
   grep -q 'ceremony_python_prefer mnemonic shamir_mnemonic' "$SCRIPTS/$f" \
     && P "$f resolves the ceremony venv for exactly those two modules" \
     || F "$f does not resolve it — it will report on whatever PATH gave"
 done
 
 hdr "preflight resolves BEFORE it checks"
-resolve="$(grep -n 'ceremony_python_prefer' "$SCRIPTS/preflight.sh" | head -1 | cut -d: -f1)"
-check="$(grep -n "import \$m" "$SCRIPTS/preflight.sh" | head -1 | cut -d: -f1)"
+resolve="$(grep -n 'ceremony_python_prefer' "$SCRIPTS/go-nogo.sh" | head -1 | cut -d: -f1)"
+check="$(grep -n "import \$m" "$SCRIPTS/go-nogo.sh" | head -1 | cut -d: -f1)"
 if [ -n "$resolve" ] && [ -n "$check" ] && [ "$resolve" -lt "$check" ]; then
   P "the resolution is at line $resolve, the import check at $check"
 else
@@ -50,12 +50,12 @@ PROBES=()
 cleanup(){ rm -rf "$T"; rm -f ${PROBES[@]+"${PROBES[@]}"}; }
 trap cleanup EXIT INT TERM
 extract(){ sed -n '/^_cp="\$(cd "\$(dirname "\${BASH_SOURCE\[0\]}")\/\.\.\/\.\."/,/^unset _cp$/p' "$1"; }
-for f in ceremony.sh preflight.sh; do
+for f in ceremony.sh go-nogo.sh; do
   extract "$SCRIPTS/$f" > "$T/$f.block"
   [ -s "$T/$f.block" ] || F "could not extract $f's resolution block"
 done
-if [ -s "$T/ceremony.sh.block" ] && [ -s "$T/preflight.sh.block" ]; then
-  if diff -q "$T/ceremony.sh.block" "$T/preflight.sh.block" >/dev/null; then
+if [ -s "$T/ceremony.sh.block" ] && [ -s "$T/go-nogo.sh.block" ]; then
+  if diff -q "$T/ceremony.sh.block" "$T/go-nogo.sh.block" >/dev/null; then
     P "the two resolution blocks are byte-identical, so they cannot drift"
   else
     # Not fatal on its own — what matters is the interpreter they land on.
@@ -78,7 +78,7 @@ if [ -s "$T/ceremony.sh.block" ] && [ -s "$T/preflight.sh.block" ]; then
   probe_preflight="$(mktemp "$SCRIPTS/.probe-preflight.XXXXXX")"
   PROBES+=("$probe_ceremony" "$probe_preflight")
   cat "$T/ceremony.sh.block"  > "$probe_ceremony"
-  cat "$T/preflight.sh.block" > "$probe_preflight"
+  cat "$T/go-nogo.sh.block" > "$probe_preflight"
   a="$(select_with "$probe_ceremony")"
   b="$(select_with "$probe_preflight")"
   rm -f "$probe_ceremony" "$probe_preflight"
@@ -105,7 +105,7 @@ fi
 hdr "a host with no venv still reaches the import check and fails THERE"
 # prefer, not require: the resolution must not abort preflight on a host that has no venv at all,
 # or the message telling the operator to bake the wheel into the image never prints.
-grep -q 'ceremony_python_require' "$SCRIPTS/preflight.sh" \
+grep -q 'ceremony_python_require' "$SCRIPTS/go-nogo.sh" \
   && F "preflight REQUIRES the venv; a host without one never reaches the import check that explains itself" \
   || P "preflight prefers rather than requires, so the import check still speaks"
 

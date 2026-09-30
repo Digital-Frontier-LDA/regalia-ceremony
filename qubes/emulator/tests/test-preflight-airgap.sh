@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # test-preflight-airgap.sh — the air-gap check is the single most important control of the
 # whole ceremony. It must FAIL CLOSED: if the route tool (`ip`/iproute2) is missing or not on
-# PATH, preflight.sh must NOT silently conclude "no default route (air-gapped)". A swallowed
+# PATH, go-nogo.sh must NOT silently conclude "no default route (air-gapped)". A swallowed
 # missing-binary error becoming a false-safe verdict would let a networked qube pass, and
 # go-nogo.sh would inherit a false GO. Runs natively, no daemons needed.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/preflight.sh"
+PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -26,7 +26,7 @@ if PATH="$SBOX" command -v ip >/dev/null 2>&1; then
 fi
 
 hdr "ip/iproute2 MISSING -> air-gap must FAIL CLOSED (no false 'air-gapped' verdict)"
-out="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" 2>&1)"; rc=$?
+out="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" --env-only 2>&1)"; rc=$?
 echo "$out" | grep -iE 'air-gap|ip ' | sed 's/^/     /'
 if grep -qi "no default route (air-gapped)" <<< "$out"; then
   F "preflight reported 'no default route (air-gapped)' while 'ip' was absent — FALSE SAFE"
@@ -42,7 +42,7 @@ fi
 
 hdr "control: with 'ip' present and no default route -> reports air-gapped OK (no over-reject)"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$SBOX/ip"; chmod +x "$SBOX/ip"
-out2="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" 2>&1)"
+out2="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" --env-only 2>&1)"
 if grep -qi "no default route (air-gapped)" <<< "$out2"; then
   P "still reports air-gapped OK when 'ip' exists and shows no default route"
 else

@@ -46,7 +46,7 @@ hdr "go-nogo with every device required -> expect GO"
 out="$("$SCRIPTS/go-nogo.sh" --need yubikey,hsm,sle4442,printer,drives 2>&1)"; rc=$?
 echo "$out" | sed 's/^/   /'
 [ "$rc" = 0 ] && P "verdict is GO (exit 0)" || F "expected GO, got exit $rc"
-grep -q "================  GO" <<< "$out" && P "prints the GO banner" || F "no GO banner"
+grep -q "GO.* — every required check passed" <<< "$out" && P "prints the GO verdict line" || F "no GO verdict line"
 grep -qi "SLE-4442 SELECT" <<< "$out" && P "ran the SLE-4442 memory-card capability probe" || F "no SLE-4442 probe"
 grep -qiE "funding-key HSM .*is present" <<< "$out" && P "saw the funding-key HSM (SmartCard-HSM/akash-funding token)" || F "HSM token not seen"
 grep -qi "PIV PIN retries = 3" <<< "$out" && P "read the YubiKey PIV retry counter" || F "no PIV retry read"

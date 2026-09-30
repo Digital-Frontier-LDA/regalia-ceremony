@@ -1,17 +1,26 @@
 #!/usr/bin/env bash
-# go-nogo.sh — single GO / NO-GO gate to run on the air-gapped vault qube IMMEDIATELY
-# before a ceremony. Read-only; touches NO key material. It runs preflight.sh and then
-# turns the "this hardware is missing" WARNINGS into HARD gates for exactly the devices
-# THIS ceremony needs, plus capability probes that catch the day-of surprises (a reader
-# that can't talk to the card, a YubiKey one wrong PIN from PUK lockout, a network printer,
-# a single optical drive). Ends in one verdict so you never start a key-touching step with
-# a setup that was going to fail three commands in.
+# go-nogo.sh — the one readiness check for the air-gapped vault qube. Read-only; touches NO key
+# material. Run it on the bench and again IMMEDIATELY before a ceremony; it ends in one verdict.
 #
+#   /opt/vault-ceremony/go-nogo.sh                     # everything, hardware advisory
 #   /opt/vault-ceremony/go-nogo.sh --need yubikey,hsm,sle4442,printer,drives,supplies
 #   /opt/vault-ceremony/go-nogo.sh --need printer,drives      # a paper+archive-only run
+#   /opt/vault-ceremony/go-nogo.sh --env-only          # environment only (what ceremony.sh runs)
 #
-# --need takes a comma list of: yubikey hsm sle4442 printer drives supplies. Anything not listed is
-# checked best-effort (warn only). With nothing listed, every probe is advisory.
+# In order:
+#   1. Environment: air-gap, leak controls, execution profile, tools, what is attached.
+#   2. Self-tests: every tool's own --selftest, and each printed form renders. Always a FAIL on
+#      failure: a broken tool is broken whatever this ceremony needs.
+#   3. Hardware: capability probes that catch the day-of surprises (a reader that can't talk to the
+#      card, a YubiKey one wrong PIN from PUK lockout, a network printer, a read-only DVD drive).
+#      These are hard gates only for the devices named in --need; the rest are advisory.
+#   4. Supplies (--need supplies): yes/no questions with a number in each.
+#
+# Every line reads OK, WARN or FAIL; the last line is GO or NO-GO. Any FAIL is a NO-GO.
+#
+# --need takes a comma list of: yubikey hsm sle4442 printer drives supplies.
+# --env-only runs step 1 and ends in PREFLIGHT OK / PREFLIGHT FAILED; ceremony.sh runs it before
+# any secret is in RAM. (This used to be a separate preflight.sh; one script, one verdict.)
 set -uo pipefail
 # The vault-tools image keeps its pinned tools in /opt/vault-bin (sops, shamir, sle4442-manager)
 # and the hash-pinned Python packages in the /opt/vault-ceremony/venv interpreter. /etc/profile.d
@@ -20,14 +29,18 @@ for _d in /opt/vault-bin /opt/vault-ceremony/venv/bin; do
   case ":$PATH:" in *":$_d:"*) ;; *) [ -d "$_d" ] && PATH="$_d:$PATH" ;; esac
 done
 unset _d
-HERE="$(cd "$(dirname "$0")" && pwd)"
+# No dirname: the air-gap tests run this with a PATH holding only a handful of tools.
+_self="${BASH_SOURCE[0]}"; case "$_self" in */*) ;; *) _self="./$_self";; esac
+HERE="$(cd "${_self%/*}" && pwd)"; unset _self
 
 NEED=""
+ENV_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --need) NEED="$2"; shift 2;;
+    --need) NEED="${2:-}"; shift 2 2>/dev/null || shift;;
     --need=*) NEED="${1#--need=}"; shift;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0;;
+    --env-only) ENV_ONLY=1; shift;;
+    -h|--help) sed -n '2,21p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -50,29 +63,254 @@ fi
 needs(){ case ",$NEED," in *",$1,"*) return 0;; *) return 1;; esac; }
 
 stop=0
-ok()   { printf '  \033[32mGO\033[0m   %s\n' "$1"; }
-warn() { printf '  \033[33m..\033[0m   %s\n' "$1"; }
-bad()  { printf '  \033[31mSTOP\033[0m %s\n' "$1"; stop=1; }
-hdr()  { printf '\n\033[1m== %s ==\033[0m\n' "$1"; }
-# gate: FAIL only when the device is in --need; otherwise advisory
+# One style for the whole report, the one preflight.sh used: OK / WARN / FAIL, and any FAIL is a NO-GO.
+ok()   { printf '  \033[32mOK\033[0m   %s\n' "$1"; }
+warn() { printf '  \033[33mWARN\033[0m %s\n' "$1"; }
+bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; stop=1; }
+hdr()  { printf '== %s ==\n' "$1"; }
+# gate: FAIL only when the device is in --need; otherwise a WARN
 gate() { if needs "$2"; then bad "$1"; else warn "$1 (not required by --need)"; fi; }
 
-hdr "Base preflight (air-gap, leak controls, tools)"
-if "$HERE/preflight.sh" >/tmp/go-nogo-preflight.$$ 2>&1; then
-  ok "preflight.sh passed"
-  # Surface preflight's non-fatal advisories. preflight.sh ALWAYS colorizes them
-  # (`  \033[33mWARN\033[0m ...`, no isatty/NO_COLOR guard), so the ESC[33m sequence sits
-  # BETWEEN the two-space prefix and the word WARN. Grepping the raw bytes for `  (WARN|FAIL)`
-  # (two spaces immediately followed by WARN) matches NOTHING, silently dropping every
-  # pass-with-warnings advisory (low entropy, HISTFILE set, core-dump limit, no print queue)
-  # from the one consolidated gate the operator relies on. Strip ANSI first, THEN anchor.
-  _esc="$(printf '\033')"
-  sed "s/${_esc}\[[0-9;]*m//g" /tmp/go-nogo-preflight.$$ | grep -E '  (WARN|FAIL)' | sed 's/^/     /' || true
+# ============================== 1. ENVIRONMENT ==============================
+hdr "Air-gap"
+# The vault qube must have NO network path. A default route means it is NOT air-gapped.
+# Fail CLOSED: if the route tool itself is missing, the `ip ... 2>/dev/null` calls below
+# would emit nothing and we'd wrongly conclude "air-gapped". Demand `ip` before trusting it.
+if ! command -v ip >/dev/null 2>&1; then
+  bad "iproute2/'ip' is missing — cannot verify the air-gap. Install iproute2 and retry."
+elif [ -n "$(ip -4 route show default 2>/dev/null)" ]; then
+  bad "a default route exists — this qube has network. Set netvm to none and retry."
+elif [ -n "$(ip -6 route show default 2>/dev/null)" ]; then
+  bad "an IPv6 default route exists — this qube has network."
 else
-  bad "preflight.sh FAILED — air-gap or a core control is wrong (full output below)"
-  sed 's/^/     /' /tmp/go-nogo-preflight.$$
+  ok "no default route (air-gapped)."
 fi
-rm -f /tmp/go-nogo-preflight.$$
+# A live non-loopback interface carrying a global-scope address IS a network path — peers on
+# the directly-connected subnet are reachable even with NO default route pushed. For a set-once,
+# real-money ceremony that must FAIL CLOSED, not merely WARN. (Loopback is scope host, so a
+# genuinely air-gapped qube with only `lo` has no global-scope address and passes.)
+if grep -q "inet " <<< "$(command -v ip >/dev/null 2>&1 && ip -4 addr show scope global 2>/dev/null)"; then
+  bad "a global-scope IPv4 address is present on a live interface — this qube has a network path (a reachable subnet) even without a default route. Set netvm to none and retry."
+elif grep -q "inet6 " <<< "$(command -v ip >/dev/null 2>&1 && ip -6 addr show scope global 2>/dev/null)"; then
+  bad "a global-scope IPv6 address is present on a live interface — this qube has a network path even without a default route. Set netvm to none and retry."
+fi
+
+hdr "Leak controls"
+# Swap: anonymous (and tmpfs) pages can be paged to disk and survive. For real seeds the
+# vault qube must have NO swap. We can only check from inside the qube.
+# In SIMULATE mode (container/CI test) the swap seen is the host/VM's — a container cannot
+# swapoff it. Downgrade to WARN so the emulator suites can run; on the REAL qube (no
+# CEREMONY_SIMULATE) this stays a hard FAIL. CEREMONY_SIMULATE is already the acknowledged
+# test flag (it also disables guard_no_stubs), and the real ceremony never sets it.
+swap_bad() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+    warn "swap is ACTIVE — cannot swapoff a container/VM's host swap in SIMULATE mode (on the real vault qube this is a hard FAIL)."
+  else
+    bad "$1"
+  fi
+}
+if [ -r /proc/swaps ]; then
+  if [ "$(grep -c . /proc/swaps)" -gt 1 ]; then swap_bad "swap is ACTIVE — secrets could hit disk. Run: swapoff -a (and set the qube's swap off)."
+  else ok "no active swap (/proc/swaps empty)."; fi
+elif command -v swapon >/dev/null 2>&1; then
+  if [ -n "$(swapon --noheadings --show=NAME 2>/dev/null)" ]; then swap_bad "swap is ACTIVE — run swapoff -a."; else ok "no active swap."; fi
+else
+  warn "cannot determine swap state here (no /proc/swaps, no swapon) — verify swap is off on the vault qube."
+fi
+# /dev/shm must be a tmpfs (the ceremony workdir lives there).
+if grep -qs "[[:space:]]/dev/shm[[:space:]]tmpfs[[:space:]]" /proc/mounts 2>/dev/null; then ok "/dev/shm is tmpfs (RAM workdir)."
+elif [ -r /proc/mounts ]; then bad "/dev/shm is not tmpfs — the RAM workdir guarantee fails."
+else warn "cannot verify /dev/shm is tmpfs here (not Linux) — it is on the vault qube."; fi
+# Shell history off
+if [ -n "${HISTFILE:-}" ]; then
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "HISTFILE is set ($HISTFILE) — real ceremonies fail this control."
+  else bad "HISTFILE is set ($HISTFILE) — unset it before the ceremony."; fi
+else ok "HISTFILE unset."; fi
+# Core dumps off
+cl="$(ulimit -c 2>/dev/null || echo '?')"
+if [ "$cl" = 0 ]; then ok "core dumps disabled (ulimit -c 0)."
+elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "core dump limit is '$cl' — real ceremonies fail this control."
+else bad "core dump limit is '$cl' — run ulimit -c 0 before the ceremony."; fi
+
+hdr "Execution profile"
+if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+  warn "execution-profile proof skipped in explicitly simulated test mode."
+elif [ ! -x "$HERE/preflight-environment.py" ]; then
+  bad "preflight-environment.py is missing or not executable — cannot prove a supported disposable profile."
+elif [ ! -x "$HERE/ceremony-teardown.py" ]; then
+  bad "ceremony-teardown.py is missing or not executable — cannot prove cleanup after secret exposure."
+elif ! profile_out="$("$HERE/preflight-environment.py" 2>&1)"; then
+  bad "execution profile is unsafe or unsupported:"
+  printf '%s\n' "$profile_out" | sed 's/^/       /'
+else
+  ok "$(printf '%s\n' "$profile_out" | head -1)"
+  printf '%s\n' "$profile_out" | grep '^WARN ' | sed 's/^/       /' || true
+fi
+
+# THE SAME INTERPRETER THE CEREMONY WILL USE. ceremony.sh resolves the ceremony venv through
+# tools/ceremony-python.sh; without doing the same here, this check reports on whichever python3
+# happened to be on PATH when preflight ran — a different interpreter than the one that runs step
+# 3c. It would then either green-light a ceremony whose python cannot import the module (the exact
+# mid-ceremony failure this check exists to prevent, with the money already exposed) or refuse one
+# that would have worked. Measured 2026-09-22: under `sudo`, secure_path drops the venv and this
+# reported both modules missing on a host where the ceremony would have found them.
+#
+# prefer, not require: a host with no venv anywhere must still reach the import check below and
+# fail THERE, with the message that says what to do about it.
+_cp="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/tools/ceremony-python.sh"
+if [ -r "$_cp" ]; then
+  # shellcheck source=/dev/null
+  . "$_cp"
+  ceremony_python_prefer mnemonic shamir_mnemonic
+fi
+unset _cp
+
+hdr "Tools"
+for t in ip age sops age-plugin-yubikey pkcs11-tool sc-hsm-tool ykman ssss-split shamir qrencode zbarimg gpg sha256sum python3; do
+  if command -v "$t" >/dev/null 2>&1; then ok "$t"; else bad "$t not found (check the template build)"; fi
+done
+# `command -v python3` passing does NOT prove the seed backup will run. Ceremony step 3
+# option c (bip39-slip39-backup.py — the FUNDING/derivation seed's only Option-B backup)
+# does `from mnemonic import Mnemonic` + `import shamir_mnemonic` at RUNTIME. On the
+# air-gapped qube there is no pip to recover a missing package, so prove the imports resolve
+# HERE, before keys are in RAM — not mid-ceremony after the money is exposed.
+if command -v python3 >/dev/null 2>&1; then
+  for m in mnemonic shamir_mnemonic; do
+    if python3 -c "import $m" >/dev/null 2>&1; then ok "python3 module '$m'"
+    else bad "python3 cannot import '$m' — the BIP39<->SLIP-39 seed backup (step 3c) will fail; bake the wheel into the vault-tools image (no pip on the air-gapped qube)."; fi
+  done
+fi
+# The M-DISC archive (step 4) burns with growisofs (or xorriso). Missing means no archival
+# copy AND no way to install it on the air-gapped qube — catch it before the ceremony.
+if command -v growisofs >/dev/null 2>&1 || command -v xorriso >/dev/null 2>&1; then ok "optical burner (growisofs/xorriso)"
+else bad "no growisofs/xorriso — cannot burn the archive disc; add it to the template build."; fi
+
+hdr "Smartcard reader / tokens"
+if command -v opensc-tool >/dev/null 2>&1; then
+  # Count the numbered reader rows. With nothing attached opensc-tool prints "No smart card
+  # readers found." — the old test grepped for "reader", matched that sentence and reported a
+  # reader present (owner's first disposable, 2026-09-25).
+  readers="$(timeout 5 opensc-tool -l 2>/dev/null | grep -E '^[0-9]+[[:space:]]' || true)"
+  if [ -n "$readers" ]; then
+    ok "$(grep -c . <<< "$readers") PC/SC reader(s) visible (opensc-tool -l)."
+  else
+    warn "no smart-card reader or token seen — attach it with 'qvm-usb attach' from dom0."
+  fi
+  # The HSM itself, named: Nitrokey HSM 2 and Pico HSM both present as SmartCard-HSM readers.
+  # Only rows whose Card column is "Yes": a reader with no token answering is not an HSM.
+  hsms="$(grep -iE 'nitrokey hsm|smartcard-hsm|pico' <<< "$readers" | grep -E '^[0-9]+[[:space:]]+Yes[[:space:]]' \
+          | sed -E 's/^[0-9]+[[:space:]]+Yes[[:space:]]+//; s/[[:space:]]+/ /g' || true)"
+  if [ -n "$hsms" ]; then
+    ok "HSM token(s) present: $(tr '\n' ';' <<< "$hsms" | sed 's/;$//')"
+  elif grep -qiE 'nitrokey hsm|smartcard-hsm|pico' <<< "$readers"; then
+    warn "an HSM reader is attached but no token answers in it — re-seat it (detach/attach with qvm-usb)."
+  else
+    warn "no Nitrokey HSM or Pico HSM seen — attach it with 'qvm-usb attach' if this ceremony uses one."
+  fi
+else
+  warn "opensc-tool not found — install opensc (reader check skipped)."
+fi
+if command -v ykman >/dev/null 2>&1; then
+  if [ -n "$(timeout 5 ykman list 2>/dev/null)" ]; then ok "a YubiKey is present (ykman list)."
+  else warn "no YubiKey seen — attach it if this ceremony needs one."; fi
+fi
+
+hdr "Printer (paper backup)"
+if command -v lpstat >/dev/null 2>&1; then
+  if [ -n "$(lpstat -p 2>/dev/null)" ]; then
+    ok "CUPS queue(s) present:"; lpstat -p 2>/dev/null | sed 's/^/       /'
+    # ALLOWLIST (matches ceremony.sh pick_printer): only usb:// (or a local file:/cups-pdf:/
+    # absolute-path/empty device-uri) is safe. A blocklist would miss smb://, bluetooth://, …
+    # and send plaintext shares over the wire. Anything NOT on the allowlist is a network printer.
+    # Anchor on the URI (text after the final ': '), not a colon-free queue name: CUPS
+    # queue names may contain a colon, and [^:]+ would discard such a line, letting a
+    # networked printer slip past. Names contain no spaces, so ': ' is only the boundary.
+    net="$(lpstat -v 2>/dev/null | grep -E 'device for .+: ' | grep -vE 'device for .+: (usb://|file:|cups-pdf:|/|$)' || true)"
+    if [ -n "$net" ]; then
+      bad "a NETWORK printer queue exists — remove it; print only over usb://."
+      printf '%s\n' "$net" | sed 's/^/       /'
+    else ok "no network printer queues (usb/local only)."; fi
+  else warn "no CUPS print queue — add the USB laser printer (no network, no internal storage) if you'll print paper shares."; fi
+else warn "lp/lpstat not installed — paper steps will only write files."; fi
+
+hdr "Optical drives (archive disc)"
+drives=$(ls /dev/sr* 2>/dev/null | wc -l | tr -d ' ')
+if [ "$drives" -ge 2 ]; then ok "$drives optical drives present — burn on one, read back on another (write capability: checked with --need drives)."
+elif [ "$drives" -eq 1 ]; then ok "1 optical drive present (its write capability is checked with --need drives); the burn is read back on it (ADR-0002 D9)."
+else warn "no /dev/sr* optical drive seen — attach the internal/external DVD writer for the archive disc."; fi
+
+hdr "Chip cards (SLE-4442)"
+# The chip-card step needs the manager AND pyscard; the manager exits at import without pyscard,
+# which would surface only at the step, with a share already in RAM.
+if command -v sle4442-manager >/dev/null 2>&1 && python3 -c "import smartcard" >/dev/null 2>&1; then
+  ok "sle4442-manager + pyscard"
+else bad "sle4442-manager or python3-pyscard missing — the SLE-4442 chip-card step cannot run; rebuild the template."; fi
+
+hdr "Camera (scan the printed QR back)"
+if command -v zbarcam >/dev/null 2>&1; then
+  if ls /dev/video* >/dev/null 2>&1; then ok "zbarcam + a camera ($(ls /dev/video* | head -1))"
+  else warn "no /dev/video* — attach the webcam with 'qvm-usb attach' to scan the printed sheets back (or scan them with zbarimg from a photo)."; fi
+else warn "zbarcam not installed — printed QR sheets cannot be scanned back here."; fi
+
+hdr "Entropy"
+ent=$(cat /proc/sys/kernel/random/entropy_avail 2>/dev/null || echo 0)
+if [ "$ent" -ge 256 ]; then ok "entropy_avail=$ent"
+elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "low entropy ($ent) — real ceremonies fail this control."
+else bad "low entropy ($ent) — wait and re-run go-nogo.sh before generating keys."; fi
+
+
+if [ "$ENV_ONLY" = 1 ]; then
+  echo
+  if [ "$stop" -eq 0 ]; then
+    printf '\033[32mPREFLIGHT OK\033[0m — the environment is safe. Run go-nogo.sh with --need before the ceremony.\n'
+  else
+    printf '\033[31mPREFLIGHT FAILED\033[0m — do NOT start the ceremony until the FAIL items are resolved.\n'
+  fi
+  exit "$stop"
+fi
+
+# ============================== 2. SELF-TESTS ===============================
+# Each tool's own --selftest (dice fairness tests, entropy mixing, QR split and scan-back, seed to
+# PKCS#12), and a render of every printed form, so nobody has to run them one by one. They run on
+# built-in test vectors, never on real material, and write only to a RAM directory removed on exit.
+hdr "Self-tests (each tool checks itself on test data)"
+st_dir="$(mktemp -d /dev/shm/go-nogo.XXXXXX 2>/dev/null || mktemp -d)"
+trap 'rm -rf "$st_dir"' EXIT
+selftest() { # <label> <expected line> <command...>
+  local label="$1" want="$2" out; shift 2
+  if out="$(timeout 120 "$@" 2>&1)" && grep -q "$want" <<< "$out"; then
+    ok "$label: $(grep "$want" <<< "$out" | head -1)"
+  else
+    bad "$label self-test FAILED — this tool is broken in the template; rebuild it:"
+    printf '%s\n' "$out" | tail -5 | sed 's/^/       /'
+  fi
+}
+selftest "dice-entropy"   "selftest: OK" python3 "$HERE/dice-entropy.py" --selftest
+selftest "entropy-mix"    "selftest: OK" python3 "$HERE/entropy-mix.py" --selftest
+selftest "payload-qr"     "selftest: OK" python3 "$HERE/payload-qr.py" --selftest
+selftest "seed-to-pkcs12" "selftest: OK" python3 "$HERE/seed-to-pkcs12.py" --selftest
+# The printed forms: each must produce a PostScript file with at least one page.
+render() { # <label> <script> <args...>
+  local label="$1" script="$2" out f="$st_dir/$2.ps"; shift 2
+  if out="$(timeout 60 python3 "$HERE/$script" "$@" -o "$f" 2>&1)" && [ "$(grep -c '^showpage' "$f" 2>/dev/null)" -ge 1 ]; then
+    ok "$label renders ($(grep -c '^showpage' "$f") page(s))"
+  else
+    bad "$label does NOT render — the ceremony would stop at the print step:"
+    printf '%s\n' "$out" | tail -5 | sed 's/^/       /'
+  fi
+}
+render "share form (words)"  share-form.py --label test --kind words --count 20
+render "case label"          case-label.py
+render "PIN card"            pin-card-form.py
+# The HSM's random generator (ceremony step 1 mixes it in). Reading random bytes touches no key;
+# a FAIL only when --need hsm, since a bench run may have no HSM attached.
+if python3 "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin")" = 32 ]; then
+  ok "$(head -1 "$st_dir/h.out")"
+else
+  gate "no HSM gave random bytes (hsm-random.py): $(tail -1 "$st_dir/h.out")" hsm
+fi
+
+# ============================== 3. HARDWARE =================================
 
 hdr "Smartcard reader can actually talk to a card"
 if command -v opensc-tool >/dev/null 2>&1; then
@@ -98,14 +336,14 @@ if needs sle4442; then
     # Read the counter in the SAME reader session as the SELECT_CARD_TYPE: a real
     # synchronous-memory reader (Identiv/SCM) only answers FF B1 when the FF A4 select
     # precedes it in one opensc-tool invocation. A separate FF B1 session (no select)
-    # returns no parsable counter on such hardware -> the near-lock STOP would silently
+    # returns no parsable counter on such hardware -> the near-lock FAIL would silently
     # degrade to the manual-confirm WARN below. The vpicc emulator answers FF B1
     # unconditionally, so this ordering is transparent under test yet correct on metal.
     secmem="$(timeout 6 opensc-tool -s 'FF:A4:00:00:01:06' -s 'FF:B1:00:00:04' 2>/dev/null)"
     # Match the FF B1 data line by its LEADING 4 hex bytes only. Real opensc-tool renders
     # response data through util_hex_dump_asc, which appends an ASCII sidebar column after the
     # hex ('07 FF FF FF ....'); anchoring the match to end-of-line ([[:space:]]*$) would fail
-    # to match that real output, leave ctr_hex empty, and silently degrade the near-lock STOP
+    # to match that real output, leave ctr_hex empty, and silently degrade the near-lock FAIL
     # to a WARN -> a false GO on a card one PSC slip from permanent lockout. No trailing anchor;
     # awk takes the first field (byte0 = the error counter).
     ctr_hex="$(printf '%s\n' "$secmem" | grep -ioE '^[[:space:]]*[0-9a-f]{2}( [0-9a-f]{2}){3}([[:space:]]|$)' | head -1 | awk '{print $1}')"
@@ -162,7 +400,7 @@ if needs hsm; then
     # lists as 'present', so without this the gate says GO. Then the first keygen `--login`
     # with a single PIN typo BLOCKS the user PIN, and if the SO-PIN is not on hand (or is
     # also exhausted) the device is permanently BRICKED and the born-in-HSM funding key is
-    # lost — the exact failure the checklist below warns about. Read the counter and STOP on
+    # lost — the exact failure the checklist below warns about. Read the counter and FAIL on
     # 0/1, exactly like the SLE-4442 (FF B1) and YubiKey PIV gates. sc-hsm-tool with no
     # operation prints 'SO-PIN tries left : N' and 'User PIN tries left : N'; it only READS
     # the state (consumes no attempt). Match the USER-PIN line specifically — a keygen `--login`
@@ -223,7 +461,7 @@ if needs printer; then
     # ALLOWLIST (matches ceremony.sh pick_printer): only usb:// (or a local file:/cups-pdf:/
     # absolute-path/empty device-uri) is safe. A blocklist would miss smb://, bluetooth://,
     # ipps://, … and let a plaintext share leave the air-gapped qube. Any device-uri that is
-    # NOT on the allowlist is a network printer -> STOP.
+    # NOT on the allowlist is a network printer -> FAIL.
     # Anchor on the URI (text after the final ': '), not a colon-free queue name: CUPS
     # queue names may legally contain a colon (e.g. "office:2"), and a name matched with
     # [^:]+ would discard such a line entirely — letting a networked printer slip past.
@@ -274,7 +512,7 @@ if needs drives; then
     # counting the lone '1' and calling GO is the exact false pass this gate must not emit. Map
     # the burn node (sr0, overridable via GONOGO_BURN_DRIVE to mirror step_archive) to its column
     # via the 'drive name:' row, then read THAT column of 'Can write DVD-R:'. Distinguish: burn
-    # drive is a writer -> GO; burn drive is read-only (writer elsewhere or none) -> STOP; header
+    # drive is a writer -> GO; burn drive is read-only (writer elsewhere or none) -> FAIL; header
     # row absent but some writer exists -> WARN (can't map, confirm by hand); table unreadable /
     # no DVD-write row -> WARN, exactly like the other counter probes above.
     # GONOGO_CDROM_INFO overrides the table path for tests only; defaults to the real proc file.
@@ -312,7 +550,7 @@ fi
 # PINs, PUK and management key; touch policy is fixed to never (a KMS YubiKey is PIN-only, nobody is
 # there to touch it); the DKEK custodian split applies only to the born-in-HSM option, which the
 # ceremony does not use. What is left is physical and countable, so each item is ONE yes/no question
-# with a number in it, and any "no" is a STOP. Needs a terminal: a scripted run cannot count discs.
+# with a number in it, and any "no" is a FAIL. Needs a terminal: a scripted run cannot count discs.
 if needs supplies; then
   n="${CEREMONY_SHARES:-6}"
   # The same rule ceremony.sh's check_scheme applies (2..16), written canonically: "0" would skip
@@ -336,11 +574,9 @@ fi
 
 echo
 if [ "$stop" -eq 0 ]; then
-  printf '\033[1;32m================  GO  ================\033[0m\n'
-  printf 'All required checks passed. Proceed with the ceremony steps by hand.\n'
+  printf '\033[32mGO\033[0m — every required check passed. Proceed with the ceremony steps by hand.\n'
   exit 0
 else
-  printf '\033[1;31m==============  NO-GO  ==============\033[0m\n'
-  printf 'Resolve every STOP item above BEFORE starting any key-touching step.\n'
+  printf '\033[31mNO-GO\033[0m — do NOT start any key-touching step until the FAIL items are resolved.\n'
   exit 1
 fi

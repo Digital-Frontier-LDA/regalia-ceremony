@@ -69,10 +69,10 @@ run_tee() {
 # parse and a second copy of it would be free to drift.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/ceremony-kcv.sh"
 
-# THE CEREMONY'S INTERPRETER, RESOLVED ONCE — and by preflight.sh too, or the two disagree.
+# THE CEREMONY'S INTERPRETER, RESOLVED ONCE — and by go-nogo.sh too, or the two disagree.
 #
 # Every python step here runs bare `python3`, so the interpreter is whatever PATH happens to give.
-# preflight.sh proves `import mnemonic` and `import shamir_mnemonic` resolve BEFORE keys are in
+# go-nogo.sh proves `import mnemonic` and `import shamir_mnemonic` resolve BEFORE keys are in
 # RAM, precisely so step 3c cannot fail mid-ceremony with the money exposed — but it proved it for
 # ITS python3, which is not necessarily this one. On the air-gapped image they coincide because
 # the wheels are installed system-wide. Anywhere the dependencies live in a venv they do not, and
@@ -291,10 +291,10 @@ guard_no_stubs() {
 require_airgap_and_tools() {
   b "Preflight"
   guard_no_stubs
-  if [ -x "$HERE/preflight.sh" ]; then
-    "$HERE/preflight.sh" || { err "preflight failed — fix before continuing"; exit 1; }
+  if [ -x "$HERE/go-nogo.sh" ]; then
+    "$HERE/go-nogo.sh" --env-only || { err "preflight failed — fix before continuing"; exit 1; }
   else
-    err "preflight.sh not found next to this script — refusing to expose secrets without the environment gate"
+    err "go-nogo.sh not found next to this script — refusing to expose secrets without the environment gate"
     exit 1
   fi
 }
@@ -372,7 +372,7 @@ pick_printer() {
   # line. A greedy `s/.*: *//` strips the URI's own scheme colon too, turning
   # smb://host/path into //host/path, which the `/*` case arm below would wave through as a
   # local absolute-path device — sending the plaintext share over the wire. Matching the
-  # anchored label like preflight.sh / go-nogo.sh do preserves smb://, ipp://, usb://, etc.
+  # anchored label like go-nogo.sh does preserves smb://, ipp://, usb://, etc.
   local uri; uri="$(lpstat -v "$PRINTER" 2>/dev/null | sed -E 's/^device for [^:]+: *//')"
   case "${uri:-}" in
     usb://*|""|file:*|/*|cups-pdf:*) : ;;   # usb (or local/unknown in tests) — allow
