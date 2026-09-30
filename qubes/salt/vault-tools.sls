@@ -221,10 +221,17 @@ ceremony-scripts:
     - source: salt://vault-ceremony-scripts
     - file_mode: "0755"
     - dir_mode: "0755"
+    # CLEAN: a script removed from the repo must leave the image too. Without it, file.recurse only
+    # adds and overwrites: preflight.sh, merged into go-nogo.sh in vt-0930a, was still in the owner's
+    # /opt/vault-ceremony after that update (2026-09-30), next to the script that replaced it.
+    - clean: True
     # E@ makes this a REGEX. Without E@, Salt treats exclude_pat as a GLOB, which can't do
     # alternation — so the stub test/sim/proof harnesses would NOT be excluded and would ship
     # in the real ceremony image (they prepend a fake-bin of STUBBED tools to PATH). Regex-anchor it.
-    - exclude_pat: 'E@(test-ceremony|recital-ceremony|simulate-ceremony|prove-ceremony)\.sh$'
+    # With clean, exclude_pat also names what clean must KEEP: the paths other states put in this
+    # directory (venv, wheels, recovery, requirements.txt). The harnesses are never installed, so
+    # keeping them is moot.
+    - exclude_pat: 'E@^((venv|wheels|recovery)(/|$)|requirements\.txt$)|(test-ceremony|recital-ceremony|simulate-ceremony|prove-ceremony)\.sh$'
 
 # libccid only opens readers its /etc/libccid_Info.plist lists, and Debian 13's libccid 1.6.2 does
 # not list the Pico HSM (2e8a:10fd), so pcscd ignored a Pico attached to the vault (owner's
