@@ -207,6 +207,23 @@ jobs:
             done
             echo "vault-tools filesystem BUILT + verified from the salt recipe"
 
+            # UPDATE over an older image: a script the repo no longer has must leave the image, and
+            # what the other states put in /opt/vault-ceremony must stay (owner, 2026-09-30:
+            # preflight.sh survived the vt-0930a update that merged it into go-nogo.sh).
+            # (no single quotes in this block: it is the single-quoted body of bash -euxc)
+            echo "echo retired" > /opt/vault-ceremony/preflight.sh
+            mkdir -p /opt/vault-ceremony/retired-dir && touch /opt/vault-ceremony/retired-dir/old.py
+            salt-call --local --retcode-passthrough state.apply vault-tools
+            for f in preflight.sh retired-dir; do
+              if [ -e "/opt/vault-ceremony/$f" ]; then echo "STALE: /opt/vault-ceremony/$f survived the update"; exit 1; fi
+            done
+            for f in ceremony.sh go-nogo.sh requirements.txt venv/bin/python3 recovery; do
+              [ -e "/opt/vault-ceremony/$f" ] || { echo "the update clean step removed /opt/vault-ceremony/$f"; exit 1; }
+            done
+            ls /opt/vault-ceremony/wheels/*.whl >/dev/null 2>&1 || { echo "the update clean step removed the offline wheels"; exit 1; }
+            python3 -c "import mnemonic, shamir_mnemonic" || { echo "the venv no longer imports after the update"; exit 1; }
+            echo "update over an older image: retired scripts removed, venv/wheels/recovery kept"
+
             # VALIDATE the ceremony against the salt-built tree (prove-ceremony is correctly
             # excluded from the image, so run it from the checkout but against the BUILT tools).
             cd /repo
