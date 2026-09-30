@@ -125,6 +125,9 @@ take the disposable down mid-ceremony. Without `disown`, closing the terminal ma
 and so does Ctrl-C in the terminal if you ran it without `&`. End a session by typing `exit` in
 the xterm (or closing it), never by closing the dom0 terminal.
 
+Before the ceremony, choose where the share cases go with [CUSTODY-SITES.md](CUSTODY-SITES.md)
+(`custody-plan-check.py --new plan.toml` guides you and checks the site rules).
+
 Before each real ceremony, run **both** checks: `preflight-dom0.sh <vault>` in **dom0**
 (asserts netvm/template/`maxmem 0`/DispVM/dom0-swap) and `/opt/vault-ceremony/go-nogo.sh`
 **inside** the qube (air-gap, swap off, `/dev/shm` tmpfs, no history/core-dumps, USB-only
