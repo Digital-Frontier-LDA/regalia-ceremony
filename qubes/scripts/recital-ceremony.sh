@@ -79,7 +79,7 @@ cleanup(){ [ -n "${WORK:-}" ] && find "$WORK" -type f -exec shred -u {} + 2>/dev
 
 # =============================================================================
 hdr "NEGATIVE 1 — wizard REFUSES to start when not air-gapped"
-if FAKE_HAS_NET=1 "$HERE/preflight.sh" >/tmp/r_pf 2>&1; then
+if FAKE_HAS_NET=1 "$HERE/go-nogo.sh" --env-only >/tmp/r_pf 2>&1; then
   F "preflight should have FAILED with a network route present"
 else
   grep -q "PREFLIGHT FAILED" /tmp/r_pf && grep -qi "has network" /tmp/r_pf \

@@ -89,4 +89,4 @@ printf '* hard core 0\n* soft core 0\n' > /etc/security/limits.d/90-regalia-no-c
 for tool in age sops age-plugin-yubikey pkcs11-tool sc-hsm-tool ykman ssss-split shamir qrencode zbarimg gpg openssl; do
   command -v "$tool" >/dev/null || { echo "offline install incomplete: $tool missing" >&2; exit 1; }
 done
-echo "OFFLINE INSTALL OK — reboot the live environment, keep networking absent, then run preflight.sh"
+echo "OFFLINE INSTALL OK — reboot the live environment, keep networking absent, then run go-nogo.sh"

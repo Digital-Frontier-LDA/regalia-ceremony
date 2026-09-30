@@ -11,7 +11,7 @@
 # CLOSED when a package is missing. Runs natively, no daemons needed.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/preflight.sh"
+PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -46,7 +46,7 @@ PY
 chmod +x "$SBOX/python3"
 
 hdr "BIP39 'mnemonic' package MISSING -> preflight must FAIL (not report the seed backup OK)"
-out="$(PATH="$SBOX" CEREMONY_SIMULATE=1 EMU_PY_MISSING=mnemonic bash "$PRE" 2>&1)"
+out="$(PATH="$SBOX" CEREMONY_SIMULATE=1 EMU_PY_MISSING=mnemonic bash "$PRE" --env-only 2>&1)"
 echo "$out" | grep -iE 'mnemonic|shamir' | sed 's/^/     /'
 if grep -qiE 'FAIL.*mnemonic' <<< "$out"; then
   P "preflight emits a FAIL naming the missing 'mnemonic' module"
@@ -55,7 +55,7 @@ else
 fi
 
 hdr "shamir_mnemonic package MISSING -> preflight must FAIL too"
-out2="$(PATH="$SBOX" CEREMONY_SIMULATE=1 EMU_PY_MISSING=shamir_mnemonic bash "$PRE" 2>&1)"
+out2="$(PATH="$SBOX" CEREMONY_SIMULATE=1 EMU_PY_MISSING=shamir_mnemonic bash "$PRE" --env-only 2>&1)"
 if grep -qiE 'FAIL.*(shamir_mnemonic|mnemonic)' <<< "$out2"; then
   P "preflight emits a FAIL when shamir_mnemonic cannot be imported"
 else
@@ -63,7 +63,7 @@ else
 fi
 
 hdr "control: both modules importable -> preflight reports the runtime deps OK (no over-reject)"
-out3="$(PATH="$SBOX" CEREMONY_SIMULATE=1 EMU_PY_MISSING=__none__ bash "$PRE" 2>&1)"
+out3="$(PATH="$SBOX" CEREMONY_SIMULATE=1 EMU_PY_MISSING=__none__ bash "$PRE" --env-only 2>&1)"
 if grep -qiE 'FAIL.*mnemonic' <<< "$out3"; then
   F "regression: preflight FAILs the module check even though both imports succeed"
   echo "$out3" | grep -iE 'mnemonic' | sed 's/^/        /'

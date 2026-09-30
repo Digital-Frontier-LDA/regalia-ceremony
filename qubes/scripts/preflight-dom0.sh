@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # preflight-dom0.sh — run in Qubes **dom0** before a real ceremony.
-# preflight.sh checks the vault qube from the INSIDE; this asserts the qube's Qubes-level
+# go-nogo.sh checks the vault qube from the INSIDE; this asserts the qube's Qubes-level
 # state from dom0, which the qube cannot see (netvm, template, memory ballooning, etc.).
 #
 #   bash preflight-dom0.sh <vault-qube-name>     # e.g. bash preflight-dom0.sh vault
@@ -55,6 +55,6 @@ elif [ "$(grep -c . "$SWAPS_FILE")" -gt 1 ]; then
 else ok "dom0 has no active swap."; fi
 
 echo
-if [ "$fail" -eq 0 ]; then echo "DOM0 PREFLIGHT OK — also run /opt/vault-ceremony/preflight.sh inside $VM."; else
+if [ "$fail" -eq 0 ]; then echo "DOM0 PREFLIGHT OK — also run /opt/vault-ceremony/go-nogo.sh inside $VM."; else
   echo "DOM0 PREFLIGHT FAILED — fix the FAIL items before a real ceremony."; fi
 exit "$fail"

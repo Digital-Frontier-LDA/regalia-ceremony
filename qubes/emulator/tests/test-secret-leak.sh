@@ -325,7 +325,7 @@ P "covered by tests/test_sle4442_model.py::TestSecretLeak (PSC / written / read-
 hdr "sops-edit-airgap.sh: REFUSES (exits non-zero) when /dev/shm is not tmpfs — no on-disk decrypt"
 # When /dev/shm is not a tmpfs mount, `sops edit` would write the DECRYPTED vault (custodial
 # seeds) to a disk-backed temp file. This wrapper must FAIL CLOSED like ceremony.sh init_work
-# and preflight.sh — never fall through to `exec sops edit`. We drive the real wrapper with a
+# and go-nogo.sh — never fall through to `exec sops edit`. We drive the real wrapper with a
 # fake `sops` (a canary that proves whether exec was reached) and a controlled mounts file.
 SEA="$SCRIPTS/sops-edit-airgap.sh"
 if [ -x "$SEA" ]; then

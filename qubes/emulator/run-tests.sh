@@ -69,7 +69,7 @@ if [ "$INSTALL" = 1 ]; then
     pip3 install --break-system-packages --require-hashes -r "$QUBES/requirements.txt" 2>/dev/null \
       || pip3 install --require-hashes -r "$QUBES/requirements.txt"
     # sops isn't in Debian apt — install the same hash-pinned binary the vault image uses
-    # (preflight.sh checks for it). Pin matches salt/vault-tools.sls.
+    # (go-nogo.sh checks for it). Pin matches salt/vault-tools.sls.
     if ! command -v sops >/dev/null 2>&1; then
       curl -fsSL -o /tmp/sops https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64
       echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /tmp/sops" | sha256sum -c - \
@@ -354,8 +354,8 @@ say "GO/NO-GO HSM PIN-retry guard (--need hsm must STOP a near-locked HSM before
 say "GO/NO-GO optical write-capability guard (--need drives must STOP a read-only DVD-ROM pair)"
 "$HERE/tests/test-go-nogo-drives-writer.sh" || suite_failed "test-go-nogo-drives-writer.sh"
 
-say "GO/NO-GO preflight warn-surface (a pass-with-warnings must show the WARNs in the GO summary)"
-"$HERE/tests/test-go-nogo-preflight-warn-surface.sh" || suite_failed "test-go-nogo-preflight-warn-surface.sh"
+say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"
+"$HERE/tests/test-go-nogo-one-script.sh" || suite_failed "test-go-nogo-one-script.sh"
 
 say "PREFLIGHT runtime deps (BIP39 'mnemonic' + shamir_mnemonic must be importable, not just python3 on PATH)"
 "$HERE/tests/test-preflight-runtime-deps.sh" || suite_failed "test-preflight-runtime-deps.sh"

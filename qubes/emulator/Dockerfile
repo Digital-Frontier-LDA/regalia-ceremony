@@ -70,7 +70,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates procps curl \
   && rm -rf /var/lib/apt/lists/*
 
-# --- sops (hash-pinned, same as salt/vault-tools.sls) — preflight.sh checks for it ----
+# A failed download or checksum inside a pipe must fail the build, not only the pipe's last command.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# --- sops (hash-pinned, same as salt/vault-tools.sls) — go-nogo.sh checks for it ----
 RUN curl -fsSL -o /usr/local/bin/sops \
       https://github.com/getsops/sops/releases/download/v3.13.1/sops-v3.13.1.linux.amd64 \
  && echo "620a9d7e3352ababeca6908cea24a6e8b14ce89a448ddbd3f94f1ef3398f470a  /usr/local/bin/sops" | sha256sum -c - \
@@ -79,7 +82,7 @@ RUN curl -fsSL -o /usr/local/bin/sops \
 # --- SLIP-39 `shamir` CLI (hash-pinned, same posture as the real image) -------------
 # (paths are relative to the build context = qubes)
 COPY requirements.txt /opt/vault-ceremony/requirements.txt
-RUN pip3 install --require-hashes -r /opt/vault-ceremony/requirements.txt
+RUN pip3 install --no-cache-dir --require-hashes -r /opt/vault-ceremony/requirements.txt
 
 # --- bake the real ceremony scripts (so the wizard itself is what we test) -----------
 COPY scripts /opt/vault-ceremony/scripts

@@ -5,7 +5,7 @@
 # preflight said "a PC/SC reader is visible" with no HSM warning.
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PF="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/preflight.sh"
+PF="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
@@ -14,7 +14,7 @@ FAKE="$(mktemp -d)"; trap 'rm -rf "$FAKE"' EXIT
 printf '#!/usr/bin/env bash\ncat "$OPENSC_OUT"\n' > "$FAKE/opensc-tool"
 printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE/ykman"
 chmod +x "$FAKE/opensc-tool" "$FAKE/ykman"
-run(){ OPENSC_OUT="$1" PATH="$FAKE:$PATH" CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1 bash "$PF" 2>&1 \
+run(){ OPENSC_OUT="$1" PATH="$FAKE:$PATH" CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1 bash "$PF" --env-only 2>&1 \
         | sed $'s/\033\\[[0-9;]*m//g' | sed -n '/== Smartcard reader/,/== Printer/p'; }
 
 printf 'No smart card readers found.\n' > "$FAKE/none"

@@ -46,13 +46,13 @@ hdr "go-nogo with every device required -> expect GO"
 out="$("$SCRIPTS/go-nogo.sh" --need yubikey,hsm,sle4442,printer,drives 2>&1)"; rc=$?
 echo "$out" | sed 's/^/   /'
 [ "$rc" = 0 ] && P "verdict is GO (exit 0)" || F "expected GO, got exit $rc"
-grep -q "================  GO" <<< "$out" && P "prints the GO banner" || F "no GO banner"
+grep -q "GO.* — every required check passed" <<< "$out" && P "prints the GO verdict line" || F "no GO verdict line"
 grep -qi "SLE-4442 SELECT" <<< "$out" && P "ran the SLE-4442 memory-card capability probe" || F "no SLE-4442 probe"
 grep -qiE "funding-key HSM .*is present" <<< "$out" && P "saw the funding-key HSM (SmartCard-HSM/akash-funding token)" || F "HSM token not seen"
 grep -qi "PIV PIN retries = 3" <<< "$out" && P "read the YubiKey PIV retry counter" || F "no PIV retry read"
 
 hdr "go-nogo bites: a YubiKey 1 try from PUK lockout -> expect NO-GO"
-EMU_YKMAN_SERIAL=99999999 out2="$(EMU_YKMAN_PIV_RETRIES=1 "$SCRIPTS/go-nogo.sh" --need yubikey 2>&1)"; rc2=$?
+out2="$(EMU_YKMAN_SERIAL=99999999 EMU_YKMAN_PIV_RETRIES=1 "$SCRIPTS/go-nogo.sh" --need yubikey 2>&1)"; rc2=$?
 if [ "$rc2" != 0 ] && grep -qi "one wrong PIN locks it" <<< "$out2"; then
   P "NO-GO when PIV retries = 1 (PUK-lockout guard works)"
 else

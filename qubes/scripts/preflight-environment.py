@@ -2,7 +2,7 @@
 """Fail-closed execution-profile and host-residue checks for key ceremonies.
 
 The normal CLI inspects the live host. ``--snapshot`` exists only to make every
-decision deterministic in tests; preflight.sh never forwards operator arguments.
+decision deterministic in tests; go-nogo.sh never forwards operator arguments.
 """
 
 from __future__ import annotations

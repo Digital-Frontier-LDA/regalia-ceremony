@@ -2,13 +2,13 @@
 # test-preflight-live-iface.sh — a live, non-loopback interface carrying a routable
 # (global-scope) address is a network path regardless of whether a default route exists.
 # For a set-once, real-money ceremony the vault qube must FAIL preflight in that state, not
-# merely WARN. Regression guard for the quorum-confirmed downgrade at preflight.sh line 32:
+# merely WARN. Regression guard for the quorum-confirmed downgrade in go-nogo.sh (air-gap section):
 # a global-scope IPv4 with no default gateway was reported as WARN, so preflight exited 0 and
 # go-nogo inherited a false GO while secrets could be exfiltrated to any directly-connected
 # peer. Runs natively, no daemons needed.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/preflight.sh"
+PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"
 
 pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
@@ -42,7 +42,7 @@ chmod +x "$SBOX/ip"
 airgap_section(){ printf '%s\n' "$1" | sed -n '/== Air-gap ==/,/== Leak controls ==/p'; }
 
 hdr "live global-scope interface, no default route -> air-gap must FAIL (not WARN)"
-out="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" 2>&1)"
+out="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" --env-only 2>&1)"
 sec="$(airgap_section "$out")"
 echo "$sec" | sed 's/^/     /'
 
@@ -68,7 +68,7 @@ case "$*" in
 esac
 FAKEIP2
 chmod +x "$SBOX/ip"
-out2="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" 2>&1)"
+out2="$(PATH="$SBOX" CEREMONY_SIMULATE=1 bash "$PRE" --env-only 2>&1)"
 if grep -qi "no default route (air-gapped)" <<< "$out2" && ! grep -qiE 'FAIL.*global-scope' <<< "$out2"; then
   P "air-gap section stays OK when only loopback is present (no over-reject)"
 else

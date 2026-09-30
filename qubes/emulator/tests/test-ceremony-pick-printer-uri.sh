@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # test-ceremony-pick-printer-uri.sh — ceremony.sh's own pick_printer() USB-only gate must
 # FAIL CLOSED for ANY non-local device-uri. This is the SOLE destination check when
-# preflight.sh is absent or the queue is added after preflight, so a broken gate here means
+# go-nogo.sh is absent or the queue is added after preflight, so a broken gate here means
 # a plaintext Shamir paper share + QR go over the wire (smb/ipp/lpd/ipps/http) off the
-# air-gapped vault qube. go-nogo.sh and preflight.sh have their own (correct, anchored)
+# air-gapped vault qube. go-nogo.sh has its own (correct, anchored)
 # guard exercised by test-printer-network-uri.sh; this harness exercises pick_printer()
 # DIRECTLY by sourcing ceremony.sh and feeding it a chosen queue whose device-uri we fake.
 #
