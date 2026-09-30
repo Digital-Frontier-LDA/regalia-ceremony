@@ -1288,6 +1288,41 @@ step_entropy_seed() {
   info "Next: step 3, option c — split it into $(K)-of-$(N) SLIP-39 shares and record its funding address."
 }
 
+# THE BREAKGLASS KEY IS BORN HERE (owner, 2026-09-30). Splitting a key generated elsewhere means
+# trusting that no other copy exists; one earlier breakglass key already outlived its escrow. A key
+# generated in this RAM workdir exists only here and in its shares. It is a post-quantum hybrid age
+# key (ML-KEM-768 + X25519, age >= 1.3): the DKEK is AES-256 and Shamir is information-theoretic,
+# so this was the one ceremony root a future quantum computer could break, and replacing it later
+# would mean a new split, which means a new ceremony. Only the public recipient leaves this machine.
+gen_breakglass() {
+  local id="$WORK/breakglass.key" rcp="$WORK/breakglass.recipient"
+  if [ -s "$WORK/secret.in" ]; then
+    err "$WORK/secret.in already holds a secret; refusing to overwrite it. Remove it first if it is"
+    err "a leftover, or choose a to split what is there."
+    return 1
+  fi
+  # Probe with a throwaway key written to a pipe (age-keygen -o refuses any existing path, /dev/null
+  # included); it is discarded unread.
+  if ! age-keygen -pq 2>/dev/null | grep -q '^AGE-SECRET-KEY-PQ-1'; then
+    err "age-keygen cannot make a post-quantum key here (needs age >= 1.3; this image ships 1.3.2"
+    err "in /opt/vault-bin). Rebuild the template; do not fall back to a classical key."
+    return 1
+  fi
+  rm -f "$id" "$rcp"
+  ( umask 077; age-keygen -pq -o "$id" 2>/dev/null ) || { err "age-keygen -pq failed"; rm -f "$id"; return 1; }
+  # ssss splits one line with no trailing newline: the identity line alone.
+  ( umask 077; grep '^AGE-SECRET-KEY-PQ-1' "$id" | tr -d '\n' > "$WORK/secret.in" )
+  age-keygen -y "$id" > "$rcp" 2>/dev/null
+  if [ ! -s "$WORK/secret.in" ] || ! grep -q '^age1pq1[0-9a-z]*$' "$rcp"; then
+    err "the new key or its recipient is malformed; nothing is split."
+    rm -f "$id" "$rcp" "$WORK/secret.in"; return 1
+  fi
+  BREAKGLASS_RECIPIENT="$(cat "$rcp")"; export BREAKGLASS_RECIPIENT
+  info "New post-quantum breakglass key generated in RAM (never printed, never on disk)."
+  info "Its PUBLIC recipient (${#BREAKGLASS_RECIPIENT} characters, age1pq1…) is in $rcp:"
+  info "it goes into .sops.yaml (the SOPS re-key PR) and onto the archive disc. It is not secret."
+}
+
 step_shamir() {
   check_scheme || return 1
   b "Shamir split a recovery root ($(K)-of-$(N))"
@@ -1307,23 +1342,29 @@ step_shamir() {
   # real empty-passphrase funding address -> at clean-shell recovery the good shares derive the
   # TRUE address != the recorded anchor -> the operator STOPs and distrusts a valid backup.
   unset BIP39_PASSPHRASE 2>/dev/null || true
-  info "Use this for the BREAKGLASS age key (ASCII) or the DERIVATION root mnemonic."
-  info "Put the secret in a file FIRST (don't type it at a prompt). It must already exist"
-  info "in this RAM workdir — e.g. you exported the breakglass age key into $WORK/secret.in"
+  info "Use this for the BREAKGLASS age key or the DERIVATION root mnemonic."
   local f="$WORK/secret.in"
-  if [ ! -s "$f" ]; then
-    warn "no $WORK/secret.in found."
-    info "For a quick DRY RUN with a throwaway value:"
-    show "printf 'TEST-do-not-use' > '$f'"
-    ask "create a throwaway test secret now?" && printf 'TEST-do-not-use-%s' "$RANDOM" > "$f"
-    [ -s "$f" ] || { warn "no secret to split"; return 0; }
-  fi
   echo
-  info "a) ssss  — best for an ASCII age key string (AGE-SECRET-KEY-1…)"
-  info "b) SLIP-0039 shamir — MINT a fresh master secret + 5 word shares"
+  info "g) GENERATE a new post-quantum BREAKGLASS age key here, then split it with ssss"
+  info "   (recommended: it exists only in this RAM workdir and in the shares, never anywhere else)"
+  info "a) ssss  — an existing ASCII age key string in $f (AGE-SECRET-KEY-…)"
+  info "b) SLIP-0039 shamir — MINT a fresh master secret + word shares"
   info "c) BIP39 WALLET mnemonic -> SLIP-39 shares  (the funding / derivation seed;"
   info "   Option B — exact round-trip, recoverable with NO HSM; shares -> metal plates)"
-  read -r -p "   choose a, b or c: " which
+  read -r -p "   choose g, a, b or c: " which
+  if [ "$which" = g ]; then
+    gen_breakglass || return 1
+    which=a
+  elif [ "$which" = a ] || [ "$which" = c ]; then
+    # a and c split a secret that must already be in the RAM workdir (never typed at a prompt).
+    if [ ! -s "$f" ]; then
+      warn "no $f found. Put the secret in that file first (don't type it at a prompt)."
+      info "For a quick DRY RUN with a throwaway value:"
+      show "printf 'TEST-do-not-use' > '$f'"
+      ask "create a throwaway test secret now?" && printf 'TEST-do-not-use-%s' "$RANDOM" > "$f"
+      [ -s "$f" ] || { warn "no secret to split"; return 0; }
+    fi
+  fi
   case "$which" in
     a)
       # ssss splits a SINGLE line up to ~128 bytes. A multi-line or oversized secret would be
@@ -1751,6 +1792,8 @@ step_payload() {
   warn "recoverer cannot tell a stale value from a live one."
 
   local recip="${BREAKGLASS_RECIPIENT:-}"
+  # The key generated in step 3 (option g) left its public recipient in the RAM workdir.
+  [ -z "$recip" ] && [ -s "$WORK/breakglass.recipient" ] && recip="$(cat "$WORK/breakglass.recipient")"
   if [ -z "$recip" ]; then
     # The RECIPIENT is a public key — safe to read at the terminal, unlike anything else here.
     read -r -p "   breakglass age RECIPIENT (age1…): " recip
@@ -1764,7 +1807,7 @@ step_payload() {
   # generic bech32 message would technically still refuse, but would lose the one instruction
   # the operator most needs to see.
   case "$recip" in
-    AGE-SECRET-KEY-1*|age-secret-key-1*)
+    AGE-SECRET-KEY-1*|age-secret-key-1*|AGE-SECRET-KEY-PQ-1*|age-secret-key-pq-1*)
        err "that is not an age recipient (must start with 'age1'). If you pasted a SECRET key"
        err "(AGE-SECRET-KEY-1…) STOP: encrypting to a secret key is not possible, and the secret"
        err "key must never be typed at a terminal that may be recorded."; return 1;;
@@ -2212,6 +2255,20 @@ step_archive() {
   # sle4442-manager has no extension, so the globs above miss it; a recoverer reading a share off
   # a chip card needs it as much as the rest of the toolkit.
   cp "$sdir/sle4442-manager" "$kit/" 2>/dev/null || true
+  # The breakglass key is post-quantum (age >= 1.3), and most distributions still ship an older age,
+  # so the disc carries the image's own static age, age-keygen and sops with their SHA-256 sums. A
+  # recoverer on a clean amd64 Linux machine runs them from bin/, without a network.
+  mkdir -p "$kit/bin"
+  for t in age age-keygen sops; do
+    [ -x "/opt/vault-bin/$t" ] && cp "/opt/vault-bin/$t" "$kit/bin/" 2>/dev/null
+  done
+  if ls "$kit/bin/"* >/dev/null 2>&1; then
+    ( cd "$kit/bin" && sha256sum -- * > SHA256SUMS )
+    info "Staged age, age-keygen and sops (static amd64) for the archive disc: recovery-kit/bin/."
+  else
+    rmdir "$kit/bin" 2>/dev/null
+    warn "No /opt/vault-bin tools staged: a clean-machine recoverer will need age >= 1.3 and sops."
+  fi
   cp "$sdir/requirements.txt" "$kit/" 2>/dev/null || cp "$sdir/../requirements.txt" "$kit/" 2>/dev/null || true
   # SCHEME.txt: THIS ceremony's k and n, which the recovery documents refer to instead of assuming
   # 4-of-6 (the scheme is a parameter, ADR-0002 D13).

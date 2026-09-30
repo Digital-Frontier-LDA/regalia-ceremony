@@ -292,6 +292,13 @@ selftest "dice-entropy"   "selftest: OK" python3 "$HERE/dice-entropy.py" --selft
 selftest "entropy-mix"    "selftest: OK" python3 "$HERE/entropy-mix.py" --selftest
 selftest "payload-qr"     "selftest: OK" python3 "$HERE/payload-qr.py" --selftest
 selftest "seed-to-pkcs12" "selftest: OK" python3 "$HERE/seed-to-pkcs12.py" --selftest
+# The breakglass key is born in the ceremony as a post-quantum age key (age >= 1.3, -pq). A throwaway
+# key goes to a pipe and is discarded unread.
+if age-keygen -pq 2>/dev/null | grep -q '^AGE-SECRET-KEY-PQ-1'; then
+  ok "age $(age --version 2>/dev/null) makes post-quantum keys (the breakglass key, step 3 option g)"
+else
+  bad "age cannot make a post-quantum key (needs >= 1.3; found $(age --version 2>/dev/null || echo none)): rebuild the template"
+fi
 # The printed forms: each must produce a PostScript file with at least one page.
 render() { # <label> <script> <args...>
   local label="$1" script="$2" out f="$st_dir/$2.ps"; shift 2

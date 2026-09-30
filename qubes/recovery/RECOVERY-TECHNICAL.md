@@ -136,9 +136,16 @@ of roots that never change, and everything else is recovered *through* them.
 **Decrypt it with the breakglass age key** — the same key the k-of-n `ssss` shares rebuild,
 so no extra threshold and nothing new to find:
 
+The breakglass key is a **post-quantum** age key (`AGE-SECRET-KEY-PQ-1…`), which needs **age 1.3 or
+later**. Many systems ship an older age that will refuse it. Use the copy on the archive disc: it is
+a static binary that runs on any 64-bit (amd64) Linux.
+
 ```sh
-# after reconstructing the breakglass key from any k of the n password shares:
-age -d -i breakglass.key payload.age > payload.txt
+cd recovery-kit/bin && sha256sum -c SHA256SUMS && cd ../..   # age, age-keygen, sops: all OK
+# after reconstructing the breakglass key from any k of the n password shares
+# (ssss-combine prints the key; put it in a file, alone on one line):
+printf '%s\n' 'AGE-SECRET-KEY-PQ-1…' > breakglass.key
+recovery-kit/bin/age -d -i breakglass.key payload.age > payload.txt
 ```
 
 It contains: both wallet mnemonics, the ops age key, `API_KEY_HASH_SECRET`, and every hardware
@@ -183,9 +190,11 @@ obligations. Do NOT reuse these seeds afterward — they have been exposed.
 
 ## 6. (Optional) decrypt the SOPS config vault
 If you also need the service configuration: the breakglass **age** key is split the same way
-(`ssss-combine -t <k>` over its k shares) → an `AGE-SECRET-KEY-1…`; then
-`SOPS_AGE_KEY=<that key> sops decrypt vault.sops.yaml` (the recovered key is a *value*, so it
-goes in `SOPS_AGE_KEY`; `SOPS_AGE_KEY_FILE` is for a *path* to a key file).
+(`ssss-combine -t <k>` over its k shares) → an `AGE-SECRET-KEY-PQ-1…`; then
+`SOPS_AGE_KEY=<that key> recovery-kit/bin/sops decrypt vault.sops.yaml` (the recovered key is a
+*value*, so it goes in `SOPS_AGE_KEY`; `SOPS_AGE_KEY_FILE` is for a *path* to a key file). The sops
+on the disc understands post-quantum age keys; an older sops may not. (A key split before this
+change starts `AGE-SECRET-KEY-1…` and works the same way.)
 
 ## 7. After
 - **Rotate**: the seeds were exposed — generate new wallets and move funds again per the plan.

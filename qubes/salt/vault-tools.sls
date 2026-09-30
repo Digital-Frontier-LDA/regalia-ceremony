@@ -16,7 +16,7 @@ vault-tools-apt:
     # server (2026-09-24). Every tool the ceremony needs is listed here explicitly instead.
     - install_recommends: False
     - pkgs:
-      - age
+      # age: NOT from Debian (1.2.1 cannot make post-quantum keys); pinned 1.3.2 below.
       - iproute2           # `ip`: the air-gap preflight needs it, and a *-minimal template may lack it
       - curl               # fetches the pinned non-apt files through the Qubes updates proxy
       - opensc
@@ -172,6 +172,36 @@ sops-binary:
     - require:
       - pkg: vault-tools-apt
       - file: vault-fetch-proxy
+
+# age (FiloSottile/age v1.3.2, linux amd64). Debian 13 ships 1.2.1, which cannot generate the
+# post-quantum hybrid breakglass key (age-keygen -pq, ML-KEM-768 + X25519) the ceremony now makes
+# (owner, 2026-09-30). The tarball is checked against its SHA-256 (the same on two downloads,
+# 2026-09-30), and the two binaries against theirs. /usr/bin/age and /usr/bin/age-keygen link to
+# them, so a plain `age` in any shell, including a recoverer's, is this version. age-plugin-yubikey
+# does not depend on Debian's age package (its Depends: libpcsclite1, libc6).
+vault-debian-age-removed:
+  pkg.removed:
+    - name: age
+
+age-binary:
+  cmd.run:
+    - name: 'PX=$(/opt/vault-build/fetch-proxy); T=/opt/vault-bin/age-v1.3.2.tar.gz; mkdir -p /opt/vault-bin && curl -fsSL --connect-timeout 30 --max-time 1200 --retry 3 ${PX:+-x $PX} -o $T.part https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz && echo "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  $T.part" | sha256sum -c - && D=$(mktemp -d) && tar -xzf $T.part -C $D age/age age/age-keygen && printf "%s  %s\n" eb7dd1b518f0a307c99cd97782623c5321da049154b04acd2d98d21aa7bc9b2c $D/age/age 0a0009db842259d6717f7eeb30acb6b90d2a2eb924c6acd0a0db0ca1f1537899 $D/age/age-keygen | sha256sum -c - && install -m 0755 $D/age/age /opt/vault-bin/age && install -m 0755 $D/age/age-keygen /opt/vault-bin/age-keygen; rc=$?; rm -rf $T.part "$D"; exit $rc'
+    - unless: 'printf "%s  %s\n" eb7dd1b518f0a307c99cd97782623c5321da049154b04acd2d98d21aa7bc9b2c /opt/vault-bin/age 0a0009db842259d6717f7eeb30acb6b90d2a2eb924c6acd0a0db0ca1f1537899 /opt/vault-bin/age-keygen | sha256sum -c --status -'
+    - require:
+      - pkg: vault-tools-apt
+      - file: vault-fetch-proxy
+
+age-on-path:
+  file.symlink:
+    - names:
+      - /usr/bin/age:
+        - target: /opt/vault-bin/age
+      - /usr/bin/age-keygen:
+        - target: /opt/vault-bin/age-keygen
+    - force: True
+    - require:
+      - cmd: age-binary
+      - pkg: vault-debian-age-removed
 
 # age-plugin-yubikey v0.5.0 — installed from the upstream .deb (v0.5.1 dropped its
 # Linux build, so v0.5.0 is the last with a Linux artifact). Needs pcscd at runtime
