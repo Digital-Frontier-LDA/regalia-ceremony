@@ -37,7 +37,10 @@ NEED=""
 ENV_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --need) NEED="${2:-}"; shift 2 2>/dev/null || shift;;
+    # A bare --need must not clear what an earlier --need asked for: that would skip a required
+    # device's checks and could end in GO.
+    --need|--need=) if [ "$1" = --need ] && [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ]; then NEED="$2"; shift 2
+                    else echo "Error: --need needs a device list (known: yubikey hsm sle4442 printer drives supplies)" >&2; exit 2; fi;;
     --need=*) NEED="${1#--need=}"; shift;;
     --env-only) ENV_ONLY=1; shift;;
     -h|--help) sed -n '2,21p' "$0"; exit 0;;
@@ -303,9 +306,13 @@ render "share form (words)"  share-form.py --label test --kind words --count 20
 render "case label"          case-label.py
 render "PIN card"            pin-card-form.py
 # The HSM's random generator (ceremony step 1 mixes it in). Reading random bytes touches no key;
-# a FAIL only when --need hsm, since a bench run may have no HSM attached.
-if python3 "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin")" = 32 ]; then
+# a FAIL only when --need hsm, since a bench run may have no HSM attached. The same 60 s bound as
+# ceremony.sh: a token that hangs mid-exchange must not stall the report before its verdict.
+if timeout 60 python3 "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin" 2>/dev/null)" = 32 ]; then
   ok "$(head -1 "$st_dir/h.out")"
+elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+  # The emulator's HSM is a PKCS#11 software token with no card reader; there is nothing to read.
+  warn "no HSM gave random bytes: $(tail -1 "$st_dir/h.out") — skipped in simulated test mode (on the real vault qube, a FAIL with --need hsm)"
 else
   gate "no HSM gave random bytes (hsm-random.py): $(tail -1 "$st_dir/h.out")" hsm
 fi

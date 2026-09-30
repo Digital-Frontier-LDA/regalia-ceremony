@@ -24,6 +24,13 @@ hdr "an entirely unknown device is rejected"
 out="$("$GN" --need wifi 2>&1)"; rc=$?
 [ "$rc" -ne 0 ] && grep -qi "unrecognised device 'wifi'" <<< "$out" && P "unknown 'wifi' rejected" || F "unknown device not rejected"
 
+hdr "a bare --need is rejected, and cannot clear an earlier --need (review of #78)"
+for args in "--need" "--need=" "--need hsm --need" "--need hsm --need --env-only"; do
+  # shellcheck disable=SC2086
+  out="$("$GN" $args 2>&1)"; rc=$?
+  [ "$rc" = 2 ] && grep -qi "needs a device list" <<< "$out" && P "'$args' refused (exit 2)" || F "'$args' not refused (exit $rc)"
+done
+
 hdr "all valid device names are accepted (validation does not over-reject)"
 # this will proceed past validation into preflight; we only assert it does NOT fail on the
 # token validation (grep for the specific validation error, which must be absent).
