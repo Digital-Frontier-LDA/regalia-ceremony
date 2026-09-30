@@ -88,5 +88,11 @@ printf '4\n6\n' | python3 "$CK" --new "$T/new.toml" >/dev/null 2>&1; [ $? = 2 ] 
 printf '4\n6\n' | python3 "$CK" --new "$T/short.toml" >/dev/null 2>&1; e=$?
 [ "$e" = 2 ] && [ ! -e "$T/short.toml" ] && P "input ending early writes nothing (exit 2)" || F "partial input: exit $e, file $(ls "$T/short.toml" 2>&1)"
 
+ln -s "$T/target" "$T/link.toml"
+printf "$ans" | python3 "$CK" --new "$T/link.toml" >/dev/null 2>&1; e=$?
+[ "$e" = 2 ] && [ ! -e "$T/target" ] && P "a symlink at the plan path is refused, not followed" || F "symlink followed: exit $e"
+( umask 000; printf "$ans" | python3 "$CK" --new "$T/umask.toml" >/dev/null 2>&1 )
+[ "$(stat -c %a "$T/umask.toml")" = 600 ] && P "0600 even with umask 000 (created with the mode, not chmod after)" || F "mode $(stat -c %a "$T/umask.toml") under umask 000"
+
 echo; echo "custody-plan-check: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

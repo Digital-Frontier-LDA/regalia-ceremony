@@ -254,8 +254,13 @@ def interactive(path):
     print("\n5. The check.\n")
     results = check(plan)
     report(results)
-    with open(path, "w", encoding="utf-8") as f:
-        os.chmod(path, 0o600)
+    # Created exclusively, already 0600: never readable by others for a moment, and a file or
+    # symlink that appeared since the check above is refused rather than followed or truncated.
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except OSError as e:
+        fail_usage("cannot create %s: %s (nothing was written)" % (path, e.strerror))
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write(to_toml(plan))
     print("\nWritten to %s (mode 0600). Re-check it any time: custody-plan-check.py %s" % (path, path))
     return 1 if any(level == "FAIL" for level, _ in results) else 0
