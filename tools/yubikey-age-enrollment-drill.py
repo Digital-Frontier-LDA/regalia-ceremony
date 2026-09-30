@@ -227,7 +227,9 @@ def main():
         log(transcript, "STEP 1 — encrypt to both tokens and break-glass; each decrypts alone")
         secret = f"drill_secret: {os.urandom(24).hex()}\n"
         plain_sha = hashlib.sha256(secret.encode()).hexdigest()
-        with open("secret.yaml", "w") as f:
+        # A random drill value, encrypted in place by sops on the next line; still never readable by
+        # others, even for that moment (CodeQL py/clear-text-storage-sensitive-data).
+        with os.fdopen(os.open("secret.yaml", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             f.write(secret)
         set_rule([t[0] for t in tokens] + ["break-glass"])
         subprocess.run(["sops", "-e", "-i", "secret.yaml"], check=True, env=env)
