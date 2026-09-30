@@ -131,4 +131,6 @@ if [ "$install" = 1 ]; then
     && ok "installed as ~/bin/vault-tools-update (from the verified $TAG)" \
     || fail "could not install into ~/bin"
 fi
-printf '\nDONE: %s applied. Open a NEW disposable: qvm-run --dispvm=ceremony-vault xterm &\n' "$TAG"
+printf '\nDONE: %s applied. Open a NEW disposable: qvm-run --dispvm=ceremony-vault xterm & disown\n' "$TAG"
+printf '  (disown: closing this dom0 terminal then cannot kill the disposable; end it with exit in its xterm)\n\n'
+

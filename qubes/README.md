@@ -114,9 +114,16 @@ To start a ceremony, open a terminal in a fresh disposable, then find its name (
 attach devices to it:
 
 ```bash
-qvm-run --dispvm=vault xterm &                  # dom0; in the xterm: /opt/vault-ceremony/ceremony.sh
+qvm-run --dispvm=vault xterm & disown           # dom0; in the xterm: /opt/vault-ceremony/ceremony.sh
 qvm-ls --class DispVM --running                  # its name, for qvm-usb / qvm-block attach
 ```
+
+The disposable lives exactly as long as that xterm, and is destroyed with everything in its RAM
+when the xterm closes. `&` gives the dom0 prompt back, so you can attach devices from the same
+terminal. `disown` detaches it from that terminal: closing the dom0 terminal can then no longer
+take the disposable down mid-ceremony. Without `disown`, closing the terminal may kill the xterm,
+and so does Ctrl-C in the terminal if you ran it without `&`. End a session by typing `exit` in
+the xterm (or closing it), never by closing the dom0 terminal.
 
 Before each real ceremony, run **both** checks: `preflight-dom0.sh <vault>` in **dom0**
 (asserts netvm/template/`maxmem 0`/DispVM/dom0-swap) and `/opt/vault-ceremony/go-nogo.sh`
