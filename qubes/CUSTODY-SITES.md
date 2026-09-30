@@ -5,7 +5,7 @@ scheme survives a disaster and resists coercion.** This file is the public, gene
 actual places, and who holds each case, are the *directory*: keep that private (encrypted, and sealed
 with the executor), never in a public repository and never inside a case.
 
-`scripts/custody-plan-check.py` checks a plan against rules 1–5 below. The easiest start is the guided
+`scripts/custody-plan-check.py` checks a plan against rules 1–6 below. The easiest start is the guided
 mode, which asks one question at a time, explains the rule behind it, flags a problem as soon as it
 appears, and writes the plan (mode 0600):
 
@@ -26,10 +26,21 @@ Keep the filled-in file private, next to the directory. Every line reads OK, WAR
 3. **Nobody reaches k sites alone.** List everyone who can open each site *without asking its holder*:
    the holder, a datacenter's staff, a bank, whoever has the key. An organisation counts as one actor.
    If one actor reaches k, coercing (or compromising) that one actor recovers the secret.
+   **The principal is the exception:** it is their secret, and in life they may reach every site
+   (datacenters, banks, their own relative). The checker reports that as WARN, not FAIL, because
+   coercing the principal is a risk no site choice removes; the defence is the holders' rule: a share
+   is handed over only in person, after the shared question, and nothing on a wrong answer or any
+   sign of pressure.
 4. **Whoever holds the directory reaches no site.** Otherwise one person knows where every case is and
    already holds one.
 5. **Pairs that together reach k are reported** as WARN, so each such pair is a choice you made on
    purpose. Pairs with the principal are not reported: in life every holder hands them a share anyway.
+
+6. **Traces.** Mark a site `logged = true` when it records every opening, as a bank's safe-deposit
+   register or a datacenter's access control does; a home safe or a relative does not. If k sites could
+   be opened without any log, that is a WARN; otherwise the report says how many logged sites every
+   recovery must touch. With institutions in the mix, nobody, the principal included, reaches k without
+   leaving a record at an institution that is not theirs to erase.
 
 ## What to weigh when choosing sites (not checked by the tool)
 
@@ -57,5 +68,7 @@ Keep the filled-in file private, next to the directory. Every line reads OK, WAR
 
 - Record each case's seal serial against its site in the private seal-custody file (see
   `seal-registry.example.yaml`).
-- Check the seals on a schedule (e.g. yearly), and log each check.
+- Check the seals on a schedule (e.g. yearly), and log each check. At the same time, ask each logged
+  site (bank, datacenter) for its access record for the case since the last check: an opening nobody
+  asked for is the trace rule 6 exists to produce, and it only helps if someone reads it.
 - Re-run `custody-plan-check.py` whenever a site, a holder or who has access changes.

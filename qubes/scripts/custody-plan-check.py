@@ -11,10 +11,14 @@ are, so keep the real one private (next to the directory, not in a public reposi
 
   1. exactly n sites for a k-of-n scheme (2 <= k <= n <= 16);
   2. at most n - k sites in any one region or hazard zone, so losing it still leaves k;
-  3. nobody (a person or an organisation) can reach k sites on their own;
+  3. nobody (a person or an organisation) can reach k sites on their own, except the principal:
+     it is their secret, so reaching k is a WARN naming the defence (the holders' in-person rule);
   4. whoever holds the directory (who holds which case, where) reaches no site;
   5. any two actors who together reach k are reported, so that pair is a deliberate choice (pairs
      with the principal are not: in life every holder hands them a share anyway).
+  6. traces: sites marked logged (a bank, a datacenter) record every opening. If k sites could be
+     opened without any log, that is a WARN; otherwise the report says how many logged sites any
+     recovery must touch.
 
 Every line reads OK, WARN or FAIL; the last line is PLAN OK or PLAN FAILED (exit 1).
 """
@@ -42,32 +46,36 @@ reach = ["principal"]            # everyone who can open it without asking a hol
 id = 2
 kind = "datacenter lock box"
 region = "capital"
+logged = true                    # every opening leaves a record
 zones = ["capital-fault"]
-reach = ["technical-director", "datacenter-a-staff"]
+reach = ["principal", "technical-director", "datacenter-a-staff"]
 
 [[site]]
 id = 3
 kind = "datacenter lock box"
 region = "north"
-reach = ["technical-director", "datacenter-b-staff"]
+logged = true
+reach = ["principal", "technical-director", "datacenter-b-staff"]
 
 [[site]]
 id = 4
 kind = "bank box, company name"
 region = "north"
+logged = true
 reach = ["principal", "bank-north"]
 
 [[site]]
 id = 5
 kind = "bank box, company name"
 region = "centre"
+logged = true
 reach = ["principal", "bank-centre"]
 
 [[site]]
 id = 6
-kind = "trusted relative"
+kind = "the principal's trusted relative"
 region = "centre"
-reach = ["relative"]
+reach = ["principal", "relative"]
 """
 
 
@@ -136,9 +144,15 @@ def check(plan):
             out.append(("FAIL", "site %s lists nobody in reach: someone opens every site; name them" % sid))
         for a in actors:
             reach.setdefault(str(a), set()).add(sid)
+    principal = str(plan.get("principal") or "")
     for a in sorted(reach):
         got = sorted(reach[a])
-        if len(got) >= k:
+        if len(got) >= k and a == principal:
+            # It is their secret: in life they may reach every site. Coercing them is the risk that
+            # remains, and the defence is the holders' in-person rule with the shared question.
+            out.append(("WARN", "%s (the principal) reaches %d sites (%s), k or more by design: the defence against "
+                        "coercing them is the holders' in-person rule and the shared question" % (a, len(got), ", ".join(got))))
+        elif len(got) >= k:
             out.append(("FAIL", "%s alone reaches %d sites (%s): k is %d" % (a, len(got), ", ".join(got), k)))
         else:
             out.append(("OK", "%s reaches %d site(s) (%s), below k" % (a, len(got), ", ".join(got))))
@@ -156,7 +170,6 @@ def check(plan):
 
     # Rule 5: pairs that together reach k. The principal is left out: in life every holder hands them
     # a share anyway, so a pair with the principal adds nothing. Alone they are still rule 3.
-    principal = str(plan.get("principal") or "")
     if principal:
         out.append(("OK", "%s is the principal: pairs with them are not listed (they may recover with any holder)" % principal))
     for a, b in itertools.combinations(sorted(x for x in reach if x != principal), 2):
@@ -164,6 +177,15 @@ def check(plan):
         if len(both) >= k and len(reach[a]) < k and len(reach[b]) < k:
             out.append(("WARN", "%s and %s together reach %d sites (%s): make that pair a deliberate choice"
                         % (a, b, len(both), ", ".join(sorted(both)))))
+
+    # Rule 6: traces. A bank or a datacenter logs every opening; a home safe or a relative does not.
+    unlogged = sorted(str(x.get("id")) for x in sites if x.get("logged") is not True)
+    if len(unlogged) >= k:
+        out.append(("WARN", "%d sites keep no access log (%s): k of them could be opened without a trace; "
+                    "mark logged = true where a bank or datacenter records each opening" % (len(unlogged), ", ".join(unlogged))))
+    else:
+        out.append(("OK", "any recovery touches at least %d logged site(s): only %d site(s) (%s) open without a trace"
+                    % (k - len(unlogged), len(unlogged), ", ".join(unlogged) or "none")))
     return out
 
 
@@ -199,6 +221,7 @@ def to_toml(plan):
         if site.get("zones"):
             lines.append("zones = [%s]" % ", ".join(toml_str(z) for z in site["zones"]))
         lines.append("reach = [%s]" % ", ".join(toml_str(r) for r in site["reach"]))
+        lines.append("logged = %s" % ("true" if site.get("logged") else "false"))
         if site.get("station"):
             lines.append("station = %s" % toml_str(site["station"]))
     return "\n".join(lines) + "\n"
@@ -234,9 +257,10 @@ def interactive(path):
         who = []
         while not who:
             who = names(ask("   who can open it (roles, comma-separated)"))
+        logged = ask("   does it keep a log of every opening, like a bank or a datacenter? (y/N)", "n").lower().startswith("y")
         station = ask("   nearest station or road, to plan a collection trip (optional)", "")
         site = {"id": i, "kind": kind or "site %d" % i, "region": region or "unknown",
-                "zones": zones, "reach": who, "station": station}
+                "zones": zones, "reach": who, "logged": logged, "station": station}
         sites.append(site)
         for area in [site["region"]] + zones:
             regions.setdefault(area, []).append(i)
@@ -245,7 +269,7 @@ def interactive(path):
                       % (area, len(regions[area]), k))
         for actor in who:
             reach.setdefault(actor, set()).add(i)
-            if len(reach[actor]) >= k:
+            if len(reach[actor]) >= k and actor != principal:
                 print("   \033[31mFAIL\033[0m %s now reaches %d sites: k is %d." % (actor, len(reach[actor]), k))
             if actor in holders:
                 print("   \033[31mFAIL\033[0m %s keeps the directory and now reaches a site." % actor)
