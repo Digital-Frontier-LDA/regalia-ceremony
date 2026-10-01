@@ -1850,7 +1850,9 @@ step_set_pins() {
 # Pin file is read once at step 0; the wizard consumes it and never echoes the values.
 # Pin fields the tier-0 payload step reads:
 #   hsm_{a,b,c}_user_pin, hsm_{a,b,c}_so_pin,
-#   yubikey_{a,b,c}_piv_pin, yubikey_{a,b,c}_piv_puk, yubikey_{a,b,c}_mgmt_key
+#   yubikey_{a,b,c}_piv_pin, yubikey_{a,b,c}_piv_puk, yubikey_{a,b,c}_mgmt_key,
+#   escrow_mac_key (32 hex: generate it with `openssl rand -hex 16`, write it on the PIN card's
+#   ESCROW MAC KEY rows; it authenticates every later PIN escrow)
 # HSM user PINs are 10-15 digits (a 10-try counter), SO-PINs exactly 16 hex digits.
   #
   # DEVICES A, B AND C ARE THE THREE PRODUCTION NITROKEYS (ADR-0002 D17). The staging Pico is NOT

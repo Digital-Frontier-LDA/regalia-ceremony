@@ -60,7 +60,9 @@ def candidates(repo):
         tree = {}
         for line in git(repo, "ls-tree", commit, "escrow/").decode().splitlines():
             meta, path = line.split("\t", 1)
-            tree[os.path.basename(path)] = meta.split()[2]
+            kind, obj = meta.split()[1:3]
+            if kind == "blob":          # a directory (or submodule) named like an escrow is never one
+                tree[os.path.basename(path)] = obj
         return tree
     head = tree_of("HEAD")
     seen, out = set(), []

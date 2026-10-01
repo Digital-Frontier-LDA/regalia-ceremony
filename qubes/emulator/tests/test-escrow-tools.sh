@@ -41,7 +41,11 @@ g rm -q escrow/pins-0002.age escrow/pins-0002.age.mac; g commit -qm delete
   && P "deleting the newest pair does not roll recovery back (reported)" || F "after deletion: $(cat "$T/out" 2>/dev/null)"
 put pins-0003.age forged "$(printf '00%.0s' {1..16})"; g add -A; g commit -qm forged
 [ "$(sel)" = pins-0002.age ] && grep -q "SKIPPED pins-0003.age" "$T/err" && P "a forged escrow is skipped and reported" || F "forged escrow selected"
-[ "$(python3 "$MAC" highest "$T/repo")" = 3 ] && P "the next sequence counts deleted escrows too (highest = 3, not 1)" || F "highest $(python3 "$MAC" highest "$T/repo")"
+mkdir -p "$T/repo/escrow/pins-0009.age.mac"; : > "$T/repo/escrow/pins-0009.age.mac/x"; printf 'x' > "$T/repo/escrow/pins-0009.age"
+g add -A; g commit -qm "a directory named like a .mac"
+[ "$(sel)" = pins-0002.age ] && grep -q "SKIPPED pins-0009.age" "$T/err" && P "a directory where a .mac should be is skipped, not a crash" || F "directory .mac: $(cat "$T/err")"
+g rm -rq escrow/pins-0009.age escrow/pins-0009.age.mac; g commit -qm "remove it"
+[ "$(python3 "$MAC" highest "$T/repo")" = 9 ] && P "the next sequence counts deleted escrows too (highest = 9, though only 0001 is left)" || F "highest $(python3 "$MAC" highest "$T/repo")"
 put pins-0004.age genuine; g add -A; g commit -qm four
 printf 'f%.0s' {1..64} > "$T/repo/escrow/pins-0004.age.mac"; g add -A; g commit -qm "replace only the mac"
 [ "$(sel)" = pins-0004.age ] && [ "$(cat "$T/out")" = genuine ] && P "replacing only the .mac does not hide the earlier valid pair" || F "after a MAC-only replacement: $(cat "$T/out" 2>/dev/null)"
@@ -82,6 +86,11 @@ out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" 7310048261 7310048262 | PATH="$T
 [ "$rc" != 0 ] && grep -q differ <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "mismatched entries: refused, nothing written" || F "rc=$rc: $out"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$(printf '11%.0s' {1..16})" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "does not match" <<< "$out" && P "a key that does not match the KCV: refused" || F "rc=$rc: $out"
+
+hdr "the hand-edited (e) step 0 template names the escrow MAC key"
+( # shellcheck disable=SC1091
+  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; declare -f step_set_pins ) | grep -q 'escrow_mac_key (32 hex' \
+  && P "the template lists escrow_mac_key and how to make it" || F "the manual template omits escrow_mac_key"
 
 hdr "the archive step refuses a disc without the escrow tools"
 mkdir -p "$T/scripts"; cp "$SCRIPTS"/ceremony.sh "$T/scripts/"
