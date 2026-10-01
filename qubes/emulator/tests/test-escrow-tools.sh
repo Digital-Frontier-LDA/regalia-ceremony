@@ -46,6 +46,9 @@ put pins-0004.age genuine; g add -A; g commit -qm four
 printf 'f%.0s' {1..64} > "$T/repo/escrow/pins-0004.age.mac"; g add -A; g commit -qm "replace only the mac"
 [ "$(sel)" = pins-0004.age ] && [ "$(cat "$T/out")" = genuine ] && P "replacing only the .mac does not hide the earlier valid pair" || F "after a MAC-only replacement: $(cat "$T/out" 2>/dev/null)"
 
+mkdir -p "$T/empty"; git -C "$T/empty" init -q
+python3 "$MAC" highest "$T/empty" >/dev/null 2>&1 && P "highest works with no escrow/ directory (every file deleted)" || F "highest fails without escrow/"
+
 hdr "the producer refuses to run from the checkout it writes to"
 mkdir -p "$T/repo/tools"; cp "$SCRIPTS/escrow/pin-escrow.sh" "$SCRIPTS/escrow/pin_escrow_mac.py" "$T/repo/tools/"
 : > "$T/repo/escrow/breakglass.recipient"; printf 'x' > "$T/repo/escrow/breakglass.recipient"; printf '%s\n' "$k1" > "$T/repo/escrow/escrow-mac.kcv"

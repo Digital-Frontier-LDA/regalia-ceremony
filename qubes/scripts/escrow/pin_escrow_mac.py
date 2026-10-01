@@ -88,7 +88,8 @@ def highest(repo, prefix="pins"):
     recovery would still find in history."""
     pat = re.compile(r"^%s-(\d{4})\.age$" % re.escape(prefix))
     names = set(git(repo, "log", "--all", "--format=", "--name-only", "--", "escrow").decode().split())
-    names |= {"escrow/" + n for n in os.listdir(os.path.join(repo, "escrow"))}
+    tree = os.path.join(repo, "escrow")
+    names |= {"escrow/" + n for n in (os.listdir(tree) if os.path.isdir(tree) else [])}
     return max([int(m[1]) for m in (pat.match(os.path.basename(n)) for n in names) if m] or [0])
 
 
