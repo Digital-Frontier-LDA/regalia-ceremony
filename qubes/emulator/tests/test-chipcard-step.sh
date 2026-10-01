@@ -185,6 +185,9 @@ reset; rm -f "$CARD/change-psc"; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf '
 out="$(STUB_CHANGE_FAIL=1 step_chipcard "$SHARE" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "do not seal it as commissioned" <<< "$out" && [ "$(cat "$WORK/sle4442.psc")" = FFFFFF ] \
   && P "a failed change fails the step and keeps the factory PSC as current" || F "failed change: rc=$rc"
+reset; rm -f "$CARD/change-psc"; printf ' ffffff \n' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
+out="$(step_chipcard "$SHARE" 2>&1)"
+[ -e "$CARD/change-psc" ] && ! grep -q "non-factory PSC" <<< "$out" && P "a factory PSC written as ' ffffff ' is still recognised as factory, and changed" || F "padded factory PSC treated as non-factory: $out"
 reset; rm -f "$CARD/change-psc" "$WORK/sle4442.newpsc"; printf 'A1B2C3' > "$WORK/sle4442.psc"
 out="$(step_chipcard "$SHARE" 2>&1)"
 grep -q "non-factory PSC" <<< "$out" && ! grep -q "still has the factory PSC" <<< "$out" && [ ! -e "$CARD/change-psc" ] \

@@ -2381,7 +2381,9 @@ step_chipcard() {
   info "is caught there — the status word alone is never treated as success)."
   # FFFFFF is the factory PSC: anyone holding the card could overwrite or erase the share. Change it
   # when a new PSC is ready (the same value as the payload's sle4442_psc line, so recovery has it).
-  if ! grep -qix 'FFFFFF' "$pscfile"; then
+  # Normalize as resolve_psc() does (whitespace stripped, case ignored): " ffffff " IS the factory PSC.
+  local cur_psc; cur_psc="$(tr -d '[:space:]' < "$pscfile" | tr 'a-f' 'A-F')"
+  if [ "$cur_psc" != FFFFFF ]; then
     info "This card was written with a non-factory PSC; it keeps it."
   elif [ -s "$WORK/sle4442.newpsc" ]; then
     run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
