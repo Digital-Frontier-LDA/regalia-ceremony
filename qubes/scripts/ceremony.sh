@@ -2369,6 +2369,7 @@ step_chipcard() {
     # present the factory PSC and spend an attempt. (A fresh card needs FFFFFF put back explicitly.)
     ( umask 077; cp "$WORK/sle4442.newpsc" "$pscfile" )
     info "PSC changed and verified in a fresh session; $pscfile now holds it (the payload's sle4442_psc must too)."
+    info "For the next FRESH card, put FFFFFF back in $pscfile first (a fresh card still has the factory PSC)."
   else
     warn "The card still has the factory PSC. To change it (recommended), put a new 6-hex PSC in"
     warn "$WORK/sle4442.newpsc (also in the payload's sle4442_psc line) and run:"
