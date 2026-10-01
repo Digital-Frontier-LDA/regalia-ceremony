@@ -36,7 +36,8 @@ with **Section 3B** below, not Section 3.
 
 **Reading the chip card** (only if you need this case's share from it — the hand-written and metal
 copies hold the same share). You need a PC/SC reader that supports SLE-4442 memory cards (e.g.
-ACS ACR39U with the `libacsccid1` driver); ordinary chip-card readers cannot power these cards.
+ACS ACR39U with the `libacsccid1` driver, or ACS ACR40U, validated with the stock Debian `libccid`);
+ordinary chip-card readers cannot power these cards.
 No PSC is needed to read. The share is plain ASCII text stored from **byte 32**; the rest of the
 card after it is padded with `00` bytes, which the command strips:
 ```bash

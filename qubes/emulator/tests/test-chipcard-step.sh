@@ -53,6 +53,7 @@ case "${1:-}" in
     echo "stored and verified $n bytes at $ad"
     exit 0;;
   read) echo "THE-CARD-WOULD-PRINT-THE-SHARE-HERE"; exit 0;;
+  change-psc) echo "$*" > "$C/change-psc"; echo "PSC changed, and the new PSC verified in a fresh session"; exit 0;;
 esac
 exit 0
 STUB
@@ -159,6 +160,18 @@ hdr "MISSING SHARE FILE: refuse rather than storing nothing"
 reset
 out="$(step_chipcard "$WORK/does-not-exist" 2>&1)"
 [ ! -s "$CARD/stored" ] && P "refused a missing share file" || F "BUG: wrote something for a missing file"
+
+# =====================================================================================
+hdr "FACTORY PSC: changed when a new PSC is ready, explained when not"
+reset; printf 'FFFFFF' > "$WORK/sle4442.psc"; rm -f "$WORK/sle4442.newpsc"
+out="$(step_chipcard "$SHARE" 2>&1)"
+[ ! -e "$CARD/change-psc" ] && grep -q "still has the factory PSC" <<< "$out" \
+  && P "no new PSC: the card keeps FFFFFF and the operator is told how to change it" || F "no-new-PSC path: $out"
+reset; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
+out="$(step_chipcard "$SHARE" 2>&1)"
+grep -q -- "--new-psc-file $WORK/sle4442.newpsc" "$CARD/change-psc" 2>/dev/null && ! grep -q 'A1B2C3' "$CARD/change-psc" \
+  && P "a new PSC file: change-psc runs after the store, both PSCs from files (never argv)" || F "change-psc not run as expected: $(cat "$CARD/change-psc" 2>/dev/null)"
+rm -f "$WORK/sle4442.newpsc"
 
 # =====================================================================================
 hdr "RESULT"

@@ -2357,6 +2357,19 @@ step_chipcard() {
          err "If the PSC was wrong, one of the three attempts has been spent."; return 1; }
   info "Share stored AND verify-read back by the card (a write that ACKs but does not persist"
   info "is caught there — the status word alone is never treated as success)."
+  # FFFFFF is the factory PSC: anyone holding the card could overwrite or erase the share. Change it
+  # when a new PSC is ready (the same value as the payload's sle4442_psc line, so recovery has it).
+  if [ -s "$WORK/sle4442.newpsc" ] && ! grep -qix 'FFFFFF' "$pscfile"; then
+    info "This card already has a non-factory PSC; leaving it."
+  elif [ -s "$WORK/sle4442.newpsc" ]; then
+    run "sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
+      && info "PSC changed and verified in a fresh session (the payload's sle4442_psc must hold it)." \
+      || warn "PSC change failed: run 'sle4442-manager info' before anything else."
+  else
+    warn "The card still has the factory PSC. To change it (recommended), put a new 6-hex PSC in"
+    warn "$WORK/sle4442.newpsc (also in the payload's sle4442_psc line) and run:"
+    show "sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'"
+  fi
   warn "Seal this card with its case. Do NOT run 'sle4442-manager read' to double-check: that"
   warn "prints the share to the terminal. The store already proved the bytes are on the card."
 }

@@ -59,7 +59,10 @@ class TestSLE4442(unittest.TestCase):
         self.assertEqual(r, bytes([0x07, 0xFF, 0xFF, 0xFF]) + sle.SW_OK)
 
     def test_write_requires_auth(self):
-        self.assertEqual(self.card.apdu(h("FF D0 00 20 01 AB")), sle.SW_NO_AUTH)
+        # the real card (ACR40U drill, regalia#43): ACKed with 90 00, and nothing is written
+        before = self.card.apdu(h("FF B0 00 20 01"))[:1]
+        self.assertEqual(self.card.apdu(h("FF D0 00 20 01 AB")), sle.SW_OK)
+        self.assertEqual(self.card.apdu(h("FF B0 00 20 01"))[:1], before)
 
     def test_verify_then_write(self):
         self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), PSC_OK)
@@ -86,7 +89,9 @@ class TestSLE4442(unittest.TestCase):
         # ACS 8.4.7: a locked card answers 90 00 — which is exactly why 90 00 is NOT success
         self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), h("90 00"))
         # locked card cannot authenticate even with the right PSC
-        self.assertEqual(self.card.apdu(h("FF D0 00 20 01 AB")), sle.SW_NO_AUTH)
+        before = self.card.apdu(h("FF B0 00 20 01"))[:1]
+        self.card.apdu(h("FF D0 00 20 01 AB"))
+        self.assertEqual(self.card.apdu(h("FF B0 00 20 01"))[:1], before)
 
     def test_protection_is_write_once(self):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
@@ -101,7 +106,7 @@ class TestSLE4442(unittest.TestCase):
 
     def test_change_psc(self):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
-        self.assertEqual(self.card.apdu(h("FF D2 00 00 03 AA BB CC")), sle.SW_OK)
+        self.assertEqual(self.card.apdu(h("FF D2 00 01 03 AA BB CC")), sle.SW_OK)
         # old PSC now fails, new one works
         self.assertEqual(self.card.apdu(h("FF 20 00 00 03 12 34 56")), h("90 03"))
         self.assertEqual(self.card.apdu(h("FF 20 00 00 03 AA BB CC")), PSC_OK)
@@ -109,7 +114,9 @@ class TestSLE4442(unittest.TestCase):
     def test_reset_clears_auth(self):
         self.card.apdu(h("FF 20 00 00 03 12 34 56"))
         self.card.power_on_reset()
-        self.assertEqual(self.card.apdu(h("FF D0 00 20 01 AB")), sle.SW_NO_AUTH)
+        before = self.card.apdu(h("FF B0 00 20 01"))[:1]
+        self.card.apdu(h("FF D0 00 20 01 AB"))
+        self.assertEqual(self.card.apdu(h("FF B0 00 20 01"))[:1], before, "a write after reset must not land")
 
     def test_write_honors_lc_not_trailing_bytes(self):
         # Lc=2 but 4 data bytes follow — a real card writes exactly Lc; we must too.
@@ -492,6 +499,71 @@ class TestManagerWriteVerifiesReadBack(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TestManagerChangePSC(unittest.TestCase):
+    """change-psc: present the current PSC, change it, prove it in a FRESH session (the real ACR40U
+    answers 90 00 to things it ignores, regalia#43)."""
+
+    def setUp(self):
+        self.mgr = _load_manager_module()
+        self.card = sle.SLE4442(psc=h("FFFFFF"))
+        card = self.card
+
+        class Conn:
+            def transmit(self, apdu_ints):
+                resp = card.apdu(bytes(apdu_ints))
+                return list(resp[:-2]), resp[-2], resp[-1]
+
+            def disconnect(self):
+                pass
+
+        def fresh(_reader):
+            card.power_on_reset()           # a new session forgets the verification
+            return Conn(), "fake reader"
+        self.mgr._connect = fresh
+        self.conn = Conn()
+
+    def run_change(self, old, new):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.mgr.cmd_change_psc(self.conn, "fake", old, new)
+        return out.getvalue()
+
+    def test_change_then_the_new_psc_verifies_and_the_old_does_not(self):
+        self.assertIn("verified in a fresh session", self.run_change("FFFFFF", "A1B2C3"))
+        self.card.power_on_reset()
+        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 A1 B2 C3")), PSC_OK)
+
+    def test_a_wrong_current_psc_changes_nothing(self):
+        with self.assertRaises(SystemExit):
+            self.run_change("000000", "A1B2C3")
+        self.card.power_on_reset()
+        self.assertEqual(self.card.apdu(h("FF 20 00 00 03 FF FF FF")), PSC_OK)
+
+    def test_a_change_the_card_ignores_is_caught_by_the_fresh_session(self):
+        card = self.card
+        real = card.apdu
+
+        def ignore_change(apdu):
+            return sle.SW_OK if apdu[:2] == b"\xFF\xD2" else real(apdu)   # ACK, do nothing
+        card.apdu = ignore_change
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_change("FFFFFF", "A1B2C3")
+        self.assertIn("does not verify", str(ctx.exception))
+
+    def test_the_new_psc_is_checked_before_the_card_is_touched(self):
+        import argparse
+        for bad in ("FFFFFF", "12345", "GGGGGG"):
+            with self.subTest(new=bad):
+                os.environ["SLE4442_NEW_PSC"] = bad
+                try:
+                    with self.assertRaises(SystemExit):
+                        self.mgr.resolve_new_psc(argparse.Namespace(new_psc_file=None))
+                finally:
+                    del os.environ["SLE4442_NEW_PSC"]
 
 
 class TestManagerReaderSelection(unittest.TestCase):
