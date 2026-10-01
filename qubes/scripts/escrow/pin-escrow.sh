@@ -92,14 +92,15 @@ next="$(printf '%04d' $((last + 1)))"
 out="escrow/$PREFIX-$next.age"
 # Anything already at the next name cannot verify (it is above the highest verified escrow): it was not
 # written with the key. Replace it, and say so; it stays in history, where recovery skips it.
-if [ -e "$out" ] || [ -e "$out.mac" ]; then
+# -L too: a dangling symlink is not -e, and writing through it would create its target.
+if [ -e "$out" ] || [ -e "$out.mac" ] || [ -L "$out" ] || [ -L "$out.mac" ]; then
   printf 'pin-escrow: %s exists but does not verify (not written with the escrow MAC key): replacing it. Record it as an incident.\n' "$out" >&2
   # Check both paths before removing either: a directory collision is left whole for inspection.
   for f in "$out" "$out.mac"; do
-    [ ! -d "$f" ] || die "$f is a directory, not an escrow file: remove it by hand after checking it; nothing written"
+    [ -L "$f" ] || [ ! -d "$f" ] || die "$f is a directory, not an escrow file: remove it by hand after checking it; nothing written"
   done
   for f in "$out" "$out.mac"; do
-    [ ! -e "$f" ] || rm -f -- "$f" || die "cannot remove $f; nothing written"
+    { [ ! -e "$f" ] && [ ! -L "$f" ]; } || rm -f -- "$f" || die "cannot remove $f; nothing written"   # a link itself, never its target
   done
 fi
 

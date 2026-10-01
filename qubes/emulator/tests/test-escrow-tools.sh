@@ -110,6 +110,11 @@ mkdir -p "$T/disc2"; cp "$T/disc/pin-escrow.sh" "$T/disc/pin_escrow_mac.py" "$T/
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc2/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "no age next to this script" <<< "$out" && P "no checked age beside the tool: refused (PATH's age is never used)" || F "rc=$rc: $out"
 run_p(){ (cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1); }
+ln -s "$T/never-created" "$T/co/escrow/pins-0002.age.mac"   # a dangling symlink on the next .mac name
+out="$(run_p)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$T/never-created" ] && [ ! -L "$T/co/escrow/pins-0002.age.mac" ] && [ -s "$T/co/escrow/pins-0002.age.mac" ] \
+  && P "a dangling symlink on the next name is removed, never written through" || F "symlink: rc=$rc $out"
+rm -f "$T/co/escrow/pins-0002.age"*
 mkdir -p "$T/co/escrow/pins-0002.age.mac"; : > "$T/co/escrow/pins-0002.age.mac/keep"; printf 'evidence' > "$T/co/escrow/pins-0002.age"
 out="$(run_p)"; rc=$?
 [ "$rc" != 0 ] && grep -q "is a directory" <<< "$out" && [ -e "$T/co/escrow/pins-0002.age.mac/keep" ] && grep -q evidence "$T/co/escrow/pins-0002.age" \
