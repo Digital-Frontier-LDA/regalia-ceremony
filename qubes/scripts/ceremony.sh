@@ -1634,17 +1634,23 @@ elif has_date(p):
 # seal-hsm-pin.sh --init-import-key / --from-blob). The PIN arrives on file descriptor 3, never argv.
 # The public key is authenticated first: the operator TYPES the start of the fingerprint they copied
 # by hand at the host's console, and a mismatch refuses (a substituted key would receive the PIN).
-#   pin_blob_for <public-key.pem> <typed fingerprint prefix> <out.blob>   3<<< "$pin"
+#   pin_blob_for <public-key.pem> <typed fingerprint prefix> <out.blob>   3< <(printf '%s' "$pin")
+# (printf, not a here-string: a here-string appends a newline, and the blob must hold exactly the PIN)
 pin_blob_for() {
-  local pub="$1" typed="$2" out="$3" fp
-  [ -r "$pub" ] || { err "cannot read the public key $pub"; return 1; }
-  fp="$(openssl pkey -pubin -in "$pub" -outform der 2>/dev/null | sha256sum | cut -d' ' -f1)"
-  [ -n "$fp" ] && [ "$fp" != "$(printf '' | sha256sum | cut -d' ' -f1)" ] || { err "$pub is not a public key"; return 1; }
+  local src="$1" typed="$2" out="$3" fp pub
+  [ -r "$src" ] || { err "cannot read the public key $src"; return 1; }
+  # Read the key ONCE into the RAM workdir, as canonical DER, and use only that copy: a file or
+  # symlink on removable media could change between the fingerprint check and the encryption.
+  pub="$(mktemp "${WORK:-/tmp}/import-pub.XXXXXX")" || return 1
+  openssl pkey -pubin -in "$src" -outform der -out "$pub" 2>/dev/null || { err "$src is not a public key"; rm -f "$pub"; return 1; }
+  fp="$(sha256sum < "$pub" | cut -d' ' -f1)"
+  [ -s "$pub" ] || { err "$src is not a public key"; rm -f "$pub"; return 1; }
   typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
-  [[ "$typed" =~ ^[0-9a-f]{16,64}$ ]] || { err "type at least the first 16 hex characters of the fingerprint you wrote down"; return 1; }
-  [ "${fp:0:${#typed}}" = "$typed" ] || { err "fingerprint MISMATCH: this public key is not the one you recorded at the host. Nothing was encrypted."; return 1; }
-  openssl pkeyutl -encrypt -pubin -inkey "$pub" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
-    -pkeyopt rsa_mgf1_md:sha256 -in /dev/fd/3 -out "$out" 2>/dev/null || { err "encryption to $pub failed"; rm -f "$out"; return 1; }
+  [[ "$typed" =~ ^[0-9a-f]{16,64}$ ]] || { err "type at least the first 16 hex characters of the fingerprint you wrote down"; rm -f "$pub"; return 1; }
+  [ "${fp:0:${#typed}}" = "$typed" ] || { err "fingerprint MISMATCH: this public key is not the one you recorded at the host. Nothing was encrypted."; rm -f "$pub"; return 1; }
+  openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$pub" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+    -pkeyopt rsa_mgf1_md:sha256 -in /dev/fd/3 -out "$out" 2>/dev/null || { err "encryption to $src failed"; rm -f "$out" "$pub"; return 1; }
+  rm -f "$pub"
   [ -s "$out" ] || { err "empty blob"; rm -f "$out"; return 1; }
 }
 
@@ -1659,7 +1665,7 @@ offer_pin_blobs() {
     read -r -p "   public key file for HSM $(tr a-z A-Z <<< "$h") (empty to skip this HSM): " pub <"$tty"
     [ -n "$pub" ] || continue
     read -r -p "   first 16+ hex of its fingerprint, from your handwritten note: " typed <"$tty"
-    if pin_blob_for "$pub" "$typed" "$dir/pin-hsm_$h.blob" 3<<< "${_vals[hsm_${h}_user_pin]}"; then
+    if pin_blob_for "$pub" "$typed" "$dir/pin-hsm_$h.blob" 3< <(printf '%s' "${_vals[hsm_${h}_user_pin]}"); then
       info "   $dir/pin-hsm_$h.blob written: copy it to the host (any medium; only that TPM can open it), then"
       info "   sudo deploy/seal-hsm-pin.sh --id … --serial … --pcrs … --from-blob pin-hsm_$h.blob"
     else

@@ -141,8 +141,8 @@ W="$T/blob"; mkdir -p "$W"; out="$(BLOB_PUB="$T/host.pub.pem" BLOB_FP="$fp" driv
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed-blob path failed: $(tail -10 <<< "$out")"
 [ -s "$W.blobs/pin-hsm_a.blob" ] && P "pin-hsm_a.blob written" || F "no blob for HSM A"
 [ ! -e "$W.blobs/pin-hsm_b.blob" ] && P "HSM B skipped (no public key given)" || F "a blob for a skipped HSM"
-got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-hsm_a.blob" 2>/dev/null | tr -d '\n')"
-[ -n "$got" ] && [ "$got" = "$(field hsm_a_user_pin "$W")" ] && P "the blob opens to HSM A's PIN" || F "the blob does not open to HSM A's PIN"
+got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-hsm_a.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+[ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field hsm_a_user_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the blob opens to exactly HSM A's PIN bytes" || F "the blob does not open to HSM A's PIN"
 
 hdr "an existing pins.env is loaded as before (hand-made files still work)"
 W="$T/file"; mkdir -p "$W"
