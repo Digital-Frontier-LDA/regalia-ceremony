@@ -1868,7 +1868,8 @@ TPL
   # encrypted TO that same key is unrecoverable by construction.
   # The generated breakglass key itself is never allowed in, whatever the override says: it is the
   # key that opens this file. PAYLOAD_ALLOW_AGE_SECRET only skips the question about a DIFFERENT key.
-  if [ -s "$WORK/breakglass.key" ] && grep -qF "$(grep '^AGE-SECRET-KEY' "$WORK/breakglass.key")" "$plain"; then
+  # The pattern comes from a file descriptor (-f), never argv: the identity must not show in ps.
+  if [ -s "$WORK/breakglass.key" ] && grep -qFf <(grep '^AGE-SECRET-KEY' "$WORK/breakglass.key") "$plain"; then
     err "the BREAKGLASS secret key is in the payload: it would be locked inside the file it opens. Remove it."
     return 1
   fi
