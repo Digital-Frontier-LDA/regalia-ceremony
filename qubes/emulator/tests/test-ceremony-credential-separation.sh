@@ -29,8 +29,10 @@ pins(){ # pins KEY=VALUE overrides...
   local a_user=$GOOD_A_USER a_so=$GOOD_A_SO b_user=$GOOD_B_USER b_so=$GOOD_B_SO c_user=$GOOD_C_USER c_so=$GOOD_C_SO
   local pin=$GOOD_PIN puk=$GOOD_PUK mgmt=$GOOD_MGMT kv
   for kv in "$@"; do eval "${kv%%=*}=\${kv#*=}"; done
-  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_a_piv_pin=%s\nyubikey_a_piv_puk=%s\nyubikey_a_mgmt_key=%s\n%b\n%b\n' \
-    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" "$YK_B" "$YK_C" > "$WORK/pins.env"
+  local emk; emk="$(printf 'E5%.0s' {1..16})"   # 32-hex escrow MAC key placeholder, built at runtime
+  for kv in "$@"; do [ "${kv%%=*}" = emk ] && emk="${kv#*=}"; done
+  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_a_piv_pin=%s\nyubikey_a_piv_puk=%s\nyubikey_a_mgmt_key=%s\n%b\n%b\nescrow_mac_key=%s\n' \
+    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" "$YK_B" "$YK_C" "$emk" > "$WORK/pins.env"
 }
 run_step0(){ ( CEREMONY_MODE="$1" step_set_pins 2>&1 ); }
 leaks(){ grep -qE "$GOOD_A_USER|$GOOD_A_SO|$GOOD_B_USER|$GOOD_B_SO|$GOOD_C_USER|$GOOD_C_SO|$GOOD_PIN|$GOOD_PUK|$GOOD_MGMT|111111" <<< "$1"; }

@@ -88,6 +88,8 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
         ("     SOPS_AGE_KEY_FILE=breakglass.key \\", "Courier", 7.5, 0),
         ("       bin/sops decrypt \\", "Courier", 7.5, 0),
         ("       example-service:infra/ansible/vault.sops.yaml", "Courier", 7.5, 0),
+        ("   PINs changed? key=payload escrow_mac_key; 6c:", "Courier", 6.5, 0),
+        ("     bin/pin_escrow_mac.py select <repo> pins.age", "Courier", 6.5, 0),
         ("6. Verify recovered addr == funding addr on sealed sheet:", "Courier", 7.5, 1),]
     if hsm_funding:
         # No funding.mnemonic exists in the born-in-HSM path; verify from the exported
@@ -102,10 +104,9 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
     body += [
         ("7. MOVE funds to the safe destination (sealed sheet).", "Courier", 7.5, 1),
         ("8. ROTATE all shares/keys - they were exposed.", "Courier", 7.5, 1),
-        ("", "Courier", 7.5, 0),
-        ("AFTER: shut down (wipes RAM); log the open + re-seal.", "Courier", 7.5, 1),
+        ("AFTER: shut down (wipes RAM); log the open + re-seal.", "Courier", 7.5, 2),
         ("Full runbook: RECOVERY-TECHNICAL.md on this disc.", "Courier", 7.5, 1),
-        ("Generated %s. No secrets are printed on this card." % D, "Courier-Oblique", 6.5, 3),
+        ("Generated %s. No secrets are printed on this card." % D, "Courier-Oblique", 6.5, 1),
     ]
     return body
 

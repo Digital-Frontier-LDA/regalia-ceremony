@@ -89,6 +89,16 @@ def emit(hsms, yubikeys, hsm_digits, yk_digits, paper):
         box(m + i * (cell + 4), y, cell, 24)
     y -= 22
 
+    # The escrow MAC key (step 0 shows it once): every later PIN escrow is authenticated with it, and
+    # the escrow tool asks for it (CEREMONY-PLAN, "The PIN card"). Secret. This card is its only
+    # human-readable copy; the encrypted tier-0 payload holds it too, for recovery from k shares.
+    text(m, y, "ESCROW MAC KEY - 32 hex, two rows of 16 (step 0 shows it once):", "Helvetica-Bold", 10.5)
+    for _ in range(2):
+        y -= 28
+        for i in range(16):
+            box(m + i * (cell + 4), y, cell, 24)
+    y -= 22
+
     lh = 11.0
     ib_h = lh * len(RULES) + 12
     if y < m + ib_h + 8:

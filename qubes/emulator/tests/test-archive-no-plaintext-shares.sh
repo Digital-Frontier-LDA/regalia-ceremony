@@ -55,6 +55,7 @@ printf 'DKEK-password-protected-blob' > "$WORK/dkek.pbe"
 printf 'DKEK-wrapped-private-key-blob' > "$WORK/funding-wrapped.bin"
 printf 'PUBLIC-funding-key-der'        > "$WORK/funding-pub.der"
 printf 'age1pq1publicrecipientfixture' > "$WORK/breakglass.recipient"   # public (step 3, option g)
+printf '0123456789abcdef\n' > "$WORK/escrow-mac.kcv"                      # public check value (step 0)
 printf 'AGE-SECRET-KEY-PQ-1%s' "$MARK" > "$WORK/breakglass.key"             # SECRET: must never be burned
 chmod 600 "$WORK/breakglass.key"
 
@@ -110,6 +111,8 @@ fi
 hdr "the breakglass key: its public recipient is burned, its secret half never"
 [ -n "$(find "$burn_dir" -name breakglass.recipient -print -quit 2>/dev/null)" ] \
   && P "breakglass.recipient (public) is on the disc, for the SOPS re-key" || F "breakglass.recipient is missing from the disc"
+[ -n "$(find "$burn_dir" -name escrow-mac.kcv -print -quit 2>/dev/null)" ] \
+  && P "escrow-mac.kcv (public) is on the disc, for later PIN escrows" || F "escrow-mac.kcv is missing from the disc"
 [ -z "$(find "$burn_dir" -name breakglass.key -print -quit 2>/dev/null)" ] \
   && P "breakglass.key (secret) is not on the disc" || F "the breakglass SECRET key was staged for the burn"
 

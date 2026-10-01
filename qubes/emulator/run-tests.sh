@@ -358,6 +358,8 @@ say "BREAKGLASS KEY born in the ceremony (post-quantum age, split + verified, re
 "$HERE/tests/test-ceremony-breakglass-pq.sh" || suite_failed "test-ceremony-breakglass-pq.sh"
 say "PIN IMPORT BLOB (step 0 encrypts a PIN to a KMS host's TPM import key; fingerprint-checked)"
 "$HERE/tests/test-ceremony-pin-import-blob.sh" || suite_failed "test-ceremony-pin-import-blob.sh"
+say "PIN ESCROW TOOLS (on the archive disc; MAC-authenticated escrow, chosen across git history)"
+"$HERE/tests/test-escrow-tools.sh" || suite_failed "test-escrow-tools.sh"
 say "CUSTODY SITES (k-of-n site rules: n-k per region, nobody reaches k, directory holders reach nothing)"
 "$HERE/tests/test-custody-plan-check.sh" || suite_failed "test-custody-plan-check.sh"
 say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"

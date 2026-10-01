@@ -45,6 +45,12 @@ class TestRecoveryCardOptionB(unittest.TestCase):
             self.assertNotIn(dead.lower(), t,
                              "default (Option B) card must not reference the never-created HSM/DKEK path: %r" % dead)
 
+    def test_the_card_names_the_escrow_key_and_selection(self):
+        for kw in ({}, {"hsm_funding": True}):
+            text = card_text(**kw)
+            self.assertIn("escrow_mac_key", text)
+            self.assertIn("bin/pin_escrow_mac.py select", text)
+
     def test_no_raw_shamir_recover_step(self):
         # raw `shamir recover` emits hex entropy, not the BIP39 mnemonic a wallet needs
         self.assertNotIn("shamir recover", card_text(),
