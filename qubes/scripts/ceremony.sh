@@ -1657,19 +1657,25 @@ pin_blob_for() {
 # Offer, at the end of step 0, to write each HSM's PIN as a TPM import blob for its KMS host. Optional:
 # a host commissioned later gets its PIN typed from the PIN card instead (seal-hsm-pin.sh fallback).
 offer_pin_blobs() {
-  local -n _vals="$1"; local tty=/dev/tty h a pub typed dir="$WORK/pin-blobs"
-  read -r -p "   Write HSM PINs as encrypted blobs for KMS hosts already commissioned (TPM import)? [y/N] " a <"$tty"
+  local -n _vals="$1"; local tty=/dev/tty a pub typed dir="$WORK/pin-blobs" dev label field file
+  read -r -p "   Write PINs as encrypted blobs for KMS hosts already commissioned (TPM import)? [y/N] " a <"$tty"
   [ "$a" = y ] || [ "$a" = Y ] || return 0
   mkdir -p "$dir"
-  for h in $HSMS; do
-    read -r -p "   public key file for HSM $(tr a-z A-Z <<< "$h") (empty to skip this HSM): " pub <"$tty"
+  # Every HSM user PIN and every YubiKey PIV PIN the KMS uses unattended; each one goes to the host
+  # that will hold that device (regalia-kms seal-hsm-pin.sh --from-blob, with --serial or --yubikey).
+  for dev in $(for h in $HSMS; do printf 'hsm:%s ' "$h"; done; for y in $YUBIKEYS; do printf 'yubikey:%s ' "$y"; done); do
+    case "$dev" in
+      hsm:*)     label="HSM $(tr a-z A-Z <<< "${dev#hsm:}")";         field="hsm_${dev#hsm:}_user_pin";     file="pin-hsm_${dev#hsm:}.blob" ;;
+      yubikey:*) label="YubiKey $(tr a-z A-Z <<< "${dev#yubikey:}")"; field="yubikey_${dev#yubikey:}_piv_pin"; file="pin-yubikey_${dev#yubikey:}.blob" ;;
+    esac
+    read -r -p "   public key file of the host for $label (empty to skip): " pub <"$tty"
     [ -n "$pub" ] || continue
     read -r -p "   first 16+ hex of its fingerprint, from your handwritten note: " typed <"$tty"
-    if pin_blob_for "$pub" "$typed" "$dir/pin-hsm_$h.blob" 3< <(printf '%s' "${_vals[hsm_${h}_user_pin]}"); then
-      info "   $dir/pin-hsm_$h.blob written: copy it to the host (any medium; only that TPM can open it), then"
-      info "   sudo deploy/seal-hsm-pin.sh --id … --serial … --pcrs … --from-blob pin-hsm_$h.blob"
+    if pin_blob_for "$pub" "$typed" "$dir/$file" 3< <(printf '%s' "${_vals[$field]}"); then
+      info "   $dir/$file written: copy it to that host (any medium; only its TPM can open it), then"
+      info "   sudo deploy/seal-hsm-pin.sh --id … $([ "${dev%%:*}" = yubikey ] && echo '--yubikey <serial>' || echo '--serial <serial>') --pcrs … --from-blob $file"
     else
-      warn "   no blob for HSM $(tr a-z A-Z <<< "$h"): seal its PIN at the host from the PIN card instead."
+      warn "   no blob for $label: seal its PIN at the host from the PIN card instead."
     fi
   done
 }

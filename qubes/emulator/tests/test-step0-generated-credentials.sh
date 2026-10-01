@@ -53,11 +53,12 @@ while time.time() < deadline:
         send("g\n"); pending = ""
     elif "yourself instead" in pending and pending.rstrip().endswith("[y/N]"):
         send("y\n" if mode.startswith("typed") else "n\n"); pending = ""
-    elif "encrypted blobs for KMS hosts" in pending and pending.rstrip().endswith("[y/N]"):
+    elif "as encrypted blobs for KMS hosts" in pending and pending.rstrip().endswith("[y/N]"):
         send("y\n" if mode == "typed-blob" else "n\n"); pending = ""
-    elif re.search(r"public key file for HSM (\S+) \(empty to skip this HSM\): $", pending):
-        h = re.search(r"public key file for HSM (\S+) ", pending).group(1)
-        send((os.environ.get("BLOB_PUB", "") if h == "A" else "") + "\n"); pending = ""
+    elif re.search(r"public key file of the host for (HSM|YubiKey) (\S+) \(empty to skip\): $", pending):
+        m = re.search(r"for (HSM|YubiKey) (\S+) \(empty", pending)
+        want = {("HSM", "A"): "BLOB_PUB", ("YubiKey", "B"): "BLOB_PUB"}.get((m.group(1), m.group(2)))
+        send((os.environ.get(want, "") if want else "") + "\n"); pending = ""
     elif re.search(r"fingerprint, from your handwritten note: $", pending):
         send(os.environ.get("BLOB_FP", "") + "\n"); pending = ""
     elif re.search(r"press Enter to SHOW the (\S+)", pending) and pending.rstrip().endswith("…"):
@@ -141,6 +142,9 @@ W="$T/blob"; mkdir -p "$W"; out="$(BLOB_PUB="$T/host.pub.pem" BLOB_FP="$fp" driv
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed-blob path failed: $(tail -10 <<< "$out")"
 [ -s "$W.blobs/pin-hsm_a.blob" ] && P "pin-hsm_a.blob written" || F "no blob for HSM A"
 [ ! -e "$W.blobs/pin-hsm_b.blob" ] && P "HSM B skipped (no public key given)" || F "a blob for a skipped HSM"
+[ -s "$W.blobs/pin-yubikey_b.blob" ] && P "pin-yubikey_b.blob written (YubiKey PIV PINs go to the TPM too)" || F "no blob for YubiKey B"
+got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-yubikey_b.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+[ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field yubikey_b_piv_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the YubiKey blob opens to exactly YubiKey B's PIV PIN" || F "the YubiKey blob does not open to its PIN"
 got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-hsm_a.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
 [ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field hsm_a_user_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the blob opens to exactly HSM A's PIN bytes" || F "the blob does not open to HSM A's PIN"
 
