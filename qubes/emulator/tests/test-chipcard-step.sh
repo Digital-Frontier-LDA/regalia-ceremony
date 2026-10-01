@@ -178,6 +178,10 @@ out="$(SLE4442_PSC=111111 SLE4442_NEW_PSC=999999 step_chipcard "$SHARE" 2>&1)"
 grep -qx 'ENV=/' "$CARD/change-psc" && [ "$(cat "$WORK/sle4442.psc")" = A1B2C3 ] \
   && P "ambient SLE4442_PSC / SLE4442_NEW_PSC never reach the manager; the files decide, and the record matches" || F "env leaked: $(cat "$CARD/change-psc")"
 reset; rm -f "$CARD/change-psc"; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
+out="$( cp(){ return 1; }; step_chipcard "$SHARE" 2>&1 )"; rc=$?
+[ "$rc" != 0 ] && grep -q "could not be updated" <<< "$out" && ! grep -q "PSC changed and verified" <<< "$out" \
+  && P "the card changed but the record did not: the step fails and says not to retry FFFFFF" || F "record update failure: rc=$rc"
+reset; rm -f "$CARD/change-psc"; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
 out="$(STUB_CHANGE_FAIL=1 step_chipcard "$SHARE" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "do not seal it as commissioned" <<< "$out" && [ "$(cat "$WORK/sle4442.psc")" = FFFFFF ] \
   && P "a failed change fails the step and keeps the factory PSC as current" || F "failed change: rc=$rc"

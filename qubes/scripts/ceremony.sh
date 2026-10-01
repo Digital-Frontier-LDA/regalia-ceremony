@@ -2389,7 +2389,9 @@ step_chipcard() {
            err "'sle4442-manager info' before anything else; do not seal it as commissioned."; return 1; }
     # The verified PSC is now this card's current one: a later run against the same card must not
     # present the factory PSC and spend an attempt. (A fresh card needs FFFFFF put back explicitly.)
-    ( umask 077; cp "$WORK/sle4442.newpsc" "$pscfile" )
+    ( umask 077; cp "$WORK/sle4442.newpsc" "$pscfile" ) \
+      || { err "the card now has the NEW PSC, but $pscfile could not be updated and still says FFFFFF."
+           err "Do NOT retry with the factory PSC: put the content of $WORK/sle4442.newpsc in $pscfile first."; return 1; }
     info "PSC changed and verified in a fresh session; $pscfile now holds it (the payload's sle4442_psc must too)."
     info "For the next FRESH card, put FFFFFF back in $pscfile first (a fresh card still has the factory PSC)."
   else

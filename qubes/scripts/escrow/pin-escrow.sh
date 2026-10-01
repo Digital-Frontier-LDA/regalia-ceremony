@@ -65,7 +65,9 @@ typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
 [ "$typed" = "$fp" ] || die "the recipient in this checkout is NOT the one on the PIN card: STOP, nothing written"
 
 key="$(ask "Escrow MAC key (32 hex), from the PIN card: ")"
-kcv="$(python3 "$HERE/pin_escrow_mac.py" kcv <<< "$key")" || die "that is not a 32-hex escrow MAC key; nothing written"
+# The key reaches Python through a pipe from the printf BUILTIN: never argv, and never a here-string,
+# which some bash versions back with a temporary file on disk.
+kcv="$(printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" kcv)" || die "that is not a 32-hex escrow MAC key; nothing written"
 [ "$kcv" = "$(tr -d '[:space:]' < "$KCV")" ] || die "the escrow MAC key does not match $KCV (mistyped?); nothing written"
 
 declare -A pin
@@ -84,7 +86,7 @@ done
 # From the whole history, as recovery reads it, and from VERIFIED escrows only: a deleted escrow must not
 # let the numbering restart below one recovery would still prefer, and a forged high-numbered file must
 # not push the numbering up (or exhaust it).
-last="$(python3 "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX" <<< "$key")" || die "cannot read the escrow history"
+last="$(printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX")" || die "cannot read the escrow history"
 [ "$last" -lt 9999 ] || die "the escrow sequence is exhausted at 9999 (recovery reads four digits); nothing written"
 next="$(printf '%04d' $((last + 1)))"
 out="escrow/$PREFIX-$next.age"
@@ -92,7 +94,10 @@ out="escrow/$PREFIX-$next.age"
 # written with the key. Replace it, and say so; it stays in history, where recovery skips it.
 if [ -e "$out" ] || [ -e "$out.mac" ]; then
   printf 'pin-escrow: %s exists but does not verify (not written with the escrow MAC key): replacing it. Record it as an incident.\n' "$out" >&2
-  rm -rf -- "$out" "$out.mac"
+  for f in "$out" "$out.mac"; do
+    [ ! -d "$f" ] || die "$f is a directory, not an escrow file: remove it by hand after checking it; nothing written"
+    [ ! -e "$f" ] || rm -f -- "$f" || die "cannot remove $f; nothing written"
+  done
 fi
 
 tmp="$(mktemp /dev/shm/pin-escrow.XXXXXX)" || die "cannot create a file in /dev/shm"
@@ -104,7 +109,7 @@ n="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"
 [ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") PINs; nothing written"
 "$AGE" -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"
-python3 "$HERE/pin_escrow_mac.py" mac "$out" <<< "$key" > "$out.mac" && [ -s "$out.mac" ] \
+printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \
   || { rm -f "$out" "$out.mac"; die "could not write the MAC; nothing written"; }
 key=""
 cat <<REC

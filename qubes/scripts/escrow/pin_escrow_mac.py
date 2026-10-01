@@ -104,12 +104,16 @@ def highest(key, repo, prefix="pins"):
     for name in (os.listdir(tree) if os.path.isdir(tree) else []):
         m, path = name_re.match(name), os.path.join(tree, name)
         if m and os.path.isfile(path) and os.path.isfile(path + ".mac"):
+            # An I/O or permission error is NOT "does not verify": stop, so the producer never treats a
+            # possibly valid escrow as a squatter. Only a tag that is not ASCII is simply invalid.
+            with open(path, "rb") as f, open(path + ".mac", "rb") as g:
+                data, raw = f.read(), g.read()
             try:
-                with open(path, "rb") as f, open(path + ".mac", encoding="ascii") as g:
-                    if hmac.compare_digest(g.read().strip(), mac(key, name, f.read())):
-                        seqs.append(int(m[1]))
-            except (OSError, UnicodeDecodeError):
-                pass
+                tag = raw.decode("ascii").strip()
+            except UnicodeDecodeError:
+                continue
+            if hmac.compare_digest(tag, mac(key, name, data)):
+                seqs.append(int(m[1]))
     return max(seqs or [0])
 
 

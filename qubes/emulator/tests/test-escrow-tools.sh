@@ -55,6 +55,11 @@ put pins-0004.age genuine; g add -A; g commit -qm four
 printf 'f%.0s' {1..64} > "$T/repo/escrow/pins-0004.age.mac"; g add -A; g commit -qm "replace only the mac"
 [ "$(sel)" = pins-0004.age ] && [ "$(cat "$T/out")" = genuine ] && P "replacing only the .mac does not hide the earlier valid pair" || F "after a MAC-only replacement: $(cat "$T/out" 2>/dev/null)"
 
+mkdir -p "$T/io/escrow"; git -C "$T/io" init -q
+ln -s /proc/self/mem "$T/io/escrow/pins-0004.age"; printf 'x\n' > "$T/io/escrow/pins-0004.age.mac"
+python3 "$MAC" highest "$T/io" <<< "$KEY" >/dev/null 2>&1 && F "an unreadable escrow was skipped as if invalid" \
+  || P "an escrow that cannot be read stops sequencing (never treated as a squatter)"
+
 mkdir -p "$T/empty"; git -C "$T/empty" init -q
 [ "$(python3 "$MAC" highest "$T/empty" <<< "$KEY" 2>&1)" = 0 ] && P "highest works with no commit and no escrow/ directory" || F "highest fails on an empty repository"
 
@@ -105,6 +110,11 @@ mkdir -p "$T/disc2"; cp "$T/disc/pin-escrow.sh" "$T/disc/pin_escrow_mac.py" "$T/
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc2/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "no age next to this script" <<< "$out" && P "no checked age beside the tool: refused (PATH's age is never used)" || F "rc=$rc: $out"
 run_p(){ (cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1); }
+mkdir -p "$T/co/escrow/pins-0002.age.mac"; : > "$T/co/escrow/pins-0002.age.mac/keep"
+out="$(run_p)"; rc=$?
+[ "$rc" != 0 ] && grep -q "is a directory" <<< "$out" && [ -e "$T/co/escrow/pins-0002.age.mac/keep" ] \
+  && P "a directory on the next name is refused, never deleted" || F "directory: rc=$rc $out"
+rm -rf "$T/co/escrow/pins-0002.age.mac"
 out1="$(run_p)"; out2="$(run_p)"   # two runs, nothing committed in between
 [ -s "$T/co/escrow/pins-0002.age" ] && [ -s "$T/co/escrow/pins-0003.age" ] && ! grep -q "does not verify" <<< "$out2" \
   && P "an escrow written but not committed is counted: the next run writes 0003, never over 0002" || F "uncommitted: $out1 / $out2"
