@@ -77,6 +77,27 @@ reset_state(){
 write_dev_pins; step_set_pins >/dev/null 2>&1
 
 # =====================================================================================
+hdr "a breakglass key generated in step 3 (option g): the payload is encrypted to ITS recipient"
+if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
+  reset_state; filled_payload
+  ( umask 077; age-keygen -pq -o "$WORK/breakglass.key" 2>/dev/null ); age-keygen -y "$WORK/breakglass.key" > "$WORK/breakglass.recipient"
+  out="$( (unset BREAKGLASS_RECIPIENT; step_payload) 2>&1)"
+  if [ -s "$WORK/payload.age" ] && age -d -i "$WORK/breakglass.key" "$WORK/payload.age" 2>/dev/null | cmp -s - "$WORK/payload.txt"; then
+    P "with no BREAKGLASS_RECIPIENT set, step_payload encrypted to breakglass.recipient (the generated key opens it)"
+  else
+    F "step_payload did not encrypt to the generated recipient: $(tail -5 <<< "$out")"
+  fi
+  reset_state; filled_payload
+  ( umask 077; age-keygen -pq -o "$WORK/breakglass.key" 2>/dev/null ); age-keygen -y "$WORK/breakglass.key" > "$WORK/breakglass.recipient"
+  grep '^AGE-SECRET-KEY-PQ-1' "$WORK/breakglass.key" >> "$WORK/payload.txt"
+  out="$( (unset BREAKGLASS_RECIPIENT; step_payload) 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q "BREAKGLASS secret key is in the payload" <<< "$out" && [ ! -s "$WORK/payload.age" ] \
+    && P "the generated (post-quantum) breakglass key pasted into the payload is refused" || F "PQ breakglass key inside its own payload was accepted (rc=$rc)"
+  rm -f "$WORK/breakglass.recipient"
+else
+  echo "  (skipping the generated-key cases: no age >= 1.3 here)"
+fi
+
 hdr "REFUSES a secret key pasted where the RECIPIENT belongs"
 reset_state; filled_payload
 out="$(BREAKGLASS_RECIPIENT='AGE-SECRET-KEY-1EXAMPLE' step_payload 2>&1)"

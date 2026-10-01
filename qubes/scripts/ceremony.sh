@@ -1308,7 +1308,12 @@ gen_breakglass() {
     err "in /opt/vault-bin). Rebuild the template; do not fall back to a classical key."
     return 1
   fi
-  rm -f "$id" "$rcp"
+  # Never silently replace a key made earlier in this session: its shares may already be on paper.
+  if [ -e "$id" ] || [ -e "$rcp" ]; then
+    err "a breakglass key was already generated in this session ($id); refusing to make another."
+    err "Its shares may already be written down. Use that key (choose a), or start a fresh ceremony."
+    return 1
+  fi
   ( umask 077; age-keygen -pq -o "$id" 2>/dev/null ) || { err "age-keygen -pq failed"; rm -f "$id"; return 1; }
   # ssss splits one line with no trailing newline: the identity line alone.
   ( umask 077; grep '^AGE-SECRET-KEY-PQ-1' "$id" | tr -d '\n' > "$WORK/secret.in" )
@@ -1861,8 +1866,13 @@ TPL
   fi
   # Refuse the one value that must never be in here. A breakglass secret key inside a file
   # encrypted TO that same key is unrecoverable by construction.
-  if grep -q 'AGE-SECRET-KEY-1' "$plain" && [ "${PAYLOAD_ALLOW_AGE_SECRET:-0}" != 1 ]; then
-    warn "an AGE-SECRET-KEY-1… value is present in the payload."
+  if grep -qE 'AGE-SECRET-KEY-(PQ-)?1' "$plain" && [ "${PAYLOAD_ALLOW_AGE_SECRET:-0}" != 1 ]; then
+    # The generated breakglass key itself is never allowed in: it is the key that opens this file.
+    if [ -s "$WORK/breakglass.key" ] && grep -qF "$(grep '^AGE-SECRET-KEY' "$WORK/breakglass.key")" "$plain"; then
+      err "the BREAKGLASS secret key is in the payload: it would be locked inside the file it opens. Remove it."
+      return 1
+    fi
+    warn "an age secret key (AGE-SECRET-KEY-1… or AGE-SECRET-KEY-PQ-1…) is present in the payload."
     warn "If that is the BREAKGLASS key, STOP — it would be locked inside the file it opens."
     warn "If it is the OPS key (a different key), that is intended and safe."
     ask "is it the OPS key (NOT breakglass)?" || { err "aborting — remove the breakglass key."; return 1; }
@@ -2258,16 +2268,24 @@ step_archive() {
   # The breakglass key is post-quantum (age >= 1.3), and most distributions still ship an older age,
   # so the disc carries the image's own static age, age-keygen and sops with their SHA-256 sums. A
   # recoverer on a clean amd64 Linux machine runs them from bin/, without a network.
+  # All three or nothing: a disc with a valid checksum but a missing binary cannot do the recovery
+  # the runbook promises. The real ceremony refuses; a simulated one (no /opt/vault-bin) only warns.
   mkdir -p "$kit/bin"
+  local t staged=0
   for t in age age-keygen sops; do
-    [ -x "/opt/vault-bin/$t" ] && cp "/opt/vault-bin/$t" "$kit/bin/" 2>/dev/null
+    [ -x "/opt/vault-bin/$t" ] && cp "/opt/vault-bin/$t" "$kit/bin/" 2>/dev/null && staged=$((staged+1))
   done
-  if ls "$kit/bin/"* >/dev/null 2>&1; then
+  if [ "$staged" = 3 ]; then
     ( cd "$kit/bin" && sha256sum -- * > SHA256SUMS )
     info "Staged age, age-keygen and sops (static amd64) for the archive disc: recovery-kit/bin/."
+  elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+    rm -rf "${kit:?}/bin"
+    warn "simulated run: /opt/vault-bin has $staged of age, age-keygen, sops; the real ceremony refuses this."
   else
-    rmdir "$kit/bin" 2>/dev/null
-    warn "No /opt/vault-bin tools staged: a clean-machine recoverer will need age >= 1.3 and sops."
+    rm -rf "${kit:?}/bin"
+    err "only $staged of age, age-keygen and sops are in /opt/vault-bin: the disc could not do an offline"
+    err "post-quantum recovery. Rebuild the template; nothing was burned."
+    return 1
   fi
   cp "$sdir/requirements.txt" "$kit/" 2>/dev/null || cp "$sdir/../requirements.txt" "$kit/" 2>/dev/null || true
   # SCHEME.txt: THIS ceremony's k and n, which the recovery documents refer to instead of assuming
@@ -2303,7 +2321,9 @@ step_archive() {
   # bytes, and the stray-artifact guard below refuses every *.png precisely so a plaintext share
   # QR can never reach archival media. The disc carries the payload itself; paper carries the
   # symbols. Nothing needs the guard relaxed.
-  local art; for art in dkek.pbe funding-wrapped.bin funding-pub.der payload.age; do
+  # breakglass.recipient is the PUBLIC half of the breakglass key (step 3, option g): the SOPS re-key
+  # (df-cicd sops-breakglass.yml) and any later encryption to it need it, and it is not secret.
+  local art; for art in dkek.pbe funding-wrapped.bin funding-pub.der payload.age breakglass.recipient; do
     [ -e "$WORK/$art" ] && cp "$WORK/$art" "$burn/" 2>/dev/null || true
   done
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then

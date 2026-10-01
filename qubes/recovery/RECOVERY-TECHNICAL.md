@@ -142,9 +142,9 @@ a static binary that runs on any 64-bit (amd64) Linux.
 
 ```sh
 cd recovery-kit/bin && sha256sum -c SHA256SUMS && cd ../..   # age, age-keygen, sops: all OK
-# after reconstructing the breakglass key from any k of the n password shares
-# (ssss-combine prints the key; put it in a file, alone on one line):
-printf '%s\n' 'AGE-SECRET-KEY-PQ-1…' > breakglass.key
+# rebuild the breakglass key from any k of the n shares, straight into a file (ssss-combine writes
+# the secret on stderr; typing it into a command would leave it in the shell history):
+( umask 077; ssss-combine -t <k> -q 2> breakglass.key )      # then type the k shares when asked
 recovery-kit/bin/age -d -i breakglass.key payload.age > payload.txt
 ```
 
@@ -157,7 +157,7 @@ this file, so it lives only in the Shamir shares.
 secrets (database passwords, Keycloak, Stripe, DNS tokens, OAuth) and is always current:
 
 ```sh
-SOPS_AGE_KEY=<breakglass key> sops decrypt example-service:infra/ansible/vault.sops.yaml
+SOPS_AGE_KEY_FILE=breakglass.key recovery-kit/bin/sops decrypt example-service:infra/ansible/vault.sops.yaml
 ```
 
 Cloud-provider and vendor API credentials are deliberately absent from both. They rotate, and
@@ -191,8 +191,8 @@ obligations. Do NOT reuse these seeds afterward — they have been exposed.
 ## 6. (Optional) decrypt the SOPS config vault
 If you also need the service configuration: the breakglass **age** key is split the same way
 (`ssss-combine -t <k>` over its k shares) → an `AGE-SECRET-KEY-PQ-1…`; then
-`SOPS_AGE_KEY=<that key> recovery-kit/bin/sops decrypt vault.sops.yaml` (the recovered key is a
-*value*, so it goes in `SOPS_AGE_KEY`; `SOPS_AGE_KEY_FILE` is for a *path* to a key file). The sops
+`SOPS_AGE_KEY_FILE=breakglass.key recovery-kit/bin/sops decrypt vault.sops.yaml`, with the key file
+written as in §3C (`ssss-combine … 2> breakglass.key`), so the key is never typed into a command. The sops
 on the disc understands post-quantum age keys; an older sops may not. (A key split before this
 change starts `AGE-SECRET-KEY-1…` and works the same way.)
 

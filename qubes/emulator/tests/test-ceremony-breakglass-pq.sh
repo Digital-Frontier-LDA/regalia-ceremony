@@ -50,15 +50,15 @@ enc="$(printf '%s' "$msg" | age -r "$(cat "$WORK/breakglass.recipient")" | base6
 [ "$(printf '%s' "$enc" | base64 -d | age -d -i <(printf '%s\n' "$rebuilt") 2>/dev/null)" = "$msg" ] \
   && P "the identity rebuilt from shares decrypts a file encrypted to the recipient" || F "rebuilt identity cannot decrypt"
 
-hdr "the payload step picks up the generated recipient"
-unset BREAKGLASS_RECIPIENT
-recip=""; [ -s "$WORK/breakglass.recipient" ] && recip="$(cat "$WORK/breakglass.recipient")"
-grep -q '\[ -s "$WORK/breakglass.recipient" \] && recip=' "$SCRIPTS/ceremony.sh" && [ -n "$recip" ] \
-  && P "step_payload falls back to the recipient generated in step 3" || F "payload step does not read the generated recipient"
+# (step_payload using the generated recipient is exercised for real in test-payload-step.sh.)
 
 hdr "refusals"
 out="$(printf 'g\n' | step_shamir 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'already holds a secret; refusing to overwrite' <<< "$out" && P "g refuses to overwrite a secret already in the workdir" || F "g overwrote secret.in (rc=$rc)"
+rm -f "$WORK/secret.in"
+out="$(printf 'g\n' | step_shamir 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'already generated in this session' <<< "$out" && grep -q "^AGE-SECRET-KEY-PQ-1" "$WORK/breakglass.key" && [ "$(grep '^AGE-SECRET-KEY' "$WORK/breakglass.key")" = "$id" ] \
+  && P "g never replaces a key generated earlier in the session (its shares may be on paper)" || F "g replaced an earlier key (rc=$rc)"
 rm -f "$WORK/secret.in" "$WORK/breakglass.key" "$WORK/breakglass.recipient" "$WORK/shares.txt"
 printf '#!/usr/bin/env bash\necho "age-keygen: unknown flag -pq" >&2; exit 1\n' > "$FAKE/age-keygen"; chmod +x "$FAKE/age-keygen"
 out="$(printf 'g\n' | step_shamir 2>&1)"; rc=$?
