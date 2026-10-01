@@ -141,10 +141,10 @@ else
 fi
 
 hdr "RECITAL — leak scan of the full interactive transcript"
-# Match a REAL key body (AGE-SECRET-KEY-1 + bech32 chars) or a 32-hex master
+# Match a REAL key body (AGE-SECRET-KEY-1 or AGE-SECRET-KEY-PQ-1 + bech32 chars) or a 32-hex master
 # secret on a "secret:" line — not the descriptive help text "AGE-SECRET-KEY-1…".
-if grep -Eq "AGE-SECRET-KEY-1[A-Z0-9]{20,}|master secret:[[:space:]]*[0-9a-f]{32}|$MARKER" "$TRANSCRIPT"; then
-  F "a secret/key leaked into the interactive transcript"; grep -nE "AGE-SECRET-KEY-1[A-Z0-9]{20,}|master secret:[[:space:]]*[0-9a-f]{32}" "$TRANSCRIPT" | head
+if grep -Eq "AGE-SECRET-KEY-(PQ-)?1[A-Z0-9]{20,}|master secret:[[:space:]]*[0-9a-f]{32}|$MARKER" "$TRANSCRIPT"; then
+  F "a secret/key leaked into the interactive transcript"; grep -nE "AGE-SECRET-KEY-(PQ-)?1[A-Z0-9]{20,}|master secret:[[:space:]]*[0-9a-f]{32}" "$TRANSCRIPT" | head
 else
   P "no key / master-secret value printed during the whole interactive run"
 fi

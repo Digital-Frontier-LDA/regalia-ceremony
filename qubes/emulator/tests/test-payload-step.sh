@@ -77,6 +77,27 @@ reset_state(){
 write_dev_pins; step_set_pins >/dev/null 2>&1
 
 # =====================================================================================
+hdr "a breakglass key generated in step 3 (option g): the payload is encrypted to ITS recipient"
+if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
+  reset_state; filled_payload
+  ( umask 077; age-keygen -pq -o "$WORK/breakglass.key" 2>/dev/null ); age-keygen -y "$WORK/breakglass.key" > "$WORK/breakglass.recipient"
+  out="$( (unset BREAKGLASS_RECIPIENT; step_payload) 2>&1)"
+  if [ -s "$WORK/payload.age" ] && age -d -i "$WORK/breakglass.key" "$WORK/payload.age" 2>/dev/null | cmp -s - "$WORK/payload.txt"; then
+    P "with no BREAKGLASS_RECIPIENT set, step_payload encrypted to breakglass.recipient (the generated key opens it)"
+  else
+    F "step_payload did not encrypt to the generated recipient: $(tail -5 <<< "$out")"
+  fi
+  reset_state; filled_payload
+  ( umask 077; age-keygen -pq -o "$WORK/breakglass.key" 2>/dev/null ); age-keygen -y "$WORK/breakglass.key" > "$WORK/breakglass.recipient"
+  grep '^AGE-SECRET-KEY-PQ-1' "$WORK/breakglass.key" >> "$WORK/payload.txt"
+  out="$( (unset BREAKGLASS_RECIPIENT; step_payload) 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q "BREAKGLASS secret key is in the payload" <<< "$out" && [ ! -s "$WORK/payload.age" ] \
+    && P "the generated (post-quantum) breakglass key pasted into the payload is refused" || F "PQ breakglass key inside its own payload was accepted (rc=$rc)"
+  rm -f "$WORK/breakglass.recipient"
+else
+  echo "  (skipping the generated-key cases: no age >= 1.3 here)"
+fi
+
 hdr "REFUSES a secret key pasted where the RECIPIENT belongs"
 reset_state; filled_payload
 out="$(BREAKGLASS_RECIPIENT='AGE-SECRET-KEY-1EXAMPLE' step_payload 2>&1)"
@@ -108,6 +129,7 @@ hdr "PROD GUARD: in CEREMONY_MODE=prod the dev-default PIN block refuses to star
 # PIN values are still the recognised dev fixtures. Verify both directions.
 state_step0_done=0
 write_dev_pins
+# shellcheck disable=SC2034  # CEREMONY_MODE is read by the sourced step_set_pins
 CEREMONY_MODE=prod out="$(step_set_pins 2>&1)"; grep -qi "PROD GUARD" <<< "$(echo "$out")" \
   && P "PROD mode rejects the dev-default PIN block" \
   || F "BUG: PROD mode accepted the dev-default PIN block"
@@ -119,6 +141,7 @@ hdr "REFUSES an UNFILLED template (labels with no values)"
 reset_state
 # Step 0 has run (the gate test above covers the opposite). To exercise the empty-label guard,
 # set the gate flag and clear the loaded PIN vars so the wizard's heredoc writes empty values.
+# shellcheck disable=SC2034  # read by the sourced step_payload gate
 state_step0_done=1
 rm -f "$WORK/payload.txt"
 unset hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin hsm_c_user_pin hsm_c_so_pin
@@ -157,6 +180,7 @@ grep -qiE "no filled-in values|empty label" <<< "$out" \
 # force the empty-label guard; the cascading tests (happy path, regression, warns, end-to-end,
 # secrets, burn) need the PINs back. Re-write the file, re-run step_set_pins to set them,
 # and leave state_step0_done=1 so the gate is satisfied for the next test.
+# shellcheck disable=SC2034  # read by the sourced step_payload gate
 state_step0_done=1
 write_dev_pins
 step_set_pins >/dev/null 2>&1

@@ -18,7 +18,8 @@ python3 "$F_" -o "$T/d.ps" && P "built" || F "not built"
 for r in "HSM A - user PIN" "HSM B - user PIN" "HSM C - user PIN" "YubiKey A - PIV PIN" "YubiKey C - PIV PIN"; do
   grep -qF "$r" "$T/d.ps" && P "row: $r" || F "missing row: $r"
 done
-[ "$(boxes "$T/d.ps")" = $((3 * 10 + 3 * 8 + 1)) ] && P "55 boxes (30 + 24 digits + the rules)" || F "boxes: $(boxes "$T/d.ps")"
+[ "$(boxes "$T/d.ps")" = $((3 * 10 + 3 * 8 + 16 + 1)) ] && P "71 boxes (30 + 24 digits + 16 for the breakglass fingerprint + the rules)" || F "boxes: $(boxes "$T/d.ps")"
+grep -q "Breakglass recipient - first 16 hex of sha256" "$T/d.ps" && P "the card has the breakglass recipient fingerprint row" || F "no breakglass fingerprint row"
 for w in "RULES FOR THIS CARD" "APART from the tokens" "NOT the backup" "seal-hsm-pin.sh" "Never write the SO-PINs" "rotate them"; do
   grep -qF "$w" "$T/d.ps" && P "rule: $w" || F "rule missing: $w"
 done
@@ -27,7 +28,7 @@ grep -q "/PageSize \[612.00 792.00\]" "$T/d.ps" && P "page size declared" || F "
 hdr "the rows follow the fleet and the PIN lengths"
 python3 "$F_" -o "$T/s.ps" --hsms a,b --yubikeys a --hsm-digits 12 --yubikey-digits 6 --paper a4
 grep -qF "HSM C" "$T/s.ps" && F "HSM C drawn for a two-HSM fleet" || P "two HSMs, one YubiKey"
-[ "$(boxes "$T/s.ps")" = $((2 * 12 + 6 + 1)) ] && P "31 boxes (2x12 + 6 + rules)" || F "boxes: $(boxes "$T/s.ps")"
+[ "$(boxes "$T/s.ps")" = $((2 * 12 + 6 + 16 + 1)) ] && P "47 boxes (2x12 + 6 + 16 fingerprint + rules)" || F "boxes: $(boxes "$T/s.ps")"
 
 hdr "bad input refused, nothing written"
 for args in "--hsms ab" "--hsms a,b,c,d" "--yubikeys 1" "--hsm-digits 5" "--yubikey-digits 9"; do
