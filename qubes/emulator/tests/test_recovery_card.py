@@ -94,9 +94,10 @@ class TestRecoveryCardSopsDecrypt(unittest.TestCase):
         t = card_text()
         self.assertNotIn("SOPS_AGE_KEY_FILE=<key>", t,
                          "card must not pass the recovered age key VALUE to the FILE-path env var")
-        self.assertIn("2> breakglass.key", t, "card must write the rebuilt key to a file")
+        self.assertIn("2>breakglass.key", t, "card must write the rebuilt key to a file")
         self.assertIn("SOPS_AGE_KEY_FILE=breakglass.key", t, "card must give sops the key FILE path")
-        self.assertIn("recovery-kit/bin/sops", t, "card must use the disc's sops (post-quantum keys)")
+        self.assertIn("bin/sops decrypt", t, "card must use the disc's sops (post-quantum keys)")
+        self.assertIn("(umask 077;", t, "card must write the rebuilt key readable by its owner only")
 
 
 class TestRecoveryRunbookSopsDecrypt(unittest.TestCase):
@@ -114,7 +115,7 @@ class TestRecoveryRunbookSopsDecrypt(unittest.TestCase):
                          "runbook must not pass the recovered age key VALUE to the FILE-path env var")
         self.assertNotIn("SOPS_AGE_KEY=<", t, "runbook must not have the key typed into a command")
         self.assertIn("2> breakglass.key", t, "runbook must write the rebuilt key to a file")
-        self.assertIn("SOPS_AGE_KEY_FILE=breakglass.key recovery-kit/bin/sops decrypt", t,
+        self.assertIn("SOPS_AGE_KEY_FILE=breakglass.key bin/sops decrypt", t,
                       "runbook must give the disc's sops the key FILE path")
 
 
