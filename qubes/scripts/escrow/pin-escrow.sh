@@ -16,7 +16,8 @@
 #   - the escrow MAC key typed from the PIN card matches escrow/escrow-mac.kcv (from the ceremony's
 #     archive disc), so a mistyped key cannot produce a file that recovery would then reject;
 #   - every one of the six devices' PINs is typed twice, hidden, and the two agree and have the
-#     device's length (Nitrokey HSM user PIN 10-15 digits, YubiKey PIV PIN 8 digits);
+#     device's shape (Nitrokey HSM user PIN 10-15 digits; YubiKey PIV PIN 6-8 printable single-byte
+#     characters, the credential contract of qubes/CREDENTIAL-SEPARATION.md);
 # and it:
 #   - keeps the plaintext in tmpfs (/dev/shm) only, removed after encryption, and stops on any write
 #     failure (a full tmpfs must not yield a truncated escrow);
@@ -61,12 +62,12 @@ declare -A pin
 for d in $DEVICES; do
   case "$d" in
     hsm_[abc]) re='^[0-9]{10,15}$'; what="10-15 digits";;
-    yubikey_[abc]) re='^[0-9]{8}$'; what="8 digits";;
+    yubikey_[abc]) re='^[[:print:]]{6,8}$'; what="6-8 printable single-byte characters";;
     *) die "unknown device id '$d' (hsm_a..c, yubikey_a..c)";;
   esac
   a="$(ask "$d PIN, from the PIN card: ")"; b="$(ask "$d PIN again: ")"
   [ "$a" = "$b" ] || die "the two entries for $d differ; nothing written"
-  [[ "$a" =~ $re ]] || die "the $d PIN must be $what; nothing written"
+  LC_ALL=C; [[ "$a" =~ $re ]] || die "the $d PIN must be $what; nothing written"; unset LC_ALL
   pin[$d]="$a"; a=""; b=""
 done
 
@@ -83,7 +84,7 @@ trap 'rm -f "$tmp"' EXIT
 ( printf '# PIN escrow %s, written %s by tools/pin-escrow.sh; one device=PIN per line\n' "$next" "$(date -u +%FT%TZ)" \
   && for d in $DEVICES; do printf '%s=%s\n' "$d" "${pin[$d]}" || exit 1; done ) > "$tmp" \
   || die "could not write the plaintext to /dev/shm (full?); nothing written"
-n="$(grep -c '^[a-z_]*=[0-9]*$' "$tmp")"
+n="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"
 [ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") PINs; nothing written"
 age -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"

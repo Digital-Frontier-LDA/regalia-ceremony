@@ -2408,6 +2408,17 @@ step_archive() {
   # recoverer on a clean amd64 Linux machine runs them from bin/, without a network.
   # All three or nothing: a disc with a valid checksum but a missing binary cannot do the recovery
   # the runbook promises. The real ceremony refuses; a simulated one (no /opt/vault-bin) only warns.
+  # Without the KCV a later PIN escrow cannot check its key (pin-escrow.sh refuses to run), so a disc
+  # without it, or with a malformed one, is refused like a disc without the escrow tools.
+  if ! grep -qxE '[0-9a-f]{16}' "$WORK/escrow-mac.kcv" 2>/dev/null; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: no valid escrow-mac.kcv from step 0; the real ceremony refuses this disc."
+    else
+      err "escrow-mac.kcv (step 0) is missing or malformed: later PIN escrows could not check their key."
+      err "Run step 0 again in this session; nothing was burned."
+      return 1
+    fi
+  fi
   mkdir -p "$kit/bin"
   local t staged=0
   for t in age age-keygen sops; do

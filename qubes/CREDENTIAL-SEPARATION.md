@@ -15,9 +15,10 @@ records nothing.
 ## PINs, SO PINs, PUKs and management keys
 
 **1. Every credential the ceremony escrows is its own value.** The fleet is three HSMs and three
-YubiKeys (ADR-0002 D17), so step 0 has fifteen fields: `hsm_{a,b,c}_user_pin`,
-`hsm_{a,b,c}_so_pin`, and `yubikey_{a,b,c}_piv_pin`, `yubikey_{a,b,c}_piv_puk`,
-`yubikey_{a,b,c}_mgmt_key` (the list is `PIN_FIELDS` in ceremony.sh). All are required. No two may
+YubiKeys (ADR-0002 D17), so step 0 has sixteen fields: `hsm_{a,b,c}_user_pin`,
+`hsm_{a,b,c}_so_pin`, `yubikey_{a,b,c}_piv_pin`, `yubikey_{a,b,c}_piv_puk`,
+`yubikey_{a,b,c}_mgmt_key`, and `escrow_mac_key` (the key that authenticates later PIN escrows;
+always generated). The list is `PIN_FIELDS` in ceremony.sh. All are required. No two may
 be equal, compared case-insensitively. Card A's PIN is not card B's; a user PIN is not its own SO
 PIN; YubiKey A's PIN is not YubiKey B's, nor its own PUK, nor any HSM PIN.
 *Verified by:* `check_credential_separation` in step 0. PROD refuses, DEV warns, and no value is
@@ -28,6 +29,7 @@ printed in either mode. Test: `test-ceremony-credential-separation.sh`.
 - SmartCard-HSM SO PIN: exactly 16 hex digits.
 - YubiKey PIV PIN and PUK: 6–8 bytes (checked as bytes: multibyte input is refused).
 - PIV management key: 32, 48 or 64 hex digits.
+- Escrow MAC key: exactly 32 hex digits (128 bits).
 
 A value the card would refuse at initialisation is found at step 0, before anything is written.
 *Verified by:* the same check and test.

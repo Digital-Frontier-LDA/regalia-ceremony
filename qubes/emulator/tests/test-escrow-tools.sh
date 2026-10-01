@@ -55,6 +55,34 @@ mkdir -p "$T/repo/tools"; cp "$SCRIPTS/escrow/pin-escrow.sh" "$SCRIPTS/escrow/pi
 out="$(cd "$T/repo" && bash tools/pin-escrow.sh < /dev/null 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "archive disc" <<< "$out" && P "the repository copy refuses and names the disc's copy" || F "rc=$rc: $out"
 
+hdr "the producer, end to end (the disc's copy, a stub age that records what it was given)"
+mkdir -p "$T/disc" "$T/stub" "$T/co/escrow"; cp "$SCRIPTS/escrow/pin-escrow.sh" "$SCRIPTS/escrow/pin_escrow_mac.py" "$T/disc/"
+cat > "$T/stub/age" <<'STUB'
+#!/usr/bin/env bash
+# stub: age -R <recipients> -o <out> <in>; "encrypts" by tagging the plaintext (test only)
+while [ $# -gt 1 ]; do case "$1" in -R) shift 2;; -o) out="$2"; shift 2;; *) shift;; esac; done
+{ printf 'STUB-AGE\n'; cat "$1"; } > "$out"
+STUB
+chmod +x "$T/stub/age"
+git -C "$T/co" init -q; printf 'age1pq1stubrecipient\n' > "$T/co/escrow/breakglass.recipient"
+printf '%s\n' "$k1" > "$T/co/escrow/escrow-mac.kcv"
+fp="$(sha256sum "$T/co/escrow/breakglass.recipient" | cut -c1-16)"
+six="7310048261 7310048261 8420159372 8420159372 9531260483 9531260483 90817263 90817263 a1b2c3 a1b2c3 72635445 72635445"
+before="$(ls /dev/shm)"
+out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && [ -s "$T/co/escrow/pins-0001.age" ] && [ -s "$T/co/escrow/pins-0001.age.mac" ] \
+  && P "six devices escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
+[ "$(grep -cE '^(hsm|yubikey)_[abc]=' "$T/co/escrow/pins-0001.age")" = 6 ] && grep -qx 'yubikey_b=a1b2c3' "$T/co/escrow/pins-0001.age" \
+  && P "the plaintext handed to age holds exactly the six device=PIN lines" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
+git -C "$T/co" add -A >/dev/null; git -C "$T/co" -c user.name=t -c user.email=t@t commit -qm e >/dev/null
+rm -f "$T/out"; [ "$(python3 "$MAC" select "$T/co" "$T/out" <<< "$KEY" 2>/dev/null)" = pins-0001.age ] \
+  && P "its MAC verifies with the key" || F "the producer's MAC does not verify"
+[ "$(ls /dev/shm)" = "$before" ] && P "nothing left in /dev/shm" || F "left in /dev/shm: $(comm -13 <(echo "$before") <(ls /dev/shm))"
+out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" 7310048261 7310048262 | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q differ <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "mismatched entries: refused, nothing written" || F "rc=$rc: $out"
+out="$(cd "$T/co" && printf '%s\n' "$fp" "$(printf '11%.0s' {1..16})" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q "does not match" <<< "$out" && P "a key that does not match the KCV: refused" || F "rc=$rc: $out"
+
 hdr "the archive step refuses a disc without the escrow tools"
 mkdir -p "$T/scripts"; cp "$SCRIPTS"/ceremony.sh "$T/scripts/"
 out="$(
@@ -67,6 +95,19 @@ out="$(
   step_archive 2>&1; echo "RC=$?"
 )"
 grep -q "RC=1" <<< "$out" && grep -q "PIN escrow tools" <<< "$out" && P "no escrow tools, no disc" || F "$(tail -5 <<< "$out")"
+
+hdr "the real archive step refuses a disc without a valid escrow-mac.kcv"
+out="$(
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1
+  ask(){ return 0; }; pause(){ :; }
+  # shellcheck disable=SC2034  # read by the sourced ceremony.sh
+  PRINTER=""
+  init_work >/dev/null 2>&1; printf 'not-a-kcv\n' > "$WORK/escrow-mac.kcv"
+  CEREMONY_SIMULATE=0 step_archive 2>&1; echo "RC=$?"
+)"
+grep -q "RC=1" <<< "$out" && grep -q "escrow-mac.kcv (step 0) is missing or malformed" <<< "$out" \
+  && P "a malformed KCV: no disc" || F "$(tail -5 <<< "$out")"
 
 echo; echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

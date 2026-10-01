@@ -87,7 +87,9 @@ def highest(repo, prefix="pins"):
     tree: the producer numbers from here, so deleting files cannot make it restart below a number
     recovery would still find in history."""
     pat = re.compile(r"^%s-(\d{4})\.age$" % re.escape(prefix))
-    names = set(git(repo, "log", "--all", "--format=", "--name-only", "--", "escrow").decode().split())
+    # -z: NUL-separated and never C-quoted, so no path can hide behind quoting or spaces.
+    names = {n for n in git(repo, "log", "--all", "-z", "--format=", "--name-only", "--", "escrow").decode(
+        "utf-8", "surrogateescape").replace("\n", "\0").split("\0") if n}
     tree = os.path.join(repo, "escrow")
     names |= {"escrow/" + n for n in (os.listdir(tree) if os.path.isdir(tree) else [])}
     return max([int(m[1]) for m in (pat.match(os.path.basename(n)) for n in names) if m] or [0])
@@ -109,8 +111,14 @@ def select(key, repo, out):
             print("NOTE %s verifies but HEAD no longer holds it (deleted or replaced after being written): "
                   "using the verified copy from history; record it as an incident" % name, file=sys.stderr)
         fd = os.open(out, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+        except OSError as error:
+            # A partial copy is not the verified ciphertext: never leave one behind (a full tmpfs).
+            os.unlink(out)
+            print("could not write %s (%s); nothing kept" % (out, error), file=sys.stderr)
+            return 1
         print(name)
         return 0
     print("no verified escrow file in %s: use the payload's PINs" % repo, file=sys.stderr)
