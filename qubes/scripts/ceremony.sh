@@ -1326,6 +1326,9 @@ gen_breakglass() {
   info "New post-quantum breakglass key generated in RAM (never printed, never on disk)."
   info "Its PUBLIC recipient (${#BREAKGLASS_RECIPIENT} characters, age1pq1…) is in $rcp:"
   info "it goes into .sops.yaml (the SOPS re-key PR) and onto the archive disc. It is not secret."
+  info "WRITE ON THE PIN CARD, in its 'Breakglass recipient' boxes, the first 16 hex of its sha256:"
+  info "     $(sha256sum < "$rcp" | cut -c1-16)"
+  info "Every later PIN escrow checks the repository's copy of the recipient against that value."
 }
 
 step_shamir() {
