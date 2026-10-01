@@ -88,8 +88,9 @@ out="$(cd "$T/co" && printf '%s\n' "$fp" "$(printf '11%.0s' {1..16})" | PATH="$T
 [ "$rc" != 0 ] && grep -q "does not match" <<< "$out" && P "a key that does not match the KCV: refused" || F "rc=$rc: $out"
 
 hdr "the hand-edited (e) step 0 template names the escrow MAC key"
-( # shellcheck disable=SC1091
-  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; declare -f step_set_pins ) | grep -q 'escrow_mac_key (32 hex' \
+body="$( # shellcheck disable=SC1091
+  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; declare -f step_set_pins )"
+grep -q 'escrow_mac_key (32 hex' <<< "$body" \
   && P "the template lists escrow_mac_key and how to make it" || F "the manual template omits escrow_mac_key"
 
 hdr "the archive step refuses a disc without the escrow tools"
