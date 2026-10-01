@@ -24,8 +24,17 @@ if pid == 0:
     os.environ["TERM"] = "xterm"
     os.execvp("bash", ["bash", "-c", cmd])
 screen, shown, pending = "", {}, ""
-typed = {"hsm_a_user_pin": "7310048261", "hsm_b_user_pin": "5512096374", "hsm_c_user_pin": "4096128803",
-         "yubikey_a_piv_pin": "908172", "yubikey_b_piv_pin": "63517240", "yubikey_c_piv_pin": "2748105"}
+# Each PIN is a queue: in mode "typed-weak" the first entries are refused (a date, a run, a reuse of
+# another device's PIN, a too-short YubiKey PIN) and the prompt must ask again; the last is accepted.
+typed = {"hsm_a_user_pin": ["7310048261"], "hsm_b_user_pin": ["5512096374"], "hsm_c_user_pin": ["4096128803"],
+         "yubikey_a_piv_pin": ["90817263"], "yubikey_b_piv_pin": ["63517240"], "yubikey_c_piv_pin": ["27481059"]}
+if mode == "typed-weak":
+    # DDMMYYYY, a run, a repeating pattern, one repeated digit, two digits non-periodic, then accepted
+    typed["hsm_a_user_pin"] = ["0101199012", "1234567890", "1231231231", "1111111111", "1212121122", "7310048261"]
+    # reuse of hsm_a's PIN, YYYYMMDD, MMDDYYYY, then accepted
+    typed["hsm_b_user_pin"] = ["7310048261", "1990010112", "1225198500", "5512096374"]
+    typed["yubikey_a_piv_pin"] = ["908172", "25121985", "90817263"]
+seen = {}
 def send(s): os.write(fd, s.encode())
 deadline = time.time() + 60
 ansi = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|\r")
@@ -43,7 +52,7 @@ while time.time() < deadline:
     if pending.rstrip().endswith("[g/e]"):
         send("g\n"); pending = ""
     elif "yourself instead" in pending and pending.rstrip().endswith("[y/N]"):
-        send("y\n" if mode == "typed" else "n\n"); pending = ""
+        send("y\n" if mode.startswith("typed") else "n\n"); pending = ""
     elif re.search(r"press Enter to SHOW the (\S+)", pending) and pending.rstrip().endswith("…"):
         send("\n"); pending = ""
     elif "press Enter to CLEAR" in pending and pending.rstrip().endswith("…"):
@@ -54,8 +63,12 @@ while time.time() < deadline:
         name = re.search(r"type the (\S+) back", pending).group(1)
         send(("00000000" if mode == "gen-wrong" else shown.get(name, "?")) + "\n"); pending = ""
     elif re.search(r"(\S+) (\(hidden\)|again): $", pending):
-        name = re.search(r"(\S+) (\(hidden\)|again): $", pending).group(1)
-        send(typed[name] + "\n"); pending = ""
+        m = re.search(r"(\S+) (\(hidden\)|again): $", pending)
+        name, which = m.group(1), m.group(2)
+        if which == "(hidden)":
+            seen[name] = seen.get(name, -1) + 1
+        queue = typed[name]
+        send(queue[min(seen.get(name, 0), len(queue) - 1)] + "\n"); pending = ""
 print(screen)
 for k, v in shown.items(): print("DRIVER: shown %s=%s" % (k, v))
 PY
@@ -91,10 +104,27 @@ grep -q "RC=1" <<< "$out" && [ ! -e "$W.kept" ] && grep -q "three mismatches" <<
 hdr "typed: the operator chooses the day-to-day PINs; recovery credentials still generated"
 W="$T/typed"; mkdir -p "$W"; out="$(drive typed "$W")"
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed path failed: $(tail -10 <<< "$out")"
-[ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_c_user_pin "$W")" = 4096128803 ] && [ "$(field yubikey_a_piv_pin "$W")" = 908172 ] && [ "$(field yubikey_c_piv_pin "$W")" = 2748105 ] && P "typed PINs stored" || F "typed PINs not stored"
+[ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_c_user_pin "$W")" = 4096128803 ] && [ "$(field yubikey_a_piv_pin "$W")" = 90817263 ] && [ "$(field yubikey_c_piv_pin "$W")" = 27481059 ] && P "typed PINs stored" || F "typed PINs not stored"
 [[ "$(field hsm_c_so_pin "$W")" =~ ^[0-9A-F]{16}$ ]] && P "SO-PINs still generated" || F "SO-PIN not generated"
 grep -q '^DRIVER: shown' <<< "$out" && F "a typed PIN was displayed" || P "typed PINs are not displayed"
-grep -qE "7310048261|5512096374|4096128803|908172|63517240|2748105" <<< "$out" && F "a typed PIN was echoed" || P "typed PINs not echoed"
+grep -qE "7310048261|5512096374|4096128803|90817263|63517240|27481059" <<< "$out" && F "a typed PIN was echoed" || P "typed PINs not echoed"
+grep -q "print the blank PIN card yourself\|blank PIN card sent" <<< "$out" && P "the blank PIN card is offered in typed mode too" || F "no PIN card in typed mode"
+
+hdr "typed: guessable, reused and short PINs are refused, and the prompt asks again"
+W="$T/weak"; mkdir -p "$W"; out="$(drive typed-weak "$W")"
+grep -q "RC=0" <<< "$out" && P "step 0 succeeds once acceptable PINs are typed" || F "typed-weak path failed: $(tail -10 <<< "$out")"
+[ "$(grep -c "refused: it contains a date" <<< "$out")" -ge 4 ] && P "dates are refused in every order (DDMMYYYY, YYYYMMDD, MMDDYYYY, and as a YubiKey PIN)" || F "dates not refused: $(grep -c 'contains a date' <<< "$out")"
+grep -q "refused: it is one digit repeated" <<< "$out" && P "a repeated digit is refused" || F "repeated digit not refused"
+grep -q "refused: it uses only two different digits" <<< "$out" && P "two distinct digits are refused" || F "two-digit PIN not refused"
+leaked=0; for v in 0101199012 1234567890 1231231231 1111111111 1212121122 1990010112 1225198500 908172 25121985 01011990 19900101 12251985; do grep -qF "$v" <<< "$(grep -v '^DRIVER' <<< "$out")" && leaked=1; done
+[ "$leaked" = 0 ] && P "no digit sequence of a refused PIN appears on the screen" || F "a refused PIN's digits were printed"
+grep -q "3<<< \"\$1\"" "$SCRIPTS/ceremony.sh" && ! grep -q 'python3 - "\$1"' "$SCRIPTS/ceremony.sh" && P "the PIN reaches the checker on a file descriptor, not argv" || F "the PIN may be on argv"
+grep -q "refused: it is a run of consecutive digits" <<< "$out" && P "a run of digits is refused" || F "run not refused"
+grep -q "refused: it repeats a short pattern" <<< "$out" && P "a repeating pattern is refused" || F "pattern not refused"
+grep -q "already used for another device" <<< "$out" && P "a PIN reused across devices is refused" || F "reuse not refused"
+grep -q "a YubiKey PIN is 8 digits" <<< "$out" && P "a 6-digit YubiKey PIN is refused" || F "short YubiKey PIN accepted"
+[ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_b_user_pin "$W")" = 5512096374 ] && [ "$(field yubikey_a_piv_pin "$W")" = 90817263 ] \
+  && P "only the accepted PINs are stored" || F "a refused PIN was stored"
 
 hdr "an existing pins.env is loaded as before (hand-made files still work)"
 W="$T/file"; mkdir -p "$W"

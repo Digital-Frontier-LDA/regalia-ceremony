@@ -1593,6 +1593,43 @@ show_day_pin() {
   done
 }
 
+# Why a PIN the operator chose is refused (empty when it is acceptable). A chosen PIN is meant to be
+# memorable (owner, 2026-10-01); these are the memorable PINs an attacker tries first, and a card
+# allows only 10 tries. NIST SP 800-63B: refuse repetitive and sequential values; here also dates,
+# since a birthday or anniversary is guessable by anyone who knows the owner.
+weak_pin_reason() {
+  # The PIN reaches Python on file descriptor 3, never as an argument: argv is readable by any local
+  # process (/proc/<pid>/cmdline). The reason printed never repeats any digit of the PIN.
+  python3 -c '
+import datetime, os
+p = os.read(3, 64).decode().strip()
+def date_ok(d, m, y):
+    try:
+        datetime.date(y, m, d)
+        return 1900 <= y <= 2099
+    except ValueError:
+        return False
+def has_date(s):
+    for i in range(len(s) - 7):
+        w = s[i:i+8]
+        dd, mm, yyyy = int(w[0:2]), int(w[2:4]), int(w[4:8])
+        if date_ok(dd, mm, yyyy) or date_ok(int(w[6:8]), int(w[4:6]), int(w[0:4])) or date_ok(mm, dd, yyyy):
+            return True
+    return False
+if len(set(p)) == 1:
+    print("it is one digit repeated")
+elif all((int(p[i+1]) - int(p[i])) % 10 == 1 for i in range(len(p) - 1)) or \
+     all((int(p[i]) - int(p[i+1])) % 10 == 1 for i in range(len(p) - 1)):
+    print("it is a run of consecutive digits")
+elif any(p == (p[:k] * len(p))[:len(p)] for k in range(2, len(p) // 2 + 1)):
+    print("it repeats a short pattern")
+elif len(set(p)) <= 2:
+    print("it uses only two different digits")
+elif has_date(p):
+    print("it contains a date: a birthday or anniversary is the first thing someone who knows you tries")
+' 3<<< "$1"
+}
+
 # Write $WORK/pins.env from generated values (and, if the operator chooses, typed day-to-day PINs).
 generate_pins() {
   local pfile="$1" tty=/dev/tty k v v2 typed_day=0
@@ -1607,9 +1644,13 @@ generate_pins() {
   done
   info "Generated: every HSM SO-PIN and every YubiKey PUK and management key. They are NOT shown: they go"
   info "only into the encrypted tier-0 payload (any $(K) of the $(N) shares open it)."
+  info "Day-to-day PINs (every HSM and every YubiKey): GENERATED (random, shown once for the PIN card),"
+  info "or CHOSEN by you, typed hidden. A chosen PIN must be 10-15 digits for an HSM and 8 for a YubiKey,"
+  info "different on every device, and not guessable: no repeated digit, run, short pattern or date."
   local a; read -r -p "   type the $(wc -w <<< "$DAY_PINS") day-to-day PINs (every HSM and every YubiKey) yourself instead of generating them? [y/N] " a <"$tty"
   if [ "$a" = y ] || [ "$a" = Y ]; then
     typed_day=1
+    local why other dup
     for k in $DAY_PINS; do
       while :; do
         read -r -s -p "   $k (hidden): " v <"$tty"; echo
@@ -1617,12 +1658,19 @@ generate_pins() {
         [ "$v" = "$v2" ] || { err "the two entries differ — again."; continue; }
         case "$k" in
           hsm_?_user_pin) [[ "$v" =~ ^[0-9]{10,15}$ ]] || { err "an HSM user PIN is 10-15 digits (10 tries need 10 digits) — again."; continue; } ;;
-          yubikey_?_piv_pin) [[ "$v" =~ ^[0-9]{6,8}$ ]] || { err "a YubiKey PIN is 6-8 digits — again."; continue; } ;;
+          yubikey_?_piv_pin) [[ "$v" =~ ^[0-9]{8}$ ]] || { err "a YubiKey PIN is 8 digits — again."; continue; } ;;
         esac
+        why="$(weak_pin_reason "$v")"
+        [ -z "$why" ] || { err "that PIN is refused: $why — choose another."; continue; }
+        # Each device has its own PIN (REQUIREMENTS A6): one site's PIN must not open another's card.
+        dup=""; for other in "${!val[@]}"; do
+          case "$other" in *_user_pin|*_piv_pin) [ "${val[$other]}" = "$v" ] && dup="$other";; esac
+        done
+        [ -z "$dup" ] || { err "that PIN is already used for another device; every device needs its own — again."; continue; }
         val[$k]="$v"; break
       done
     done
-    v=""; v2=""
+    v=""; v2=""; why=""
   else
     # HSM user PINs: 10 digits, for the production 10-try counter (ADR-0002 D15, PLAN.md 1.3). A
     # YubiKey PIN is at most 8 characters.
@@ -1634,19 +1682,24 @@ generate_pins() {
       for k in $PIN_FIELDS; do
         printf '%s=%s\n' "$k" "${val[$k]}"
       done; } > "$pfile" )
-  if [ "$typed_day" = 0 ]; then
-    # The paper PIN card (ADR-0002 D16): a blank form with a row per device; the PINs are written on
-    # it by hand. The printer sees only the blank form, never a PIN.
-    local card="$WORK/pin-card.ps"
-    if python3 "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")" --yubikeys "$(tr ' ' ',' <<< "$YUBIKEYS")"; then
-      if [ -n "${PRINTER:-}" ]; then
-        run "lp -d '$PRINTER' '$card'" <"$tty" && info "blank PIN card sent to $PRINTER (it holds no PIN)"
-      else
-        warn "no printer set — print the blank PIN card yourself (no PIN in it): lp -d <queue> $card"
-      fi
+  # The paper PIN card (ADR-0002 D16), in both modes: a blank form with a row per device, filled in
+  # by hand. The printer sees only the blank form, never a PIN. A chosen PIN still goes on the card:
+  # an HSM's user PIN cannot be reset (PIN reset is disabled, D15), so a forgotten one costs a key
+  # restore from the k-of-n shares.
+  local card="$WORK/pin-card.ps"
+  if python3 "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")" --yubikeys "$(tr ' ' ',' <<< "$YUBIKEYS")"; then
+    if [ -n "${PRINTER:-}" ]; then
+      run "lp -d '$PRINTER' '$card'" <"$tty" && info "blank PIN card sent to $PRINTER (it holds no PIN)"
     else
-      warn "could not build the blank PIN card; use a plain sheet, one line per device"
+      warn "no printer set — print the blank PIN card yourself (no PIN in it): lp -d <queue> $card"
     fi
+  else
+    warn "could not build the blank PIN card; use a plain sheet, one line per device"
+  fi
+  if [ "$typed_day" = 1 ]; then
+    warn "Write the PINs you chose on the PIN card too, then seal it in its envelope: an HSM user PIN"
+    warn "cannot be reset, and a forgotten one costs a key restore from the k-of-n shares."
+  else
     warn "Next: each day-to-day PIN is shown ONCE. Write it on your PIN card by hand. Make sure nobody"
     warn "else can see this screen, and no camera points at it."
     for k in $DAY_PINS; do show_day_pin "$k" "${val[$k]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
