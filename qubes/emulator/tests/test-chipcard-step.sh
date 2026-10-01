@@ -53,7 +53,7 @@ case "${1:-}" in
     echo "stored and verified $n bytes at $ad"
     exit 0;;
   read) echo "THE-CARD-WOULD-PRINT-THE-SHARE-HERE"; exit 0;;
-  change-psc) echo "$*" > "$C/change-psc"; [ "${STUB_CHANGE_FAIL:-0}" = 1 ] && { echo "the NEW PSC does not verify" >&2; exit 1; }
+  change-psc) echo "$*" > "$C/change-psc"; echo "ENV=${SLE4442_PSC:-}/${SLE4442_NEW_PSC:-}" >> "$C/change-psc"; [ "${STUB_CHANGE_FAIL:-0}" = 1 ] && { echo "the NEW PSC does not verify" >&2; exit 1; }
               echo "PSC changed, and the new PSC verified in a fresh session"; exit 0;;
 esac
 exit 0
@@ -173,6 +173,10 @@ out="$(step_chipcard "$SHARE" 2>&1)"
 grep -q -- "--new-psc-file $WORK/sle4442.newpsc" "$CARD/change-psc" 2>/dev/null && ! grep -q 'A1B2C3' "$CARD/change-psc" \
   && P "a new PSC file: change-psc runs after the store, both PSCs from files (never argv)" || F "change-psc not run as expected: $(cat "$CARD/change-psc" 2>/dev/null)"
 [ "$(cat "$WORK/sle4442.psc")" = A1B2C3 ] && P "after a verified change, the current-PSC file holds the new PSC" || F "current PSC file not updated"
+reset; rm -f "$CARD/change-psc"; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
+out="$(SLE4442_PSC=111111 SLE4442_NEW_PSC=999999 step_chipcard "$SHARE" 2>&1)"
+grep -qx 'ENV=/' "$CARD/change-psc" && [ "$(cat "$WORK/sle4442.psc")" = A1B2C3 ] \
+  && P "ambient SLE4442_PSC / SLE4442_NEW_PSC never reach the manager; the files decide, and the record matches" || F "env leaked: $(cat "$CARD/change-psc")"
 reset; rm -f "$CARD/change-psc"; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
 out="$(STUB_CHANGE_FAIL=1 step_chipcard "$SHARE" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "do not seal it as commissioned" <<< "$out" && [ "$(cat "$WORK/sle4442.psc")" = FFFFFF ] \

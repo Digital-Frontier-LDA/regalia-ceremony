@@ -21,7 +21,8 @@
 # and it:
 #   - keeps the plaintext in tmpfs (/dev/shm) only, removed after encryption, and stops on any write
 #     failure (a full tmpfs must not yield a truncated escrow);
-#   - names the file by a monotonic sequence, escrow/pins-NNNN.age (one more than the highest here),
+#   - names the file by a monotonic sequence, escrow/pins-NNNN.age (one more than the highest escrow
+#     anywhere in the history whose MAC verifies),
 #     not by a date an offline clock could get wrong, and writes its MAC to escrow/pins-NNNN.age.mac.
 #     Recovery uses the highest file whose MAC verifies; repository write access cannot forge one.
 #
@@ -80,13 +81,19 @@ for d in $DEVICES; do
   pin[$d]="$a"; a=""; b=""
 done
 
-# From the whole history, as recovery reads it: a deleted escrow must not let the numbering restart
-# below a file recovery would still find and prefer.
-last="$(python3 "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX")" || die "cannot read the escrow history"
+# From the whole history, as recovery reads it, and from VERIFIED escrows only: a deleted escrow must not
+# let the numbering restart below one recovery would still prefer, and a forged high-numbered file must
+# not push the numbering up (or exhaust it).
+last="$(python3 "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX" <<< "$key")" || die "cannot read the escrow history"
 [ "$last" -lt 9999 ] || die "the escrow sequence is exhausted at 9999 (recovery reads four digits); nothing written"
 next="$(printf '%04d' $((last + 1)))"
 out="escrow/$PREFIX-$next.age"
-[ ! -e "$out" ] && [ ! -e "$out.mac" ] || die "$out already exists"
+# Anything already at the next name cannot verify (it is above the highest verified escrow): it was not
+# written with the key. Replace it, and say so; it stays in history, where recovery skips it.
+if [ -e "$out" ] || [ -e "$out.mac" ]; then
+  printf 'pin-escrow: %s exists but does not verify (not written with the escrow MAC key): replacing it. Record it as an incident.\n' "$out" >&2
+  rm -rf -- "$out" "$out.mac"
+fi
 
 tmp="$(mktemp /dev/shm/pin-escrow.XXXXXX)" || die "cannot create a file in /dev/shm"
 trap 'rm -f "$tmp"' EXIT

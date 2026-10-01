@@ -2372,7 +2372,9 @@ step_chipcard() {
   # `store` verify-reads the bytes back and compares INTERNALLY, failing loudly on a mismatch,
   # and never echoes the payload. Do NOT follow this with `sle4442-manager read` to "confirm" —
   # that subcommand PRINTS the stored bytes, which would put the share on the terminal.
-  run "sle4442-manager store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
+  # env -u: an ambient SLE4442_PSC / SLE4442_NEW_PSC would take precedence over the files (resolve_psc),
+  # and the step would then record a PSC the card was not given.
+  run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
     || { err "store failed or was skipped — the card does NOT hold the share."; \
          err "If the PSC was wrong, one of the three attempts has been spent."; return 1; }
   info "Share stored AND verify-read back by the card (a write that ACKs but does not persist"
@@ -2382,7 +2384,7 @@ step_chipcard() {
   if ! grep -qix 'FFFFFF' "$pscfile"; then
     info "This card was written with a non-factory PSC; it keeps it."
   elif [ -s "$WORK/sle4442.newpsc" ]; then
-    run "sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
+    run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
       || { err "the PSC change failed or was skipped: this card may still have the factory PSC. Run"
            err "'sle4442-manager info' before anything else; do not seal it as commissioned."; return 1; }
     # The verified PSC is now this card's current one: a later run against the same card must not

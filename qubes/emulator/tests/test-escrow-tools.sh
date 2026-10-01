@@ -45,13 +45,18 @@ mkdir -p "$T/repo/escrow/pins-0009.age.mac"; : > "$T/repo/escrow/pins-0009.age.m
 g add -A; g commit -qm "a directory named like a .mac"
 [ "$(sel)" = pins-0002.age ] && grep -q "SKIPPED pins-0009.age" "$T/err" && P "a directory where a .mac should be is skipped, not a crash" || F "directory .mac: $(cat "$T/err")"
 g rm -rq escrow/pins-0009.age escrow/pins-0009.age.mac; g commit -qm "remove it"
-[ "$(python3 "$MAC" highest "$T/repo")" = 9 ] && P "the next sequence counts deleted escrows too (highest = 9, though only 0001 is left)" || F "highest $(python3 "$MAC" highest "$T/repo")"
+h="$(python3 "$MAC" highest "$T/repo" <<< "$KEY")"
+[ "$h" = 2 ] && P "the next sequence counts the deleted VERIFIED 0002, and ignores the forged 0003 and 0009 (highest = 2)" || F "highest $h"
+put pins-9999.age squatter "$(printf '00%.0s' {1..16})"; g add -A; g commit -qm "a forged 9999"
+h="$(python3 "$MAC" highest "$T/repo" <<< "$KEY")"
+[ "$h" = 2 ] && P "a forged pins-9999.age cannot exhaust the sequence (highest still 2)" || F "highest after a forged 9999: $h"
+g rm -q escrow/pins-9999.age escrow/pins-9999.age.mac; g commit -qm "remove the squatter"
 put pins-0004.age genuine; g add -A; g commit -qm four
 printf 'f%.0s' {1..64} > "$T/repo/escrow/pins-0004.age.mac"; g add -A; g commit -qm "replace only the mac"
 [ "$(sel)" = pins-0004.age ] && [ "$(cat "$T/out")" = genuine ] && P "replacing only the .mac does not hide the earlier valid pair" || F "after a MAC-only replacement: $(cat "$T/out" 2>/dev/null)"
 
 mkdir -p "$T/empty"; git -C "$T/empty" init -q
-python3 "$MAC" highest "$T/empty" >/dev/null 2>&1 && P "highest works with no escrow/ directory (every file deleted)" || F "highest fails without escrow/"
+[ "$(python3 "$MAC" highest "$T/empty" <<< "$KEY" 2>&1)" = 0 ] && P "highest works with no commit and no escrow/ directory" || F "highest fails on an empty repository"
 
 mkdir -p "$T/none/escrow"; git -C "$T/none" init -q
 put2(){ printf '%s' "$2" > "$T/none/escrow/$1"; python3 "$MAC" mac "$T/none/escrow/$1" <<< "$(printf '00%.0s' {1..16})" > "$T/none/escrow/$1.mac"; }
@@ -83,8 +88,11 @@ git -C "$T/co" init -q; printf 'age1pq1stubrecipient\n' > "$T/co/escrow/breakgla
 printf '%s\n' "$k1" > "$T/co/escrow/escrow-mac.kcv"
 fp="$(sha256sum "$T/co/escrow/breakglass.recipient" | cut -c1-16)"
 six="7310048261 7310048261 8420159372 8420159372 9531260483 9531260483 90817263 90817263 a1b2c3 a1b2c3 72635445 72635445"
+printf 'planted' > "$T/co/escrow/pins-0001.age"   # a squatter on the next name, written without the key
 before="$(ls /dev/shm)"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
+grep -q "exists but does not verify" <<< "$out" && ! grep -q planted "$T/co/escrow/pins-0001.age" \
+  && P "an unverified file on the next name is replaced, and reported" || F "squatter: $out"
 [ "$rc" = 0 ] && [ -s "$T/co/escrow/pins-0001.age" ] && [ -s "$T/co/escrow/pins-0001.age.mac" ] \
   && P "six devices escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
 [ "$(grep -cE '^(hsm|yubikey)_[abc]=' "$T/co/escrow/pins-0001.age")" = 6 ] && grep -qx 'yubikey_b=a1b2c3' "$T/co/escrow/pins-0001.age" \

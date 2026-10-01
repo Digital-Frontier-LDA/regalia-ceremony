@@ -215,9 +215,13 @@ repository's copy:
 
 ```sh
 # the key goes straight from the payload into the verifier: never into a file of its own
+rm -f /dev/shm/pins.age      # a stale copy must never be what gets decrypted
 sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
-echo "exit $?"     # the verifier's status
-bin/age -d -i breakglass.key /dev/shm/pins.age
+case $? in
+  0) bin/age -d -i breakglass.key /dev/shm/pins.age ;;               # the verified escrow
+  3) echo "no escrow verifies: use the payload's PINs" ;;
+  *) echo "STOP: the selection failed; fix the cause, do NOT fall back" ;;
+esac
 ```
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
