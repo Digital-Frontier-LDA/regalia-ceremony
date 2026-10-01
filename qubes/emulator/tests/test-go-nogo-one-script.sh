@@ -41,7 +41,7 @@ out="$(run "$SCRIPTS/go-nogo.sh")"
 for t in dice-entropy entropy-mix payload-qr seed-to-pkcs12 "share form" "case label" "PIN card"; do
   grep -qE "^  OK   $t" <<< "$out" && P "self-test ran and passed: $t" || F "no OK line for $t"
 done
-if age-keygen -pq 2>/dev/null | grep -q '^AGE-SECRET-KEY-PQ-1'; then
+if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
   grep -qE '^  OK   age .* makes post-quantum keys' <<< "$out" && P "the post-quantum age check ran and passed" || F "no post-quantum age line"
 else
   grep -qE '^  FAIL age cannot make a post-quantum key' <<< "$out" && P "an old age is a FAIL (this host has no age >= 1.3)" || F "old age not reported"

@@ -16,7 +16,7 @@ hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 command -v ssss-split >/dev/null 2>&1 || { echo "  (skipping: ssss not installed)"; exit 0; }
 # The vault image pins age 1.3.2 in /opt/vault-bin; AGE_BIN_DIR points at another copy for tests.
 for d in "${AGE_BIN_DIR:-}" /opt/vault-bin; do [ -n "$d" ] && [ -x "$d/age-keygen" ] && PATH="$d:$PATH"; done
-if ! age-keygen -pq 2>/dev/null | grep -q '^AGE-SECRET-KEY-PQ-1'; then
+if ! grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
   echo "  (skipping: no age >= 1.3 here; set AGE_BIN_DIR to an age 1.3 directory)"; exit 0
 fi
 

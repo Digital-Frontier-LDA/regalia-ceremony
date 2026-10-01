@@ -293,8 +293,8 @@ selftest "entropy-mix"    "selftest: OK" python3 "$HERE/entropy-mix.py" --selfte
 selftest "payload-qr"     "selftest: OK" python3 "$HERE/payload-qr.py" --selftest
 selftest "seed-to-pkcs12" "selftest: OK" python3 "$HERE/seed-to-pkcs12.py" --selftest
 # The breakglass key is born in the ceremony as a post-quantum age key (age >= 1.3, -pq). A throwaway
-# key goes to a pipe and is discarded unread.
-if age-keygen -pq 2>/dev/null | grep -q '^AGE-SECRET-KEY-PQ-1'; then
+# key is captured in memory and discarded unread (a here-string, not a pipe: pipefail + grep -q).
+if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
   ok "age $(age --version 2>/dev/null) makes post-quantum keys (the breakglass key, step 3 option g)"
 else
   bad "age cannot make a post-quantum key (needs >= 1.3; found $(age --version 2>/dev/null || echo none)): rebuild the template"

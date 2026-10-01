@@ -1301,9 +1301,9 @@ gen_breakglass() {
     err "a leftover, or choose a to split what is there."
     return 1
   fi
-  # Probe with a throwaway key written to a pipe (age-keygen -o refuses any existing path, /dev/null
+  # Probe with a throwaway key captured in memory (age-keygen -o refuses any existing path, /dev/null
   # included); it is discarded unread.
-  if ! age-keygen -pq 2>/dev/null | grep -q '^AGE-SECRET-KEY-PQ-1'; then
+  if ! grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
     err "age-keygen cannot make a post-quantum key here (needs age >= 1.3; this image ships 1.3.2"
     err "in /opt/vault-bin). Rebuild the template; do not fall back to a classical key."
     return 1
