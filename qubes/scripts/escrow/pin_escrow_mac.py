@@ -95,8 +95,22 @@ def highest(key, repo, prefix="pins"):
     numbers from here. Deleting files cannot make it restart below a verified escrow recovery would
     still find, and an unauthenticated file (a lone forged pins-9999.age) cannot push the numbering
     up or exhaust it: only escrows written with the key count."""
-    return max([seq for seq, name, data, tag, _ in candidates(repo, prefix)
-                if tag and hmac.compare_digest(tag, mac(key, name, data))] or [0])
+    seqs = [seq for seq, name, data, tag, _ in candidates(repo, prefix)
+            if tag and hmac.compare_digest(tag, mac(key, name, data))]
+    # And the working tree: an escrow written but not committed yet must not be overwritten by a second
+    # run. It counts when it verifies, like everything else.
+    name_re = re.compile(r"^%s-(\d{4})\.age$" % re.escape(prefix))
+    tree = os.path.join(repo, "escrow")
+    for name in (os.listdir(tree) if os.path.isdir(tree) else []):
+        m, path = name_re.match(name), os.path.join(tree, name)
+        if m and os.path.isfile(path) and os.path.isfile(path + ".mac"):
+            try:
+                with open(path, "rb") as f, open(path + ".mac", encoding="ascii") as g:
+                    if hmac.compare_digest(g.read().strip(), mac(key, name, f.read())):
+                        seqs.append(int(m[1]))
+            except (OSError, UnicodeDecodeError):
+                pass
+    return max(seqs or [0])
 
 
 def select(key, repo, out):
