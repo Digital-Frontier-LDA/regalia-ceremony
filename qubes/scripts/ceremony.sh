@@ -1687,6 +1687,9 @@ elif has_date(p):
 # (printf, not a here-string: a here-string appends a newline, and the blob must hold exactly the PIN)
 pin_blob_for() {
   local src="$1" typed="$2" out="$3" fp pub
+  # A refusal must leave NO blob: an earlier attempt's file at the same name could be copied to the
+  # wrong host as if it were this one.
+  rm -f "$out"
   [ -r "$src" ] || { err "cannot read the public key $src"; return 1; }
   # Read the key ONCE into the RAM workdir, as canonical DER, and use only that copy: a file or
   # symlink on removable media could change between the fingerprint check and the encryption.
@@ -1703,7 +1706,8 @@ pin_blob_for() {
   [ -s "$out" ] || { err "empty blob"; rm -f "$out"; return 1; }
 }
 
-# Offer, at the end of step 0, to write each HSM's PIN as a TPM import blob for its KMS host. Optional:
+# Offer, at the end of step 0 (after the PINs are loaded, from either source: generated, chosen or the
+# hand-edited file), to write each HSM's PIN as a TPM import blob for its KMS host. Optional:
 # a host commissioned later gets its PIN typed from the PIN card instead (seal-hsm-pin.sh fallback).
 offer_pin_blobs() {
   local -n _vals="$1"; local tty=/dev/tty a pub typed dir="$WORK/pin-blobs" dev label field file
@@ -1803,7 +1807,6 @@ generate_pins() {
     warn "else can see this screen, and no camera points at it."
     for k in $DAY_PINS; do show_day_pin "$k" "${val[$k]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
   fi
-  offer_pin_blobs val
   for k in "${!val[@]}"; do val[$k]=""; done
   info "PIN file written (0600, RAM-only workdir)."
 }
@@ -1866,6 +1869,14 @@ EOF
     return 1
   fi
   check_credential_separation || return 1
+  # TPM import blobs, from whichever source the PINs came (needs a terminal: every key is
+  # authenticated by a typed fingerprint).
+  if { : </dev/tty; } 2>/dev/null; then
+    local -A loaded=()
+    for k in $DAY_PINS; do loaded[$k]="${!k}"; done
+    offer_pin_blobs loaded
+    for k in "${!loaded[@]}"; do loaded[$k]=""; done
+  fi
   # Mark steps 7 (and 9, which loads the keys into a serializer) as "needs step 0 first".
   state_step0_done=1
   info "PIN file loaded. Tier-0 payload steps will use these values, not the template."

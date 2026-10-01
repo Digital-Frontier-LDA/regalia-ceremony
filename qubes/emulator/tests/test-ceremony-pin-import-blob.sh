@@ -2,7 +2,8 @@
 # test-ceremony-pin-import-blob.sh — step 0 can write each HSM's PIN as a TPM import blob for its KMS
 # host (ADR-0002 D21), so the PIN is never typed at the site or carried in clear. pin_blob_for:
 #   - refuses unless the TYPED fingerprint prefix matches the public key (a substituted key would
-#     receive the PIN), and writes nothing when it refuses;
+#     receive the PIN), and leaves no blob when it refuses (not even an earlier attempt's);
+#   - is offered after step 0 loads the PINs, from any source (generated, chosen, hand-edited file);
 #   - takes the PIN on file descriptor 3, never argv;
 #   - writes RSA-OAEP SHA-256, which a TPM-resident key opens with tpm2_rsadecrypt (proven here with
 #     swtpm when tpm2-tools and swtpm are installed, as regalia-kms seal-hsm-pin.sh --from-blob does).
@@ -48,6 +49,15 @@ out="$(pin_blob_for "$T/host.pub.pem" "${FP:0:8}" "$T/d.blob" 3< <(printf '%s' "
 printf 'not a key\n' > "$T/junk.pem"
 out="$(pin_blob_for "$T/junk.pem" "${FP:0:16}" "$T/e.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
 [ "$rc" != 0 ] && [ ! -e "$T/e.blob" ] && P "a file that is not a public key is refused" || F "junk accepted as a key"
+printf 'blob from an earlier attempt' > "$T/f.blob"
+out="$(pin_blob_for "$T/host.pub.pem" "$other" "$T/f.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$T/f.blob" ] && P "a refusal also removes an earlier attempt's blob at that name" || F "a stale blob survived a refusal"
+# The offer comes after step 0 has LOADED the PINs, so the hand-edited (e) file gets it too, not only
+# generated or chosen PINs.
+body="$(declare -f step_set_pins)"
+grep -q 'offer_pin_blobs' <<< "$body" && ! declare -f generate_pins | grep -q 'offer_pin_blobs' \
+  && [ "$(grep -n 'done < "$pfile"' <<< "$body" | cut -d: -f1)" -lt "$(grep -n 'offer_pin_blobs' <<< "$body" | cut -d: -f1)" ] \
+  && P "blobs are offered after the PIN file is loaded, whatever its source" || F "the blob offer is not after the PIN load in step_set_pins"
 grep -q -- '-in /dev/fd/3' "$SCRIPTS/ceremony.sh" && grep -q 'pin_blob_for "$pub" "$typed" "$dir/$file" 3< <(printf' "$SCRIPTS/ceremony.sh" \
   && P "the PIN reaches openssl on a file descriptor, never argv" || F "the PIN may be on argv"
 
