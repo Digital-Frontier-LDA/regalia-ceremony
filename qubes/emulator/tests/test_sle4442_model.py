@@ -497,9 +497,6 @@ class TestManagerWriteVerifiesReadBack(unittest.TestCase):
         self.assertNotIn(self.SHARE_HEX, out.lower())
 
 
-if __name__ == "__main__":
-    unittest.main(verbosity=2)
-
 
 class TestManagerChangePSC(unittest.TestCase):
     """change-psc: present the current PSC, change it, prove it in a FRESH session (the real ACR40U
@@ -700,3 +697,7 @@ class TestManagerStoreLeavesNoTail(TestManagerAgainstACSProtocol):
     def test_text_with_padding_bytes_is_refused(self):
         with self.assertRaises(SystemExit):
             self.mgr.cmd_store(self.conn, self.PSC, 32, "bad\x00share")
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

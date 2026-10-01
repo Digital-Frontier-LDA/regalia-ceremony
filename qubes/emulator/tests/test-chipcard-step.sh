@@ -53,7 +53,8 @@ case "${1:-}" in
     echo "stored and verified $n bytes at $ad"
     exit 0;;
   read) echo "THE-CARD-WOULD-PRINT-THE-SHARE-HERE"; exit 0;;
-  change-psc) echo "$*" > "$C/change-psc"; echo "PSC changed, and the new PSC verified in a fresh session"; exit 0;;
+  change-psc) echo "$*" > "$C/change-psc"; [ "${STUB_CHANGE_FAIL:-0}" = 1 ] && { echo "the NEW PSC does not verify" >&2; exit 1; }
+              echo "PSC changed, and the new PSC verified in a fresh session"; exit 0;;
 esac
 exit 0
 STUB
@@ -171,6 +172,15 @@ reset; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.n
 out="$(step_chipcard "$SHARE" 2>&1)"
 grep -q -- "--new-psc-file $WORK/sle4442.newpsc" "$CARD/change-psc" 2>/dev/null && ! grep -q 'A1B2C3' "$CARD/change-psc" \
   && P "a new PSC file: change-psc runs after the store, both PSCs from files (never argv)" || F "change-psc not run as expected: $(cat "$CARD/change-psc" 2>/dev/null)"
+[ "$(cat "$WORK/sle4442.psc")" = A1B2C3 ] && P "after a verified change, the current-PSC file holds the new PSC" || F "current PSC file not updated"
+reset; rm -f "$CARD/change-psc"; printf 'FFFFFF' > "$WORK/sle4442.psc"; printf 'A1B2C3' > "$WORK/sle4442.newpsc"
+out="$(STUB_CHANGE_FAIL=1 step_chipcard "$SHARE" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q "do not seal it as commissioned" <<< "$out" && [ "$(cat "$WORK/sle4442.psc")" = FFFFFF ] \
+  && P "a failed change fails the step and keeps the factory PSC as current" || F "failed change: rc=$rc"
+reset; rm -f "$CARD/change-psc" "$WORK/sle4442.newpsc"; printf 'A1B2C3' > "$WORK/sle4442.psc"
+out="$(step_chipcard "$SHARE" 2>&1)"
+grep -q "non-factory PSC" <<< "$out" && ! grep -q "still has the factory PSC" <<< "$out" && [ ! -e "$CARD/change-psc" ] \
+  && P "a card written with a non-factory PSC is not reported as factory, and nothing is changed" || F "non-factory path: $out"
 rm -f "$WORK/sle4442.newpsc"
 
 # =====================================================================================

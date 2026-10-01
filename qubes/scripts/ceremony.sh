@@ -2359,12 +2359,16 @@ step_chipcard() {
   info "is caught there — the status word alone is never treated as success)."
   # FFFFFF is the factory PSC: anyone holding the card could overwrite or erase the share. Change it
   # when a new PSC is ready (the same value as the payload's sle4442_psc line, so recovery has it).
-  if [ -s "$WORK/sle4442.newpsc" ] && ! grep -qix 'FFFFFF' "$pscfile"; then
-    info "This card already has a non-factory PSC; leaving it."
+  if ! grep -qix 'FFFFFF' "$pscfile"; then
+    info "This card was written with a non-factory PSC; it keeps it."
   elif [ -s "$WORK/sle4442.newpsc" ]; then
     run "sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
-      && info "PSC changed and verified in a fresh session (the payload's sle4442_psc must hold it)." \
-      || warn "PSC change failed: run 'sle4442-manager info' before anything else."
+      || { err "the PSC change failed or was skipped: this card may still have the factory PSC. Run"
+           err "'sle4442-manager info' before anything else; do not seal it as commissioned."; return 1; }
+    # The verified PSC is now this card's current one: a later run against the same card must not
+    # present the factory PSC and spend an attempt. (A fresh card needs FFFFFF put back explicitly.)
+    ( umask 077; cp "$WORK/sle4442.newpsc" "$pscfile" )
+    info "PSC changed and verified in a fresh session; $pscfile now holds it (the payload's sle4442_psc must too)."
   else
     warn "The card still has the factory PSC. To change it (recommended), put a new 6-hex PSC in"
     warn "$WORK/sle4442.newpsc (also in the payload's sle4442_psc line) and run:"
