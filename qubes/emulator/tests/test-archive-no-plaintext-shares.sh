@@ -27,6 +27,7 @@ hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 # shellcheck disable=SC1090
 source "$SCRIPTS/ceremony.sh"
 ask(){ return 0; }; pause(){ :; }   # auto-confirm the manifest-gen `run`, no interactive stalls
+# shellcheck disable=SC2034  # read by the sourced ceremony.sh
 PRINTER=""
 init_work
 trap 'rm -rf "${WORK:-}"' EXIT

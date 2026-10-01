@@ -1814,7 +1814,7 @@ step_payload() {
   case "$recip" in
     AGE-SECRET-KEY-1*|age-secret-key-1*|AGE-SECRET-KEY-PQ-1*|age-secret-key-pq-1*)
        err "that is not an age recipient (must start with 'age1'). If you pasted a SECRET key"
-       err "(AGE-SECRET-KEY-1…) STOP: encrypting to a secret key is not possible, and the secret"
+       err "(AGE-SECRET-KEY-1… or AGE-SECRET-KEY-PQ-1…) STOP: encrypting to a secret key is not possible, and the secret"
        err "key must never be typed at a terminal that may be recorded."; return 1;;
     age1*[!0-9a-z]*|*[!0-9a-z]*)
        err "that is not an age recipient: it contains characters outside bech32 ([0-9a-z])."
@@ -1823,7 +1823,7 @@ step_payload() {
        return 1;;
     age1*) : ;;
     *) err "that is not an age recipient (must start with 'age1'). If you pasted a SECRET key"
-       err "(AGE-SECRET-KEY-1…) STOP: encrypting to a secret key is not possible, and the secret"
+       err "(AGE-SECRET-KEY-1… or AGE-SECRET-KEY-PQ-1…) STOP: encrypting to a secret key is not possible, and the secret"
        err "key must never be typed at a terminal that may be recorded."; return 1;;
   esac
 

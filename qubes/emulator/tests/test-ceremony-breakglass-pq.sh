@@ -52,6 +52,17 @@ enc="$(printf '%s' "$msg" | age -r "$(cat "$WORK/breakglass.recipient")" | base6
 
 # (step_payload using the generated recipient is exercised for real in test-payload-step.sh.)
 
+hdr "the leak scanners catch a post-quantum key (it does not contain AGE-SECRET-KEY-1)"
+for f in recital-ceremony.sh prove-ceremony.sh; do
+  pat="$(grep -oE 'AGE-SECRET-KEY-\(PQ-\)\?1\[A-Z0-9\]\{20,\}' "$SCRIPTS/$f" | head -1)"
+  [ -n "$pat" ] && grep -Eq "$pat" <<< "$id" && P "$f's transcript scan matches the generated PQ key" || F "$f's scan misses a PQ key"
+done
+if python3 -c "import sys; sys.path.insert(0, '$SCRIPTS/vendor'); from regalia_kms.tools import custody_manifest as m; sys.exit(0 if any(p.search(sys.argv[1]) for p in m.PRIVATE_PATTERNS) else 1)" "$id" 2>/dev/null; then
+  P "the custody manifest's secret patterns refuse a PQ key"
+else
+  F "the custody manifest accepts a PQ key"
+fi
+
 hdr "refusals"
 out="$(printf 'g\n' | step_shamir 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'already holds a secret; refusing to overwrite' <<< "$out" && P "g refuses to overwrite a secret already in the workdir" || F "g overwrote secret.in (rc=$rc)"

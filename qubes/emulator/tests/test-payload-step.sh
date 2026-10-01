@@ -129,6 +129,7 @@ hdr "PROD GUARD: in CEREMONY_MODE=prod the dev-default PIN block refuses to star
 # PIN values are still the recognised dev fixtures. Verify both directions.
 state_step0_done=0
 write_dev_pins
+# shellcheck disable=SC2034  # CEREMONY_MODE is read by the sourced step_set_pins
 CEREMONY_MODE=prod out="$(step_set_pins 2>&1)"; grep -qi "PROD GUARD" <<< "$(echo "$out")" \
   && P "PROD mode rejects the dev-default PIN block" \
   || F "BUG: PROD mode accepted the dev-default PIN block"
@@ -140,6 +141,7 @@ hdr "REFUSES an UNFILLED template (labels with no values)"
 reset_state
 # Step 0 has run (the gate test above covers the opposite). To exercise the empty-label guard,
 # set the gate flag and clear the loaded PIN vars so the wizard's heredoc writes empty values.
+# shellcheck disable=SC2034  # read by the sourced step_payload gate
 state_step0_done=1
 rm -f "$WORK/payload.txt"
 unset hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin hsm_c_user_pin hsm_c_so_pin
@@ -178,6 +180,7 @@ grep -qiE "no filled-in values|empty label" <<< "$out" \
 # force the empty-label guard; the cascading tests (happy path, regression, warns, end-to-end,
 # secrets, burn) need the PINs back. Re-write the file, re-run step_set_pins to set them,
 # and leave state_step0_done=1 so the gate is satisfied for the next test.
+# shellcheck disable=SC2034  # read by the sourced step_payload gate
 state_step0_done=1
 write_dev_pins
 step_set_pins >/dev/null 2>&1
