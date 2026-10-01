@@ -71,13 +71,14 @@ out="$(cd "$T/repo" && bash tools/pin-escrow.sh < /dev/null 2>&1)"; rc=$?
 
 hdr "the producer, end to end (the disc's copy, a stub age that records what it was given)"
 mkdir -p "$T/disc" "$T/stub" "$T/co/escrow"; cp "$SCRIPTS/escrow/pin-escrow.sh" "$SCRIPTS/escrow/pin_escrow_mac.py" "$T/disc/"
-cat > "$T/stub/age" <<'STUB'
+cat > "$T/disc/age" <<'STUB'
 #!/usr/bin/env bash
 # stub: age -R <recipients> -o <out> <in>; "encrypts" by tagging the plaintext (test only)
 while [ $# -gt 1 ]; do case "$1" in -R) shift 2;; -o) out="$2"; shift 2;; *) shift;; esac; done
 { printf 'STUB-AGE\n'; cat "$1"; } > "$out"
 STUB
-chmod +x "$T/stub/age"
+chmod +x "$T/disc/age"
+printf '#!/bin/sh\necho "the PATH age must never be used" >&2; exit 9\n' > "$T/stub/age"; chmod +x "$T/stub/age"
 git -C "$T/co" init -q; printf 'age1pq1stubrecipient\n' > "$T/co/escrow/breakglass.recipient"
 printf '%s\n' "$k1" > "$T/co/escrow/escrow-mac.kcv"
 fp="$(sha256sum "$T/co/escrow/breakglass.recipient" | cut -c1-16)"
@@ -92,6 +93,9 @@ git -C "$T/co" add -A >/dev/null; git -C "$T/co" -c user.name=t -c user.email=t@
 rm -f "$T/out"; [ "$(python3 "$MAC" select "$T/co" "$T/out" <<< "$KEY" 2>/dev/null)" = pins-0001.age ] \
   && P "its MAC verifies with the key" || F "the producer's MAC does not verify"
 [ "$(ls /dev/shm)" = "$before" ] && P "nothing left in /dev/shm" || F "left in /dev/shm: $(comm -13 <(echo "$before") <(ls /dev/shm))"
+mkdir -p "$T/disc2"; cp "$T/disc/pin-escrow.sh" "$T/disc/pin_escrow_mac.py" "$T/disc2/"
+out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc2/pin-escrow.sh" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q "no age next to this script" <<< "$out" && P "no checked age beside the tool: refused (PATH's age is never used)" || F "rc=$rc: $out"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" 7310048261 7310048262 | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q differ <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "mismatched entries: refused, nothing written" || F "rc=$rc: $out"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$(printf '11%.0s' {1..16})" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?

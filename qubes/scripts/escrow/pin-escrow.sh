@@ -42,9 +42,18 @@ case "$HERE/" in "$TOP"/*) die "this is the repository's copy of the tool: run t
 RCP="escrow/breakglass.recipient"; KCV="escrow/escrow-mac.kcv"
 [ -s "$RCP" ] || die "$RCP is missing: it is committed right after the ceremony"
 [ -s "$KCV" ] || die "$KCV is missing: it is committed right after the ceremony, from the archive disc"
-command -v age >/dev/null || die "age is required (>= 1.3 for the post-quantum recipient)"
+# The disc's own age, next to this script and under the same SHA256SUMS: never whichever age is first on
+# PATH, which would receive the plaintext PINs without having been checked.
+AGE="$HERE/age"
+[ -x "$AGE" ] || die "no age next to this script ($AGE): run the archive disc's bin/pin-escrow.sh, whose bin/ holds the checked age"
 command -v python3 >/dev/null || die "python3 is required (the MAC)"
-[ -d /dev/shm ] || die "no /dev/shm: the plaintext must stay in RAM"
+# RAM only: /dev/shm must be a tmpfs mount, not just a directory (a disk-backed or bind-mounted one
+# would keep the PINs). CEREMONY_ALLOW_NONTMPFS=1 is the test-only override, as in ceremony.sh.
+if ! grep -qs "[[:space:]]/dev/shm[[:space:]]tmpfs[[:space:]]" /proc/mounts; then
+  [ "${CEREMONY_ALLOW_NONTMPFS:-}" = 1 ] && [ -d /dev/shm ] \
+    || die "/dev/shm is not a tmpfs mount: refusing to write the PINs where they could reach a disk"
+  printf 'pin-escrow: /dev/shm is NOT tmpfs (CEREMONY_ALLOW_NONTMPFS=1: tests only)\n' >&2
+fi
 
 # Input: hidden prompts on a terminal; one value per line on stdin otherwise (tests).
 ask(){ local v; if [ -t 0 ]; then read -r -s -p "$1" v; echo >&2; else IFS= read -r v || v=""; fi; printf '%s' "$v"; }
@@ -86,7 +95,7 @@ trap 'rm -f "$tmp"' EXIT
   || die "could not write the plaintext to /dev/shm (full?); nothing written"
 n="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"
 [ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") PINs; nothing written"
-age -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
+"$AGE" -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"
 python3 "$HERE/pin_escrow_mac.py" mac "$out" <<< "$key" > "$out.mac" && [ -s "$out.mac" ] \
   || { rm -f "$out" "$out.mac"; die "could not write the MAC; nothing written"; }
