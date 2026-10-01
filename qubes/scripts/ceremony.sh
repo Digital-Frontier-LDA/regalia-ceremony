@@ -1679,6 +1679,60 @@ elif has_date(p):
 ' 3<<< "$1"
 }
 
+# Encrypt one HSM user PIN to a KMS host's TPM import key (ADR-0002 D21; regalia-kms
+# seal-hsm-pin.sh --init-import-key / --from-blob). The PIN arrives on file descriptor 3, never argv.
+# The public key is authenticated first: the operator TYPES the start of the fingerprint they copied
+# by hand at the host's console, and a mismatch refuses (a substituted key would receive the PIN).
+#   pin_blob_for <public-key.pem> <typed fingerprint prefix> <out.blob>   3< <(printf '%s' "$pin")
+# (printf, not a here-string: a here-string appends a newline, and the blob must hold exactly the PIN)
+pin_blob_for() {
+  local src="$1" typed="$2" out="$3" fp pub
+  # A refusal must leave NO blob: an earlier attempt's file at the same name could be copied to the
+  # wrong host as if it were this one.
+  rm -f "$out"
+  [ -r "$src" ] || { err "cannot read the public key $src"; return 1; }
+  # Read the key ONCE into the RAM workdir, as canonical DER, and use only that copy: a file or
+  # symlink on removable media could change between the fingerprint check and the encryption.
+  pub="$(mktemp "${WORK:-/tmp}/import-pub.XXXXXX")" || return 1
+  openssl pkey -pubin -in "$src" -outform der -out "$pub" 2>/dev/null || { err "$src is not a public key"; rm -f "$pub"; return 1; }
+  fp="$(sha256sum < "$pub" | cut -d' ' -f1)"
+  [ -s "$pub" ] || { err "$src is not a public key"; rm -f "$pub"; return 1; }
+  typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
+  [[ "$typed" =~ ^[0-9a-f]{16,64}$ ]] || { err "type at least the first 16 hex characters of the fingerprint you wrote down"; rm -f "$pub"; return 1; }
+  [ "${fp:0:${#typed}}" = "$typed" ] || { err "fingerprint MISMATCH: this public key is not the one you recorded at the host. Nothing was encrypted."; rm -f "$pub"; return 1; }
+  openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$pub" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+    -pkeyopt rsa_mgf1_md:sha256 -in /dev/fd/3 -out "$out" 2>/dev/null || { err "encryption to $src failed"; rm -f "$out" "$pub"; return 1; }
+  rm -f "$pub"
+  [ -s "$out" ] || { err "empty blob"; rm -f "$out"; return 1; }
+}
+
+# Offer, at the end of step 0 (after the PINs are loaded, from either source: generated, chosen or the
+# hand-edited file), to write each HSM's PIN as a TPM import blob for its KMS host. Optional:
+# a host commissioned later gets its PIN typed from the PIN card instead (seal-hsm-pin.sh fallback).
+offer_pin_blobs() {
+  local -n _vals="$1"; local tty=/dev/tty a pub typed dir="$WORK/pin-blobs" dev label field file
+  read -r -p "   Write PINs as encrypted blobs for KMS hosts already commissioned (TPM import)? [y/N] " a <"$tty"
+  [ "$a" = y ] || [ "$a" = Y ] || return 0
+  mkdir -p "$dir"
+  # Every HSM user PIN and every YubiKey PIV PIN the KMS uses unattended; each one goes to the host
+  # that will hold that device (regalia-kms seal-hsm-pin.sh --from-blob, with --serial or --yubikey).
+  for dev in $(for h in $HSMS; do printf 'hsm:%s ' "$h"; done; for y in $YUBIKEYS; do printf 'yubikey:%s ' "$y"; done); do
+    case "$dev" in
+      hsm:*)     label="HSM $(tr a-z A-Z <<< "${dev#hsm:}")";         field="hsm_${dev#hsm:}_user_pin";     file="pin-hsm_${dev#hsm:}.blob" ;;
+      yubikey:*) label="YubiKey $(tr a-z A-Z <<< "${dev#yubikey:}")"; field="yubikey_${dev#yubikey:}_piv_pin"; file="pin-yubikey_${dev#yubikey:}.blob" ;;
+    esac
+    read -r -p "   public key file of the host for $label (empty to skip): " pub <"$tty"
+    [ -n "$pub" ] || continue
+    read -r -p "   first 16+ hex of its fingerprint, from your handwritten note: " typed <"$tty"
+    if pin_blob_for "$pub" "$typed" "$dir/$file" 3< <(printf '%s' "${_vals[$field]}"); then
+      info "   $dir/$file written: copy it to that host (any medium; only its TPM can open it), then"
+      info "   sudo deploy/seal-hsm-pin.sh --id … $([ "${dev%%:*}" = yubikey ] && echo '--yubikey <serial>' || echo '--serial <serial>') --pcrs … --from-blob $file"
+    else
+      warn "   no blob for $label: seal its PIN at the host from the PIN card instead."
+    fi
+  done
+}
+
 # Write $WORK/pins.env from generated values (and, if the operator chooses, typed day-to-day PINs).
 generate_pins() {
   local pfile="$1" tty=/dev/tty k v v2 typed_day=0
@@ -1815,6 +1869,14 @@ EOF
     return 1
   fi
   check_credential_separation || return 1
+  # TPM import blobs, from whichever source the PINs came (needs a terminal: every key is
+  # authenticated by a typed fingerprint).
+  if { : </dev/tty; } 2>/dev/null; then
+    local -A loaded=()
+    for k in $DAY_PINS; do loaded[$k]="${!k}"; done
+    offer_pin_blobs loaded
+    for k in "${!loaded[@]}"; do loaded[$k]=""; done
+  fi
   # Mark steps 7 (and 9, which loads the keys into a serializer) as "needs step 0 first".
   state_step0_done=1
   info "PIN file loaded. Tier-0 payload steps will use these values, not the template."

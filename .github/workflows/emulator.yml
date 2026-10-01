@@ -69,7 +69,7 @@ jobs:
             age opensc pcscd libccid pcsc-tools yubikey-manager ssss qrencode zbar-tools \
             gnupg python3 python3-pip xxd softhsm2 opensc-pkcs11 vsmartcard-vpcd \
             cups cups-client printer-driver-cups-pdf xorriso python3-pyscard openssl \
-            ghostscript cups-filters
+            ghostscript cups-filters swtpm swtpm-tools tpm2-tools
             # ghostscript (PS->PDF renderer) + cups-filters are RECOMMENDS of printer-driver-cups-pdf,
             # so --no-install-recommends drops them on newer images: the print job is accepted but no
             # PDF is ever rendered ("no PDF produced (cups-pdf)"). Install them explicitly.
@@ -128,7 +128,8 @@ jobs:
           echo "apparmor after teardown:"; sudo aa-status 2>/dev/null | grep -iE 'profiles are loaded|complain|cups' | head || echo "  (apparmor disabled/unavailable)"
 
       - name: Run the full emulator suite natively (route coverage + go/no-go + wizard)
-        run: sudo qubes/emulator/run-tests.sh
+        # REQUIRE_TPM_SIM: the TPM cases (swtpm + tpm2-tools, installed above) must run, not skip.
+        run: sudo env REQUIRE_TPM_SIM=1 qubes/emulator/run-tests.sh
 
       - name: Show emulator logs on failure
         if: failure()
