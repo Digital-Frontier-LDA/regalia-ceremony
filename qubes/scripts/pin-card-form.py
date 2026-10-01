@@ -81,6 +81,14 @@ def emit(hsms, yubikeys, hsm_digits, yk_digits, paper):
         text(m + digits * (cell + 4) + 10, y + 8, "Typed back and matched: [  ]", "Helvetica", 9)
         y -= 22
 
+    # The breakglass recipient's fingerprint: every later PIN escrow checks the repository's copy of
+    # the public recipient against this handwritten value (CEREMONY-PLAN, "The PIN card").
+    text(m, y, "Breakglass recipient - first 16 hex of sha256 (step 3 shows it):", "Helvetica-Bold", 10.5)
+    y -= 28
+    for i in range(16):
+        box(m + i * (cell + 4), y, cell, 24)
+    y -= 22
+
     lh = 11.0
     ib_h = lh * len(RULES) + 12
     if y < m + ib_h + 8:

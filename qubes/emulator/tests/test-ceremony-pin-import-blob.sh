@@ -48,7 +48,7 @@ out="$(pin_blob_for "$T/host.pub.pem" "${FP:0:8}" "$T/d.blob" 3< <(printf '%s' "
 printf 'not a key\n' > "$T/junk.pem"
 out="$(pin_blob_for "$T/junk.pem" "${FP:0:16}" "$T/e.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
 [ "$rc" != 0 ] && [ ! -e "$T/e.blob" ] && P "a file that is not a public key is refused" || F "junk accepted as a key"
-grep -q -- '-in /dev/fd/3' "$SCRIPTS/ceremony.sh" && grep -q 'pin_blob_for "$pub" "$typed" "$dir/pin-hsm_$h.blob" 3< <(printf' "$SCRIPTS/ceremony.sh" \
+grep -q -- '-in /dev/fd/3' "$SCRIPTS/ceremony.sh" && grep -q 'pin_blob_for "$pub" "$typed" "$dir/$file" 3< <(printf' "$SCRIPTS/ceremony.sh" \
   && P "the PIN reaches openssl on a file descriptor, never argv" || F "the PIN may be on argv"
 
 hdr "a TPM-resident key opens the ceremony's blob (swtpm, as at the host)"
@@ -69,8 +69,10 @@ if command -v swtpm >/dev/null && command -v tpm2_rsadecrypt >/dev/null; then
   got="$(tpm2_rsadecrypt -c 0x81000101 -s oaep -o /dev/stdout "$T/t.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
   [ "$got" = "$(printf '%s' "$PIN" | od -An -tx1 | tr -d ' \n')" ] && P "tpm2_rsadecrypt inside the (software) TPM recovers exactly the PIN's bytes" || F "the TPM gave bytes $got"
   stop_tpm
+elif [ "${REQUIRE_TPM_SIM:-0}" = 1 ]; then
+  F "REQUIRE_TPM_SIM=1 but swtpm or tpm2-tools is missing: the TPM case must run here, not skip"
 else
-  echo "  (skipping the TPM case: swtpm and tpm2-tools not installed)"
+  echo "  (skipping the TPM case: swtpm and tpm2-tools not installed; CI sets REQUIRE_TPM_SIM=1)"
 fi
 
 echo; echo "pin-import-blob: $pass passed, $fail failed"

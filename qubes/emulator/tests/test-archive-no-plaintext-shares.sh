@@ -27,6 +27,7 @@ hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 # shellcheck disable=SC1090
 source "$SCRIPTS/ceremony.sh"
 ask(){ return 0; }; pause(){ :; }   # auto-confirm the manifest-gen `run`, no interactive stalls
+# shellcheck disable=SC2034  # read by the sourced ceremony.sh
 PRINTER=""
 init_work
 trap 'rm -rf "${WORK:-}"' EXIT
@@ -53,6 +54,9 @@ chmod 600 "$WORK"/w1 "$WORK"/w2 "$WORK"/w3 "$WORK"/slip39.txt "$WORK"/secret.in 
 printf 'DKEK-password-protected-blob' > "$WORK/dkek.pbe"
 printf 'DKEK-wrapped-private-key-blob' > "$WORK/funding-wrapped.bin"
 printf 'PUBLIC-funding-key-der'        > "$WORK/funding-pub.der"
+printf 'age1pq1publicrecipientfixture' > "$WORK/breakglass.recipient"   # public (step 3, option g)
+printf 'AGE-SECRET-KEY-PQ-1%s' "$MARK" > "$WORK/breakglass.key"             # SECRET: must never be burned
+chmod 600 "$WORK/breakglass.key"
 
 # ---- run the archive step and capture what it tells the operator to burn ------------------
 out="$(step_archive 2>&1)"
@@ -103,6 +107,12 @@ else
 fi
 
 # =====================================================================================
+hdr "the breakglass key: its public recipient is burned, its secret half never"
+[ -n "$(find "$burn_dir" -name breakglass.recipient -print -quit 2>/dev/null)" ] \
+  && P "breakglass.recipient (public) is on the disc, for the SOPS re-key" || F "breakglass.recipient is missing from the disc"
+[ -z "$(find "$burn_dir" -name breakglass.key -print -quit 2>/dev/null)" ] \
+  && P "breakglass.key (secret) is not on the disc" || F "the breakglass SECRET key was staged for the burn"
+
 hdr "we still archive the real backup (encrypted artifacts + recovery kit)"
 have_enc=0
 for f in dkek.pbe funding-wrapped.bin; do

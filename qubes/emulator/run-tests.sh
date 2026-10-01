@@ -354,6 +354,8 @@ say "GO/NO-GO HSM PIN-retry guard (--need hsm must STOP a near-locked HSM before
 say "GO/NO-GO optical write-capability guard (--need drives must STOP a read-only DVD-ROM pair)"
 "$HERE/tests/test-go-nogo-drives-writer.sh" || suite_failed "test-go-nogo-drives-writer.sh"
 
+say "BREAKGLASS KEY born in the ceremony (post-quantum age, split + verified, recipient to the payload)"
+"$HERE/tests/test-ceremony-breakglass-pq.sh" || suite_failed "test-ceremony-breakglass-pq.sh"
 say "PIN IMPORT BLOB (step 0 encrypts a PIN to a KMS host's TPM import key; fingerprint-checked)"
 "$HERE/tests/test-ceremony-pin-import-blob.sh" || suite_failed "test-ceremony-pin-import-blob.sh"
 say "CUSTODY SITES (k-of-n site rules: n-k per region, nobody reaches k, directory holders reach nothing)"

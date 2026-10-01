@@ -69,7 +69,7 @@ jobs:
             age opensc pcscd libccid pcsc-tools yubikey-manager ssss qrencode zbar-tools \
             gnupg python3 python3-pip xxd softhsm2 opensc-pkcs11 vsmartcard-vpcd \
             cups cups-client printer-driver-cups-pdf xorriso python3-pyscard openssl \
-            ghostscript cups-filters
+            ghostscript cups-filters swtpm swtpm-tools tpm2-tools
             # ghostscript (PS->PDF renderer) + cups-filters are RECOMMENDS of printer-driver-cups-pdf,
             # so --no-install-recommends drops them on newer images: the print job is accepted but no
             # PDF is ever rendered ("no PDF produced (cups-pdf)"). Install them explicitly.
@@ -91,6 +91,17 @@ jobs:
           sudo pip3 install --break-system-packages --ignore-installed --require-hashes \
             -r qubes/requirements.txt \
           || sudo pip3 install --ignore-installed --require-hashes -r qubes/requirements.txt
+
+      - name: Install hash-pinned age 1.3.2 (post-quantum breakglass key; Debian/Ubuntu ship older)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o /tmp/age.tgz \
+            https://github.com/FiloSottile/age/releases/download/v1.3.2/age-v1.3.2-linux-amd64.tar.gz
+          echo "cbe24006683f8eb669266162894b9a522a1af52f2665fbc63a4bb032ed26ac10  /tmp/age.tgz" | sha256sum -c -
+          tar -xzf /tmp/age.tgz -C /tmp age/age age/age-keygen
+          printf '%s  %s\n' eb7dd1b518f0a307c99cd97782623c5321da049154b04acd2d98d21aa7bc9b2c /tmp/age/age 0a0009db842259d6717f7eeb30acb6b90d2a2eb924c6acd0a0db0ca1f1537899 /tmp/age/age-keygen | sha256sum -c -
+          sudo install -m 0755 /tmp/age/age /tmp/age/age-keygen /usr/local/bin/
+          age --version
 
       - name: Install hash-pinned sops (preflight checks for it; not in apt)
         run: |
@@ -117,7 +128,8 @@ jobs:
           echo "apparmor after teardown:"; sudo aa-status 2>/dev/null | grep -iE 'profiles are loaded|complain|cups' | head || echo "  (apparmor disabled/unavailable)"
 
       - name: Run the full emulator suite natively (route coverage + go/no-go + wizard)
-        run: sudo qubes/emulator/run-tests.sh
+        # REQUIRE_TPM_SIM: the TPM cases (swtpm + tpm2-tools, installed above) must run, not skip.
+        run: sudo env REQUIRE_TPM_SIM=1 qubes/emulator/run-tests.sh
 
       - name: Show emulator logs on failure
         if: failure()
@@ -184,6 +196,11 @@ jobs:
             # VERIFY the built image
             . /etc/profile.d/vault-bin.sh
             echo "sops:"; sops --version
+            # age 1.3.2 from /opt/vault-bin, on PATH as /usr/bin/age: it must make post-quantum keys
+            # (no single quotes in this block: it is the single-quoted body of bash -euxc)
+            [ "$(readlink -f /usr/bin/age)" = /opt/vault-bin/age ] || { echo "/usr/bin/age is not the pinned age"; exit 1; }
+            age --version | grep -qx "v1.3.2" || { echo "age is not v1.3.2: $(age --version)"; exit 1; }
+            age-keygen -pq 2>/dev/null | grep -q "^AGE-SECRET-KEY-PQ-1" || { echo "age-keygen cannot make a post-quantum key"; exit 1; }
             test -f /opt/vault-ceremony/ceremony.sh
             test -f /opt/vault-ceremony/requirements.txt
             for t in age pkcs11-tool sc-hsm-tool shamir ssss-split ssss-combine qrencode age-plugin-yubikey \

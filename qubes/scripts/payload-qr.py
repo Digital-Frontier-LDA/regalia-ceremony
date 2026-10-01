@@ -146,8 +146,12 @@ STEPS
      It will begin "{AGE_ARMOR_HEADER}".
   6. Verify: sha256 of payload.age must START with {digest}
        sha256sum payload.age
-  7. Decrypt with the breakglass age key (reconstruct it from any {k} of the {n} Shamir shares):
-       age -d -i breakglass.key payload.age > payload.txt
+  7. Decrypt with the breakglass age key. It is post-quantum (AGE-SECRET-KEY-PQ-1...), which needs
+     age 1.3 or later: use the copy on the archive disc (recovery-kit/bin/, checked against its
+     SHA256SUMS). Rebuild the key from any {k} of the {n} Shamir shares straight into a file, so it
+     is never typed into a command, then decrypt:
+       ( umask 077; ssss-combine -t {k} -q 2> breakglass.key )
+       recovery-kit/bin/age -d -i breakglass.key payload.age > payload.txt
 
 If a QR code is damaged and will not scan, the payload cannot be rebuilt from the remaining
 codes — every chunk is required. Use another copy of this sheet, the M-DISC, or a chip card.
