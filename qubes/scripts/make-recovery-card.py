@@ -83,10 +83,10 @@ def build_lines(date: str, case_id: str = "", seal_serial: str = "", hsm_funding
         ("       --in derivation-shares.txt", "Courier", 7.5, 0),]
     body += [
         ("4. Breakglass age key (only to decrypt the vault):", "Courier", 7.5, 1),
-        ("     ssss-combine -t %d   (paste %d ssss shares)" % (k, k), "Courier", 7.5, 0),
-        ("     -> AGE-SECRET-KEY-1... (recovery key)", "Courier", 7.5, 0),
-        ("5. Decrypt vault with the recovered age key:", "Courier", 7.5, 1),
-        ("     SOPS_AGE_KEY=<key> sops decrypt \\", "Courier", 7.5, 0),
+        ("     ssss-combine -t %d -q 2> breakglass.key" % k, "Courier", 7.5, 0),
+        ("5. Decrypt vault with the disc's sops:", "Courier", 7.5, 1),
+        ("     SOPS_AGE_KEY_FILE=breakglass.key \\", "Courier", 7.5, 0),
+        ("       recovery-kit/bin/sops decrypt \\", "Courier", 7.5, 0),
         ("       example-service:infra/ansible/vault.sops.yaml", "Courier", 7.5, 0),
         ("6. Verify recovered addr == funding addr on sealed sheet:", "Courier", 7.5, 1),]
     if hsm_funding:

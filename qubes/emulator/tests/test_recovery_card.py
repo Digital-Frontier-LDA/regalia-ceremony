@@ -88,12 +88,15 @@ class TestRecoveryCardSopsDecrypt(unittest.TestCase):
     which does not exist -> decrypt fails. The key VALUE must go through SOPS_AGE_KEY.
     """
 
+    # The key is rebuilt by ssss-combine straight into breakglass.key (never typed into a command),
+    # so SOPS_AGE_KEY_FILE takes that PATH. What must never happen is a key VALUE in the FILE var.
     def test_card_sops_decrypt_uses_key_value_env_not_file_path(self):
         t = card_text()
         self.assertNotIn("SOPS_AGE_KEY_FILE=<key>", t,
                          "card must not pass the recovered age key VALUE to the FILE-path env var")
-        self.assertIn("SOPS_AGE_KEY=<key>", t,
-                      "card must pass the recovered age key value via SOPS_AGE_KEY")
+        self.assertIn("2> breakglass.key", t, "card must write the rebuilt key to a file")
+        self.assertIn("SOPS_AGE_KEY_FILE=breakglass.key", t, "card must give sops the key FILE path")
+        self.assertIn("recovery-kit/bin/sops", t, "card must use the disc's sops (post-quantum keys)")
 
 
 class TestRecoveryRunbookSopsDecrypt(unittest.TestCase):
@@ -109,8 +112,10 @@ class TestRecoveryRunbookSopsDecrypt(unittest.TestCase):
         t = self._md()
         self.assertNotIn("SOPS_AGE_KEY_FILE=<that key>", t,
                          "runbook must not pass the recovered age key VALUE to the FILE-path env var")
-        self.assertIn("SOPS_AGE_KEY=<that key>", t,
-                      "runbook must pass the recovered age key value via SOPS_AGE_KEY")
+        self.assertNotIn("SOPS_AGE_KEY=<", t, "runbook must not have the key typed into a command")
+        self.assertIn("2> breakglass.key", t, "runbook must write the rebuilt key to a file")
+        self.assertIn("SOPS_AGE_KEY_FILE=breakglass.key recovery-kit/bin/sops decrypt", t,
+                      "runbook must give the disc's sops the key FILE path")
 
 
 class TestRecoveryAddressAnchorLocation(unittest.TestCase):
