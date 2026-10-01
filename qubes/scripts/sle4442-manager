@@ -12,6 +12,7 @@ a real SLE-4442 it works unchanged.
   sle4442-manager read    --addr 32 --len 16
   sle4442-manager write   --psc FFFFFF --addr 32 --hex-file share.hex
   SLE4442_PSC=... SLE4442_TEXT="share-1-..." sle4442-manager store --addr 32   # share off argv
+  sle4442-manager change-psc --psc-file old.psc --new-psc-file new.psc       # off argv only
 
 The PSC *and* the secret payload (--text/--hex) resolve off the command line: prefer the
 SLE4442_PSC / SLE4442_TEXT / SLE4442_HEX env vars or the --psc-file/--text-file/--hex-file
@@ -226,6 +227,51 @@ def resolve_psc(args):
     return psc or DEFAULT_PSC
 
 
+def resolve_new_psc(args):
+    """The NEW PSC: SLE4442_NEW_PSC env or --new-psc-file only (there is no argv form). Exactly 6 hex,
+    not the factory FFFFFF (that is what it replaces)."""
+    new = os.environ.get("SLE4442_NEW_PSC")
+    if not new and getattr(args, "new_psc_file", None):
+        with open(args.new_psc_file) as fh:
+            new = fh.read()
+    new = (new or "").strip().upper().replace(" ", "")
+    if len(new) != 6 or any(c not in "0123456789ABCDEF" for c in new):
+        sys.exit("the new PSC must be 6 hex digits (SLE4442_NEW_PSC or --new-psc-file)")
+    if new == DEFAULT_PSC:
+        sys.exit("the new PSC must not be the factory FFFFFF")
+    return new
+
+
+def cmd_change_psc(conn, reader, old, new):
+    """Present the current PSC, change it, then prove the change in a FRESH session by presenting the
+    new one. The status word of the change is not trusted on its own: through an ACR40U a refused
+    write still answers 90 00 (regalia#43), so only the re-presentation proves the card took it."""
+    if new == old.strip().upper().replace(" ", ""):
+        sys.exit("the new PSC is the current one")
+    select_sle4442(conn)
+    _present_psc(conn, old)
+    _, sw1, sw2 = _xmit(conn, "FF D2 00 01 03 " + new)
+    if not _ok(sw1, sw2):
+        sys.exit(f"change PSC failed: {sw1:02X} {sw2:02X} (the old PSC still applies)")
+    try:
+        conn.disconnect()
+    except Exception:
+        pass
+    conn2, _ = _connect(reader)
+    try:
+        select_sle4442(conn2)
+        _, sw1, sw2 = _xmit(conn2, "FF 20 00 00 03 " + new)
+        if sw1 != 0x90 or sw2 != 0x07:
+            sys.exit(f"the NEW PSC does not verify ({sw1:02X} {sw2:02X}; one attempt spent): the card may "
+                     "still answer to the OLD PSC. Check with `info` before trying anything else.")
+    finally:
+        try:
+            conn2.disconnect()
+        except Exception:
+            pass
+    print("PSC changed, and the new PSC verified in a fresh session")
+
+
 def resolve_secret(args, kind):
     """Resolve the secret payload (the share/seed itself) WITHOUT exposing it on the command
     line — the same protection resolve_psc gives the far-less-sensitive PSC. Order:
@@ -279,8 +325,12 @@ def main(argv=None):
             sp.add_argument("--text-file", default=None,
                             help="read the secret text payload from this file (not argv)")
     p = sub.add_parser("read");   p.add_argument("--addr", type=int, required=True); p.add_argument("--len", type=int, required=True)
+    cp = sub.add_parser("change-psc", allow_abbrev=False)   # --psc must not abbreviate --psc-file
+    cp.add_argument("--psc-file", default=None, help="read the CURRENT PSC from this file")
+    cp.add_argument("--new-psc-file", default=None, help="read the NEW PSC from this file (or SLE4442_NEW_PSC)")
     args = ap.parse_args(argv)
 
+    new_psc = resolve_new_psc(args) if args.cmd == "change-psc" else None   # refuse before touching the card
     conn, name = _connect(args.reader)
     try:
         if args.cmd == "info":
@@ -293,6 +343,8 @@ def main(argv=None):
             cmd_write(conn, resolve_psc(args), args.addr, resolve_secret(args, "hex"))
         elif args.cmd == "store":
             cmd_store(conn, resolve_psc(args), args.addr, resolve_secret(args, "text"))
+        elif args.cmd == "change-psc":
+            cmd_change_psc(conn, args.reader or name, resolve_psc(args), new_psc)
     finally:
         try:
             conn.disconnect()

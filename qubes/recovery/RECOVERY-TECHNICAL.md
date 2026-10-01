@@ -36,7 +36,8 @@ with **Section 3B** below, not Section 3.
 
 **Reading the chip card** (only if you need this case's share from it — the hand-written and metal
 copies hold the same share). You need a PC/SC reader that supports SLE-4442 memory cards (e.g.
-ACS ACR39U with the `libacsccid1` driver); ordinary chip-card readers cannot power these cards.
+ACS ACR39U with the `libacsccid1` driver, or ACS ACR40U, validated with the stock Debian `libccid`);
+ordinary chip-card readers cannot power these cards.
 No PSC is needed to read. The share is plain ASCII text stored from **byte 32**; the rest of the
 card after it is padded with `00` bytes, which the command strips:
 ```bash
@@ -213,15 +214,20 @@ line). Use the newest **verified** escrow, not the payload's PINs, and use this 
 repository's copy:
 
 ```sh
-( umask 077; sed -n 's/^escrow_mac_key: *//p' payload.txt > /dev/shm/escrow-mac.key )
-python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age < /dev/shm/escrow-mac.key
-bin/age -d -i breakglass.key /dev/shm/pins.age
+# the key goes straight from the payload into the verifier: never into a file of its own
+rm -f /dev/shm/pins.age      # a stale copy must never be what gets decrypted
+sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
+case $? in
+  0) bin/age -d -i breakglass.key /dev/shm/pins.age ;;               # the verified escrow
+  3) echo "no escrow verifies: use the payload's PINs" ;;
+  *) echo "STOP: the selection failed; fix the cause, do NOT fall back" ;;
+esac
 ```
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no
 escrow verifies: then use the payload's PINs. Any other failure (a malformed key, git, a full tmpfs)
-means STOP and fix it; never fall back to the payload's older PINs because of it. Shred `/dev/shm/escrow-mac.key` and `/dev/shm/pins.age` afterwards.
+means STOP and fix it; never fall back to the payload's older PINs because of it. Shred `/dev/shm/pins.age` afterwards.
 
 ## 7. After
 - **Rotate**: the seeds were exposed — generate new wallets and move funds again per the plan.

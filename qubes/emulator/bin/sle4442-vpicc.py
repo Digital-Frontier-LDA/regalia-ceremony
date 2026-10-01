@@ -195,7 +195,10 @@ class SLE4442:
         # UPDATE MAIN MEMORY — FF D0 00 <addr> <lc> <data>  (needs auth)
         if ins == 0xD0:
             if not self.authenticated:
-                return SW_NO_AUTH
+                # As a real card answers through an ACS ACR40U (drill, regalia#43, 2026-10-01): a write
+                # without the PSC is ACKNOWLEDGED (90 00) and silently does nothing. Only a read-back
+                # catches it, which is why sle4442-manager verify-reads every write.
+                return SW_OK
             if short:
                 return SW_WRONG_LEN
             addr = p2
@@ -223,7 +226,8 @@ class SLE4442:
             self._save()
             return SW_OK
 
-        # CHANGE PSC — FF D2 00 00 03 <new psc> (needs auth)
+        # CHANGE PSC — FF D2 00 01 03 <new psc> (needs auth). P2 = 01 is what the ACS manual gives and the
+        # real ACR40U accepts; 00 is kept for older callers.
         if ins == 0xD2:
             if not self.authenticated:
                 return SW_NO_AUTH

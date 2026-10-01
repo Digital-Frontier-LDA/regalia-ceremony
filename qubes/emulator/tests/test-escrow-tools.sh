@@ -45,13 +45,23 @@ mkdir -p "$T/repo/escrow/pins-0009.age.mac"; : > "$T/repo/escrow/pins-0009.age.m
 g add -A; g commit -qm "a directory named like a .mac"
 [ "$(sel)" = pins-0002.age ] && grep -q "SKIPPED pins-0009.age" "$T/err" && P "a directory where a .mac should be is skipped, not a crash" || F "directory .mac: $(cat "$T/err")"
 g rm -rq escrow/pins-0009.age escrow/pins-0009.age.mac; g commit -qm "remove it"
-[ "$(python3 "$MAC" highest "$T/repo")" = 9 ] && P "the next sequence counts deleted escrows too (highest = 9, though only 0001 is left)" || F "highest $(python3 "$MAC" highest "$T/repo")"
+h="$(python3 "$MAC" highest "$T/repo" <<< "$KEY")"
+[ "$h" = 2 ] && P "the next sequence counts the deleted VERIFIED 0002, and ignores the forged 0003 and 0009 (highest = 2)" || F "highest $h"
+put pins-9999.age squatter "$(printf '00%.0s' {1..16})"; g add -A; g commit -qm "a forged 9999"
+h="$(python3 "$MAC" highest "$T/repo" <<< "$KEY")"
+[ "$h" = 2 ] && P "a forged pins-9999.age cannot exhaust the sequence (highest still 2)" || F "highest after a forged 9999: $h"
+g rm -q escrow/pins-9999.age escrow/pins-9999.age.mac; g commit -qm "remove the squatter"
 put pins-0004.age genuine; g add -A; g commit -qm four
 printf 'f%.0s' {1..64} > "$T/repo/escrow/pins-0004.age.mac"; g add -A; g commit -qm "replace only the mac"
 [ "$(sel)" = pins-0004.age ] && [ "$(cat "$T/out")" = genuine ] && P "replacing only the .mac does not hide the earlier valid pair" || F "after a MAC-only replacement: $(cat "$T/out" 2>/dev/null)"
 
+mkdir -p "$T/io/escrow"; git -C "$T/io" init -q
+ln -s /proc/self/mem "$T/io/escrow/pins-0004.age"; printf 'x\n' > "$T/io/escrow/pins-0004.age.mac"
+python3 "$MAC" highest "$T/io" <<< "$KEY" >/dev/null 2>&1 && F "an unreadable escrow was skipped as if invalid" \
+  || P "an escrow that cannot be read stops sequencing (never treated as a squatter)"
+
 mkdir -p "$T/empty"; git -C "$T/empty" init -q
-python3 "$MAC" highest "$T/empty" >/dev/null 2>&1 && P "highest works with no escrow/ directory (every file deleted)" || F "highest fails without escrow/"
+[ "$(python3 "$MAC" highest "$T/empty" <<< "$KEY" 2>&1)" = 0 ] && P "highest works with no commit and no escrow/ directory" || F "highest fails on an empty repository"
 
 mkdir -p "$T/none/escrow"; git -C "$T/none" init -q
 put2(){ printf '%s' "$2" > "$T/none/escrow/$1"; python3 "$MAC" mac "$T/none/escrow/$1" <<< "$(printf '00%.0s' {1..16})" > "$T/none/escrow/$1.mac"; }
@@ -83,8 +93,11 @@ git -C "$T/co" init -q; printf 'age1pq1stubrecipient\n' > "$T/co/escrow/breakgla
 printf '%s\n' "$k1" > "$T/co/escrow/escrow-mac.kcv"
 fp="$(sha256sum "$T/co/escrow/breakglass.recipient" | cut -c1-16)"
 six="7310048261 7310048261 8420159372 8420159372 9531260483 9531260483 90817263 90817263 a1b2c3 a1b2c3 72635445 72635445"
+printf 'planted' > "$T/co/escrow/pins-0001.age"   # a squatter on the next name, written without the key
 before="$(ls /dev/shm)"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
+grep -q "exists but does not verify" <<< "$out" && ! grep -q planted "$T/co/escrow/pins-0001.age" \
+  && P "an unverified file on the next name is replaced, and reported" || F "squatter: $out"
 [ "$rc" = 0 ] && [ -s "$T/co/escrow/pins-0001.age" ] && [ -s "$T/co/escrow/pins-0001.age.mac" ] \
   && P "six devices escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
 [ "$(grep -cE '^(hsm|yubikey)_[abc]=' "$T/co/escrow/pins-0001.age")" = 6 ] && grep -qx 'yubikey_b=a1b2c3' "$T/co/escrow/pins-0001.age" \
@@ -96,6 +109,21 @@ rm -f "$T/out"; [ "$(python3 "$MAC" select "$T/co" "$T/out" <<< "$KEY" 2>/dev/nu
 mkdir -p "$T/disc2"; cp "$T/disc/pin-escrow.sh" "$T/disc/pin_escrow_mac.py" "$T/disc2/"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc2/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "no age next to this script" <<< "$out" && P "no checked age beside the tool: refused (PATH's age is never used)" || F "rc=$rc: $out"
+run_p(){ (cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1); }
+ln -s "$T/never-created" "$T/co/escrow/pins-0002.age.mac"   # a dangling symlink on the next .mac name
+out="$(run_p)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$T/never-created" ] && [ ! -L "$T/co/escrow/pins-0002.age.mac" ] && [ -s "$T/co/escrow/pins-0002.age.mac" ] \
+  && P "a dangling symlink on the next name is removed, never written through" || F "symlink: rc=$rc $out"
+rm -f "$T/co/escrow/pins-0002.age"*
+mkdir -p "$T/co/escrow/pins-0002.age.mac"; : > "$T/co/escrow/pins-0002.age.mac/keep"; printf 'evidence' > "$T/co/escrow/pins-0002.age"
+out="$(run_p)"; rc=$?
+[ "$rc" != 0 ] && grep -q "is a directory" <<< "$out" && [ -e "$T/co/escrow/pins-0002.age.mac/keep" ] && grep -q evidence "$T/co/escrow/pins-0002.age" \
+  && P "a directory on the next name is refused; neither path is touched (the file beside it is kept)" || F "directory: rc=$rc $out"
+rm -rf "$T/co/escrow/pins-0002.age.mac" "$T/co/escrow/pins-0002.age"
+out1="$(run_p)"; out2="$(run_p)"   # two runs, nothing committed in between
+[ -s "$T/co/escrow/pins-0002.age" ] && [ -s "$T/co/escrow/pins-0003.age" ] && ! grep -q "does not verify" <<< "$out2" \
+  && P "an escrow written but not committed is counted: the next run writes 0003, never over 0002" || F "uncommitted: $out1 / $out2"
+rm -f "$T/co/escrow/pins-0002.age"* "$T/co/escrow/pins-0003.age"*
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" 7310048261 7310048262 | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q differ <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "mismatched entries: refused, nothing written" || F "rc=$rc: $out"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$(printf '11%.0s' {1..16})" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?

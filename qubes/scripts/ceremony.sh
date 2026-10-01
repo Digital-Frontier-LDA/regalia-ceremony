@@ -2372,11 +2372,35 @@ step_chipcard() {
   # `store` verify-reads the bytes back and compares INTERNALLY, failing loudly on a mismatch,
   # and never echoes the payload. Do NOT follow this with `sle4442-manager read` to "confirm" —
   # that subcommand PRINTS the stored bytes, which would put the share on the terminal.
-  run "sle4442-manager store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
+  # env -u: an ambient SLE4442_PSC / SLE4442_NEW_PSC would take precedence over the files (resolve_psc),
+  # and the step would then record a PSC the card was not given.
+  run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
     || { err "store failed or was skipped — the card does NOT hold the share."; \
          err "If the PSC was wrong, one of the three attempts has been spent."; return 1; }
   info "Share stored AND verify-read back by the card (a write that ACKs but does not persist"
   info "is caught there — the status word alone is never treated as success)."
+  # FFFFFF is the factory PSC: anyone holding the card could overwrite or erase the share. Change it
+  # when a new PSC is ready (the same value as the payload's sle4442_psc line, so recovery has it).
+  # Normalize as resolve_psc() does (whitespace stripped, case ignored): " ffffff " IS the factory PSC.
+  local cur_psc; cur_psc="$(tr -d '[:space:]' < "$pscfile" | tr 'a-f' 'A-F')"
+  if [ "$cur_psc" != FFFFFF ]; then
+    info "This card was written with a non-factory PSC; it keeps it."
+  elif [ -s "$WORK/sle4442.newpsc" ]; then
+    run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
+      || { err "the PSC change failed or was skipped: this card may still have the factory PSC. Run"
+           err "'sle4442-manager info' before anything else; do not seal it as commissioned."; return 1; }
+    # The verified PSC is now this card's current one: a later run against the same card must not
+    # present the factory PSC and spend an attempt. (A fresh card needs FFFFFF put back explicitly.)
+    ( umask 077; cp "$WORK/sle4442.newpsc" "$pscfile" ) \
+      || { err "the card now has the NEW PSC, but $pscfile could not be updated and still says FFFFFF."
+           err "Do NOT retry with the factory PSC: put the content of $WORK/sle4442.newpsc in $pscfile first."; return 1; }
+    info "PSC changed and verified in a fresh session; $pscfile now holds it (the payload's sle4442_psc must too)."
+    info "For the next FRESH card, put FFFFFF back in $pscfile first (a fresh card still has the factory PSC)."
+  else
+    warn "The card still has the factory PSC. To change it (recommended), put a new 6-hex PSC in"
+    warn "$WORK/sle4442.newpsc (also in the payload's sle4442_psc line) and run:"
+    show "sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'"
+  fi
   warn "Seal this card with its case. Do NOT run 'sle4442-manager read' to double-check: that"
   warn "prints the share to the terminal. The store already proved the bytes are on the card."
 }

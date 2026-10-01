@@ -9,7 +9,7 @@ write access alone cannot produce a valid MAC. The key is read from STANDARD INP
 
     pin_escrow_mac.py kcv                      < key   # print the key check value (catches typos)
     pin_escrow_mac.py mac escrow/pins-0003.age < key   # print the file's MAC (written to <file>.mac)
-    pin_escrow_mac.py highest <checkout> [prefix]       # highest sequence ever used (history + tree)
+    pin_escrow_mac.py highest <checkout> [prefix] < key # highest VERIFIED sequence in the history
     pin_escrow_mac.py select <checkout> /dev/shm/pins.age < key
         # copy the highest-numbered escrow/pins-NNNN.age whose MAC verifies to the given path (0600),
         # exactly the bytes that were verified, and print its name; report every candidate skipped.
@@ -55,9 +55,10 @@ def git(repo, *args):
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, check=True).stdout
 
 
-def candidates(repo):
-    """(sequence, name, data, tag-or-None, in_head) for every distinct pins-NNNN.age blob in any
+def candidates(repo, prefix="pins"):
+    """(sequence, name, data, tag-or-None, in_head) for every distinct <prefix>-NNNN.age blob in any
     commit of any ref, newest commit first. in_head: these exact bytes are at that name in HEAD."""
+    name_re = re.compile(r"^%s-(\d{4})\.age$" % re.escape(prefix))
     def tree_of(commit):
         tree = {}
         for line in git(repo, "ls-tree", commit, "escrow/").decode().splitlines():
@@ -66,12 +67,15 @@ def candidates(repo):
             if kind == "blob":          # a directory (or submodule) named like an escrow is never one
                 tree[os.path.basename(path)] = obj
         return tree
-    head = tree_of("HEAD")
+    try:
+        head = tree_of("HEAD")
+    except subprocess.CalledProcessError:       # a repository with no commit yet
+        head = {}
     seen, out = set(), []
     for commit in git(repo, "rev-list", "--all", "--", "escrow").decode().split():
         tree = tree_of(commit)
         for name, blob in tree.items():
-            m = NAME.match(name)
+            m = name_re.match(name)
             tag_blob = tree.get(name + ".mac")
             # The identity is the ciphertext AND its tag: a later commit that replaces only the .mac
             # must not hide an earlier commit's valid pairing of the same ciphertext.
@@ -86,17 +90,31 @@ def candidates(repo):
     return out
 
 
-def highest(repo, prefix="pins"):
-    """The highest sequence ever used for <prefix>-NNNN.age, in any commit of any ref or in the working
-    tree: the producer numbers from here, so deleting files cannot make it restart below a number
-    recovery would still find in history."""
-    pat = re.compile(r"^%s-(\d{4})\.age$" % re.escape(prefix))
-    # -z: NUL-separated and never C-quoted, so no path can hide behind quoting or spaces.
-    names = {n for n in git(repo, "log", "--all", "-z", "--format=", "--name-only", "--", "escrow").decode(
-        "utf-8", "surrogateescape").replace("\n", "\0").split("\0") if n}
+def highest(key, repo, prefix="pins"):
+    """The highest sequence of an escrow whose MAC VERIFIES, in any commit of any ref: the producer
+    numbers from here. Deleting files cannot make it restart below a verified escrow recovery would
+    still find, and an unauthenticated file (a lone forged pins-9999.age) cannot push the numbering
+    up or exhaust it: only escrows written with the key count."""
+    seqs = [seq for seq, name, data, tag, _ in candidates(repo, prefix)
+            if tag and hmac.compare_digest(tag, mac(key, name, data))]
+    # And the working tree: an escrow written but not committed yet must not be overwritten by a second
+    # run. It counts when it verifies, like everything else.
+    name_re = re.compile(r"^%s-(\d{4})\.age$" % re.escape(prefix))
     tree = os.path.join(repo, "escrow")
-    names |= {"escrow/" + n for n in (os.listdir(tree) if os.path.isdir(tree) else [])}
-    return max([int(m[1]) for m in (pat.match(os.path.basename(n)) for n in names) if m] or [0])
+    for name in (os.listdir(tree) if os.path.isdir(tree) else []):
+        m, path = name_re.match(name), os.path.join(tree, name)
+        if m and os.path.isfile(path) and os.path.isfile(path + ".mac"):
+            # An I/O or permission error is NOT "does not verify": stop, so the producer never treats a
+            # possibly valid escrow as a squatter. Only a tag that is not ASCII is simply invalid.
+            with open(path, "rb") as f, open(path + ".mac", "rb") as g:
+                data, raw = f.read(), g.read()
+            try:
+                tag = raw.decode("ascii").strip()
+            except UnicodeDecodeError:
+                continue
+            if hmac.compare_digest(tag, mac(key, name, data)):
+                seqs.append(int(m[1]))
+    return max(seqs or [0])
 
 
 def select(key, repo, out):
@@ -139,7 +157,7 @@ def main(argv):
         print(mac(read_key(sys.stdin), os.path.basename(argv[1]), data))
         return 0
     if len(argv) in (2, 3) and argv[0] == "highest":
-        print(highest(argv[1], *argv[2:]))
+        print(highest(read_key(sys.stdin), argv[1], *argv[2:]))
         return 0
     if len(argv) == 3 and argv[0] == "select":
         return select(read_key(sys.stdin), argv[1], argv[2])
