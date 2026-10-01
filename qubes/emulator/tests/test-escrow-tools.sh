@@ -53,6 +53,16 @@ printf 'f%.0s' {1..64} > "$T/repo/escrow/pins-0004.age.mac"; g add -A; g commit 
 mkdir -p "$T/empty"; git -C "$T/empty" init -q
 python3 "$MAC" highest "$T/empty" >/dev/null 2>&1 && P "highest works with no escrow/ directory (every file deleted)" || F "highest fails without escrow/"
 
+mkdir -p "$T/none/escrow"; git -C "$T/none" init -q
+put2(){ printf '%s' "$2" > "$T/none/escrow/$1"; python3 "$MAC" mac "$T/none/escrow/$1" <<< "$(printf '00%.0s' {1..16})" > "$T/none/escrow/$1.mac"; }
+put2 pins-0001.age forged; git -C "$T/none" add -A; git -C "$T/none" -c user.name=t -c user.email=t@t commit -qm f
+rm -f "$T/o3"; python3 "$MAC" select "$T/none" "$T/o3" <<< "$KEY" >/dev/null 2>&1; rc=$?
+[ "$rc" = 3 ] && P "no verified escrow exits 3 (the only status that means: use the payload)" || F "no-escrow exit $rc"
+: > "$T/o3"; python3 "$MAC" select "$T/repo" "$T/o3" <<< "$KEY" >/dev/null 2>&1; rc=$?
+[ "$rc" != 0 ] && [ "$rc" != 3 ] && P "an output problem is not 'no escrow' (exit $rc: stop, do not fall back)" || F "output problem exit $rc"
+python3 "$MAC" select "$T/repo" "$T/o4" <<< "bad" >/dev/null 2>&1; rc=$?
+[ "$rc" != 0 ] && [ "$rc" != 3 ] && P "a malformed key is not 'no escrow' (exit $rc)" || F "bad key exit $rc"
+
 hdr "the producer refuses to run from the checkout it writes to"
 mkdir -p "$T/repo/tools"; cp "$SCRIPTS/escrow/pin-escrow.sh" "$SCRIPTS/escrow/pin_escrow_mac.py" "$T/repo/tools/"
 : > "$T/repo/escrow/breakglass.recipient"; printf 'x' > "$T/repo/escrow/breakglass.recipient"; printf '%s\n' "$k1" > "$T/repo/escrow/escrow-mac.kcv"

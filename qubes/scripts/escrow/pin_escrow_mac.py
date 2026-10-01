@@ -13,7 +13,8 @@ write access alone cannot produce a valid MAC. The key is read from STANDARD INP
     pin_escrow_mac.py select <checkout> /dev/shm/pins.age < key
         # copy the highest-numbered escrow/pins-NNNN.age whose MAC verifies to the given path (0600),
         # exactly the bytes that were verified, and print its name; report every candidate skipped.
-        # Exit 1 if none.
+        # Exit 3 when NO escrow verifies (then, and only then, use the payload's PINs); any other
+        # failure (a malformed key, git, a full tmpfs) exits 1 or 2, and recovery must stop.
 
 Candidates come from the repository's HISTORY (every commit, every ref), not only the current tree:
 a writer who deletes the newest escrow pair cannot roll recovery back to an older, stale one, because
@@ -30,6 +31,7 @@ import re
 import subprocess
 import sys
 
+NO_ESCROW = 3          # the only exit status that means "fall back to the payload's PINs"
 NAME = re.compile(r"^pins-(\d{4})\.age$")
 
 
@@ -124,7 +126,7 @@ def select(key, repo, out):
         print(name)
         return 0
     print("no verified escrow file in %s: use the payload's PINs" % repo, file=sys.stderr)
-    return 1
+    return NO_ESCROW
 
 
 def main(argv):

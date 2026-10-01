@@ -219,8 +219,9 @@ bin/age -d -i breakglass.key /dev/shm/pins.age
 ```
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
-chose. Every `SKIPPED` or `NOTE` line is an incident to record. If no escrow verifies, use the
-payload's PINs. Shred `/dev/shm/escrow-mac.key` and `/dev/shm/pins.age` afterwards.
+chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no
+escrow verifies: then use the payload's PINs. Any other failure (a malformed key, git, a full tmpfs)
+means STOP and fix it; never fall back to the payload's older PINs because of it. Shred `/dev/shm/escrow-mac.key` and `/dev/shm/pins.age` afterwards.
 
 ## 7. After
 - **Rotate**: the seeds were exposed — generate new wallets and move funds again per the plan.
