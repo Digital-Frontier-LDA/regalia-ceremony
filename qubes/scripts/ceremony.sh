@@ -1598,22 +1598,24 @@ show_day_pin() {
 # allows only 10 tries. NIST SP 800-63B: refuse repetitive and sequential values; here also dates,
 # since a birthday or anniversary is guessable by anyone who knows the owner.
 weak_pin_reason() {
-  python3 - "$1" <<'PY'
-import datetime, sys
-p = sys.argv[1]
+  # The PIN reaches Python on file descriptor 3, never as an argument: argv is readable by any local
+  # process (/proc/<pid>/cmdline). The reason printed never repeats any digit of the PIN.
+  python3 -c '
+import datetime, os
+p = os.read(3, 64).decode().strip()
 def date_ok(d, m, y):
     try:
         datetime.date(y, m, d)
         return 1900 <= y <= 2099
     except ValueError:
         return False
-def dates(s):
+def has_date(s):
     for i in range(len(s) - 7):
         w = s[i:i+8]
         dd, mm, yyyy = int(w[0:2]), int(w[2:4]), int(w[4:8])
         if date_ok(dd, mm, yyyy) or date_ok(int(w[6:8]), int(w[4:6]), int(w[0:4])) or date_ok(mm, dd, yyyy):
-            return w
-    return None
+            return True
+    return False
 if len(set(p)) == 1:
     print("it is one digit repeated")
 elif all((int(p[i+1]) - int(p[i])) % 10 == 1 for i in range(len(p) - 1)) or \
@@ -1623,9 +1625,9 @@ elif any(p == (p[:k] * len(p))[:len(p)] for k in range(2, len(p) // 2 + 1)):
     print("it repeats a short pattern")
 elif len(set(p)) <= 2:
     print("it uses only two different digits")
-elif dates(p):
-    print("it contains a date (%s): a birthday or anniversary is the first thing someone who knows you tries" % dates(p))
-PY
+elif has_date(p):
+    print("it contains a date: a birthday or anniversary is the first thing someone who knows you tries")
+' 3<<< "$1"
 }
 
 # Write $WORK/pins.env from generated values (and, if the operator chooses, typed day-to-day PINs).

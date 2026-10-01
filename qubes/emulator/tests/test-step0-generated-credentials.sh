@@ -29,8 +29,10 @@ screen, shown, pending = "", {}, ""
 typed = {"hsm_a_user_pin": ["7310048261"], "hsm_b_user_pin": ["5512096374"], "hsm_c_user_pin": ["4096128803"],
          "yubikey_a_piv_pin": ["90817263"], "yubikey_b_piv_pin": ["63517240"], "yubikey_c_piv_pin": ["27481059"]}
 if mode == "typed-weak":
-    typed["hsm_a_user_pin"] = ["0101199012", "1234567890", "1231231231", "7310048261"]
-    typed["hsm_b_user_pin"] = ["7310048261", "5512096374"]
+    # DDMMYYYY, a run, a repeating pattern, one repeated digit, two digits non-periodic, then accepted
+    typed["hsm_a_user_pin"] = ["0101199012", "1234567890", "1231231231", "1111111111", "1212121122", "7310048261"]
+    # reuse of hsm_a's PIN, YYYYMMDD, MMDDYYYY, then accepted
+    typed["hsm_b_user_pin"] = ["7310048261", "1990010112", "1225198500", "5512096374"]
     typed["yubikey_a_piv_pin"] = ["908172", "25121985", "90817263"]
 seen = {}
 def send(s): os.write(fd, s.encode())
@@ -111,12 +113,16 @@ grep -q "print the blank PIN card yourself\|blank PIN card sent" <<< "$out" && P
 hdr "typed: guessable, reused and short PINs are refused, and the prompt asks again"
 W="$T/weak"; mkdir -p "$W"; out="$(drive typed-weak "$W")"
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds once acceptable PINs are typed" || F "typed-weak path failed: $(tail -10 <<< "$out")"
-grep -q "refused: it contains a date (01011990)" <<< "$out" && P "a date is refused" || F "date not refused"
+[ "$(grep -c "refused: it contains a date" <<< "$out")" -ge 4 ] && P "dates are refused in every order (DDMMYYYY, YYYYMMDD, MMDDYYYY, and as a YubiKey PIN)" || F "dates not refused: $(grep -c 'contains a date' <<< "$out")"
+grep -q "refused: it is one digit repeated" <<< "$out" && P "a repeated digit is refused" || F "repeated digit not refused"
+grep -q "refused: it uses only two different digits" <<< "$out" && P "two distinct digits are refused" || F "two-digit PIN not refused"
+leaked=0; for v in 0101199012 1234567890 1231231231 1111111111 1212121122 1990010112 1225198500 908172 25121985 01011990 19900101 12251985; do grep -qF "$v" <<< "$(grep -v '^DRIVER' <<< "$out")" && leaked=1; done
+[ "$leaked" = 0 ] && P "no digit sequence of a refused PIN appears on the screen" || F "a refused PIN's digits were printed"
+grep -q "3<<< \"\$1\"" "$SCRIPTS/ceremony.sh" && ! grep -q 'python3 - "\$1"' "$SCRIPTS/ceremony.sh" && P "the PIN reaches the checker on a file descriptor, not argv" || F "the PIN may be on argv"
 grep -q "refused: it is a run of consecutive digits" <<< "$out" && P "a run of digits is refused" || F "run not refused"
 grep -q "refused: it repeats a short pattern" <<< "$out" && P "a repeating pattern is refused" || F "pattern not refused"
 grep -q "already used for another device" <<< "$out" && P "a PIN reused across devices is refused" || F "reuse not refused"
 grep -q "a YubiKey PIN is 8 digits" <<< "$out" && P "a 6-digit YubiKey PIN is refused" || F "short YubiKey PIN accepted"
-grep -q "refused: it contains a date (25121985)" <<< "$out" && P "an 8-digit date is refused as a YubiKey PIN" || F "YubiKey date not refused"
 [ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_b_user_pin "$W")" = 5512096374 ] && [ "$(field yubikey_a_piv_pin "$W")" = 90817263 ] \
   && P "only the accepted PINs are stored" || F "a refused PIN was stored"
 
