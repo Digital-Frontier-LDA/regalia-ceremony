@@ -18,7 +18,7 @@ drive(){ python3 - "$1" "$2" "$SCRIPTS" <<'PY'
 import os, pty, re, sys, time, select
 mode, work, scripts = sys.argv[1:4]
 cmd = ('source "%s/ceremony.sh" >/dev/null 2>&1; HERE="%s"; WORK="%s"; CEREMONY_MODE=prod; '
-       'step_set_pins; rc=$?; cp -p "$WORK/pins.env" "%s.kept" 2>/dev/null; echo "RC=$rc"') % (scripts, scripts, work, work)
+       'step_set_pins; rc=$?; cp -p "$WORK/pins.env" "%s.kept" 2>/dev/null; cp -rp "$WORK/pin-blobs" "%s.blobs" 2>/dev/null; echo "RC=$rc"') % (scripts, scripts, work, work, work)
 pid, fd = pty.fork()
 if pid == 0:
     os.environ["TERM"] = "xterm"
@@ -53,6 +53,13 @@ while time.time() < deadline:
         send("g\n"); pending = ""
     elif "yourself instead" in pending and pending.rstrip().endswith("[y/N]"):
         send("y\n" if mode.startswith("typed") else "n\n"); pending = ""
+    elif "encrypted blobs for KMS hosts" in pending and pending.rstrip().endswith("[y/N]"):
+        send("y\n" if mode == "typed-blob" else "n\n"); pending = ""
+    elif re.search(r"public key file for HSM (\S+) \(empty to skip this HSM\): $", pending):
+        h = re.search(r"public key file for HSM (\S+) ", pending).group(1)
+        send((os.environ.get("BLOB_PUB", "") if h == "A" else "") + "\n"); pending = ""
+    elif re.search(r"fingerprint, from your handwritten note: $", pending):
+        send(os.environ.get("BLOB_FP", "") + "\n"); pending = ""
     elif re.search(r"press Enter to SHOW the (\S+)", pending) and pending.rstrip().endswith("…"):
         send("\n"); pending = ""
     elif "press Enter to CLEAR" in pending and pending.rstrip().endswith("…"):
@@ -125,6 +132,17 @@ grep -q "already used for another device" <<< "$out" && P "a PIN reused across d
 grep -q "a YubiKey PIN is 8 digits" <<< "$out" && P "a 6-digit YubiKey PIN is refused" || F "short YubiKey PIN accepted"
 [ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_b_user_pin "$W")" = 5512096374 ] && [ "$(field yubikey_a_piv_pin "$W")" = 90817263 ] \
   && P "only the accepted PINs are stored" || F "a refused PIN was stored"
+
+hdr "typed-blob: HSM A's PIN is written as a TPM import blob for its host (ADR-0002 D21)"
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$T/host.key" 2>/dev/null
+openssl pkey -in "$T/host.key" -pubout -out "$T/host.pub.pem"
+fp="$(openssl pkey -pubin -in "$T/host.pub.pem" -outform der | sha256sum | cut -c1-16)"
+W="$T/blob"; mkdir -p "$W"; out="$(BLOB_PUB="$T/host.pub.pem" BLOB_FP="$fp" drive typed-blob "$W")"
+grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed-blob path failed: $(tail -10 <<< "$out")"
+[ -s "$W.blobs/pin-hsm_a.blob" ] && P "pin-hsm_a.blob written" || F "no blob for HSM A"
+[ ! -e "$W.blobs/pin-hsm_b.blob" ] && P "HSM B skipped (no public key given)" || F "a blob for a skipped HSM"
+got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-hsm_a.blob" 2>/dev/null | tr -d '\n')"
+[ -n "$got" ] && [ "$got" = "$(field hsm_a_user_pin "$W")" ] && P "the blob opens to HSM A's PIN" || F "the blob does not open to HSM A's PIN"
 
 hdr "an existing pins.env is loaded as before (hand-made files still work)"
 W="$T/file"; mkdir -p "$W"

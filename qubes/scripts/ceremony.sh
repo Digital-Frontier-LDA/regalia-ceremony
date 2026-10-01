@@ -1630,6 +1630,44 @@ elif has_date(p):
 ' 3<<< "$1"
 }
 
+# Encrypt one HSM user PIN to a KMS host's TPM import key (ADR-0002 D21; regalia-kms
+# seal-hsm-pin.sh --init-import-key / --from-blob). The PIN arrives on file descriptor 3, never argv.
+# The public key is authenticated first: the operator TYPES the start of the fingerprint they copied
+# by hand at the host's console, and a mismatch refuses (a substituted key would receive the PIN).
+#   pin_blob_for <public-key.pem> <typed fingerprint prefix> <out.blob>   3<<< "$pin"
+pin_blob_for() {
+  local pub="$1" typed="$2" out="$3" fp
+  [ -r "$pub" ] || { err "cannot read the public key $pub"; return 1; }
+  fp="$(openssl pkey -pubin -in "$pub" -outform der 2>/dev/null | sha256sum | cut -d' ' -f1)"
+  [ -n "$fp" ] && [ "$fp" != "$(printf '' | sha256sum | cut -d' ' -f1)" ] || { err "$pub is not a public key"; return 1; }
+  typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
+  [[ "$typed" =~ ^[0-9a-f]{16,64}$ ]] || { err "type at least the first 16 hex characters of the fingerprint you wrote down"; return 1; }
+  [ "${fp:0:${#typed}}" = "$typed" ] || { err "fingerprint MISMATCH: this public key is not the one you recorded at the host. Nothing was encrypted."; return 1; }
+  openssl pkeyutl -encrypt -pubin -inkey "$pub" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
+    -pkeyopt rsa_mgf1_md:sha256 -in /dev/fd/3 -out "$out" 2>/dev/null || { err "encryption to $pub failed"; rm -f "$out"; return 1; }
+  [ -s "$out" ] || { err "empty blob"; rm -f "$out"; return 1; }
+}
+
+# Offer, at the end of step 0, to write each HSM's PIN as a TPM import blob for its KMS host. Optional:
+# a host commissioned later gets its PIN typed from the PIN card instead (seal-hsm-pin.sh fallback).
+offer_pin_blobs() {
+  local -n _vals="$1"; local tty=/dev/tty h a pub typed dir="$WORK/pin-blobs"
+  read -r -p "   Write HSM PINs as encrypted blobs for KMS hosts already commissioned (TPM import)? [y/N] " a <"$tty"
+  [ "$a" = y ] || [ "$a" = Y ] || return 0
+  mkdir -p "$dir"
+  for h in $HSMS; do
+    read -r -p "   public key file for HSM $(tr a-z A-Z <<< "$h") (empty to skip this HSM): " pub <"$tty"
+    [ -n "$pub" ] || continue
+    read -r -p "   first 16+ hex of its fingerprint, from your handwritten note: " typed <"$tty"
+    if pin_blob_for "$pub" "$typed" "$dir/pin-hsm_$h.blob" 3<<< "${_vals[hsm_${h}_user_pin]}"; then
+      info "   $dir/pin-hsm_$h.blob written: copy it to the host (any medium; only that TPM can open it), then"
+      info "   sudo deploy/seal-hsm-pin.sh --id … --serial … --pcrs … --from-blob pin-hsm_$h.blob"
+    else
+      warn "   no blob for HSM $(tr a-z A-Z <<< "$h"): seal its PIN at the host from the PIN card instead."
+    fi
+  done
+}
+
 # Write $WORK/pins.env from generated values (and, if the operator chooses, typed day-to-day PINs).
 generate_pins() {
   local pfile="$1" tty=/dev/tty k v v2 typed_day=0
@@ -1704,6 +1742,7 @@ generate_pins() {
     warn "else can see this screen, and no camera points at it."
     for k in $DAY_PINS; do show_day_pin "$k" "${val[$k]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
   fi
+  offer_pin_blobs val
   for k in "${!val[@]}"; do val[$k]=""; done
   info "PIN file written (0600, RAM-only workdir)."
 }
