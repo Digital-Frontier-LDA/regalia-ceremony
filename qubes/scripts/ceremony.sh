@@ -1574,6 +1574,7 @@ check_credential_separation() {
       hsm_?_so_pin)    [[ "$v" =~ ^[0-9A-Fa-f]{16}$ ]] || problems="$problems|$k: a SmartCard-HSM SO PIN is exactly 16 hex digits" ;;
       yubikey_?_piv_pin|yubikey_?_piv_puk) [[ "$v" =~ ^[[:print:]]{6,8}$ ]] || problems="$problems|$k: a YubiKey PIV PIN or PUK is 6-8 characters" ;;
       yubikey_?_mgmt_key) [[ "$v" =~ ^[0-9A-Fa-f]{48}$|^[0-9A-Fa-f]{32}$|^[0-9A-Fa-f]{64}$ ]] || problems="$problems|$k: a PIV management key is 32, 48 or 64 hex digits" ;;
+      escrow_mac_key) [[ "$v" =~ ^[0-9A-Fa-f]{32}$ ]] || problems="$problems|$k: the escrow MAC key is exactly 32 hex digits (128 bits)" ;;
     esac
     for other in $fields; do
       [[ "$other" > "$k" ]] || continue
@@ -1615,6 +1616,11 @@ declare -gA YK_SET_OF=()   # YubiKey serial -> its credential set letter, for th
 PIN_FIELDS="$(for h in $HSMS; do printf 'hsm_%s_user_pin hsm_%s_so_pin ' "$h" "$h"; done
   for y in $YUBIKEYS; do printf 'yubikey_%s_piv_pin yubikey_%s_piv_puk yubikey_%s_mgmt_key ' "$y" "$y" "$y"; done)"
 PIN_FIELDS="${PIN_FIELDS% }"
+# The escrow MAC key (128 bits): authenticates every later PIN escrow file (the private tracker's
+# escrow/, written by escrow/pin-escrow.sh after a PIN change). It rides in the tier-0 payload with the
+# PINs, so recovery has it from k shares, and it is shown once for the PIN card, so the owner has it at
+# every escrow. Always generated, never chosen. Its check value goes to the archive disc.
+PIN_FIELDS="$PIN_FIELDS escrow_mac_key"
 DAY_PINS="$(for h in $HSMS; do printf 'hsm_%s_user_pin ' "$h"; done; for y in $YUBIKEYS; do printf 'yubikey_%s_piv_pin ' "$y"; done)"
 DAY_PINS="${DAY_PINS% }"
 gen_secret() {   # $1 = digits:N | hex:N
@@ -1635,7 +1641,9 @@ show_day_pin() {
     read -r -p "   written down? press Enter to CLEAR the screen… " _ </dev/tty
     clear; printf '\033[3J' >/dev/tty
     read -r -s -p "   type the $name back FROM YOUR PAPER (hidden): " typed </dev/tty; echo
-    [ "$typed" = "$value" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
+    # Spaces and letter case do not count: a hex key is easier to copy in groups.
+    typed="${typed//[[:space:]]/}"
+    [ "${typed^^}" = "${value^^}" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
     typed=""; tries=$((tries+1))
     err "your copy of the $name does NOT match."
     [ "$tries" -ge 3 ] && { err "three mismatches: the $name is NOT verified."; return 1; }
@@ -1742,6 +1750,7 @@ generate_pins() {
   fi
   local -A val
   local h; for h in $HSMS; do val[hsm_${h}_so_pin]="$(gen_secret hex:16)"; done
+  val[escrow_mac_key]="$(gen_secret hex:32)"
   local y; for y in $YUBIKEYS; do
     val[yubikey_${y}_piv_puk]="$(gen_secret digits:8)"; val[yubikey_${y}_mgmt_key]="$(gen_secret hex:48)"
   done
@@ -1807,6 +1816,10 @@ generate_pins() {
     warn "else can see this screen, and no camera points at it."
     for k in $DAY_PINS; do show_day_pin "$k" "${val[$k]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
   fi
+  # In both modes: the escrow MAC key is generated, and the PIN card is where the owner keeps it.
+  warn "The escrow MAC key is shown ONCE: write it on the PIN card's ESCROW MAC KEY row (32 hex). Every"
+  warn "later PIN escrow asks for it; without it, a PIN change can only be escrowed by a new ceremony."
+  show_day_pin escrow_mac_key "${val[escrow_mac_key]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }
   for k in "${!val[@]}"; do val[$k]=""; done
   info "PIN file written (0600, RAM-only workdir)."
 }
@@ -1837,7 +1850,9 @@ step_set_pins() {
 # Pin file is read once at step 0; the wizard consumes it and never echoes the values.
 # Pin fields the tier-0 payload step reads:
 #   hsm_{a,b,c}_user_pin, hsm_{a,b,c}_so_pin,
-#   yubikey_{a,b,c}_piv_pin, yubikey_{a,b,c}_piv_puk, yubikey_{a,b,c}_mgmt_key
+#   yubikey_{a,b,c}_piv_pin, yubikey_{a,b,c}_piv_puk, yubikey_{a,b,c}_mgmt_key,
+#   escrow_mac_key (32 hex: generate it with `openssl rand -hex 16`, write it on the PIN card's
+#   ESCROW MAC KEY rows; it authenticates every later PIN escrow)
 # HSM user PINs are 10-15 digits (a 10-try counter), SO-PINs exactly 16 hex digits.
   #
   # DEVICES A, B AND C ARE THE THREE PRODUCTION NITROKEYS (ADR-0002 D17). The staging Pico is NOT
@@ -1869,6 +1884,11 @@ EOF
     return 1
   fi
   check_credential_separation || return 1
+  # The escrow MAC key's check value (not secret) for the archive disc: escrow/pin-escrow.sh compares
+  # the key typed from the PIN card with it, so a mistyped key cannot produce an escrow file that
+  # recovery would then reject. The key reaches Python on standard input, never argv.
+  python3 "$HERE/escrow/pin_escrow_mac.py" kcv <<< "${escrow_mac_key:-}" > "$WORK/escrow-mac.kcv" 2>/dev/null \
+    || { rm -f "$WORK/escrow-mac.kcv"; err "cannot compute the escrow MAC key's check value"; return 1; }
   # TPM import blobs, from whichever source the PINs came (needs a terminal: every key is
   # authenticated by a typed fingerprint).
   if { : </dev/tty; } 2>/dev/null; then
@@ -2408,14 +2428,38 @@ step_archive() {
   # recoverer on a clean amd64 Linux machine runs them from bin/, without a network.
   # All three or nothing: a disc with a valid checksum but a missing binary cannot do the recovery
   # the runbook promises. The real ceremony refuses; a simulated one (no /opt/vault-bin) only warns.
+  # Without the KCV a later PIN escrow cannot check its key (pin-escrow.sh refuses to run), so a disc
+  # without it, or with a malformed one, is refused like a disc without the escrow tools.
+  if ! grep -qxE '[0-9a-f]{16}' "$WORK/escrow-mac.kcv" 2>/dev/null; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: no valid escrow-mac.kcv from step 0; the real ceremony refuses this disc."
+    else
+      err "escrow-mac.kcv (step 0) is missing or malformed: later PIN escrows could not check their key."
+      err "Run step 0 again in this session; nothing was burned."
+      return 1
+    fi
+  fi
   mkdir -p "$kit/bin"
   local t staged=0
   for t in age age-keygen sops; do
     [ -x "/opt/vault-bin/$t" ] && cp "/opt/vault-bin/$t" "$kit/bin/" 2>/dev/null && staged=$((staged+1))
   done
+  # The PIN escrow tools ride with them, under the same SHA256SUMS: after the ceremony, escrowing a PIN
+  # change and choosing the escrow file at recovery both run THESE copies, never a repository's, which
+  # anyone with write access to it could alter (escrow/pin-escrow.sh).
+  local escrow_tools=0
+  for t in pin-escrow.sh pin_escrow_mac.py; do
+    [ -s "$sdir/escrow/$t" ] && cp "$sdir/escrow/$t" "$kit/bin/" 2>/dev/null && escrow_tools=$((escrow_tools+1))
+  done
+  if [ "$escrow_tools" != 2 ]; then
+    rm -rf "${kit:?}/bin"
+    err "the PIN escrow tools (escrow/pin-escrow.sh, escrow/pin_escrow_mac.py) are missing next to this script:"
+    err "the disc could not escrow or select later PINs. Nothing was burned."
+    return 1
+  fi
   if [ "$staged" = 3 ]; then
     ( cd "$kit/bin" && sha256sum -- * > SHA256SUMS )
-    info "Staged age, age-keygen and sops (static amd64) for the archive disc: recovery-kit/bin/."
+    info "Staged age, age-keygen, sops (static amd64) and the PIN escrow tools for the archive disc: recovery-kit/bin/."
   elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
     rm -rf "${kit:?}/bin"
     warn "simulated run: /opt/vault-bin has $staged of age, age-keygen, sops; the real ceremony refuses this."
@@ -2461,7 +2505,9 @@ step_archive() {
   # symbols. Nothing needs the guard relaxed.
   # breakglass.recipient is the PUBLIC half of the breakglass key (step 3, option g): the SOPS re-key
   # (df-cicd sops-breakglass.yml) and any later encryption to it need it, and it is not secret.
-  local art; for art in dkek.pbe funding-wrapped.bin funding-pub.der payload.age breakglass.recipient; do
+  # escrow-mac.kcv is the escrow MAC key's check value (step 0): not secret, committed with
+  # breakglass.recipient to the private tracker's escrow/ after the ceremony.
+  local art; for art in dkek.pbe funding-wrapped.bin funding-pub.der payload.age breakglass.recipient escrow-mac.kcv; do
     [ -e "$WORK/$art" ] && cp "$WORK/$art" "$burn/" 2>/dev/null || true
   done
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then

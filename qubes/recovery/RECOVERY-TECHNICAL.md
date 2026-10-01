@@ -206,6 +206,24 @@ and the DKEK check value (KCV). A blob is useless without the DKEK, so it was ne
 one: rebuild the DKEK from k shares (above), load it into a card, check the blob's sha256 against the
 manifest, then `sc-hsm-tool --unwrap-key <blob> --key-reference <N>`.
 
+## 6c. PINs changed after the ceremony
+The payload holds the day-to-day PINs as they were on ceremony day. After any PIN change, the current
+PINs are escrowed in the operator's private repository as `escrow/pins-NNNN.age`, encrypted to the
+breakglass recipient, each with a `.mac` under the **escrow MAC key** (the payload's `escrow_mac_key`
+line). Use the newest **verified** escrow, not the payload's PINs, and use this disc's tool, not the
+repository's copy:
+
+```sh
+( umask 077; sed -n 's/^escrow_mac_key: *//p' payload.txt > /dev/shm/escrow-mac.key )
+python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age < /dev/shm/escrow-mac.key
+bin/age -d -i breakglass.key /dev/shm/pins.age
+```
+
+`select` searches the repository's whole git history (use a full clone) and prints the escrow it
+chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no
+escrow verifies: then use the payload's PINs. Any other failure (a malformed key, git, a full tmpfs)
+means STOP and fix it; never fall back to the payload's older PINs because of it. Shred `/dev/shm/escrow-mac.key` and `/dev/shm/pins.age` afterwards.
+
 ## 7. After
 - **Rotate**: the seeds were exposed — generate new wallets and move funds again per the plan.
 - **Log it**: record the open in the seal registry's `openings:` list (broken serial → new
