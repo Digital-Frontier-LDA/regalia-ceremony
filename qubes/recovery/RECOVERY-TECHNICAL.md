@@ -214,15 +214,16 @@ line). Use the newest **verified** escrow, not the payload's PINs, and use this 
 repository's copy:
 
 ```sh
-( umask 077; sed -n 's/^escrow_mac_key: *//p' payload.txt > /dev/shm/escrow-mac.key )
-python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age < /dev/shm/escrow-mac.key
+# the key goes straight from the payload into the verifier: never into a file of its own
+sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
+echo "exit $?"     # the verifier's status
 bin/age -d -i breakglass.key /dev/shm/pins.age
 ```
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no
 escrow verifies: then use the payload's PINs. Any other failure (a malformed key, git, a full tmpfs)
-means STOP and fix it; never fall back to the payload's older PINs because of it. Shred `/dev/shm/escrow-mac.key` and `/dev/shm/pins.age` afterwards.
+means STOP and fix it; never fall back to the payload's older PINs because of it. Shred `/dev/shm/pins.age` afterwards.
 
 ## 7. After
 - **Rotate**: the seeds were exposed — generate new wallets and move funds again per the plan.
