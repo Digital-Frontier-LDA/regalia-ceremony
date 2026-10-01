@@ -551,6 +551,13 @@ class TestManagerChangePSC(unittest.TestCase):
             self.run_change("FFFFFF", "A1B2C3")
         self.assertIn("does not verify", str(ctx.exception))
 
+    def test_there_is_no_argv_form_for_either_psc(self):
+        import contextlib
+        import io
+        for argv in (["change-psc", "--psc", "123456"], ["change-psc", "--new-psc", "A1B2C3"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                self.mgr.main(argv)
+
     def test_the_new_psc_is_checked_before_the_card_is_touched(self):
         import argparse
         for bad in ("FFFFFF", "12345", "GGGGGG"):

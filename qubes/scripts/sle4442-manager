@@ -325,8 +325,7 @@ def main(argv=None):
             sp.add_argument("--text-file", default=None,
                             help="read the secret text payload from this file (not argv)")
     p = sub.add_parser("read");   p.add_argument("--addr", type=int, required=True); p.add_argument("--len", type=int, required=True)
-    cp = sub.add_parser("change-psc")
-    cp.add_argument("--psc", default=None, help="CURRENT PSC hex (PREFER SLE4442_PSC env or --psc-file)")
+    cp = sub.add_parser("change-psc", allow_abbrev=False)   # --psc must not abbreviate --psc-file
     cp.add_argument("--psc-file", default=None, help="read the CURRENT PSC from this file")
     cp.add_argument("--new-psc-file", default=None, help="read the NEW PSC from this file (or SLE4442_NEW_PSC)")
     args = ap.parse_args(argv)
