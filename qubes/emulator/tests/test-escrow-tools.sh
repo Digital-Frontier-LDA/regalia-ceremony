@@ -110,11 +110,11 @@ mkdir -p "$T/disc2"; cp "$T/disc/pin-escrow.sh" "$T/disc/pin_escrow_mac.py" "$T/
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc2/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "no age next to this script" <<< "$out" && P "no checked age beside the tool: refused (PATH's age is never used)" || F "rc=$rc: $out"
 run_p(){ (cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1); }
-mkdir -p "$T/co/escrow/pins-0002.age.mac"; : > "$T/co/escrow/pins-0002.age.mac/keep"
+mkdir -p "$T/co/escrow/pins-0002.age.mac"; : > "$T/co/escrow/pins-0002.age.mac/keep"; printf 'evidence' > "$T/co/escrow/pins-0002.age"
 out="$(run_p)"; rc=$?
-[ "$rc" != 0 ] && grep -q "is a directory" <<< "$out" && [ -e "$T/co/escrow/pins-0002.age.mac/keep" ] \
-  && P "a directory on the next name is refused, never deleted" || F "directory: rc=$rc $out"
-rm -rf "$T/co/escrow/pins-0002.age.mac"
+[ "$rc" != 0 ] && grep -q "is a directory" <<< "$out" && [ -e "$T/co/escrow/pins-0002.age.mac/keep" ] && grep -q evidence "$T/co/escrow/pins-0002.age" \
+  && P "a directory on the next name is refused; neither path is touched (the file beside it is kept)" || F "directory: rc=$rc $out"
+rm -rf "$T/co/escrow/pins-0002.age.mac" "$T/co/escrow/pins-0002.age"
 out1="$(run_p)"; out2="$(run_p)"   # two runs, nothing committed in between
 [ -s "$T/co/escrow/pins-0002.age" ] && [ -s "$T/co/escrow/pins-0003.age" ] && ! grep -q "does not verify" <<< "$out2" \
   && P "an escrow written but not committed is counted: the next run writes 0003, never over 0002" || F "uncommitted: $out1 / $out2"
