@@ -207,6 +207,17 @@ def compare_to_spki(key, der):
                    f"keys, so nothing can match it")
 
 
+def isolation_flags():
+    """The isolation this process was started with, for the chain walker it starts. A child process
+    does not inherit -E or -s: started as `python3 -Es` (which is how commission-card.sh starts this
+    verdict), this process ignores PYTHONPATH and the user's site-packages, and a bare
+    [sys.executable, walker] would honour both, so a module left there would run inside the half of
+    the verdict that says whether the device certificate chains to the anchor."""
+    if sys.flags.isolated:
+        return ["-I"]
+    return [flag for flag, on in (("-E", sys.flags.ignore_environment), ("-s", sys.flags.no_user_site)) if on]
+
+
 def missing_dependencies(need_pycvc):
     """Names of the modules this run needs and cannot import. pycvc is imported the way the chain
     walker imports it — in THIS interpreter, which is the one the walker is run under (sys.executable),
@@ -280,7 +291,7 @@ def main():
             cached.write(devaut)
             cached_path = cached.name
         try:
-            chain = subprocess.run([sys.executable, verifier, "--cert", cached_path,
+            chain = subprocess.run([sys.executable, *isolation_flags(), verifier, "--cert", cached_path,
                                     "--trust-dir", a.trust_dir, "--require-external-car"],
                                    capture_output=True, text=True)
         finally:
