@@ -196,6 +196,8 @@ out7="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/fundi
         --pw-file "$T/p12.pw" --id 31 --label akash-funding --dkek "$T/dkek.pbe" \
         --dkek-pw "$T/dkek.pw" --pin-file "$T/pin.txt" --reader 0 \
         --cert "$T/funding.crt" --module /dev/null 2>&1)"
+grep -q 'IMPORT-OK' <<<"$out7" && P "an import at --id 31 succeeds end to end (the key signs as its certificate)" \
+  || F "the --id 31 import failed: $(tail -3 <<<"$out7")"
 # key reference 31 decimal is 0x1F: the PrKD goes to EF C41F and the certificate must be written
 # with --id 1f, not --id 31.
 apdu_prkd="$(grep -oE '^apdu [0-9A-Fa-f]+' "$T/stdin.txt" | awk '{print $2}' | grep -i '^00D7C4' | head -1 | tr 'a-f' 'A-F')"
