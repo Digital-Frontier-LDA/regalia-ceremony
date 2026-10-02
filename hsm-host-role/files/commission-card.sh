@@ -496,8 +496,7 @@ PYTYPE
     else
       printf '%s' "$att_hex" | "$KEK_PY" -I -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
         > "$kek_tmp/attest.bin" 2>/dev/null
-      # THE ATTESTATION VERDICT, isolated: the verifier passes the same isolation on to the chain
-      # walker it starts (hsm-key-attestation-verify.py, isolation_flags).
+      # THE ATTESTATION VERDICT, isolated; the verifier starts its chain walker with -I itself.
       ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" -Es "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
                    --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
                    --expect-spki "$kek_tmp/kek.der" 2>&1)"; ver_rc=$?

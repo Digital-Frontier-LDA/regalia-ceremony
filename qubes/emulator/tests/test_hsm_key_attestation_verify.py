@@ -428,28 +428,55 @@ class BothKeyTypesTest(unittest.TestCase):
         self.assertNotIn("DEVAUT_CHAIN=", r.stdout)
         self.assertNotIn("=verified", r.stdout)
 
-    def test_started_isolated_the_chain_walker_is_isolated_too(self):
-        """commission-card.sh starts the verdict as `python3 -Es`. The chain walker is a child process,
-        and a child does not inherit those flags. With a `cvc` on PYTHONPATH that records being
-        imported and then refuses: started plain, both processes meet it (the test above); started
-        -Es or -I, NEITHER may, and the verdict is the real one."""
-        shadow = os.path.join(self.tmp, "planted", "cvc")
-        os.makedirs(shadow, exist_ok=True)
-        marker = os.path.join(self.tmp, "planted-cvc-was-imported")
-        with open(os.path.join(shadow, "__init__.py"), "w") as f:
-            f.write("open(%r, 'a').write('x')\nraise ImportError('planted')\n" % marker)
-        env = dict(os.environ, PYTHONPATH=os.path.dirname(shadow))
+    def test_the_chain_walker_runs_isolated_however_the_verifier_is_started(self):
+        """commission-card.sh starts the verdict as `python3 -Es`; the chain walker is a child, and a
+        child inherits none of those flags, so the verifier starts it with -I itself. Planted: a cvc on
+        PYTHONPATH that records its importer, and a .pth under PYTHONUSERBASE that records which
+        program is starting. Started -Es, -E -s or -I, neither process meets either. Started PLAIN, the
+        verifier itself meets the .pth (the premise), and the chain walker still meets nothing."""
+        planted = os.path.join(self.tmp, "planted")
+        os.makedirs(os.path.join(planted, "cvc"), exist_ok=True)
+        log = os.path.join(self.tmp, "planted.log")
+        with open(os.path.join(planted, "cvc", "__init__.py"), "w") as f:
+            f.write("import sys\nopen(%r, 'a').write('cvc ' + sys.argv[0] + '\\n')\nraise ImportError('planted')\n" % log)
+        userbase = os.path.join(self.tmp, "userbase")
+        site = os.path.join(userbase, "lib", "python%d.%d" % sys.version_info[:2], "site-packages")
+        os.makedirs(site, exist_ok=True)
+        with open(os.path.join(site, "planted.pth"), "w") as f:
+            f.write("import sys; open(%r, 'a').write('pth ' + sys.argv[0] + '\\n')\n" % log)
+        command = [SCRIPT, "--trust-dir", ANCHORS, "--devaut", self.paths["ef2f02"],
+                   "--attestation", self.paths["ce04"], "--expect-spki", self.paths["rsa.der"]]
+
+        def run(flags, env):
+            if os.path.exists(log):
+                os.unlink(log)
+            r = subprocess.run([sys.executable, *flags, *command], capture_output=True, text=True, env=env)
+            return r, (open(log).read().split("\n")[:-1] if os.path.exists(log) else [])
+
+        both = dict(os.environ, PYTHONPATH=planted, PYTHONUSERBASE=userbase)
         for flags in (["-Es"], ["-E", "-s"], ["-I"]):
             with self.subTest(flags=flags):
-                r = subprocess.run([sys.executable, *flags, SCRIPT, "--trust-dir", ANCHORS, "--devaut", self.paths["ef2f02"],
-                                    "--attestation", self.paths["ce04"], "--expect-spki", self.paths["rsa.der"]],
-                                   capture_output=True, text=True, env=env)
+                r, seen = run(flags, both)
                 self.assert_verified(r)
-                self.assertFalse(os.path.exists(marker), "the planted cvc was imported: by this process or by the chain walker")
-        # the premise: started plain, the same environment does reach it
-        r = self.verify(self.paths["ce04"], "--expect-spki", self.paths["rsa.der"], env=env)
-        self.assertEqual(r.returncode, 2)
-        self.assertTrue(os.path.exists(marker), "the premise: without the flags the planted module is imported")
+                self.assertEqual(seen, [], "a planted module ran: %s" % seen)
+        # Started PLAIN, the verifier itself is exposed (the premise), and the chain walker is not. A
+        # sitecustomize on PYTHONPATH is run at start-up by any interpreter that honours PYTHONPATH,
+        # a virtual environment's included; the user site only where the interpreter has one on.
+        custom = os.path.join(self.tmp, "custom")
+        os.makedirs(custom, exist_ok=True)
+        with open(os.path.join(custom, "sitecustomize.py"), "w") as f:
+            f.write("import sys\nopen(%r, 'a').write('custom ' + sys.argv[0] + '\\n')\n" % log)
+        r, seen = run([], dict(os.environ, PYTHONPATH=custom, PYTHONUSERBASE=userbase))
+        self.assert_verified(r)
+        self.assertTrue(any(line.startswith("custom ") and line.endswith("hsm-key-attestation-verify.py") for line in seen),
+                        "the premise: started plain, the verifier runs a sitecustomize from PYTHONPATH: %s" % seen)
+        self.assertFalse([line for line in seen if "cvc-devaut-verify" in line],
+                         "the chain walker ran something planted: %s" % seen)
+        # Where this interpreter has no user site (a virtual environment), the .pth above cannot fire
+        # for either process, so a child started with -E alone would also pass the runs above. The
+        # flag itself is therefore pinned too: -I, nothing weaker.
+        with open(SCRIPT) as f:
+            self.assertIn('[sys.executable, "-I", verifier,', f.read())
 
     def test_a_chain_the_walker_could_not_evaluate_is_not_reported_as_failed(self):
         """The walker's exit 2 (input or environment) is not a verdict on the card either."""

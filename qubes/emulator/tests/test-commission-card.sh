@@ -546,7 +546,9 @@ sys.exit(0 if (b["state"], b["public_key_sha256"]) == ("qualified", sys.argv[2])
   # asked: the resolver and commission-card.sh run Python isolated (-I, -Es), and the earlier
   # stand-in, a `cvc` that refused to import placed on PYTHONPATH, is ignored by exactly those flags
   # and so no longer stood for anything. commission-card.sh must FIND the interpreter that can
-  # import pycvc rather than use this one.
+  # import pycvc rather than use this one. NOTE: CEREMONY_VENV below is the resolver's FIRST
+  # candidate, so the resolver never probes this stand-in: the row proves that the KEK section does
+  # not run the bare python3 on PATH, not how the resolver ranks interpreters.
   mkdir -p "$FAKE/pybin"
   printf '#!/usr/bin/env bash\nexec %q -S "$@"\n' "$REAL_PY" > "$FAKE/pybin/python3"
   chmod +x "$FAKE/pybin/python3"
