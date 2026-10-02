@@ -150,7 +150,7 @@ for name in files:
             # counts, unless the variable is the first word of a command.
             loose = match.group(0).strip("\"'}") == "python" or (
                 match.group("variable") is not None and not COMMAND.search(code[:match.start()]))
-            what = judge(code[match.end():], bool(re.search(r"(?<!\|)\|\s*$", code[:match.start()])), loose)
+            what = judge(code[match.end():], bool(re.search(r"(?<!\|)\|&?\s*$", code[:match.start()])), loose)
             if what:
                 problems.append(what)
         if DIRECT.search(code):

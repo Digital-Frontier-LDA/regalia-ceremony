@@ -67,6 +67,8 @@ if ! out="$("$HERE/preflight-environment.py" 2>&1)"; then :; fi
 python3 -c 'import cvc'   # isolation-exempt:
 python -c 'print(1)'
 pypy3 -c 'print(1)'
+producer |& python3
+producer |& python3 > out.txt
 $py -c 'import importlib'
 $PY "$HERE/seed-to-pkcs12.py"
 "$PYTHON_BIN" -c 'print(1)'
@@ -107,6 +109,8 @@ python3 \\\n  -I -c 'print(1)'
 python3 -c 'import cvc'   # isolation-exempt: its harness supplies cvc through PYTHONPATH
 # isolation-exempt: the verifier's pycvc reaches the test through PYTHONPATH\nver="$(perl -e 'exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut d.bin)"
 python3 -Es -- "$HERE/x.py"
+producer |& python3 -I
+make || python3 -Es "$HERE/x.py"
 python3 -Wdefault::ImportWarning -I -c 'print(1)'
 python3 -Es "$DERIVE_PY" --hex "$point"
 echo "python3 is required for the seed backup"
