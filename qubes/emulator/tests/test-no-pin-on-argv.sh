@@ -10,6 +10,7 @@
 #      reached, no secret is in any recorded argv, and each call did receive its secret
 #   2  the instrument: the same check, given an argv with a PIN in it, says so
 #   3  every non-test script: no token-tool option takes a secret from a shell variable on argv
+#   4  the emulator's sc-hsm-tool refuses a PIN on its command line, so a regression fails the suites
 #
 # NO HARDWARE CAN BE REACHED. Every tool that talks to a card is a stub first on PATH, and PC/SC
 # itself is pointed at a socket that does not exist, so a tool this list forgot cannot find a reader
@@ -105,17 +106,23 @@ hdr "3  every non-test script: no token-tool option takes a secret from a variab
 PATTERN='--(so-pin|new-pin|pin|puk|password)[ =]+("?\$|"?'"'"'")'
 hits="$(cd "$ROOT" && find . -name '*.sh' -not -path './.git/*' -not -path './qubes/emulator/*' -print0 | sort -z \
         | xargs -0 grep -nE -- "$PATTERN" /dev/null | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#' || true)"
-# Being fixed in the change that adds a sign/verify check after import (#95). Each entry must still
-# have a hit: one that is clean has to leave this list.
-PENDING="./qubes/scripts/ceremony.sh ./qubes/scripts/hsm-import-key-nojvm.sh ./tools/hsm-staging-restore.sh"
-for f in $PENDING; do
-  if grep -q "^$f:" <<< "$hits"; then echo "  NOTE $f still passes a secret on a command line (pending #95)"
-  else F "$f is clean now: remove it from PENDING in this test"; fi
-done
-others="$(grep -vE "^($(tr ' ' '|' <<< "$PENDING" | sed 's/\./\\./g')):" <<< "$hits" || true)"
-[ -z "$others" ] && P "no other script passes a PIN, SO-PIN, PUK or password from a variable on a command line" || F "secrets on command lines: $others"
+[ -z "$hits" ] && P "no script passes a PIN, SO-PIN, PUK or password from a variable on a command line" || F "secrets on command lines: $hits"
 uses="$(cd "$ROOT" && find . -name '*.sh' -not -path './.git/*' -not -path './qubes/emulator/*' -print0 | xargs -0 grep -hoE -- '--(so-pin|new-pin|pin|password) env:[A-Z_]+' | sort | uniq -c | wc -l)"
 [ "$uses" -ge 4 ] && P "and the scripts do pass them as env:NAME ($uses distinct forms in use)" || F "only $uses env:NAME forms found: the sweep may be matching nothing"
+
+hdr "4  the emulator's sc-hsm-tool refuses a PIN on its command line"
+# So a script that regresses fails the emulator suites, not only this test.
+MODEL="$ROOT/qubes/emulator/bin/sc-hsm-tool"; mkdir -p "$T/model"
+model(){ env EMU_SCHSM_STATE="$T/model" "$@" python3 "$MODEL" --initialize --so-pin "$SOARG" --pin "$PINARG" 2>&1; }
+SOARG="$SO_PIN" PINARG=env:P; out="$(model P="$PIN_A")"; rc=$?
+[ "$rc" != 0 ] && grep -q -- "--so-pin was given a value on the command line" <<< "$out" && P "a literal --so-pin is refused" || F "literal --so-pin (exit $rc): $out"
+SOARG=env:S PINARG="$PIN_A"; out="$(model S="$SO_PIN")"; rc=$?
+[ "$rc" != 0 ] && grep -q -- "--pin was given a value on the command line" <<< "$out" && P "a literal --pin is refused" || F "literal --pin (exit $rc): $out"
+SOARG=env:S PINARG=env:P; out="$(model S="$SO_PIN")"; rc=$?
+[ "$rc" != 0 ] && grep -q "P is unset/empty (the real tool would prompt)" <<< "$out" && P "env:NAME with NAME unset is refused (the real tool would prompt)" || F "unset name (exit $rc): $out"
+out="$(model S="$SO_PIN" P="$PIN_A")"; rc=$?
+[ "$rc" = 0 ] && P "env:NAME with both variables set is accepted" || F "env: forms refused (exit $rc): $out"
+grep -qF "$PIN_A" <<< "$out" || grep -qF "$SO_PIN" <<< "$out" && F "the model printed a PIN" || P "and the model prints no PIN"
 
 echo; echo "test-no-pin-on-argv: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
