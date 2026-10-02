@@ -33,8 +33,8 @@ RULES = [
     "- A broken seal means: assume the PINs are known and rotate them.",
     "- It is NOT the backup: every PIN is also in the encrypted recovery payload, which the Shamir",
     "  shares open. Losing this card costs a recovery step, not the keys.",
-    "- Each site's HSM PIN is typed ONCE into that server's TPM (seal-hsm-pin.sh). Once every site is",
-    "  sealed and the YubiKey PIN is memorised, the card may be destroyed (shredded, then burned).",
+    "- Each site's HSM PIN is typed ONCE into that server's TPM (seal-hsm-pin.sh). KEEP the card after",
+    "  that, sealed: the next PIN escrow asks for every PIN and the escrow MAC key from it.",
     "- Never write the SO-PINs, the PUK or the management key here.",
 ]
 

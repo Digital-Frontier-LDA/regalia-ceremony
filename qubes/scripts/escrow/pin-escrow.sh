@@ -87,6 +87,12 @@ for d in $DEVICES; do
   a="$(ask "$d $kind, from $from: ")"; b="$(ask "$d $kind again: ")"
   [ "$a" = "$b" ] || die "the two entries for $d differ; nothing written"
   LC_ALL=C; [[ "$a" =~ $re ]] || die "the $d $kind must be $what; nothing written"; unset LC_ALL
+  # Each KMS host has its own lockout authorization (step 0 generates three, and credential separation
+  # refuses a repeat). The same value for two hosts here is a row of the card typed twice, and the
+  # escrow would then hold a WRONG value for one of them: at that host, a wrong attempt.
+  case "$d" in tpm_*) for o in "${!pin[@]}"; do
+    case "$o" in tpm_*) [ "${pin[$o]}" != "$a" ] || die "the $d $kind is the same as $o's: each KMS host has its own (the same row typed twice?); nothing written";; esac
+  done;; esac
   pin[$d]="$a"; a=""; b=""
 done
 

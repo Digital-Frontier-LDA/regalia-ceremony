@@ -145,6 +145,9 @@ out="$(escrow_with "$ta" "$ta" "$tb" "$tb" SHORTVALUE SHORTVALUE)"; rc=$?
 out="$(escrow_with "$ta" "$ta" "QBQB QBQB QBQB QBQB" "QBQB QBQB QBQB QBQB" "$tc" "$tc")"; rc=$?
 [ "$rc" != 0 ] && grep -q "tpm_b lockout authorization must be 16-32 printable characters with no space" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
   && P "a lockout authorization written in groups (with spaces): refused, nothing written" || F "rc=$rc: $out"
+out="$(escrow_with "$ta" "$ta" "$tb" "$tb" "$ta" "$ta")"; rc=$?
+[ "$rc" != 0 ] && grep -q "tpm_c lockout authorization is the same as tpm_a's" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+  && P "one lockout authorization typed for two hosts: refused, nothing written (an escrow with a wrong value for a host is worse than none)" || F "rc=$rc: $out"
 out="$(escrow_with "$ta" "$tb")"; rc=$?
 [ "$rc" != 0 ] && grep -q "two entries for tpm_a differ" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "two different entries for a lockout authorization: refused" || F "rc=$rc: $out"
 
