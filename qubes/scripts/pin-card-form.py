@@ -34,7 +34,10 @@ RULES = [
     "- It is NOT the backup: every PIN is also in the encrypted recovery payload, which the Shamir",
     "  shares open. Losing this card costs a recovery step, not the keys.",
     "- Each site's HSM PIN is typed ONCE into that server's TPM (seal-hsm-pin.sh). KEEP the card after",
-    "  that, sealed: the next PIN escrow asks for every PIN and the escrow MAC key from it.",
+    "  that, sealed. It is how a KMS server is BROUGHT BACK when its TPM has lost the sealed PIN (a",
+    "  rebuild, a TPM reset, a replaced board): the PIN is sealed again from this card. A TPM that is",
+    "  only in LOCKOUT still holds it: clear the lockout with page 2, do not seal again.",
+    "  And the next PIN escrow asks for every PIN and the escrow MAC key from it.",
     "- Never write the SO-PINs, the PUK or the management key here.",
 ]
 
@@ -51,9 +54,10 @@ HOST_RULES = [
     "  value too until its lockout-recovery time has passed (24 hours under the KMS policy).",
     "- It never contains 0, 1, I, L or O: a character that looks like one of those is a copying error.",
     "- Type it at the host WITHOUT spaces, whatever grouping you used here to copy it.",
-    "- KEEP this page, sealed in its tamper-evident envelope, apart from the servers: every later PIN",
-    "  escrow asks for all of these values again. It is NOT the backup (each value is also in the",
-    "  encrypted recovery payload), but without it a PIN change cannot be escrowed.",
+    "- KEEP this page, sealed in its tamper-evident envelope, apart from the servers. It is what clears",
+    "  a server's TPM lockout when that server has to be brought back, and every later PIN escrow asks",
+    "  for all of these values again. It is NOT the backup (each value is also in the encrypted",
+    "  recovery payload), but without it a PIN change cannot be escrowed.",
     "- A broken seal means: assume the values are known. Record it as an incident.",
 ]
 
