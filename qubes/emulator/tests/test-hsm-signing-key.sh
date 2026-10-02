@@ -255,6 +255,13 @@ grep -q 'python3 -I "$CERT_TOOL"' "$KEYTOOL" && P "the script runs its Python wi
 python3 -I "$SCRIPTS/hsm-signing-cert.py" check --certificate "$OUT/secure-boot.crt.pem" --public-key "$OUT/pcr-initrd.pub.der" >/dev/null 2>&1 \
   && F "check accepted a certificate for another key" || P "check refuses a certificate for another key"
 
+# A PATH stub does not see a card reached through a LIBRARY: pyscard's `smartcard`, python-pkcs11, or a
+# PKCS#11 module loaded by openssl through an engine or a provider. Neither file loads any of them: the
+# Python imports the standard library only, and every openssl call here works on files with no engine.
+if grep -nE '^[[:space:]]*(import|from)[[:space:]]+(smartcard|pkcs11|PyKCS11|cryptography)|-engine|-provider|OPENSSL_CONF' \
+     "$SCRIPTS/hsm-signing-key.sh" "$SCRIPTS/hsm-signing-cert.py" >/dev/null; then
+  F "the script or its Python can reach a card through a library, which no stub here sees"
+else P "neither file loads a card library, an openssl engine or a provider (a stub on PATH would not see one)"; fi
 [ ! -e "$ROOT/tripwire" ] && P "no other card tool was called by any run above" || F "another card tool was called: $(cat "$ROOT/tripwire")"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"; [ "$fail" -eq 0 ]
