@@ -15,14 +15,37 @@ records nothing.
 ## PINs, SO PINs, PUKs and management keys
 
 **1. Every credential the ceremony escrows is its own value.** The fleet is three HSMs and three
-YubiKeys (ADR-0002 D17), so step 0 has sixteen fields: `hsm_{a,b,c}_user_pin`,
+YubiKeys (ADR-0002 D17), and three KMS hosts, so step 0 has nineteen fields: `hsm_{a,b,c}_user_pin`,
 `hsm_{a,b,c}_so_pin`, `yubikey_{a,b,c}_piv_pin`, `yubikey_{a,b,c}_piv_puk`,
-`yubikey_{a,b,c}_mgmt_key`, and `escrow_mac_key` (the key that authenticates later PIN escrows;
-always generated). The list is `PIN_FIELDS` in ceremony.sh. All are required. No two may
+`yubikey_{a,b,c}_mgmt_key`, `escrow_mac_key` (the key that authenticates later PIN escrows;
+always generated), and `tpm_{a,b,c}_lockout_auth` (each KMS host's TPM lockout authorization; always
+generated, see below). The list is `PIN_FIELDS` in ceremony.sh. All are required. No two may
 be equal, compared case-insensitively. Card A's PIN is not card B's; a user PIN is not its own SO
 PIN; YubiKey A's PIN is not YubiKey B's, nor its own PUK, nor any HSM PIN.
 *Verified by:* `check_credential_separation` in step 0. PROD refuses, DEV warns, and no value is
 printed in either mode. Test: `test-ceremony-credential-separation.sh`.
+
+**Each KMS host's TPM lockout authorization** (`tpm_{a,b,c}_lockout_auth`) is the value that lets its
+holder change that host's TPM dictionary-attack settings or clear its failed-try counter (the KMS
+repository's `deploy/baremetal/tpm-lockout.sh`). Left empty, anyone with root on the host can do
+both; lost, nobody can. So the ceremony generates one per host, 20 characters from capitals and
+digits with no `0`, `1`, `I`, `L` or `O` (99 bits), and treats it like a PIN:
+
+- it rides in the tier-0 payload, and every later escrow repeats it (`escrow/pin-escrow.sh` asks for
+  all three each time, so the newest escrow is always whole). The KMS host card is therefore KEPT,
+  sealed like the PIN card, and not destroyed once the hosts are commissioned;
+- it is shown once in step 0 and written by hand on the **KMS host card**, page 2 of the PIN card
+  form, because it reaches the host by being typed at its console, once, at commissioning;
+- a hand-made PIN file may hold any 16 to 32 printable characters with no space, which is what the
+  host tool accepts.
+
+**One wrong attempt at the host is expensive.** After a wrong lockout authorization the TPM refuses
+the right one too until its lockout-recovery time has passed; the KMS policy sets that to 24 hours
+(measured on a software TPM, not yet on the production hardware). The value is therefore read from
+the card or from the escrow and never guessed, and the host tool asks for it once.
+*Verified by:* `test-step0-generated-credentials.sh` (generated, shown once, distinct per host),
+`test-ceremony-credential-separation.sh` (shape, distinctness), `test-escrow-tools.sh` (required at
+every escrow, never in the tool's output), `test-pin-card-form.sh` (page 2 and its rules).
 
 **2. Each credential has the shape its device accepts.**
 - SmartCard-HSM user PIN: 10–15 digits (a 10-try counter needs a 10-digit PIN; ADR-0002 D15).

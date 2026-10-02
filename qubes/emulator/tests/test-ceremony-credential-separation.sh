@@ -28,11 +28,13 @@ YK_C="yubikey_c_piv_pin=29470186\nyubikey_c_piv_puk=85016734\nyubikey_c_mgmt_key
 pins(){ # pins KEY=VALUE overrides...
   local a_user=$GOOD_A_USER a_so=$GOOD_A_SO b_user=$GOOD_B_USER b_so=$GOOD_B_SO c_user=$GOOD_C_USER c_so=$GOOD_C_SO
   local pin=$GOOD_PIN puk=$GOOD_PUK mgmt=$GOOD_MGMT kv
+  # each KMS host's TPM lockout authorization: 20-character placeholders, built at runtime
+  local tpm_a tpm_b tpm_c; tpm_a="$(printf 'QA%.0s' {1..10})"; tpm_b="$(printf 'QB%.0s' {1..10})"; tpm_c="$(printf 'QC%.0s' {1..10})"
   for kv in "$@"; do eval "${kv%%=*}=\${kv#*=}"; done
   local emk; emk="$(printf 'E5%.0s' {1..16})"   # 32-hex escrow MAC key placeholder, built at runtime
   for kv in "$@"; do [ "${kv%%=*}" = emk ] && emk="${kv#*=}"; done
-  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_a_piv_pin=%s\nyubikey_a_piv_puk=%s\nyubikey_a_mgmt_key=%s\n%b\n%b\nescrow_mac_key=%s\n' \
-    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" "$YK_B" "$YK_C" "$emk" > "$WORK/pins.env"
+  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_a_piv_pin=%s\nyubikey_a_piv_puk=%s\nyubikey_a_mgmt_key=%s\n%b\n%b\nescrow_mac_key=%s\ntpm_a_lockout_auth=%s\ntpm_b_lockout_auth=%s\ntpm_c_lockout_auth=%s\n' \
+    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" "$YK_B" "$YK_C" "$emk" "$tpm_a" "$tpm_b" "$tpm_c" > "$WORK/pins.env"
 }
 run_step0(){ ( CEREMONY_MODE="$1" step_set_pins 2>&1 ); }
 leaks(){ grep -qE "$GOOD_A_USER|$GOOD_A_SO|$GOOD_B_USER|$GOOD_B_SO|$GOOD_C_USER|$GOOD_C_SO|$GOOD_PIN|$GOOD_PUK|$GOOD_MGMT|111111" <<< "$1"; }
@@ -59,6 +61,11 @@ refuses "card C's SO PIN reused from card B" "hsm_b_so_pin and hsm_c_so_pin hold
 refuses "YubiKey A's PIN reused on YubiKey B" "yubikey_a_piv_pin and yubikey_b_piv_pin hold the same value" pin=61839025
 refuses "a 5-character YubiKey PIN" "yubikey_a_piv_pin: a YubiKey PIV PIN or PUK is 6-8" pin=11111
 refuses "a malformed management key" "yubikey_a_mgmt_key: a PIV management key" mgmt=0102
+# Each KMS host's TPM lockout authorization (regalia-ceremony#92): its own value, 16-32 printable, no space.
+refuses "a 10-character TPM lockout authorization" "tpm_a_lockout_auth: a TPM lockout authorization is 16-32 printable characters with no space" tpm_a=SHORTVALUE
+refuses "a TPM lockout authorization with spaces" "tpm_b_lockout_auth: a TPM lockout authorization is 16-32 printable characters with no space" "tpm_b=QBQB QBQB QBQB QBQB"
+refuses "a 33-character TPM lockout authorization" "tpm_c_lockout_auth: a TPM lockout authorization is 16-32 printable characters with no space" tpm_c="$(printf 'Q%.0s' {1..33})"
+refuses "one TPM lockout authorization on two hosts" "tpm_a_lockout_auth and tpm_b_lockout_auth hold the same value" tpm_b="$(printf 'QA%.0s' {1..10})"
 
 refuses "the YubiKey factory PIN" "PROD GUARD: yubikey_a_piv_pin is unset or holds a recognised dev default" pin=123456
 refuses "the YubiKey factory PUK" "PROD GUARD: yubikey_a_piv_puk is unset or holds a recognised dev default" puk=12345678
