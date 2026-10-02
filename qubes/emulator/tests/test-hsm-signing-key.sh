@@ -26,6 +26,9 @@ FAKE="$ROOT/bin"; CARDS="$ROOT/cards"; ATTACHED="$ROOT/attached"; mkdir -p "$FAK
 export CARDS ATTACHED ARGV_LOG="$ROOT/argv.log" CEREMONY_PKCS11_MODULE="$ROOT/opensc-pkcs11.so" TMPDIR="$ROOT"
 : > "$CEREMONY_PKCS11_MODULE"; : > "$ARGV_LOG"
 export PATH="$FAKE:$PATH"
+# NO REAL CARD CAN BE REACHED. The two card tools the script calls are the stubs above everything else on
+# PATH, and the PC/SC socket is pointed at nothing, so even a tool that slipped past them finds no reader.
+export PCSCLITE_CSOCK_NAME="$ROOT/no-pcscd.sock"
 PIN_SIGNING="583120" PIN_SPARE="602447" PIN_KMS="711893"
 
 # ---- the card model ------------------------------------------------------------------------------
@@ -128,6 +131,11 @@ printf 'Wrapped key contains:\n  Key blob\n  Private Key Description (PRKD)\nKey
 exit 1                                                                   # measured: exits 1 even on success
 STUB
 chmod +x "$FAKE/pkcs11-tool" "$FAKE/sc-hsm-tool"
+# Tripwires: the script calls no other card tool. If it ever does, the test fails here instead of
+# reaching whatever is attached to the machine running it.
+for t in opensc-tool opensc-explorer pkcs15-tool pkcs15-init scsh3 ykman; do
+  printf '#!/bin/sh\necho "TRIPWIRE: %s was called" >&2; echo "%s $*" >> "%s"; exit 99\n' "$t" "$t" "$ROOT/tripwire" > "$FAKE/$t"; chmod +x "$FAKE/$t"
+done
 
 card(){ # card SERIAL PIN DOMAIN
   mkdir -p "$CARDS/$1/keys"; printf '%s' "$2" > "$CARDS/$1/pin"; echo 3 > "$CARDS/$1/pin-tries"; printf '%s' "$3" > "$CARDS/$1/dkek"
@@ -246,5 +254,7 @@ out="$(cd "$ROOT/planted" && PYTHONPATH="$ROOT/planted" bash "$KEYTOOL" generate
 grep -q 'python3 -I "$CERT_TOOL"' "$KEYTOOL" && P "the script runs its Python with -I" || F "the Python is not run isolated"
 python3 -I "$SCRIPTS/hsm-signing-cert.py" check --certificate "$OUT/secure-boot.crt.pem" --public-key "$OUT/pcr-initrd.pub.der" >/dev/null 2>&1 \
   && F "check accepted a certificate for another key" || P "check refuses a certificate for another key"
+
+[ ! -e "$ROOT/tripwire" ] && P "no other card tool was called by any run above" || F "another card tool was called: $(cat "$ROOT/tripwire")"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"; [ "$fail" -eq 0 ]
