@@ -220,9 +220,9 @@ fi
 say "RRC verified OFF on $RESTORE_SERIAL"
 
 say "2. import the staging DKEK share"
-DKEK_PW="$(cat "$STAGING/dkek.pw")" perl -e 'alarm 120; exec @ARGV' -- \
+DKEK_PW="$(cat "$STAGING/dkek.pw")" REGALIA_SO_PIN="$SO_PIN" perl -e 'alarm 120; exec @ARGV' -- \
     sc-hsm-tool -r "$READER" --import-dkek-share "$STAGING/dkek.pbe" --password env:DKEK_PW \
-    --so-pin "$SO_PIN" < /dev/null >/dev/null 2>&1 \
+    --so-pin env:REGALIA_SO_PIN < /dev/null >/dev/null 2>&1 \
   && say "DKEK imported" || die "DKEK import failed"
 
 say "3. install the seed key (hsm-auto-import.sh)"

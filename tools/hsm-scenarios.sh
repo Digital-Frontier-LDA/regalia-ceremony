@@ -169,7 +169,7 @@ wipe_and_provision() {
     # why hsm-staging-e2e.sh phase d ignores it too and verifies by behaviour. Aborting here on a
     # non-zero status turns a successful wipe into "provisioning failed" and takes every scenario
     # after it. The real verification is the card coming back and the DKEK import succeeding.
-    perl -e 'alarm 200; exec @ARGV' -- sc-hsm-tool -r "$READER" --initialize --so-pin "$SO_PIN" --pin "$USER_PIN" \
+    REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$USER_PIN" perl -e 'alarm 200; exec @ARGV' -- sc-hsm-tool -r "$READER" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN \
         --dkek-shares 1 --label scen < /dev/null >/dev/null 2>&1 || true
     for _ in $(seq 1 40); do sleep 1; card_alive && break; done
     # RECOVER, DON'T JUST GIVE UP. A wedge during re-provisioning strands every scenario after it:
@@ -183,9 +183,9 @@ wipe_and_provision() {
     fi
     card_alive || return 1
     DKEK_LOG="$WORK/dkek-import.log"
-    if ! DKEK_PW="$(cat "$STAGING/dkek.pw")" perl -e 'alarm 120; exec @ARGV' -- \
+    if ! DKEK_PW="$(cat "$STAGING/dkek.pw")" REGALIA_SO_PIN="$SO_PIN" perl -e 'alarm 120; exec @ARGV' -- \
         sc-hsm-tool -r "$READER" --import-dkek-share "$STAGING/dkek.pbe" --password env:DKEK_PW \
-        --so-pin "$SO_PIN" < /dev/null >"$DKEK_LOG" 2>&1; then
+        --so-pin env:REGALIA_SO_PIN < /dev/null >"$DKEK_LOG" 2>&1; then
         provision_failure "$DKEK_LOG" "DKEK import"
         return 1
     fi
@@ -235,7 +235,7 @@ refresh_ref_pub() {
 sign_and_verify() {   # $1 = key id
     local vrc
     head -c 32 /dev/urandom > "$WORK/d.bin"
-    pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" --sign --mechanism ECDSA \
+    REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
         --id "$1" --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1 || return 1
     python3 "$VERIFY" --der "$REF_PUB" --digest "$WORK/d.bin" --sig "$WORK/s.bin" >/dev/null 2>&1
     vrc=$?
@@ -333,7 +333,7 @@ if card_alive; then
     high=0; tot=15
     for _ in $(seq 1 $tot); do
         head -c 32 /dev/urandom > "$WORK/d.bin"
-        pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" --sign --mechanism ECDSA --id 31 \
+        REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA --id 31 \
             --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1 || continue
         python3 - "$WORK/s.bin" <<'PY' && high=$((high+1))
 import sys
@@ -476,7 +476,7 @@ if probe_key S7; then
     K=6
     for i in $(seq 1 $K); do
         head -c 32 /dev/urandom > "$WORK/c$i.bin"
-        ( pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" --sign --mechanism ECDSA --id 31 \
+        ( REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA --id 31 \
             --input-file "$WORK/c$i.bin" --output-file "$WORK/c$i.sig" >/dev/null 2>&1
           echo $? > "$WORK/c$i.rc" ) &
     done
@@ -522,7 +522,7 @@ hdr "S8  KEY DELETION BEHAVIOUR IS WHAT THE DOCS SAY — pinning requirement C1"
 # to refuse it — the Nitrokey HSM 2 is untested (requirement D1, RUNBOOK-NITROKEY-GATE row 5) and
 # may well be that device.
 if probe_key S8; then
-    dout="$(pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" \
+    dout="$(REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN \
         --delete-object --type privkey --id 31 2>&1)"; drc=$?
     sign_and_verify 31; src=$?
     # The follow-up sign means OPPOSITE things depending on what the card just answered, and
@@ -581,7 +581,7 @@ if card_alive; then
     : > "$WORK/rs.txt"; n=12; got=0
     for _ in $(seq 1 $n); do
         head -c 32 /dev/urandom > "$WORK/d.bin"
-        pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" --sign --mechanism ECDSA --id 31 \
+        REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA --id 31 \
             --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1 || continue
         python3 - "$WORK/s.bin" >> "$WORK/rs.txt" <<'PY'
 import sys
@@ -602,7 +602,7 @@ PY
     # deterministic signatures make a signing oracle replay-comparable and random ones do not.
     head -c 32 /dev/urandom > "$WORK/same.bin"
     for k in 1 2; do
-        pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" --sign --mechanism ECDSA --id 31 \
+        REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA --id 31 \
             --input-file "$WORK/same.bin" --output-file "$WORK/same$k.sig" >/dev/null 2>&1 || true
     done
     if [ -s "$WORK/same1.sig" ] && [ -s "$WORK/same2.sig" ]; then

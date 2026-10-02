@@ -1122,7 +1122,7 @@ if tier_admits hw_sign; then
       # not knowing how many tries remain is precisely when you must not spend one.
       if [ "$PIN_SPEND_OK" != 1 ]; then
         skip hw_sign "the user-PIN retry counter is not known-healthy (see hw_pin_health) — refusing to spend a retry to find out"
-      elif pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$USER_PIN" --sign \
+      elif REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign \
            --mechanism ECDSA --id "${HSM_CI_KEY_ID:-31}" \
            --input-file "$w/d.bin" --output-file "$w/s.bin" 2>&1 | "$REDACT" >"$w/sign.log" \
          && python3 "$VERIFY" --der "$PUB" --digest "$w/d.bin" --sig "$w/s.bin" 2>&1 | "$REDACT" >>"$w/sign.log"; then

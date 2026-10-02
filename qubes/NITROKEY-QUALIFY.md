@@ -82,9 +82,12 @@ card and generates a secp256k1 key **on** the token, then measures `#447` on tha
 
 ```
 ./nitrokey-qualify.sh --serial <token serial> \
-  --pin <user PIN> --so-pin <SO-PIN> \
   --provision --i-understand-this-wipes-the-card
 ```
+
+It asks for the user PIN and the SO-PIN with echo off. They are never given on the command line
+(`--pin` and `--so-pin` are refused): a command line is readable by every local user for as long
+as the command runs. For an unattended run, set `HSM_USER_PIN` and `HSM_SO_PIN` in the environment.
 
 The result line says whether a key generated on this token reports `CKA_LOCAL=true` (the wrap guard
 admits it) or not (as on the Pico — provenance must then come from device attestation). Restore

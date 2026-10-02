@@ -569,7 +569,24 @@ def main(argv=None):
     ap.add_argument("--unwrap-key")
     ap.add_argument("--key-reference", default="1")
     ap.add_argument("--password")
+    # The PINs. The model does not check their values (it models the DKEK, not the PIN counters), but
+    # it does check HOW they arrive: the real tool reads --pin and --so-pin through util_get_pin, which
+    # takes env:NAME (OpenSC 0.26.1, sc-hsm-tool.c and util.c), and no caller here may put the value
+    # itself on a command line, where /proc shows it to every local user (#94). A literal value is
+    # refused loudly, so a script that regresses fails the suites instead of passing quietly; so is a
+    # name whose variable is empty, because the real tool would then stop and PROMPT.
+    ap.add_argument("--pin")
+    ap.add_argument("--so-pin")
     args, _unknown = ap.parse_known_args(argv)
+    for option, spec in (("--pin", args.pin), ("--so-pin", args.so_pin)):
+        if spec is None:
+            continue
+        if not spec.lower().startswith("env:") or len(spec) <= 4:
+            sys.exit("sc-hsm-tool(model): %s was given a value on the command line; pass env:NAME and set "
+                     "NAME in the command's environment (argv is readable by every local user)" % option)
+        if not os.environ.get(spec[4:]):
+            sys.exit("sc-hsm-tool(model): %s %s but %s is unset/empty (the real tool would prompt)"
+                     % (option, spec, spec[4:]))
 
     if args.create_dkek_share:
         create_dkek_share(args.create_dkek_share, args.pwd_shares_threshold,
