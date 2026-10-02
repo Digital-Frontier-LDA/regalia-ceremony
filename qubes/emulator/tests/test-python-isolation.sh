@@ -122,7 +122,16 @@ ub="$T/userbase"; sp="$ub/lib/python$(python3 -I -c 'import sys; print("%d.%d" %
 printf 'import os; open(%s, "w").close()\n' "'$T/pth-ran'" > "$sp/x.pth"
 key="$(printf 'E5%.0s' {1..16})"
 clean="$(python3 -I "$SCRIPTS/escrow/pin_escrow_mac.py" kcv <<< "$key" 2>/dev/null)" || clean="$(python3 -Es "$SCRIPTS/escrow/pin_escrow_mac.py" kcv <<< "$key")"
-( PYTHONUSERBASE="$ub" python3 -E "$SCRIPTS/escrow/pin_escrow_mac.py" kcv <<< "$key" >/dev/null 2>&1 ); [ -e "$T/pth-ran" ] && P "the premise: with -E alone, a .pth under PYTHONUSERBASE runs" || F "the premise does not hold on this Python: -E alone already ignored the user site"
+# The premise needs an interpreter whose user site is ON. In a virtual environment that excludes the
+# system site-packages (the ceremony image's), Python turns the user site off by itself: -E alone is
+# then already safe there, and the premise is reported as not applicable instead of failing.
+user_site="$(PYTHONUSERBASE="$ub" python3 -E -c 'import site; print(site.ENABLE_USER_SITE)' 2>/dev/null)"
+( PYTHONUSERBASE="$ub" python3 -E "$SCRIPTS/escrow/pin_escrow_mac.py" kcv <<< "$key" >/dev/null 2>&1 )
+if [ "$user_site" = True ]; then
+  [ -e "$T/pth-ran" ] && P "the premise: with -E alone, a .pth under PYTHONUSERBASE runs" || F "the premise does not hold on this Python: the user site is on, and -E alone ignored its .pth"
+else
+  [ ! -e "$T/pth-ran" ] && P "this interpreter has its user site off (a virtual environment): the premise does not apply here, and nothing ran" || F "a .pth ran although this interpreter reports its user site off"
+fi
 rm -f "$T/pth-ran"
 got="$(PYTHONUSERBASE="$ub" python3 -Es "$SCRIPTS/escrow/pin_escrow_mac.py" kcv <<< "$key")"
 [ ! -e "$T/pth-ran" ] && [ -n "$got" ] && [ "$got" = "$clean" ] && P "with -Es it does not, and the check value is the clean one" || F "a user-site .pth ran under -Es, or the value changed: $got / $clean"
