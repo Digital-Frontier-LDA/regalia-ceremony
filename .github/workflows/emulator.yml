@@ -129,7 +129,11 @@ jobs:
 
       - name: Run the full emulator suite natively (route coverage + go/no-go + wizard)
         # REQUIRE_TPM_SIM: the TPM cases (swtpm + tpm2-tools, installed above) must run, not skip.
-        run: sudo env REQUIRE_TPM_SIM=1 qubes/emulator/run-tests.sh
+        # REQUIRE_UTF8_LOCALE: test-locale-ranges.sh needs en_US.UTF-8 (generated here) and must not skip.
+        run: |
+          sudo apt-get install -y -qq --no-install-recommends locales >/dev/null
+          sudo locale-gen en_US.UTF-8 >/dev/null
+          sudo env REQUIRE_TPM_SIM=1 REQUIRE_UTF8_LOCALE=1 qubes/emulator/run-tests.sh
 
       - name: Show emulator logs on failure
         if: failure()
