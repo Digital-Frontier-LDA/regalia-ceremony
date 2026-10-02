@@ -253,15 +253,15 @@ sc-hsm-tool -r "$READER" 2>&1 | grep -iE 'version|reset with SO-PIN|tries left|D
 # contract. The id is read back from the card by the LABEL the import writes.
 W=$(mktemp -d); head -c 32 /dev/urandom > "$W/d"
 KEY_LABEL="${HSM_RESTORE_KEY_LABEL:-akash-funding}"
-KEY_ID="$(perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" \
-            --login --pin "$PIN" --list-objects --type privkey 2>/dev/null \
+KEY_ID="$(REGALIA_P11_PIN="$PIN" perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" \
+            --login --pin env:REGALIA_P11_PIN --list-objects --type privkey 2>/dev/null \
           | awk -v want="$KEY_LABEL" '/^ *label:/{l=$2} /^ *ID:/{if (l==want) {print $2; exit}}')"
 if [ -z "$KEY_ID" ]; then
     rm -rf "$W"
     die "no private key labelled '$KEY_LABEL' on $RESTORE_SERIAL after the import — there is nothing to verify"
 fi
 say "    key '$KEY_LABEL' is at id $KEY_ID"
-if perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --sign \
+if REGALIA_P11_PIN="$PIN" perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_P11_PIN --sign \
      --mechanism ECDSA --id "$KEY_ID" --input-file "$W/d" --output-file "$W/s" >/dev/null 2>&1 \
    && python3 "$SCRIPTS/verify-hsm-control.py" --der "$STAGING/expected-pub.der" \
         --digest "$W/d" --sig "$W/s" >/dev/null 2>&1; then

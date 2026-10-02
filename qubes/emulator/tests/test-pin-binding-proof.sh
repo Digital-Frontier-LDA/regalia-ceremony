@@ -35,9 +35,14 @@ hdr "The proof exists and uses the ESCROWED value, not a fresh prompt"
 grep -q 'hsm_a_user_pin' <<<"$BODY" \
   && P "step_hsm_import references the escrowed hsm_a_user_pin" \
   || F "the escrowed PIN is never read back — escrow and card remain unconnected"
-grep -qE 'pkcs11-tool --login --pin "\$hsm_a_user_pin"' <<<"$BODY" \
+grep -qE 'REGALIA_P11_PIN="\$hsm_a_user_pin" pkcs11-tool --login --pin env:REGALIA_P11_PIN' <<<"$BODY" \
   && P "it PRESENTS that value to the card (a positive control, not an inspection)" \
   || F "nothing presents the escrowed PIN to the card; the binding is asserted, not proven"
+# …through pkcs11-tool's env: form, set for that one command: never on argv, where every process
+# on the machine could read it for as long as the card takes.
+grep -qE -- '--pin "?\$hsm_a_user_pin' <<<"$BODY" \
+  && F "the escrowed PIN is passed on argv (--pin \$hsm_a_user_pin)" \
+  || P "…and the PIN is never on argv (env:REGALIA_P11_PIN)"
 
 hdr "It FAILS CLOSED — a mismatch aborts the ceremony"
 # The dangerous shape would be a warning that lets the operator continue and engrave anyway.
