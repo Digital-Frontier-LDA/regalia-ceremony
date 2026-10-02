@@ -591,7 +591,7 @@ if needs supplies; then
     supply "At least $((n + 2)) BLANK archive discs (Verbatim AZO DVD-R or M-DISC): one per case, two spare?"
     supply "$n holographic seal stickers, with their serials written in the seal registry BEFORE today?"
     supply "Two six-sided dice (for 25 throws of two)?"
-    supply "A black pen, one blank paper PIN card and one tamper-evident envelope for it?"
+    supply "A black pen, one blank paper PIN card (three pages), and THREE tamper-evident envelopes: one per page (the KMS host recovery card is sealed apart)?"
     supply "A FULL paper tray (50 sheets or more) in the printer, and toner that does not report low?"
   elif [ "$n" -gt 0 ]; then
     bad "supplies must be confirmed at a terminal (no /dev/tty): run go-nogo.sh interactively"

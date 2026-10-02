@@ -237,9 +237,17 @@ when nothing else can: all three sites down, or a host whose TPM no longer relea
 it at that host's boot prompt **exactly as written, lower case, dashes included** (8 groups of 8
 letters); without the dashes it does not open the disk. Use the newest verified escrow, not the
 payload: a key is replaced after every use, and the replaced key opens nothing. Once the host is
-back, replace the key again (`recovery-key.sh --replace` in the KMS repository, with a new key from
-a new escrow): it has now been typed at a console. An escrow written before these lines existed has
-none; then, and only then, the payload's keys are the ones to use.
+back, replace the key again: it has now been typed at a console. In this order, because the newest
+verified escrow must never hold a key that opens nothing:
+
+1. `bin/pin-escrow.sh --new-recovery-key` on the offline machine prints one new key (never invent
+   one by hand); write it on a new KMS host recovery card.
+2. At the host: `recovery-key.sh --replace` (KMS repository) with the used key and the new one, then
+   `--check` with the key read from the new card.
+3. Only then escrow it (`bin/pin-escrow.sh`).
+
+An escrow written before these lines existed has no `luks_` lines; then, and only then, the payload's
+keys are the ones to use.
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no

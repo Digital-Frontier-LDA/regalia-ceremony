@@ -5,6 +5,17 @@
 # card open.
 #
 #   /media/<archive disc>/bin/pin-escrow.sh        # from the checkout's top directory
+#   /media/<archive disc>/bin/pin-escrow.sh --new-recovery-key    # print ONE new disk recovery key
+#
+# --new-recovery-key is for the day a KMS host's disk recovery key has been USED (a real recovery or
+# a rehearsal) or its envelope seal is broken. It prints one new key, generated here from the
+# system's random source, and writes nothing. A recovery key is never invented by hand: the host
+# enrols it on the assumption that it holds 256 random bits. THE ORDER MATTERS:
+#   1. write the new key on a new KMS host recovery card;
+#   2. at the host: regalia-kms recovery-key.sh --replace (the used key, then the new one), then
+#      --check with the key read from the new card;
+#   3. ONLY THEN escrow it, with this tool and no argument. An escrow written before step 2 has
+#      succeeded would hold, as the newest verified escrow, a key that opens nothing on that host.
 #
 # Run the ARCHIVE DISC's copy (checked with its SHA256SUMS), never this repository's: anyone who can
 # write here could change this script to skip a check or send the PINs elsewhere. It refuses to run
@@ -40,7 +51,30 @@
 # files test-pins-NNNN.age, which recovery never selects.
 set -uo pipefail
 die(){ printf 'pin-escrow: %s\n' "$*" >&2; exit 1; }
-[ $# -eq 0 ] || { sed -n '2,35p' "$0"; [ "$1" = -h ] || [ "$1" = --help ]; exit; }
+# One definition of a disk recovery key's shape (systemd's recovery-key format, dashes included).
+RECOVERY_KEY_RE='^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$'
+if [ "${1:-}" = --new-recovery-key ] && [ $# -eq 1 ]; then
+  # 32 bytes from the kernel's random source, each half-byte as one letter: what systemd-cryptenroll
+  # writes and what step 0 generates (ceremony.sh gen_secret recovery:256).
+  # python3 -I (isolated): without it the CURRENT DIRECTORY is first on the module path, and this tool
+  # is run from the top of the repository checkout. A secrets.py planted there by anyone who can
+  # write to the repository would choose the key (measured: it printed cccccccc-…-cccccccc).
+  key="$(python3 -I -c 'import secrets
+letters = "".join("cbdefghijklnrtuv"[b >> 4] + "cbdefghijklnrtuv"[b & 15] for b in secrets.token_bytes(32))
+print("-".join(letters[i:i + 8] for i in range(0, 64, 8)))')" || die "could not generate a key (python3)"
+  [[ "$key" =~ $RECOVERY_KEY_RE ]] || die "the generator produced something that is not a recovery key; nothing shown"
+  printf '%s\n' "$key"; key=""
+  cat >&2 <<'NEXT'
+A NEW DISK RECOVERY KEY, shown once and stored nowhere. The dashes are part of the key.
+  1. Write it on a NEW KMS host recovery card, by hand, and check your copy letter by letter.
+  2. At the host: recovery-key.sh --replace (the used key, then this one), then --check from the card.
+  3. Only then run this tool with no argument to escrow it.
+Clear this screen when it is written down.
+NEXT
+  exit 0
+fi
+# The header above, up to the first line that is not a comment: no line count to keep in step.
+[ $# -eq 0 ] || { sed -n '2,/^set -uo pipefail$/{/^set -uo pipefail$/!p}' "$0"; [ "$1" = -h ] || [ "$1" = --help ]; exit; }
 DEVICES="hsm_a hsm_b hsm_c yubikey_a yubikey_b yubikey_c tpm_a tpm_b tpm_c luks_a luks_b luks_c"; PREFIX=pins
 if [ -n "${PIN_ESCROW_TEST_DEVICES:-}" ]; then
   DEVICES="$PIN_ESCROW_TEST_DEVICES"; PREFIX=test-pins
@@ -88,7 +122,7 @@ for d in $DEVICES; do
     # A KMS host's TPM lockout authorization: what regalia-kms tpm-lockout.sh --set accepts.
     tpm_[abc]) re='^[[:graph:]]{16,32}$'; what="16-32 printable characters with no space"; kind="lockout authorization"; from="the KMS host card";;
     # A KMS host's disk recovery key: what regalia-kms recovery-key.sh accepts, dashes included.
-    luks_[abc]) re='^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$'; what="8 groups of 8 letters from cbdefghijklnrtuv with a dash between groups, lower case (the dashes are part of the key)"; kind="disk recovery key"; from="the KMS host recovery card";;
+    luks_[abc]) re="$RECOVERY_KEY_RE"; what="8 groups of 8 letters from cbdefghijklnrtuv with a dash between groups, lower case (the dashes are part of the key)"; kind="disk recovery key"; from="the KMS host recovery card";;
     *) die "unknown device id '$d' (hsm_a..c, yubikey_a..c, tpm_a..c, luks_a..c)";;
   esac
   a="$(ask "$d $kind, from $from: ")"; b="$(ask "$d $kind again: ")"

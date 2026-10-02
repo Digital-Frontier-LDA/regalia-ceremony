@@ -37,6 +37,7 @@ done
 [ "$(grep -c rectstroke <<< "$page3")" = $((3 * 64 + 1)) ] && P "page 3 has 64 boxes per host and its rules box" || F "page 3 boxes: $(grep -c rectstroke <<< "$page3")"
 [ "$(grep -c '(-) show' <<< "$page3")" = $((3 * 7)) ] && P "seven dashes are printed per key: one after every group but the last, the line break included" || F "page 3 dashes: $(grep -c '(-) show' <<< "$page3")"
 for w in "RULES FOR THIS PAGE" "opens that host's disk BY ITSELF" "THE DASHES ARE PART OF THE KEY" "Without them the key does not open the disk" \
+         "type one after every" "group but the last" "THE DASH IS NOT" "Find it first" \
          "only b c d e f g h i j k l n r t u v" "recovery-key.sh --enrol" "envelope OF ITS OWN" "from pages 1 and 2" \
          "Every later PIN escrow asks for all of these keys again" "USING A KEY SPENDS IT" "recovery-key.sh --replace" "It is NOT the backup"; do
   grep -qF "$w" <<< "$page3" && P "page 3 rule: $w" || F "page 3 rule missing: $w"
