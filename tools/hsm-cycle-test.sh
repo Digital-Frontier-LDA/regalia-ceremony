@@ -349,7 +349,7 @@ for n in $(seq 1 "$CYCLES"); do
                 --id 31 --input-file "$LOGDIR/d-$n.bin" --output-file "$LOGDIR/s-$n.bin" \
                 > "$LOGDIR/sign-$n.log" 2>&1 || chain_ok=0
             if [ "$chain_ok" = 1 ]; then
-                python3 "$VERIFY" --der "$STAGING/expected-pub.der" \
+                python3 -E "$VERIFY" --der "$STAGING/expected-pub.der" \
                     --digest "$LOGDIR/d-$n.bin" --sig "$LOGDIR/s-$n.bin" >/dev/null 2>&1
                 if [ $? -ne 0 ]; then
                     chain_ok=0; echo "  CHAIN FAIL: card signature does NOT match the seed's pubkey"
@@ -357,7 +357,7 @@ for n in $(seq 1 "$CYCLES"); do
                     # Negative control: the same signature against a DIFFERENT digest must FAIL.
                     # Without this, a verifier stuck returning 0 would make every cycle "pass".
                     head -c 32 /dev/urandom > "$LOGDIR/dbad-$n.bin"
-                    python3 "$VERIFY" --der "$STAGING/expected-pub.der" \
+                    python3 -E "$VERIFY" --der "$STAGING/expected-pub.der" \
                         --digest "$LOGDIR/dbad-$n.bin" --sig "$LOGDIR/s-$n.bin" >/dev/null 2>&1
                     if [ $? -eq 0 ]; then
                         chain_ok=0; echo "  CHAIN FAIL: negative control PASSED — verifier is not discriminating"

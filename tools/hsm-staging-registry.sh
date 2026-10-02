@@ -14,7 +14,7 @@ hsm_staging_registry_load() {
     local registry="${HSM_STAGING_REGISTRY_FILE:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/hsm-staging-registry.json}"
     local maps probes devauts raw
     [ -r "$registry" ] || { echo "registry unavailable: $registry" >&2; return 1; }
-    raw="$(python3 - "$registry" <<'PY'
+    raw="$(python3 -I - "$registry" <<'PY'
 import json, re, sys
 
 # NO `assert` IN THIS VALIDATOR. `python3 -O`, or a PYTHONOPTIMIZE set anywhere in the environment,

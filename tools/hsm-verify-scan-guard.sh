@@ -96,7 +96,7 @@ done
 say "capturing the current filesystem"
 ocd_run "init; halt; dump_image $OUT/fs-orig.bin $FS_BASE $FS_SIZE; reset run; shutdown" \
     > "$OUT/dump.log" 2>&1
-python3 - "$OUT/fs-orig.bin" <<'EOP' || exit 2
+python3 -I - "$OUT/fs-orig.bin" <<'EOP' || exit 2
 import sys
 d = open(sys.argv[1], "rb").read()
 if not d or d.count(0xff) == len(d):
@@ -108,7 +108,7 @@ say "  $(wc -c < "$OUT/fs-orig.bin") bytes of real filesystem"
 
 # ---- 2. build the corrupted image ------------------------------------------------------------
 say "constructing a dangling link"
-python3 - "$OUT/fs-orig.bin" "$OUT/fs-dangling.bin" "$FS_BASE" "$FS_SIZE" <<'EOP' || exit 2
+python3 -I - "$OUT/fs-orig.bin" "$OUT/fs-dangling.bin" "$FS_BASE" "$FS_SIZE" <<'EOP' || exit 2
 import sys
 src, dst, base_s, size_s = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 BASE, SIZE = int(base_s, 16), int(size_s, 16)

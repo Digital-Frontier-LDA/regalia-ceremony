@@ -177,7 +177,7 @@ assert_expected_device() {
     info "   ATR matches the pinned device ($what)."
     return 0
   fi
-  ascii="$(printf '%s' "$atr" | python3 -c "
+  ascii="$(printf '%s' "$atr" | python3 -I -c "
 import sys
 raw = bytes.fromhex(sys.stdin.read().strip())
 print(''.join(chr(b) if 32 <= b < 127 else '.' for b in raw))
@@ -407,7 +407,7 @@ scan_back_payload() {
     return 2
   fi
   ask "scan the PRINTED QR sheet back with the camera now (strongly recommended)?" || return 2
-  python3 "$HERE/payload-qr.py" --verify-scan "$enc" --device "$SCAN_DEVICE"
+  python3 -E "$HERE/payload-qr.py" --verify-scan "$enc" --device "$SCAN_DEVICE"
 }
 
 # Scan ONE printed share symbol back and compare it with the file it was printed from, without
@@ -442,7 +442,7 @@ record_share() {
     kind=chars; count="${#share}"
   fi
   form="$WORK/form-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_').ps"
-  python3 "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" \
+  python3 -E "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" \
     --threshold "$(K)" --total "$(N)" -o "$form" \
     || { err "could not build the blank form for '$label'"; return 1; }
   # EVERY prompt here reads /dev/tty, never stdin: step 3 calls this inside
@@ -715,7 +715,7 @@ step_yubikey_ops() {
 #   CEREMONY_MANIFEST_BACKEND       restrict plan/record to one backend, e.g. yubikey-piv when the
 #                                   Nitrokeys are commissioned later at the rack
 CEREMONY_MANIFEST="${CEREMONY_MANIFEST:-}"
-manifest_tool(){ python3 "$HERE/ceremony-manifest.py" "$@"; }
+manifest_tool(){ python3 -E "$HERE/ceremony-manifest.py" "$@"; }
 manifest_scope() {
   MANIFEST_SCOPE=()
   [ -n "${CEREMONY_MANIFEST_SITE:-}" ] && MANIFEST_SCOPE+=(--site "$CEREMONY_MANIFEST_SITE")
@@ -1048,7 +1048,7 @@ step_hsm_funding() {
   local proven=0
   if run "pkcs11-tool --login --sign --id 01 -m ECDSA -i '$WORK/kat.digest' -o '$WORK/kat.sig'" \
      && [ -s "$WORK/kat.sig" ] \
-     && python3 "$HERE/verify-hsm-control.py" --der "$WORK/funding-pub.der" \
+     && python3 -E "$HERE/verify-hsm-control.py" --der "$WORK/funding-pub.der" \
           --digest "$WORK/kat.digest" --sig "$WORK/kat.sig" >/dev/null 2>&1; then
     proven=1
   fi
@@ -1061,7 +1061,7 @@ step_hsm_funding() {
     return 1
   fi
   info "   keypair-control proof PASSED — the HSM holds the private key for this public key."
-  local addr; addr=$(python3 "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null || true)
+  local addr; addr=$(python3 -E "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null || true)
   if [ -z "$addr" ]; then
     err "address derivation failed after a passing key-control proof — derive manually and DO NOT"
     err "fund until you have an address: derive-akash-address.py --der funding-pub.der"
@@ -1271,13 +1271,13 @@ step_entropy_seed() {
   info "     and the OS, so 128 bits is the target). Throw 2 dice at a time: 25 throws."
   info "     For each throw type both values, left die first (e.g. 5 2), press Enter; repeat until the"
   info "     counter reaches 50. Typing is hidden. A mistyped line is discarded whole — just retype it."
-  python3 "$HERE/dice-entropy.py" --out "$d" || { err "dice entropy not collected — no seed generated."; return 1; }
+  python3 -E "$HERE/dice-entropy.py" --out "$d" || { err "dice entropy not collected — no seed generated."; return 1; }
 
   info "2/3  HSM — 32 bytes from the Nitrokey HSM / Pico HSM hardware random generator (no PIN)."
   # Direct PC/SC (SELECT + GET CHALLENGE), not pkcs11-tool: OpenSC enumeration wedged a Pico HSM
   # on the bench while the direct commands answered on both devices (2026-09-25).
   local hout
-  if ! hout="$(timeout 60 python3 "$HERE/hsm-random.py" --out "$h" 2>&1)" || [ "$(wc -c < "$h" 2>/dev/null)" != 32 ]; then
+  if ! hout="$(timeout 60 python3 -E "$HERE/hsm-random.py" --out "$h" 2>&1)" || [ "$(wc -c < "$h" 2>/dev/null)" != 32 ]; then
     printf '%s\n' "$hout" | sed 's/^/     /' >&2
     err "no random bytes from an HSM — attach the Nitrokey HSM or Pico HSM with 'qvm-usb attach'"
     err "and run this step again. The seed is never generated without them (dice + HSM, both required)."
@@ -1288,9 +1288,9 @@ step_entropy_seed() {
   info "3/3  OPERATING SYSTEM — 32 bytes from /dev/urandom."
   head -c 32 /dev/urandom > "$o" && chmod 600 "$o"
 
-  python3 "$HERE/entropy-mix.py" --out "$m" "$d" "$h" "$o" \
+  python3 -E "$HERE/entropy-mix.py" --out "$m" "$d" "$h" "$o" \
     || { err "mixing refused the sources (identical or empty) — no seed generated."; return 1; }
-  if ! python3 "$HERE/bip39-slip39-backup.py" --from-entropy --in "$m" --out "$staged" 2>"$WORK/seed.err"; then
+  if ! python3 -E "$HERE/bip39-slip39-backup.py" --from-entropy --in "$m" --out "$staged" 2>"$WORK/seed.err"; then
     sed 's/^/     /' "$WORK/seed.err" >&2; err "could not encode the mixed entropy as a mnemonic."; return 1
   fi
   chmod 600 "$staged" && mv -f "$staged" "$f" || { err "could not install the new mnemonic; the existing seed was preserved."; return 1; }
@@ -1419,7 +1419,7 @@ step_shamir() {
       # (it would land in the shares file) and does no reconstruct-verify. The minter never
       # emits the master secret and proves every k-of-n subset recovers before writing.
       show "slip39-mint.py --threshold $(K) --shares $(N) --out slip39.txt"
-      if python3 "$HERE/slip39-mint.py" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
+      if python3 -E "$HERE/slip39-mint.py" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
         info "Minted + reconstruct-verified (every $(K)-of-$(N) subset recovers). Copy each share BY HAND onto its form:"
       else
         err "mint/verify FAILED — refusing to distribute:"; sed 's/^/     /' "$WORK/mint.err" >&2; rm -f "$WORK/slip39.txt"; return 1
@@ -1438,7 +1438,7 @@ step_shamir() {
       # Surface the tool's stderr to the operator (do NOT swallow it): if a passphrase is somehow
       # still in effect it WARNS that recovery requires the EXACT passphrase — that safeguard must
       # reach the operator, not vanish into /dev/null. Mirror option b (capture then echo).
-      if python3 "$HERE/bip39-slip39-backup.py" --in "$f" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
+      if python3 -E "$HERE/bip39-slip39-backup.py" --in "$f" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
         [ -s "$WORK/bkp.err" ] && sed 's/^/     /' "$WORK/bkp.err" >&2
         info "BIP39 mnemonic split into $(N) SLIP-39 word-shares (any $(K) recover the EXACT mnemonic)."
         local n=0; while IFS= read -r line; do
@@ -1453,7 +1453,7 @@ step_shamir() {
         # the sealed sheet, else STOP") needs the funding ADDRESS recorded NOW. Without it a
         # wrong-share / wrong-passphrase / tampered recovery cannot be caught before funds move.
         # The address is PUBLIC; derive it from the source mnemonic file (never printed) and show it.
-        local caddr; caddr=$(python3 "$HERE/derive-akash-address.py" --mnemonic-file "$f" 2>/dev/null || true)
+        local caddr; caddr=$(python3 -E "$HERE/derive-akash-address.py" --mnemonic-file "$f" 2>/dev/null || true)
         if [ -n "$caddr" ]; then
           info "FUNDING ADDRESS (public; derived from this seed at m/44'/118'/0'/0/0): $caddr"
           warn "RECORD this address on the sealed custodian-contact sheet / seal registry NOW. It is"
@@ -1724,7 +1724,7 @@ show_day_pin() {
 weak_pin_reason() {
   # The PIN reaches Python on file descriptor 3, never as an argument: argv is readable by any local
   # process (/proc/<pid>/cmdline). The reason printed never repeats any digit of the PIN.
-  python3 -c '
+  python3 -I -c '
 import datetime, os
 p = os.read(3, 64).decode().strip()
 def date_ok(d, m, y):
@@ -1873,7 +1873,7 @@ generate_pins() {
   # an HSM's user PIN cannot be reset (PIN reset is disabled, D15), so a forgotten one costs a key
   # restore from the k-of-n shares.
   local card="$WORK/pin-card.ps"
-  if python3 "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")" --yubikeys "$(tr ' ' ',' <<< "$YUBIKEYS")" \
+  if python3 -E "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")" --yubikeys "$(tr ' ' ',' <<< "$YUBIKEYS")" \
        --hosts "$(tr ' ' ',' <<< "$KMS_HOSTS")"; then
     if [ -n "${PRINTER:-}" ]; then
       run "lp -d '$PRINTER' '$card'" <"$tty" && info "blank PIN card sent to $PRINTER (it holds no PIN)"
@@ -1980,7 +1980,7 @@ EOF
   # The escrow MAC key's check value (not secret) for the archive disc: escrow/pin-escrow.sh compares
   # the key typed from the PIN card with it, so a mistyped key cannot produce an escrow file that
   # recovery would then reject. The key reaches Python on standard input, never argv.
-  python3 "$HERE/escrow/pin_escrow_mac.py" kcv <<< "${escrow_mac_key:-}" > "$WORK/escrow-mac.kcv" 2>/dev/null \
+  python3 -E "$HERE/escrow/pin_escrow_mac.py" kcv <<< "${escrow_mac_key:-}" > "$WORK/escrow-mac.kcv" 2>/dev/null \
     || { rm -f "$WORK/escrow-mac.kcv"; err "cannot compute the escrow MAC key's check value"; return 1; }
   # TPM import blobs, from whichever source the PINs came (needs a terminal: every key is
   # authenticated by a typed fingerprint).
@@ -2115,7 +2115,7 @@ TPL
     || { err "encryption failed or was skipped — nothing was archived."; return 1; }
   [ -s "$enc" ] || { err "age produced an empty file — do NOT proceed."; return 1; }
 
-  run "python3 '$HERE/payload-qr.py' --split '$enc' --outdir '$qrdir' --threshold $(K) --shares $(N)" \
+  run "python3 -E '$HERE/payload-qr.py' --split '$enc' --outdir '$qrdir' --threshold $(K) --shares $(N)" \
     || { err "QR emission failed — the payload has no paper copy."; return 1; }
 
   # ROUND-TRIP PROOF. An encrypted payload nobody has ever decrypted is not a backup. If the
@@ -2123,7 +2123,7 @@ TPL
   # drill), prove the whole chain rebuilds the exact plaintext before anything is printed.
   if [ -s "$WORK/breakglass.key" ]; then
     info "Verifying the full chain: QR chunks -> payload.age -> decrypt -> original…"
-    if python3 "$HERE/payload-qr.py" --join "$qrdir/chunks.txt" --out "$WORK/rebuilt.age" >/dev/null 2>&1 \
+    if python3 -E "$HERE/payload-qr.py" --join "$qrdir/chunks.txt" --out "$WORK/rebuilt.age" >/dev/null 2>&1 \
        && age -d -i "$WORK/breakglass.key" "$WORK/rebuilt.age" > "$WORK/rebuilt.txt" 2>/dev/null \
        && cmp -s "$plain" "$WORK/rebuilt.txt"; then
       info "   ROUND-TRIP PROVEN — the QR codes rebuild and decrypt to the exact payload."
@@ -2225,7 +2225,7 @@ step_hsm_import() {
   [ -s "$pwfile" ] || { head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$pwfile"; chmod 600 "$pwfile"; }
 
   local derived
-  derived="$(python3 "$HERE/seed-to-pkcs12.py" --mnemonic-file "$mfile" \
+  derived="$(python3 -E "$HERE/seed-to-pkcs12.py" --mnemonic-file "$mfile" \
                --password-file "$pwfile" --out "$p12" 2>&1 | tee /dev/stderr \
                | grep -oE 'akash1[a-z0-9]+' | head -1)"
   [ -s "$p12" ] || { err "no PKCS#12 container was produced — aborting."; return 1; }
@@ -2309,7 +2309,7 @@ step_hsm_import() {
     || { err "could not read the imported public key from the card — import unproven."; return 1; }
   [ -s "$WORK/imported-pub.der" ] || { err "empty public key read from the card — do NOT fund."; return 1; }
   local oncard
-  oncard="$(python3 "$HERE/derive-akash-address.py" --der "$WORK/imported-pub.der" 2>/dev/null || true)"
+  oncard="$(python3 -E "$HERE/derive-akash-address.py" --der "$WORK/imported-pub.der" 2>/dev/null || true)"
   if [ -z "$oncard" ]; then
     err "could not derive an address from the card's public key — import unproven; do NOT fund."
     return 1
@@ -2332,7 +2332,7 @@ step_hsm_import() {
   local proven=0
   if run "pkcs11-tool ${p11sel[*]} --login --sign --label '$klabel' -m ECDSA -i '$WORK/imp.digest' -o '$WORK/imp.sig'" \
      && [ -s "$WORK/imp.sig" ] \
-     && python3 "$HERE/verify-hsm-control.py" --der "$WORK/imported-pub.der" \
+     && python3 -E "$HERE/verify-hsm-control.py" --der "$WORK/imported-pub.der" \
           --digest "$WORK/imp.digest" --sig "$WORK/imp.sig" >/dev/null 2>&1; then
     proven=1
   fi
@@ -2719,7 +2719,7 @@ step_recovery_card() {
     info "card will carry the default SLIP-39 funding-seed recovery procedure."
   fi
   show "make-recovery-card.py -o recovery-card.ps --case-id '$cid' --seal-serial '$serial' --threshold $(K) --shares $(N) $hsm_flag"
-  if python3 "$HERE/make-recovery-card.py" -o "$ps" --date "$(date +%F)" --case-id "$cid" --seal-serial "$serial" \
+  if python3 -E "$HERE/make-recovery-card.py" -o "$ps" --date "$(date +%F)" --case-id "$cid" --seal-serial "$serial" \
        --threshold "$(K)" --shares "$(N)" $hsm_flag >/dev/null 2>&1; then
     info "card written: $ps"
   else
@@ -2734,7 +2734,7 @@ step_recovery_card() {
   # check them, and refuse, without breaking the seal. It says nothing about what is inside, and the
   # distress answer itself is never printed: only what to do when it is given.
   local label="$WORK/case-label.ps"
-  if python3 "$HERE/case-label.py" -o "$label"; then
+  if python3 -E "$HERE/case-label.py" -o "$label"; then
     if [ -n "$PRINTER" ]; then
       run "lp -d '$PRINTER' '$label'" && info "sent the outer case label to $PRINTER: write the case ID and seal serial on it, stick it OUTSIDE the case" || warn "label print skipped"
     else

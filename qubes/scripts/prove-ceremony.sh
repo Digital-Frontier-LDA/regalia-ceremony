@@ -66,7 +66,7 @@ mkf pkcs11-tool <<'S'
 #!/usr/bin/env bash
 prev=""; out=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
 DER=3056301006072a8648ce3d020106052b8104000a034200047f41ffa6c0c377ce7660dfd2716ab96f18f9dbd7de5a6d360b3e89efbbae906cd5188e7d696b936777d5383256af1246980098dd9a16826a4f4984a136fbeab6
-case "$*" in *--read-object*pubkey*) [ -n "$out" ] && python3 -c "import binascii;open('$out','wb').write(binascii.unhexlify('$DER'))";; esac
+case "$*" in *--read-object*pubkey*) [ -n "$out" ] && python3 -I -c "import binascii;open('$out','wb').write(binascii.unhexlify('$DER'))";; esac
 echo "[stub] pkcs11-tool $*"
 S
 mkf lp <<'S'
@@ -97,7 +97,7 @@ say ""; say "PROOF 1 — Nitrokey HSM funding-address derivation"
 hsm_out="$(step_hsm_funding 2>&1)"
 WIZ_ADDR=$(printf '%s' "$hsm_out" | grep -oE 'akash1[0-9a-z]+' | head -1)
 CANON="akash1dc66jys4v4ckt0sxq63ksps34ylra5n9m2qw85"   # cosmjs-canonical for the fixed test DER
-SCRIPT_ADDR=$(python3 "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null)
+SCRIPT_ADDR=$(python3 -E "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null)
 say "   wizard-printed address : ${WIZ_ADDR:-<withheld: fail-closed>}"
 say "   derive-script address  : $SCRIPT_ADDR"
 say "   cosmjs-canonical value : $CANON"
@@ -178,7 +178,7 @@ qrencode -o "$PROOF/qr-share1.png" -r "$WORK/secret.in" -s 6 -m 4 -l H
 hdr=$(xxd -p -l 8 "$PROOF/qr-share1.png" 2>/dev/null || od -An -tx1 -N8 "$PROOF/qr-share1.png" | tr -d ' \n')
 say "   QR PNG: $(wc -c <"$PROOF/qr-share1.png") bytes, magic=$hdr (89504e47…=PNG)"
 DECQR=""
-python3 - "$PROOF/qr-share1.png" <<'PY' >/dev/null 2>&1 && DECQR=$(cat "$PROOF/.qrdec" 2>/dev/null)
+python3 -I - "$PROOF/qr-share1.png" <<'PY' >/dev/null 2>&1 && DECQR=$(cat "$PROOF/.qrdec" 2>/dev/null)
 import sys
 try:
     from pyzbar.pyzbar import decode; from PIL import Image
@@ -209,7 +209,7 @@ SOURCE_LEXER="$HERE/../emulator/tests/source_lexing.py"
 # the output, from ceremony.sh having genuinely dropped `-l H`. Reporting the second for the first
 # sends someone to audit print_share() for a change nobody made. Refuse once, for the real reason,
 # and do not run the check that cannot answer.
-if CEREMONY_CODE="$(python3 "$SOURCE_LEXER" shell "$HERE/ceremony.sh")"; then
+if CEREMONY_CODE="$(python3 -E "$SOURCE_LEXER" shell "$HERE/ceremony.sh")"; then
   if grep -qE 'qrencode .*-l H' <<<"$CEREMONY_CODE"; then
     ok "ceremony.sh print_share() requests QR error-correction level H"
   else

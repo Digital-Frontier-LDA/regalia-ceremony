@@ -110,9 +110,9 @@ printf '%s\n' \
   > "$root/licenses/REGALIA-SCRIPTS-NOASSERTION.txt"
 
 ( cd "$root/apt" && dpkg-scanpackages . /dev/null > Packages && gzip -n -9 < Packages > Packages.gz )
-python3 "$root/bundle-tool.py" create "$root" --epoch "$SOURCE_DATE_EPOCH" \
+python3 -E "$root/bundle-tool.py" create "$root" --epoch "$SOURCE_DATE_EPOCH" \
   --source-commit "$source_commit" --builder-image "$BUILDER_IMAGE_DIGEST"
-python3 "$root/bundle-tool.py" verify "$root"
+python3 -E "$root/bundle-tool.py" verify "$root"
 find "$root" -exec touch -h -d "@$SOURCE_DATE_EPOCH" {} +
 
 out="${OUTPUT_DIR:-$REPO/dist/offline-ceremony}"
@@ -122,7 +122,7 @@ tar --sort=name --format=posix --pax-option=delete=atime,delete=ctime \
   --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -C "$work" -cf - "$(basename "$root")" \
   | gzip -n -9 > "$artifact"
 ( cd "$out" && sha256sum "$(basename "$artifact")" > SHA256SUMS )
-python3 "$HERE/bundle-tool.py" release "$artifact" "$out/RELEASE.json" \
+python3 -E "$HERE/bundle-tool.py" release "$artifact" "$out/RELEASE.json" \
   --source-commit "$source_commit" --epoch "$SOURCE_DATE_EPOCH" --snapshot "$DEBIAN_SNAPSHOT"
 
 echo "UNSIGNED BUILD OUTPUT — use sign-release.py; production verification requires the centralized-KMS signature" \

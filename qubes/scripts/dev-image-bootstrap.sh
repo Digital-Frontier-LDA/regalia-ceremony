@@ -112,7 +112,7 @@ fi
 # The three arrays are index-aligned, so an entry is appended to each.
 plist=/etc/libccid_Info.plist
 if [ -w "$plist" ] || [ "$(id -u)" = 0 ]; then
-  python3 - "$plist" <<'PICO'
+  python3 -I - "$plist" <<'PICO'
 import re, sys
 p = sys.argv[1]
 s = open(p).read()
@@ -219,7 +219,7 @@ fi
 grep -q -- '--hash=sha256:' "$tmp/ceremony-req.txt" \
   || { echo "requirements.txt carries no hashes — refusing an unpinned install" >&2; exit 1; }
 rm -rf /opt/dev-bin/regalia-venv
-python3 -m venv /opt/dev-bin/regalia-venv
+python3 -I -m venv /opt/dev-bin/regalia-venv
 /opt/dev-bin/regalia-venv/bin/pip install --quiet --require-hashes -r "$tmp/ceremony-req.txt"
 
 cat >> /etc/profile.d/dev-bin.sh <<PROFILE
@@ -242,7 +242,7 @@ pkg-config --exists libpcsclite || { echo "MISSING: libpcsclite pkg-config (need
 # The PAIR at the same index, for the reason above: 0x2E8A present against another product is not
 # a registered Pico, and a self-check that accepts it declares an image ready that cannot see the
 # card.
-python3 - /etc/libccid_Info.plist <<'PICOCHECK' || missing=1
+python3 -I - /etc/libccid_Info.plist <<'PICOCHECK' || missing=1
 import re, sys
 s = open(sys.argv[1]).read()
 def entries(key):

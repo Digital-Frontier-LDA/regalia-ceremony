@@ -71,7 +71,7 @@ for i in $(seq 1 "$ATTEMPTS"); do
     # repository root — the documented invocation — it pointed one level above the repository, the
     # subprocess produced no JSON, the except printed "0", and the hunt recorded "no physical
     # evidence" for every attempt. A negative result from a command that never ran.
-    phys="$(python3 - "$d/trace.jsonl" "$d/flash-after.bin" "$REPO/tools/hsm-drain-analyzer.py" <<'EOP' 2>/dev/null
+    phys="$(python3 -I - "$d/trace.jsonl" "$d/flash-after.bin" "$REPO/tools/hsm-drain-analyzer.py" <<'EOP' 2>/dev/null
 import json, subprocess, sys, os
 trace, flash, analyzer = sys.argv[1], sys.argv[2], sys.argv[3]
 if not (os.path.exists(trace) and os.path.exists(flash) and os.path.exists(analyzer)):

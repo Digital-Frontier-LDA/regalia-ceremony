@@ -48,7 +48,7 @@ trap 'rm -rf "$W"' EXIT
 printf '%s' "$M" > "$W/m.txt"; chmod 600 "$W/m.txt"
 ( umask 077; head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$W/pw" )
 
-python3 "$SCRIPTS/seed-to-pkcs12.py" --mnemonic-file "$W/m.txt" --password-file "$W/pw" \
+python3 -E "$SCRIPTS/seed-to-pkcs12.py" --mnemonic-file "$W/m.txt" --password-file "$W/pw" \
     --out "$W/f.p12" >/dev/null 2>&1 \
   || { printf 'seed-to-pkcs12.py failed — is the ceremony venv present? (see qubes/requirements.txt)\n' >&2; exit 2; }
 openssl pkcs12 -in "$W/f.p12" -nodes -passin file:"$W/pw" 2>/dev/null \
