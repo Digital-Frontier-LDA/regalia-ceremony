@@ -68,7 +68,13 @@ payload; the recovery key opens one disk.
   PIN card form. That page is sealed in an envelope **of its own**, apart from the servers and apart
   from pages 1 and 2.
 - **Using it spends it.** Once typed at a host outside the ceremony, a rehearsal included, that host
-  gets a new key (`recovery-key.sh --replace`), a new card and a new escrow.
+  gets a new key, a new card and a new escrow, in that order: the archive disc's
+  `pin-escrow.sh --new-recovery-key` prints the new key (it is never invented by hand: the host
+  enrols it on the assumption of 256 random bits); `recovery-key.sh --replace` and `--check` at the
+  host; and only then the escrow, so that the newest verified escrow never holds a key that opens
+  nothing.
+- A hand-made PIN file must hold keys made the same way. The shape check cannot tell a random key
+  from a chosen one.
 
 *Verified by:* `test-step0-generated-credentials.sh` (generated in that format, shown once, distinct
 per host; a copy without dashes or in capitals is refused), `test-ceremony-credential-separation.sh`

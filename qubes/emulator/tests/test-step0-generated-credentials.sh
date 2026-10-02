@@ -141,10 +141,13 @@ ok=1; for t in a b c; do v="$(field luks_${t}_recovery_key "$W")"
   [[ "$v" =~ $RK ]] && grep -qx "DRIVER: shown luks_${t}_recovery_key=$v" <<< "$out" || ok=0; done
 [ "$ok" = 1 ] && P "each host's recovery key is 8 groups of 8 letters from cbdefghijklnrtuv with dashes, stored, and shown once" || F "a disk recovery key is missing, malformed or not shown"
 [ "$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | sort -u | wc -l)" = 3 ] && P "the three hosts get three different keys" || F "two hosts share a recovery key"
-# 256 bits: all sixteen letters turn up across the three keys (192 letters); a generator that drew from
-# fewer symbols, or repeated a group, would not look like this.
+# All sixteen letters turn up across the three keys (192 letters), and no group repeats.
 [ "$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | tr -d '\n-' | fold -w1 | sort -u | wc -l)" = 16 ] \
   && [ "$(field luks_a_recovery_key "$W" | tr '-' '\n' | sort -u | wc -l)" = 8 ] && P "the keys use the whole 16-letter alphabet and no group repeats" || F "the recovery keys do not look random"
+# 256 bits, not 128: each byte gives TWO letters, one per half-byte. A generator that used one
+# half-byte for both would make every pair equal (96 of 96 here); by chance about 6 are.
+pairs="$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | tr -d '\n-' | fold -w2 | awk 'substr($0,1,1)==substr($0,2,1){n++} END{print n+0}')"
+[ "$pairs" -lt 30 ] && P "the two letters of a byte are independent ($pairs of 96 pairs equal; about 6 expected)" || F "the generator's letters are not independent: $pairs of 96 pairs equal"
 grep -q "for copying onto the KMS HOST RECOVERY CARD (page 3)" <<< "$out" && ! grep -E "SHOW the luks_[abc]_recovery_key for copying onto (your PIN card|the KMS HOST CARD)" <<< "$out" >/dev/null \
   && P "each recovery key is revealed for the KMS HOST RECOVERY CARD (page 3), never for another card" || F "a recovery key is revealed for the wrong card"
 grep -q "THE DASHES ARE PART OF THE KEY" <<< "$out" && grep -q "opens that host's disk BY ITSELF" <<< "$out" && grep -q "in its own envelope, apart from the servers and from the other cards" <<< "$out" \

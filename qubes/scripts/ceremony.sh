@@ -1938,7 +1938,8 @@ step_set_pins() {
 #   no space; write each on the KMS HOST CARD. At the host, one wrong attempt blocks it for a day),
 #   luks_{a,b,c}_recovery_key (each KMS host's disk recovery key, in systemd's format: 8 groups of 8
 #   letters from cbdefghijklnrtuv with a dash between groups, lower case; write each on the KMS HOST
-#   RECOVERY CARD. It opens that host's disk by itself)
+#   RECOVERY CARD. It opens that host's disk by itself. NEVER invent one by hand: the host enrols it
+#   on the assumption of 256 random bits. Generate each with: escrow/pin-escrow.sh --new-recovery-key)
 # HSM user PINs are 10-15 digits (a 10-try counter), SO-PINs exactly 16 hex digits.
   #
   # DEVICES A, B AND C ARE THE THREE PRODUCTION NITROKEYS (ADR-0002 D17). The staging Pico is NOT
