@@ -2329,7 +2329,7 @@ step_hsm_import() {
   if [ -n "${hsm_a_user_pin:-}" ]; then
     info "Proving the ESCROWED PIN actually opens this card…"
     local tries_before; tries_before="$(hsm_pin_tries_left 2>/dev/null || echo "?")"
-    if pkcs11-tool --login --pin "$hsm_a_user_pin" --list-objects >/dev/null 2>&1; then
+    if REGALIA_P11_PIN="$hsm_a_user_pin" pkcs11-tool --login --pin env:REGALIA_P11_PIN --list-objects >/dev/null 2>&1; then
       info "   PIN BINDING PROVEN — the PIN going onto metal is the PIN this card answers to."
     else
       local tries_after; tries_after="$(hsm_pin_tries_left 2>/dev/null || echo "?")"

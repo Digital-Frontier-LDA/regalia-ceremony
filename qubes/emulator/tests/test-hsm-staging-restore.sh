@@ -277,5 +277,23 @@ run_restore FAKE_NAMES="$TWO_SWAPPED" FAKE_SERIAL_0=ESP2202E14A FAKE_SERIAL_1=ES
 want "step 1 verifies the posture and the run reaches step 2" 1 "RRC verified OFF"
 want "  (step 2 is where this run stops, on the faked DKEK failure)" 1 "DKEK import failed"
 
+# THE PIN NEVER REACHES argv. The runs above stop at the faked DKEK failure, before the sign check
+# that presents the PIN, so that step is asserted over the script's executable body (the shell
+# lexer drops comments and prose): every pkcs11-tool login uses the env: form, and no --pin "$PIN"
+# survives. A regression to the argv form would otherwise leave this suite green.
+body="$(python3 "$HERE/source_lexing.py" shell "$UNDER_TEST")" || { echo "source lexer failed" >&2; exit 2; }
+n_env="$(grep -c -- '--pin env:REGALIA_P11_PIN' <<< "$body")"
+if [ "$n_env" -ge 2 ] && grep -q 'REGALIA_P11_PIN="\$PIN"' <<< "$body"; then
+  pass=$((pass+1)); printf '  ok   the restore check logs in with --pin env:REGALIA_P11_PIN (%s calls)\n' "$n_env"
+else
+  fail=$((fail+1)); printf '  FAIL the restore check does not use the env: PIN form (%s calls)\n' "$n_env"
+fi
+# (The SO PIN still reaches sc-hsm-tool --import-dkek-share on argv; that needs a pty and is #94.)
+if grep -qE -- '--pin "?\$\{?PIN\b' <<< "$body"; then
+  fail=$((fail+1)); printf '  FAIL the user PIN is passed on argv: %s\n' "$(grep -oE -- '--pin "?\$\{?PIN[^ ]*' <<< "$body" | head -1)"
+else
+  pass=$((pass+1)); printf '  ok   the user PIN is on no pkcs11-tool argv\n'
+fi
+
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
