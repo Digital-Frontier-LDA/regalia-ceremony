@@ -36,7 +36,11 @@ grep -qiE "destroy|shred|burn" <<< "$form" && F "the form tells the operator to 
 grep -qF "KEEP the card after" <<< "$form" && grep -qF "the next PIN escrow asks for every PIN and the escrow MAC key" <<< "$form" && P "page 1 says to keep the card, and why" || F "page 1 does not say to keep the card"
 # Owner, 2026-10-02: the card is kept because it is how the KMS servers are resuscitated.
 grep -qF "It is how a KMS server is BROUGHT BACK" <<< "$form" && grep -qF "the PIN is sealed again from this card" <<< "$form" \
-  && P "page 1 gives the first reason: a server whose TPM no longer releases the PIN is brought back from this card" || F "page 1 does not say the card brings a KMS server back"
+  && P "page 1 gives the first reason: a server whose TPM has lost the sealed PIN is brought back from this card" || F "page 1 does not say the card brings a KMS server back"
+# A TPM in lockout has NOT lost the PIN: sealing it again there would expose the PIN for nothing.
+grep -qF "only in LOCKOUT still holds it: clear the lockout with page 2, do not seal again" <<< "$form" \
+  && P "page 1 sends a TPM lockout to page 2 and says not to seal again" || F "page 1 does not tell a lockout apart from a lost PIN"
+grep -qE "TPM reset or lockout" <<< "$form" && F "page 1 lists a lockout as a reason to seal the PIN again" || P "a lockout is not listed as a reason to seal again"
 grep -qF "It is what clears" <<< "$form" && grep -qF "a server's TPM lockout when that server has to be brought back" <<< "$form" \
   && P "page 2 says the same of the lockout authorizations" || F "page 2 does not say what the values are kept for"
 for paper in letter a4; do python3 "$F_" -o "$T/fit-$paper.ps" --paper "$paper" 2>"$T/fit.err" && P "three HSMs, three YubiKeys and three hosts still fit on $paper with the longer rules" || F "does not fit on $paper: $(cat "$T/fit.err")"; done
