@@ -18,6 +18,11 @@
 #   - every one of the six devices' PINs is typed twice, hidden, and the two agree and have the
 #     device's shape (Nitrokey HSM user PIN 10-15 digits; YubiKey PIV PIN 6-8 printable single-byte
 #     characters, the credential contract of qubes/CREDENTIAL-SEPARATION.md);
+#   - every one of the three KMS hosts' TPM lockout authorizations is typed twice too, from the KMS
+#     HOST CARD (16-32 printable characters, no space). They are asked for at EVERY escrow, changed or
+#     not, so that the newest escrow is always whole: recovery reads one file, and a value left out
+#     here would send it back to the ceremony's copy, which at the host is a WRONG attempt if the
+#     value changed since, and one wrong attempt blocks that TPM's lockout hierarchy for a day;
 # and it:
 #   - keeps the plaintext in tmpfs (/dev/shm) only, removed after encryption, and stops on any write
 #     failure (a full tmpfs must not yield a truncated escrow);
@@ -30,8 +35,8 @@
 # files test-pins-NNNN.age, which recovery never selects.
 set -uo pipefail
 die(){ printf 'pin-escrow: %s\n' "$*" >&2; exit 1; }
-[ $# -eq 0 ] || { sed -n '2,25p' "$0"; [ "$1" = -h ] || [ "$1" = --help ]; exit; }
-DEVICES="hsm_a hsm_b hsm_c yubikey_a yubikey_b yubikey_c"; PREFIX=pins
+[ $# -eq 0 ] || { sed -n '2,30p' "$0"; [ "$1" = -h ] || [ "$1" = --help ]; exit; }
+DEVICES="hsm_a hsm_b hsm_c yubikey_a yubikey_b yubikey_c tpm_a tpm_b tpm_c"; PREFIX=pins
 if [ -n "${PIN_ESCROW_TEST_DEVICES:-}" ]; then
   DEVICES="$PIN_ESCROW_TEST_DEVICES"; PREFIX=test-pins
   printf 'pin-escrow: TEST MODE (%s): writes test-pins-NNNN.age, which recovery ignores\n' "$DEVICES" >&2
@@ -73,13 +78,15 @@ kcv="$(printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" kcv)" || die "th
 declare -A pin
 for d in $DEVICES; do
   case "$d" in
-    hsm_[abc]) re='^[0-9]{10,15}$'; what="10-15 digits";;
-    yubikey_[abc]) re='^[[:print:]]{6,8}$'; what="6-8 printable single-byte characters";;
-    *) die "unknown device id '$d' (hsm_a..c, yubikey_a..c)";;
+    hsm_[abc]) re='^[0-9]{10,15}$'; what="10-15 digits"; kind="PIN"; from="the PIN card";;
+    yubikey_[abc]) re='^[[:print:]]{6,8}$'; what="6-8 printable single-byte characters"; kind="PIN"; from="the PIN card";;
+    # A KMS host's TPM lockout authorization: what regalia-kms tpm-lockout.sh --set accepts.
+    tpm_[abc]) re='^[[:graph:]]{16,32}$'; what="16-32 printable characters with no space"; kind="lockout authorization"; from="the KMS host card";;
+    *) die "unknown device id '$d' (hsm_a..c, yubikey_a..c, tpm_a..c)";;
   esac
-  a="$(ask "$d PIN, from the PIN card: ")"; b="$(ask "$d PIN again: ")"
+  a="$(ask "$d $kind, from $from: ")"; b="$(ask "$d $kind again: ")"
   [ "$a" = "$b" ] || die "the two entries for $d differ; nothing written"
-  LC_ALL=C; [[ "$a" =~ $re ]] || die "the $d PIN must be $what; nothing written"; unset LC_ALL
+  LC_ALL=C; [[ "$a" =~ $re ]] || die "the $d $kind must be $what; nothing written"; unset LC_ALL
   pin[$d]="$a"; a=""; b=""
 done
 
@@ -106,11 +113,11 @@ fi
 
 tmp="$(mktemp /dev/shm/pin-escrow.XXXXXX)" || die "cannot create a file in /dev/shm"
 trap 'rm -f "$tmp"' EXIT
-( printf '# PIN escrow %s, written %s by tools/pin-escrow.sh; one device=PIN per line\n' "$next" "$(date -u +%FT%TZ)" \
+( printf '# PIN escrow %s, written %s by tools/pin-escrow.sh; one device=PIN per line, and tpm_<host>=<TPM lockout authorization>\n' "$next" "$(date -u +%FT%TZ)" \
   && for d in $DEVICES; do printf '%s=%s\n' "$d" "${pin[$d]}" || exit 1; done ) > "$tmp" \
   || die "could not write the plaintext to /dev/shm (full?); nothing written"
-n="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"
-[ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") PINs; nothing written"
+n="$(grep -cE '^(hsm|yubikey|tpm)_[abc]=' "$tmp")"
+[ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") values; nothing written"
 "$AGE" -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"
 printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \

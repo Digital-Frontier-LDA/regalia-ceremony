@@ -93,15 +93,22 @@ git -C "$T/co" init -q; printf 'age1pq1stubrecipient\n' > "$T/co/escrow/breakgla
 printf '%s\n' "$k1" > "$T/co/escrow/escrow-mac.kcv"
 fp="$(sha256sum "$T/co/escrow/breakglass.recipient" | cut -c1-16)"
 six="7310048261 7310048261 8420159372 8420159372 9531260483 9531260483 90817263 90817263 a1b2c3 a1b2c3 72635445 72635445"
+# ...and each KMS host's TPM lockout authorization, twice (regalia-ceremony#92): 20-character
+# placeholders built at runtime, so no secret-shaped literal sits in the repository.
+ta="$(printf 'QA%.0s' {1..10})"; tb="$(printf 'QB%.0s' {1..10})"; tc="$(printf 'QC%.0s' {1..10})"
+pins_only="$six"; six="$six $ta $ta $tb $tb $tc $tc"
 printf 'planted' > "$T/co/escrow/pins-0001.age"   # a squatter on the next name, written without the key
 before="$(ls /dev/shm)"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
 grep -q "exists but does not verify" <<< "$out" && ! grep -q planted "$T/co/escrow/pins-0001.age" \
   && P "an unverified file on the next name is replaced, and reported" || F "squatter: $out"
 [ "$rc" = 0 ] && [ -s "$T/co/escrow/pins-0001.age" ] && [ -s "$T/co/escrow/pins-0001.age.mac" ] \
-  && P "six devices escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
+  && P "six devices and three TPM lockout authorizations escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
 [ "$(grep -cE '^(hsm|yubikey)_[abc]=' "$T/co/escrow/pins-0001.age")" = 6 ] && grep -qx 'yubikey_b=a1b2c3' "$T/co/escrow/pins-0001.age" \
   && P "the plaintext handed to age holds exactly the six device=PIN lines" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
+[ "$(grep -cE '^tpm_[abc]=' "$T/co/escrow/pins-0001.age")" = 3 ] && grep -qx "tpm_a=$ta" "$T/co/escrow/pins-0001.age" && grep -qx "tpm_c=$tc" "$T/co/escrow/pins-0001.age" \
+  && P "and exactly the three tpm_<host>=<lockout authorization> lines" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
+grep -qF "$ta" <<< "$out" && F "a TPM lockout authorization appeared in the tool's output" || P "no TPM lockout authorization appears in the tool's output"
 git -C "$T/co" add -A >/dev/null; git -C "$T/co" -c user.name=t -c user.email=t@t commit -qm e >/dev/null
 rm -f "$T/out"; [ "$(python3 "$MAC" select "$T/co" "$T/out" <<< "$KEY" 2>/dev/null)" = pins-0001.age ] \
   && P "its MAC verifies with the key" || F "the producer's MAC does not verify"
@@ -128,12 +135,26 @@ out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" 7310048261 7310048262 | PATH="$T
 [ "$rc" != 0 ] && grep -q differ <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "mismatched entries: refused, nothing written" || F "rc=$rc: $out"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$(printf '11%.0s' {1..16})" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q "does not match" <<< "$out" && P "a key that does not match the KCV: refused" || F "rc=$rc: $out"
+# The TPM lockout authorizations are required at every escrow, and have a shape.
+escrow_with(){ (cd "$T/co" && printf '%s\n' "$fp" "$KEY" $pins_only "$@" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1); }
+out="$(escrow_with)"; rc=$?
+[ "$rc" != 0 ] && grep -q "tpm_a lockout authorization must be 16-32" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+  && P "PINs with no TPM lockout authorization: refused, nothing written (the newest escrow must be whole)" || F "rc=$rc: $out"
+out="$(escrow_with "$ta" "$ta" "$tb" "$tb" SHORTVALUE SHORTVALUE)"; rc=$?
+[ "$rc" != 0 ] && grep -q "tpm_c lockout authorization must be 16-32" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "a 10-character lockout authorization: refused, nothing written" || F "rc=$rc: $out"
+out="$(escrow_with "$ta" "$ta" "QBQB QBQB QBQB QBQB" "QBQB QBQB QBQB QBQB" "$tc" "$tc")"; rc=$?
+[ "$rc" != 0 ] && grep -q "tpm_b lockout authorization must be 16-32 printable characters with no space" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+  && P "a lockout authorization written in groups (with spaces): refused, nothing written" || F "rc=$rc: $out"
+out="$(escrow_with "$ta" "$tb")"; rc=$?
+[ "$rc" != 0 ] && grep -q "two entries for tpm_a differ" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "two different entries for a lockout authorization: refused" || F "rc=$rc: $out"
 
 hdr "the hand-edited (e) step 0 template names the escrow MAC key"
 body="$( # shellcheck disable=SC1091
   source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; declare -f step_set_pins )"
 grep -q 'escrow_mac_key (32 hex' <<< "$body" \
   && P "the template lists escrow_mac_key and how to make it" || F "the manual template omits escrow_mac_key"
+grep -q 'tpm_{a,b,c}_lockout_auth' <<< "$body" && grep -q 'one wrong attempt blocks it for a day' <<< "$body" \
+  && P "the template lists the TPM lockout authorizations and the cost of a wrong attempt" || F "the manual template omits the TPM lockout authorizations"
 
 hdr "the archive step refuses a disc without the escrow tools"
 mkdir -p "$T/scripts"; cp "$SCRIPTS"/ceremony.sh "$T/scripts/"

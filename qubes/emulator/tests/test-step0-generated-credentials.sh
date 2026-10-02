@@ -87,7 +87,14 @@ field(){ sed -n "s/^$1=//p" "$2.kept"; }
 hdr "generate: recovery credentials generated and never shown; day-to-day PINs shown once, typed back"
 W="$T/gen"; mkdir -p "$W"; out="$(drive gen-ok "$W")"
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds (PROD mode)" || F "step 0 failed: $(tail -15 <<< "$out")"
-[ "$(grep -c '^DRIVER: shown' <<< "$out")" = 7 ] && P "six day-to-day PINs and the escrow MAC key shown (HSM A-C, YubiKey A-C)" || F "shown: $(grep DRIVER <<< "$out")"
+[ "$(grep -c '^DRIVER: shown' <<< "$out")" = 10 ] && P "six day-to-day PINs, the escrow MAC key and three TPM lockout authorizations shown" || F "shown: $(grep DRIVER <<< "$out")"
+# Each KMS host's TPM lockout authorization (regalia-ceremony#92): generated, 20 characters a person
+# can copy by hand (capitals and digits, no 0 1 I L O), stored, shown once, and its own value.
+ok=1; for t in a b c; do v="$(field tpm_${t}_lockout_auth "$W")"
+  [[ "$v" =~ ^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{20}$ ]] && grep -qx "DRIVER: shown tpm_${t}_lockout_auth=$v" <<< "$out" || ok=0; done
+[ "$ok" = 1 ] && P "each KMS host's TPM lockout authorization is generated (20 unambiguous characters), stored, and shown once" || F "a TPM lockout authorization is missing, malformed or not shown"
+[ "$(for t in a b c; do field tpm_${t}_lockout_auth "$W"; done | sort -u | wc -l)" = 3 ] && P "the three hosts get three different values" || F "two hosts share a lockout authorization"
+grep -q "ONE wrong attempt" <<< "$out" && grep -q "KMS HOST CARD" <<< "$out" && P "the operator is told where to write it, and that one wrong attempt at the host blocks it for a day" || F "no warning about a wrong attempt"
 [[ "$(field escrow_mac_key "$W")" =~ ^[0-9A-F]{32}$ ]] && grep -qx "DRIVER: shown escrow_mac_key=$(field escrow_mac_key "$W")" <<< "$out" \
   && P "the escrow MAC key is generated (32 hex), stored, and shown once for the PIN card" || F "escrow MAC key missing, malformed or not shown"
 [ -s "$W.kcv" ] && [ "$(cat "$W.kcv")" = "$(python3 "$SCRIPTS/escrow/pin_escrow_mac.py" kcv <<< "$(field escrow_mac_key "$W")")" ] \
@@ -118,7 +125,8 @@ W="$T/typed"; mkdir -p "$W"; out="$(drive typed "$W")"
 grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed path failed: $(tail -10 <<< "$out")"
 [ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_c_user_pin "$W")" = 4096128803 ] && [ "$(field yubikey_a_piv_pin "$W")" = 90817263 ] && [ "$(field yubikey_c_piv_pin "$W")" = 27481059 ] && P "typed PINs stored" || F "typed PINs not stored"
 [[ "$(field hsm_c_so_pin "$W")" =~ ^[0-9A-F]{16}$ ]] && P "SO-PINs still generated" || F "SO-PIN not generated"
-grep '^DRIVER: shown' <<< "$out" | grep -qv '^DRIVER: shown escrow_mac_key=' && F "a typed PIN was displayed" || P "typed PINs are not displayed (only the generated escrow MAC key is)"
+grep '^DRIVER: shown' <<< "$out" | grep -qvE '^DRIVER: shown (escrow_mac_key|tpm_[abc]_lockout_auth)=' && F "a typed PIN was displayed" || P "typed PINs are not displayed (only the generated escrow MAC key and TPM lockout authorizations are)"
+[[ "$(field tpm_b_lockout_auth "$W")" =~ ^[ABCDEFGHJKMNPQRSTUVWXYZ23456789]{20}$ ]] && P "TPM lockout authorizations still generated" || F "no TPM lockout authorization in typed mode"
 grep -qE "7310048261|5512096374|4096128803|90817263|63517240|27481059" <<< "$out" && F "a typed PIN was echoed" || P "typed PINs not echoed"
 grep -q "print the blank PIN card yourself\|blank PIN card sent" <<< "$out" && P "the blank PIN card is offered in typed mode too" || F "no PIN card in typed mode"
 
@@ -159,7 +167,9 @@ W="$T/file"; mkdir -p "$W"
   printf 'yubikey_a_piv_pin=161803\nyubikey_a_piv_puk=17320508\nyubikey_a_mgmt_key=%s\n' "$(printf 'AB%.0s' {1..24})"
   printf 'yubikey_b_piv_pin=223606\nyubikey_b_piv_puk=24494897\nyubikey_b_mgmt_key=%s\n' "$(printf 'CD%.0s' {1..24})"
   printf 'yubikey_c_piv_pin=264575\nyubikey_c_piv_puk=28284271\nyubikey_c_mgmt_key=%s\n' "$(printf 'EF%.0s' {1..24})"
-  printf 'escrow_mac_key=%s\n' "$(printf 'E5%.0s' {1..16})"; } > "$W/pins.env"   # a 48-hex placeholder, built so no key-shaped literal sits in the repo
+  printf 'escrow_mac_key=%s\n' "$(printf 'E5%.0s' {1..16})"
+  # 20-character placeholders for the three TPM lockout authorizations, built at runtime as well
+  for t in a b c; do printf 'tpm_%s_lockout_auth=%s\n' "$t" "$(printf "Q${t^^}%.0s" {1..10})"; done; } > "$W/pins.env"   # a 48-hex placeholder, built so no key-shaped literal sits in the repo
 # shellcheck disable=SC2034  # WORK and CEREMONY_MODE are read by the sourced step_set_pins
 out="$( ( source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; HERE="$SCRIPTS"; WORK="$W"; CEREMONY_MODE=prod; step_set_pins </dev/null; echo "RC=$?" ) 2>&1 )"
 grep -q "RC=0" <<< "$out" && ! grep -q "generate the credentials" <<< "$out" && P "loaded without asking to generate" || F "file path changed: $(tail -5 <<< "$out")"

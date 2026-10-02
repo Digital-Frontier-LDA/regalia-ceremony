@@ -10,6 +10,10 @@ HSM user PIN to that site's one-time TPM sealing (regalia-kms deploy/seal-hsm-pi
 YubiKey PIN until it is memorised. The recovery credentials (SO-PINs, PUK, management key) are NEVER
 written here: they exist only in the encrypted tier-0 payload.
 
+PAGE 2, THE KMS HOST CARD (--hosts, default a,b,c): a row per KMS host for its TPM lockout
+authorization, which step 0 also generates and shows once. It is typed at that host's console when
+its TPM is commissioned (regalia-kms deploy/baremetal/tpm-lockout.sh --set).
+
 The printer only ever sees this blank form: device names, empty digit boxes and the rules. The PINs,
 and the serial numbers too, are written by hand (ADR-0002 D12).
 
@@ -35,16 +39,32 @@ RULES = [
 ]
 
 
+# Page 2. What step 0 generates for each KMS host's TPM: 20 characters from capitals and digits with
+# no 0, 1, I, L or O (ceremony.sh gen_secret paper:20).
+HOST_AUTH_CHARS = 20
+HOST_RULES = [
+    "RULES FOR THIS PAGE",
+    "- One row per KMS host. Each value is typed ONCE at that host's console, when its TPM is",
+    "  commissioned (regalia-kms tpm-lockout.sh --set). Whoever holds it can change that TPM's lockout",
+    "  settings or clear its failed-try counter.",
+    "- Copy it EXACTLY and never guess at the host: after ONE wrong attempt the TPM refuses the right",
+    "  value too until its lockout-recovery time has passed (24 hours under the KMS policy).",
+    "- It never contains 0, 1, I, L or O: a character that looks like one of those is a copying error.",
+    "- It is NOT the backup: each value is also in the encrypted recovery payload and in every PIN",
+    "  escrow. Seal this page with the PIN card, and destroy it the same way once every host is done.",
+]
+
+
 def esc(s):
     return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
 
 
-def emit(hsms, yubikeys, hsm_digits, yk_digits, paper):
+def emit(hsms, yubikeys, hsm_digits, yk_digits, paper, hosts=()):
     W, H = PAPER[paper]
     m = 42.0
     out = ["%!PS-Adobe-3.0", "%%%%BoundingBox: 0 0 %d %d" % (W, H),
            "%%%%DocumentMedia: %s %d %d 0 () ()" % (paper, round(W), round(H)),
-           "%%Pages: 1", "%%EndComments",
+           "%%%%Pages: %d" % (2 if hosts else 1), "%%EndComments",
            "%%BeginSetup", "<< /PageSize [%.2f %.2f] >> setpagedevice" % (W, H), "%%EndSetup",
            "%%Page: 1 1", "0.8 setlinewidth"]
 
@@ -108,7 +128,43 @@ def emit(hsms, yubikeys, hsm_digits, yk_digits, paper):
     for ln in RULES:
         text(m + 8, yy, ln, "Helvetica-Bold" if ln.isupper() else "Helvetica", 8.5)
         yy -= lh
-    out += ["showpage", "%%EOF"]
+    out.append("showpage")
+
+    # Page 2, the KMS HOST CARD: each KMS host's TPM lockout authorization (step 0 shows each once).
+    # A page of its own: the values are not PINs, they go to a host's console once, and the rule that
+    # matters most for them (never guess at the host) belongs beside them.
+    if hosts:
+        out += ["%%Page: 2 2", "0.8 setlinewidth"]
+        y = H - m - 6
+        text(m, y, "KMS HOST CARD - WRITE BY HAND, IN PEN", "Helvetica-Bold", 15)
+        y -= 18
+        text(m, y, "TPM lockout authorizations only. This printed page held no secret when printed.", "Helvetica", 9)
+        y -= 16
+        text(m, y, "Date:", "Helvetica-Bold", 9)
+        line(m + 32, y - 2, m + 180)
+        text(m + 200, y, "Written by (initials):", "Helvetica-Bold", 9)
+        line(m + 305, y - 2, W - m)
+        y -= 26
+        for host in hosts:
+            text(m, y, "KMS host %s - TPM lockout authorization" % host.upper(), "Helvetica-Bold", 10.5)
+            text(m + 262, y, "Server serial:", "Helvetica-Bold", 9)
+            line(m + 325, y - 2, W - m)
+            y -= 28
+            for i in range(HOST_AUTH_CHARS):
+                box(m + i * (cell + 4), y, cell, 24)
+            y -= 14
+            text(m, y, "%d characters, capitals and digits. Typed back and matched: [  ]" % HOST_AUTH_CHARS, "Helvetica", 9)
+            y -= 22
+        ib_h = lh * len(HOST_RULES) + 12
+        if y < m + ib_h + 8:
+            raise ValueError("%d host rows do not fit above the rules on %s paper" % (len(hosts), paper))
+        box(m, m, W - 2 * m, ib_h)
+        yy = m + ib_h - 14
+        for ln in HOST_RULES:
+            text(m + 8, yy, ln, "Helvetica-Bold" if ln.isupper() else "Helvetica", 8.5)
+            yy -= lh
+        out.append("showpage")
+    out.append("%%EOF")
     return "\n".join(out) + "\n"
 
 
@@ -117,6 +173,8 @@ def main():
     ap.add_argument("-o", "--out", required=True)
     ap.add_argument("--hsms", default="a,b,c", help="HSM letters, comma separated (default a,b,c)")
     ap.add_argument("--yubikeys", default="a,b,c", help="YubiKey letters, comma separated (default a,b,c)")
+    ap.add_argument("--hosts", default="a,b,c", help="KMS host letters for page 2, the TPM lockout "
+                    "authorizations (default a,b,c; empty for no second page)")
     ap.add_argument("--hsm-digits", type=int, default=10, help="HSM user PIN length (default 10)")
     ap.add_argument("--yubikey-digits", type=int, default=8, help="YubiKey PIN length (default 8)")
     ap.add_argument("--paper", choices=list(PAPER), default="letter")
@@ -126,10 +184,13 @@ def main():
     for name, lst in (("--hsms", hsms), ("--yubikeys", yubikeys)):
         if not lst or any(len(x) != 1 or not x.isalpha() for x in lst) or len(lst) > 3:
             sys.exit("pin-card-form: %s is 1-3 single letters, e.g. a,b,c" % name)
+    hosts = [h for h in a.hosts.split(",") if h]
+    if any(len(x) != 1 or not x.isalpha() for x in hosts) or len(hosts) > 3:
+        sys.exit("pin-card-form: --hosts is up to 3 single letters, e.g. a,b,c")
     if not 6 <= a.hsm_digits <= 16 or not 6 <= a.yubikey_digits <= 8:
         sys.exit("pin-card-form: HSM PINs are 6-16 digits, a YubiKey PIN 6-8")
     try:
-        page = emit(hsms, yubikeys, a.hsm_digits, a.yubikey_digits, a.paper)
+        page = emit(hsms, yubikeys, a.hsm_digits, a.yubikey_digits, a.paper, hosts)
     except ValueError as exc:
         sys.exit("pin-card-form: %s; nothing written" % exc)
     with open(a.out, "w") as fh:

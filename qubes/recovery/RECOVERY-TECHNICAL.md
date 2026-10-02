@@ -224,6 +224,13 @@ case $? in
 esac
 ```
 
+The escrow also holds each KMS host's **TPM lockout authorization**, as `tpm_a=`, `tpm_b=` and
+`tpm_c=` lines (the payload has them as `tpm_{a,b,c}_lockout_auth`). The same rule applies: the newest
+verified escrow, not the payload. It matters more here than for a PIN: typed at a host, a stale value
+is a **wrong attempt**, and after one wrong attempt that TPM refuses the right value too for its
+lockout-recovery time (24 hours under the KMS policy). An escrow written before these lines existed
+has none; then, and only then, the payload's values are the ones to use.
+
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no
 escrow verifies: then use the payload's PINs. Any other failure (a malformed key, git, a full tmpfs)
