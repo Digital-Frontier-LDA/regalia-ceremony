@@ -40,6 +40,7 @@ for t in pkcs11-tool sc-hsm-tool pkcs15-tool opensc-tool opensc-explorer scriptr
 #!/usr/bin/env bash
 { printf 'ARGV %s' "$t"; printf ' %s' "\$@"; printf '\n'
   for v in REGALIA_PIN REGALIA_SO_PIN REGALIA_NEW_PIN REGALIA_DKEK_PW; do [ -n "\${!v:-}" ] && printf 'ENV %s=%s\n' "\$v" "\${!v}"; done
+  for v in HSM_USER_PIN HSM_SO_PIN; do [ -n "\${!v:-}" ] && printf 'INHERITED %s\n' "\$v"; done
   for a in "\$@"; do case "\$a" in env:*) n="\${a#env:}"; [ -n "\${!n:-}" ] || printf 'MISSING %s\n' "\$n";; esac; done; } >> "$T/calls"
 case "$t \$*" in
   pkcs11-tool*--list-slots*|pkcs11-tool*\ -L*)
@@ -91,7 +92,14 @@ for want in "REGALIA_PIN=$PIN_A" "REGALIA_PIN=$PIN_B" "REGALIA_SO_PIN=$SO_PIN"; 
 done
 missing="$(grep '^MISSING ' "$calls" | sort -u)"
 [ -z "$missing" ] && P "no call named a variable that was empty (the real tool would have prompted)" || F "env:NAME given with NAME empty: $missing"
-grep -qF "$PIN_A" <<< "$out" || grep -qF "$PIN_B" <<< "$out" || grep -qF "$SO_PIN" <<< "$out" && F "a PIN appears in the drill's own output" || P "no PIN appears in the drill's output either"
+shown=""
+while IFS= read -r secret; do
+  [ -n "$secret" ] && grep -qF -- "$secret" <<< "$out" && shown="$shown [a ${#secret}-character secret]"
+done <<< "$PIN_A"$'\n'"$PIN_B"$'\n'"$SO_PIN"$'\n'"$dkpw"
+[ -z "$shown" ] && P "no PIN, SO-PIN or generated DKEK password appears in the drill's output either" || F "a secret appears in the drill's own output:$shown"
+# The instrument: the same loop sees a generated DKEK password when it IS in the output.
+first_pw="$(head -1 <<< "$dkpw")"
+[ -n "$first_pw" ] && grep -qF -- "$first_pw" <<< "password: $first_pw" && P "the output check does look for the generated DKEK passwords" || F "no DKEK password to look for"
 
 hdr "2  the instrument: a PIN on a command line is seen"
 printf 'ARGV pkcs11-tool --module m --login --pin %s --list-objects\n' "$PIN_A" > "$T/planted"
@@ -162,7 +170,8 @@ out="$(env HSM_USER_PIN="$PIN_A" HSM_SO_PIN="$SO_PIN" PATH="$T/bin:$PATH" HSM_PK
         --provision --i-understand-this-wipes-the-card < /dev/null 2>&1)"
 grep -q -- "^ARGV sc-hsm-tool .*--initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN" "$T/calls" && [ -z "$(leaks "$T/calls" "$PIN_A" "$SO_PIN")" ] \
   && grep -qxF "ENV REGALIA_PIN=$PIN_A" "$T/calls" && grep -qxF "ENV REGALIA_SO_PIN=$SO_PIN" "$T/calls" \
-  && P "with HSM_USER_PIN and HSM_SO_PIN set it initialises, both delivered in the environment, neither in any argv" \
+  && ! grep -q '^INHERITED ' "$T/calls" \
+  && P "with HSM_USER_PIN and HSM_SO_PIN set it initialises, both delivered in the environment, neither in any argv, and no child inherits the source variables" \
   || F "provisioning from the environment: $(grep -c '^ARGV' "$T/calls") calls, leaks: $(leaks "$T/calls" "$PIN_A" "$SO_PIN"); $(tail -2 <<< "$out")"
 
 echo; echo "test-no-pin-on-argv: $pass passed, $fail failed"
