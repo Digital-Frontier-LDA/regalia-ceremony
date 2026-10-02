@@ -28,6 +28,18 @@
 #
 # Each sample costs ~23s, almost all of it the PBKDF: budget 20 samples per 8 minutes.
 set -uo pipefail
+# ASCII RANGES. A check here that says [0-9] means ten digits, and [a-z] twenty-six letters. In a
+# UTF-8 locale bash matches a bracket range by the locale's collation instead: [0-9] also takes
+# full-width and Arabic-Indic digits, [a-z0-9] takes accented letters, and a negated range such as
+# *[!0-9]* no longer catches them (measured: bash 5.2, glibc 2.41, en_US.UTF-8). Only the collation is
+# pinned, so text stays UTF-8 and lengths are still counted in characters. LC_ALL overrides
+# LC_COLLATE, so it is moved away first, into every other category it was deciding.
+if [ -n "${LC_ALL:-}" ]; then
+  for _lc in LANG LC_CTYPE LC_NUMERIC LC_TIME LC_MONETARY LC_MESSAGES LC_PAPER LC_NAME LC_ADDRESS \
+             LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION; do export "$_lc=$LC_ALL"; done
+  unset LC_ALL _lc
+fi
+export LC_COLLATE=C
 
 # HSM_PROBE_REPO lets a frozen copy of this script (one run from outside the tree, so that editing
 # the original mid-run cannot corrupt the running instance) still find the resolver it sources.
