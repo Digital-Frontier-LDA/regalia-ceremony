@@ -23,6 +23,14 @@
 # One failure anywhere rejects the unit. The defect is intermittent, so a PASS is evidence and not
 # proof. That is why the counts default well above where the bad unit failed.
 set -euo pipefail
+# ASCII RANGES. A check here that says [0-9] means ten digits, and [a-z] twenty-six letters. In a
+# UTF-8 locale bash matches a bracket range by the locale's collation instead: [0-9] also takes
+# full-width and Arabic-Indic digits, [a-z0-9] takes accented letters, and a negated range such as
+# *[!0-9]* no longer catches them (measured: bash 5.2, glibc 2.41, en_US.UTF-8). Only the collation is
+# pinned, so text stays UTF-8 and lengths are still counted in characters. LC_ALL overrides
+# LC_COLLATE, so it is moved into LANG and LC_CTYPE first.
+if [ -n "${LC_ALL:-}" ]; then export LANG="$LC_ALL" LC_CTYPE="$LC_ALL"; unset LC_ALL; fi
+export LC_COLLATE=C
 # Tests point this at a fake sysfs tree; on a real host it is always the kernel's.
 USB_DEVICES="${NITROKEY_USB_DEVICES:-/sys/bus/usb/devices}"
 ENUMS=10 APDUS=2000 USBPATH=""

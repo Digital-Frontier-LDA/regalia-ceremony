@@ -45,6 +45,14 @@
 # that returns 0 because a tool was missing is worse than no script: it certifies nothing while
 # looking like it certified everything.
 set -uo pipefail
+# ASCII RANGES. A check here that says [0-9] means ten digits, and [a-z] twenty-six letters. In a
+# UTF-8 locale bash matches a bracket range by the locale's collation instead: [0-9] also takes
+# full-width and Arabic-Indic digits, [a-z0-9] takes accented letters, and a negated range such as
+# *[!0-9]* no longer catches them (measured: bash 5.2, glibc 2.41, en_US.UTF-8). Only the collation is
+# pinned, so text stays UTF-8 and lengths are still counted in characters. LC_ALL overrides
+# LC_COLLATE, so it is moved into LANG and LC_CTYPE first.
+if [ -n "${LC_ALL:-}" ]; then export LANG="$LC_ALL" LC_CTYPE="$LC_ALL"; unset LC_ALL; fi
+export LC_COLLATE=C
 
 P11="${HSM_PKCS11_MODULE:-/usr/lib/opensc-pkcs11.so}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

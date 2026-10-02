@@ -20,6 +20,14 @@
 # THE PIN NEVER REACHES argv, for the reason hsm-init-hardened.sh gives: the APDUs go to
 # opensc-explorer on stdin, and the child runs without the PIN in its environment.
 set -uo pipefail
+# ASCII RANGES. A check here that says [0-9] means ten digits, and [a-z] twenty-six letters. In a
+# UTF-8 locale bash matches a bracket range by the locale's collation instead: [0-9] also takes
+# full-width and Arabic-Indic digits, [a-z0-9] takes accented letters, and a negated range such as
+# *[!0-9]* no longer catches them (measured: bash 5.2, glibc 2.41, en_US.UTF-8). Only the collation is
+# pinned, so text stays UTF-8 and lengths are still counted in characters. LC_ALL overrides
+# LC_COLLATE, so it is moved into LANG and LC_CTYPE first.
+if [ -n "${LC_ALL:-}" ]; then export LANG="$LC_ALL" LC_CTYPE="$LC_ALL"; unset LC_ALL; fi
+export LC_COLLATE=C
 
 READER="" ; KEY_ID="" ; BLOB="" ; LABEL="" ; KEY_SIZE="256"
 AID="E82B0601040181C31F0201"
