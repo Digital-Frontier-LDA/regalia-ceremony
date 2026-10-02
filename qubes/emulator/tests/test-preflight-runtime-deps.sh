@@ -35,12 +35,17 @@ done
 # fails to import). Any other invocation is a no-op success.
 cat > "$SBOX/python3" <<'PY'
 #!/usr/bin/env bash
-# emulate `python3 -c '...'`: fail if the snippet imports the "missing" module
-if [ "${1:-}" = "-c" ]; then
-  case "$2" in
-    *import*"${EMU_PY_MISSING:-__none__}"*) exit 1;;
-  esac
-fi
+# emulate `python3 [-I] -c '...'`: fail if the snippet imports the "missing" module. The program is
+# the argument after -c, wherever -c stands (the scripts pass -I before it: isolated mode).
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-c" ]; then
+    case "${2:-}" in
+      *import*"${EMU_PY_MISSING:-__none__}"*) exit 1;;
+    esac
+    break
+  fi
+  shift
+done
 exit 0
 PY
 chmod +x "$SBOX/python3"

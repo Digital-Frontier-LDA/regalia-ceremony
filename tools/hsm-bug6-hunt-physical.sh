@@ -76,7 +76,7 @@ import json, subprocess, sys, os
 trace, flash, analyzer = sys.argv[1], sys.argv[2], sys.argv[3]
 if not (os.path.exists(trace) and os.path.exists(flash) and os.path.exists(analyzer)):
     print("0"); raise SystemExit
-cmd = [sys.executable, analyzer, trace, "--post-flash", flash,
+cmd = [sys.executable, "-E", analyzer, trace, "--post-flash", flash,
        "--flash-base", os.environ.get("HSM_FS_DUMP_BASE", "0x103f0000"), "--json"]
 try:
     d = json.loads(subprocess.run(cmd, capture_output=True, text=True, timeout=120).stdout)

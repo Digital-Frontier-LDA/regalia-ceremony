@@ -31,10 +31,34 @@ files = subprocess.run(["git", "ls-files", "*.sh"], capture_output=True, text=Tr
 # An interpreter is `python3`, or, AT THE START OF A COMMAND, a quoted variable with one of the names
 # these scripts use for one ("$py", "$PYBIN", "$PYTHON"...). A variable passed as an argument, or one
 # that merely contains those letters ("$copyright"), is not an interpreter being run.
-INTERP = (r'(?:(?<![\w./-])python3|(?:^|[;&|({!]|\$\(|\bthen\b|\bdo\b|\bif\b|\belse\b)\s*'
-          r'"\$\{?(?:py|PY|_py|PYBIN|PYTHON|PYTHON3|python)\}?")')
-cwd_first = re.compile(INTERP + r'\s+(?!(-[A-Za-z]*I[A-Za-z]*\s))((-[A-Za-z]+\s+)*)(-c\b|-\s|-$|-m\b)')
-script = re.compile(INTERP + r'\s+(?!(-[A-Za-z]*[IE][A-Za-z]*\s))(?=(["\']?\$[\w{(]|["\']?[\w./-]*\.py\b))')
+INTERP = re.compile(r'(?:(?<![\w./-])python3(?![\w.-])|(?:^|[;&|({!]|\$\(|\bthen\b|\bdo\b|\bif\b|\belse\b)\s*'
+                    r'"\$\{?(?:py|PY|_py|PYBIN|PYTHON|PYTHON3|python)\}?")')
+TAKES_VALUE = ("-X", "-W")      # options whose value is the NEXT word
+
+
+def judge(rest):
+    """What follows the interpreter on the line -> a finding, or None. The options are PARSED: any
+    number of them, bundled (-uB) or with a value of their own (-X utf8), may stand before the program."""
+    words = rest.split()
+    flags, i = "", 0
+    while i < len(words) and words[i].startswith("-") and words[i] not in ("-c", "-m", "-") and not words[i].startswith("--"):
+        flags += words[i][1:]
+        i += 2 if words[i] in TAKES_VALUE else 1
+    if i >= len(words):
+        return None
+    word = words[i]
+    if word in ("-c", "-m", "-") or word.startswith("-c") and len(word) > 2:
+        return None if "I" in flags else "a program on the command line, on standard input or by module name, without -I"
+    if re.match(r'^[0-9]*[<>|&;)]', word):      # a redirection or the end of the command, not a program
+        return None
+    bare = word.strip("\"'")
+    # A script by path: something with a directory, a variable, or a .py name. A plain word after
+    # "python3" in prose or in a package list ("python3 python3-pip", "python3 is required") is not one.
+    if "/" in bare or bare.startswith("$") or bare.endswith(".py"):
+        return None if ("I" in flags or "E" in flags) else "a script by path without -E"
+    return None
+
+
 found = 0
 for name in files:
     if name.startswith(("hardware/", "qubes/emulator/")) or "/tests/" in name or name in EXEMPT:
@@ -42,10 +66,10 @@ for name in files:
     for number, line in enumerate(open(name, encoding="utf-8", errors="replace"), 1):
         if line.lstrip().startswith("#"):
             continue
-        if cwd_first.search(line):
-            print("%s:%d: a program on the command line, on standard input or by module name, without -I: %s" % (name, number, line.strip()[:110])); found += 1
-        elif script.search(line):
-            print("%s:%d: a script by path without -E: %s" % (name, number, line.strip()[:110])); found += 1
+        for match in INTERP.finditer(line):
+            what = judge(line[match.end():])
+            if what:
+                print("%s:%d: %s: %s" % (name, number, what, line.strip()[:110])); found += 1
 if found:
     print("python-isolation-lint: %d finding(s). Add -I (or -E for a script by path); see this file's header." % found)
 sys.exit(1 if found else 0)

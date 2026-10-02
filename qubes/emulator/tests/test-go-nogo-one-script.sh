@@ -27,7 +27,7 @@ callers="$(grep -rnE --exclude=test-go-nogo-one-script.sh '(\$HERE|\$SCRIPTS|/op
 grep -q '"$HERE/go-nogo.sh" --env-only' "$SCRIPTS/ceremony.sh" \
   && P "ceremony.sh gates on go-nogo.sh --env-only before any secret" || F "ceremony.sh does not run the environment gate"
 
-grep -q 'timeout 60 python3 "$HERE/hsm-random.py"' "$SCRIPTS/go-nogo.sh" \
+grep -q 'timeout 60 python3 -E "$HERE/hsm-random.py"' "$SCRIPTS/go-nogo.sh" \
   && P "the HSM RNG read is bounded (60 s, as in ceremony.sh)" || F "the HSM RNG read has no timeout: a hung token stalls the report"
 
 hdr "--env-only: the environment alone, in preflight's words"

@@ -35,6 +35,11 @@ python3 -u -c 'print(1)'
 "$py" -c 'import importlib'
 "$PYBIN" - "$UART" <<'EOPY'
 "${PYTHON}" "$CAPTURE" "$1"
+python3 -X utf8 -c 'print(1)'
+python3 -u tools/thing.py
+python3 /tmp/helper
+python3 -W ignore "$HERE/tool.py"
+python3 -uB - <<'PY'
 CASES
 while IFS= read -r line; do
   printf '#!/usr/bin/env bash\n%s\n' "$line" > "$T/repo/x/case.sh"; git -C "$T/repo" add -A >/dev/null
@@ -47,6 +52,10 @@ python3 -E "$HERE/tool.py" --flag
 python3 -I "$HERE/tool.py"
 "$py" -I -c 'import importlib'
 "$PYBIN" -E "$CAPTURE" "$1"
+python3 -X utf8 -I -c 'print(1)'
+python3 -u -E tools/thing.py
+python3 -IB - <<'PY'
+echo "python3 is required for the seed backup"
 "$copy" -c 3 "$file"
 cp -L "$copyright" "$root/licenses/x.copyright"
 if imports "$py" "$module"; then :; fi
