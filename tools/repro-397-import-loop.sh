@@ -183,8 +183,8 @@ printf 'iter\texit\tserial\tpka_before\tclass\twhy\tdrill_log\n' > "$LEDGER"
 # --required-pub-keys 2), so the import runs against the same prior state the nightly's
 # failing iteration had. Source the drill's own env for pins/labels where possible.
 phase_d_init(){
-  sc-hsm-tool --reader "$READER" --initialize --so-pin "${HSM_SO_PIN:-3537363231383830}" \
-    --pin "$PIN" --dkek-shares 1 --label pka-repro \
+  REGALIA_SO_PIN="${HSM_SO_PIN:-3537363231383830}" REGALIA_PIN="$PIN" sc-hsm-tool --reader "$READER" --initialize --so-pin env:REGALIA_SO_PIN \
+    --pin env:REGALIA_PIN --dkek-shares 1 --label pka-repro \
     --public-key-auth 3 --required-pub-keys 2 > "$1" 2>&1 || true
 }
 

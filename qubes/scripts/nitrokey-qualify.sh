@@ -21,6 +21,9 @@ set -uo pipefail
 
 MODULE="${HSM_PKCS11_MODULE:-}"
 SERIAL="" ; PROVISION=0 ; CONFIRM_WIPE=0 ; PIN="${HSM_USER_PIN:-}" ; SO_PIN="${HSM_SO_PIN:-}"
+# The copies are plain shell variables; the exported sources are dropped before the first child runs,
+# so no tool this script starts inherits a PIN it was not handed (as hsm-unwrap-key.sh does).
+unset HSM_USER_PIN HSM_SO_PIN
 OBJ_ID="${HSM_QUAL_OBJECT_ID:-01}"
 
 usage() { sed -n '2,20p' "$0"; }
@@ -31,8 +34,10 @@ while [ $# -gt 0 ]; do
     --module)      MODULE="$2"; shift 2;;
     --serial)      SERIAL="$2"; shift 2;;
     --object-id)   OBJ_ID="$2"; shift 2;;
-    --pin)         PIN="$2"; shift 2;;
-    --so-pin)      SO_PIN="$2"; shift 2;;
+    # This script's own command line is as public as any other (/proc/<pid>/cmdline, for the whole
+    # qualification), so the PINs are not taken there (#94).
+    --pin|--so-pin|--pin=*|--so-pin=*)
+      die "the PINs are never taken on the command line: set HSM_USER_PIN and HSM_SO_PIN, or leave them unset to be asked with echo off";;
     --provision)   PROVISION=1; shift;;
     --i-understand-this-wipes-the-card) CONFIRM_WIPE=1; shift;;
     -h|--help)     usage; exit 0;;
@@ -118,8 +123,15 @@ fi
 # ---- destructive provisioning (authorized) ---------------------------------------------------
 [ "$CONFIRM_WIPE" = 1 ] || die "--provision WIPES the card; pass --i-understand-this-wipes-the-card to proceed"
 command -v sc-hsm-tool >/dev/null || die "sc-hsm-tool not found (install opensc)"
-[ -n "$PIN" ]    || die "--pin (or HSM_USER_PIN) required for --provision"
-[ -n "$SO_PIN" ] || die "--so-pin (or HSM_SO_PIN) required for --provision"
+# From the environment, or asked for with echo off. Never guessed: an empty PIN is a refusal.
+ask_secret() { local _v=""   # ask_secret <what>: read one line from the terminal with echo off
+  [ -t 0 ] || die "the $1 is not set and there is no terminal to ask on"
+  IFS= read -rs -p "$1: " _v || die "no $1 was entered"
+  printf '\n' >&2; printf '%s' "$_v"; }
+[ -n "$PIN" ]    || PIN="$(ask_secret "user PIN (HSM_USER_PIN)")" || exit 2
+[ -n "$SO_PIN" ] || SO_PIN="$(ask_secret "SO-PIN (HSM_SO_PIN)")" || exit 2
+[ -n "$PIN" ]    || die "the user PIN is empty (HSM_USER_PIN); --provision needs it"
+[ -n "$SO_PIN" ] || die "the SO-PIN is empty (HSM_SO_PIN); --provision needs it"
 
 # sc-hsm-tool addresses readers by name/index, not by PKCS#11 slot. Resolve the reader whose card
 # carries our serial, so the wipe cannot land on the other HSM.
@@ -139,7 +151,7 @@ printf '### provisioning: WIPING and re-initialising serial %s at reader %s\n' "
 # missing", and a SmartCard-HSM refuses on-card key generation in that state: C_GenerateKeyPair
 # returned CKR_GENERAL_ERROR on a Nitrokey HSM 2 (DENK0404144, fw 4.1, 2026-09-17). This path only
 # needs a key GENERATED on the card, so it initialises without a DKEK domain.
-sc-hsm-tool --reader "$reader" --initialize --so-pin "$SO_PIN" --pin "$PIN" --label nitrokey-qual \
+REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$PIN" sc-hsm-tool --reader "$reader" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN --label nitrokey-qual \
   || die "sc-hsm-tool --initialize failed"
 # Re-resolve the slot (re-init can renumber) and generate a key ON the card.
 mapfile -t SLOTS < <(pkcs11-tool --module "$MODULE" -L 2>/dev/null | awk -v want="$SERIAL" '

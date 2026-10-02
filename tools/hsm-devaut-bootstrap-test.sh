@@ -276,7 +276,7 @@ if [ -n "$PROTECT_SERIAL" ]; then
     fi
     pass "reader $READER is not the protected card $PROTECT_SERIAL"
 fi
-run 200 sc-hsm-tool -r "$READER" --initialize --so-pin "$SO_PIN" --pin "$PIN" \
+REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$PIN" run 200 sc-hsm-tool -r "$READER" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN \
     --dkek-shares 1 --label devauttest </dev/null 2>&1 | tail -2
 
 # The firmware schedules a reset after INITIALIZE, so the device re-enumerates.

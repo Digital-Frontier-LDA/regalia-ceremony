@@ -245,8 +245,8 @@ for n in $(seq 1 "$CYCLES"); do
 
     # The alarm must OUTLIVE the firmware's own 180s commit cap plus response time, otherwise
     # a legitimate slow wipe reads as a stall and the refusal response arrives after we died.
-    perl -e 'alarm 300; exec @ARGV' -- sc-hsm-tool -r "$READER" --initialize \
-        --so-pin "$SO_PIN" --pin "$USER_PIN" --dkek-shares 1 --label "cycle$n" \
+    REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$USER_PIN" perl -e 'alarm 300; exec @ARGV' -- sc-hsm-tool -r "$READER" --initialize \
+        --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN --dkek-shares 1 --label "cycle$n" \
         < /dev/null > "$LOGDIR/init-$n.log" 2>&1
     init_rc=$?
 
@@ -323,9 +323,9 @@ for n in $(seq 1 "$CYCLES"); do
         fi
 
         if [ "$chain_ok" = 1 ]; then
-            DKEK_PW="$(cat "$STAGING/dkek.pw")" perl -e 'alarm 120; exec @ARGV' -- \
+            DKEK_PW="$(cat "$STAGING/dkek.pw")" REGALIA_SO_PIN="$SO_PIN" perl -e 'alarm 120; exec @ARGV' -- \
                 sc-hsm-tool -r "$READER" --import-dkek-share "$STAGING/dkek.pbe" \
-                --password env:DKEK_PW --so-pin "$SO_PIN" < /dev/null \
+                --password env:DKEK_PW --so-pin env:REGALIA_SO_PIN < /dev/null \
                 > "$LOGDIR/dkek-$n.log" 2>&1 || chain_ok=0
             [ "$chain_ok" = 1 ] || echo "  CHAIN FAIL: dkek import"
         fi
@@ -345,7 +345,7 @@ for n in $(seq 1 "$CYCLES"); do
             # first token, so on a two-card bench this can sign with the OTHER card and then report
             # "CHAIN FAIL: card signature does NOT match the seed's pubkey" for a healthy target —
             # while spending a PIN login on a card nobody named. hsm-scenarios.sh already passes it.
-            pkcs11-tool --module "$P11MOD" --slot "$SLOTID" --login --pin "$USER_PIN" --sign --mechanism ECDSA \
+            REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11MOD" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
                 --id 31 --input-file "$LOGDIR/d-$n.bin" --output-file "$LOGDIR/s-$n.bin" \
                 > "$LOGDIR/sign-$n.log" 2>&1 || chain_ok=0
             if [ "$chain_ok" = 1 ]; then

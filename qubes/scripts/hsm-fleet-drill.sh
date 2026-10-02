@@ -254,11 +254,11 @@ trap 'isolate_end >/dev/null 2>&1 || true; hsm_bench_lock_release' EXIT INT TERM
 wrappable_refs_on(){ # $1=reader $2=pin -> echoes references, e.g. "1 2"
   local rdr="$1" pin="$2" slotid r tmp acc=""
   slotid="$(reader_slot_of "$rdr")"
-  pkcs11-tool --module "$P11" --slot "$slotid" --login --pin "$pin" --list-objects >/dev/null 2>&1 \
+  REGALIA_PIN="$pin" pkcs11-tool --module "$P11" --slot "$slotid" --login --pin env:REGALIA_PIN --list-objects >/dev/null 2>&1 \
     || { echo "" ; return 1; }
   tmp="$(mktemp)"
   for r in 1 2 3 4 5; do
-    if sc-hsm-tool --reader "$rdr" --wrap-key "$tmp" --key-reference "$r" --pin "$pin" >/dev/null 2>&1 \
+    if REGALIA_PIN="$pin" sc-hsm-tool --reader "$rdr" --wrap-key "$tmp" --key-reference "$r" --pin env:REGALIA_PIN >/dev/null 2>&1 \
        && [ -s "$tmp" ]; then acc="$acc $r"; fi
     : > "$tmp"
   done
@@ -446,17 +446,17 @@ provision(){ # $1=slot $2=pin $3=name $4=serial -> echoes the DKEK KCV
   # The FILE is the proof, not the exit status: with no -r this call takes reader 0, prints
   # "Failed to connect to card" to a discarded stream, writes nothing, and still exits in a way a
   # bare check accepts (measured 2026-09-03).
-  _pstep "create-dkek-share" sc-hsm-tool --reader "$(reader_of "$slot")" --create-dkek-share "$work/dkek.pbe" --password "$(cat "$dkpw")"
+  REGALIA_DKEK_PW="$(cat "$dkpw")" _pstep "create-dkek-share" sc-hsm-tool --reader "$(reader_of "$slot")" --create-dkek-share "$work/dkek.pbe" --password env:REGALIA_DKEK_PW
   [ -s "$work/dkek.pbe" ] \
     || { err "$name: create-dkek-share produced no share file — $(tail -1 "$plog")"; rm -rf "$work"; return 1; }
 
   # INITIALIZE's EXIT STATUS IS NOT A VERDICT — the Pico drops off the USB bus mid-command, which
   # every other suite here already accounts for. Judge it by whether the card comes back.
-  _pstep "initialize" sc-hsm-tool --reader "$(reader_of "$slot")" --initialize --so-pin "$SO_PIN" --pin "$pin" --dkek-shares 1 --label "$name" || true
+  REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$pin" _pstep "initialize" sc-hsm-tool --reader "$(reader_of "$slot")" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN --dkek-shares 1 --label "$name" || true
   wait_card "$slot" "$name" >> "$plog" 2>&1 \
     || { err "$name: card never came back after INITIALIZE (see $plog)"; rm -rf "$work"; return 1; }
 
-  kcv="$(sc-hsm-tool --reader "$(reader_of "$slot")" --import-dkek-share "$work/dkek.pbe" --password "$(cat "$dkpw")" --so-pin "$SO_PIN" 2>&1 | tee -a "$plog" | grep -oE '[0-9A-F]{8,16}' | head -1)"
+  kcv="$(REGALIA_DKEK_PW="$(cat "$dkpw")" REGALIA_SO_PIN="$SO_PIN" sc-hsm-tool --reader "$(reader_of "$slot")" --import-dkek-share "$work/dkek.pbe" --password env:REGALIA_DKEK_PW --so-pin env:REGALIA_SO_PIN 2>&1 | tee -a "$plog" | grep -oE '[0-9A-F]{8,16}' | head -1)"
 
   # The import runs through scsh, so give it a bus with one card on it.
   local ik_slot="$slot" ik_reader; ik_reader="$(reader_of "$slot")"
@@ -495,14 +495,14 @@ provision(){ # $1=slot $2=pin $3=name $4=serial -> echoes the DKEK KCV
 
 card_address(){ # $1=slot $2=pin
   local der; der="$(mktemp)"
-  pkcs11-tool --module "$P11" --slot "$1" --login --pin "$2" --read-object --type pubkey \
+  REGALIA_PIN="$2" pkcs11-tool --module "$P11" --slot "$1" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --label "$DRILL_LABEL" --output-file "$der" >/dev/null 2>&1 || { rm -f "$der"; return 1; }
   python3 "$DERIVE" --der "$der" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1
   rm -f "$der"
 }
 
 sign_with(){ # $1=slot $2=pin $3=digestfile $4=sigfile
-  pkcs11-tool --module "$P11" --slot "$1" --login --pin "$2" --sign --mechanism ECDSA \
+  REGALIA_PIN="$2" pkcs11-tool --module "$P11" --slot "$1" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
     --label "$DRILL_LABEL" --input-file "$3" --output-file "$4" >/dev/null 2>&1
 }
 
@@ -532,17 +532,17 @@ init_card(){ # $1=slot $2=pin $3=label $4=workdir ${5..}=extra init flags
   local dkpw="$work/dkek.pw" out kcv
   head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$dkpw"; chmod 600 "$dkpw"
   # See above: verify the artefact, not the status.
-  sc-hsm-tool --reader "$(reader_of "$slot")" --create-dkek-share "$work/dkek.pbe" \
-      --password "$(cat "$dkpw")" >/dev/null 2>&1
+  REGALIA_DKEK_PW="$(cat "$dkpw")" sc-hsm-tool --reader "$(reader_of "$slot")" --create-dkek-share "$work/dkek.pbe" \
+      --password env:REGALIA_DKEK_PW >/dev/null 2>&1
   [ -s "$work/dkek.pbe" ] || return 1
   # Exit status deliberately ignored: INITIALIZE DEVICE drops the Pico off the USB bus, and a
   # "failed" init can be a perfectly good wipe. The import below is the behavioural check.
-  sc-hsm-tool --reader "$(reader_of "$slot")" --initialize --so-pin "$SO_PIN" --pin "$pin" \
+  REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$pin" sc-hsm-tool --reader "$(reader_of "$slot")" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN \
       --dkek-shares 1 --label "$name" "$@" >"$work/init.log" 2>&1 || true
   printf '  (init exit status ignored — the Pico drops off the USB bus; verifying by behaviour)\n'
   wait_card "$slot" "$name" || return 1
-  out="$(sc-hsm-tool --reader "$(reader_of "$slot")" --import-dkek-share "$work/dkek.pbe" \
-      --password "$(cat "$dkpw")" --so-pin "$SO_PIN" 2>&1)" || { printf '%s\n' "$out" | tail -3; return 1; }
+  out="$(REGALIA_DKEK_PW="$(cat "$dkpw")" REGALIA_SO_PIN="$SO_PIN" sc-hsm-tool --reader "$(reader_of "$slot")" --import-dkek-share "$work/dkek.pbe" \
+      --password env:REGALIA_DKEK_PW --so-pin env:REGALIA_SO_PIN 2>&1)" || { printf '%s\n' "$out" | tail -3; return 1; }
   kcv="$(printf '%s' "$out" | grep -oE '[0-9A-F]{8,16}' | head -1)"
   printf '  %s initialised, DKEK imported (kcv %s)\n' "$name" "${kcv:-?}"
 }
@@ -622,15 +622,15 @@ if [ "$MODE" = "run" ]; then
   b4_src="$(printf '%s' "$b4_refs_a" | awk '{print $1}')"
   if [ -z "$b4_src" ]; then
     F "B4: no wrappable key reference on A — cannot obtain a blob to test isolation with"
-  elif ! sc-hsm-tool --reader "$READER_A" --wrap-key "$b4_blob" --key-reference "$b4_src" --pin "$PIN_A" >/dev/null 2>&1 \
+  elif ! REGALIA_PIN="$PIN_A" sc-hsm-tool --reader "$READER_A" --wrap-key "$b4_blob" --key-reference "$b4_src" --pin env:REGALIA_PIN >/dev/null 2>&1 \
        || [ ! -s "$b4_blob" ]; then
     F "B4: could not wrap A's key (reference $b4_src) — cannot evaluate DKEK isolation"
   else
     P "wrapped A's key under A's DKEK ($(wc -c < "$b4_blob" | tr -d ' ') bytes, reference $b4_src)"
     # 1. B must REFUSE it.
-    b4_on_b="$(sc-hsm-tool --reader "$READER_B" --unwrap-key "$b4_blob" --key-reference 9 --pin "$PIN_B" 2>&1)"
+    b4_on_b="$(REGALIA_PIN="$PIN_B" sc-hsm-tool --reader "$READER_B" --unwrap-key "$b4_blob" --key-reference 9 --pin env:REGALIA_PIN 2>&1)"
     # 2. A must ACCEPT it — the control.
-    b4_on_a="$(sc-hsm-tool --reader "$READER_A" --unwrap-key "$b4_blob" --key-reference 9 --pin "$PIN_A" 2>&1)"
+    b4_on_a="$(REGALIA_PIN="$PIN_A" sc-hsm-tool --reader "$READER_A" --unwrap-key "$b4_blob" --key-reference 9 --pin env:REGALIA_PIN 2>&1)"
     # JUDGE BY OUTPUT: --unwrap-key exits 1 even on success (measured 2026-08-06).
     b4_b_ok=0; grep -qi "successfully imported" <<< "$b4_on_b" && b4_b_ok=1
     b4_a_ok=0; grep -qi "successfully imported" <<< "$b4_on_a" && b4_a_ok=1
@@ -666,7 +666,7 @@ if [ "$MODE" = "run" ]; then
   hdr "NEGATIVE CONTROLS — this drill must be able to fail"
   sign_with "$SLOT_A" "$PIN_A" "$D" "$S"
   DER_A="$(mktemp)"
-  pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --pin "$PIN_A" --read-object --type pubkey \
+  REGALIA_PIN="$PIN_A" pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --label "$DRILL_LABEL" --output-file "$DER_A" >/dev/null 2>&1
   head -c 32 /dev/urandom > "$D.wrong"
   if python3 "$VERIFY" --der "$DER_A" --digest "$D.wrong" --sig "$S" >/dev/null 2>&1; then
@@ -871,8 +871,8 @@ if [ "$MODE" = "pka" ]; then
   printf '  Reseat card A (slot %s) to clear any live PKA session, then press Enter. > ' "$SLOT_A"
   IFS= read -r _
   wait_card "$SLOT_A" "device A" || exit 1
-  if pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --login-type so \
-       --so-pin "$SO_PIN_P11" --init-pin --new-pin "$ATTACK_PIN" >/dev/null 2>&1; then
+  if REGALIA_SO_PIN="$SO_PIN_P11" REGALIA_NEW_PIN="$ATTACK_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --login-type so \
+       --so-pin env:REGALIA_SO_PIN --init-pin --new-pin env:REGALIA_NEW_PIN >/dev/null 2>&1; then
     printf '  SO-PIN reset accepted (expected: A is RRC-ENABLED by construction — see step 1)\n'
     D="$(mktemp)"; head -c 32 /dev/urandom > "$D"; S="$(mktemp)"
     if sign_with "$SLOT_A" "$ATTACK_PIN" "$D" "$S" 2>/dev/null; then
@@ -884,8 +884,8 @@ if [ "$MODE" = "pka" ]; then
     fi
     rm -f "$D" "$S"
     # Leave no attacker PIN behind: the reset works at any time (B6), so restore the drill PIN.
-    pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --login-type so \
-        --so-pin "$SO_PIN_P11" --init-pin --new-pin "$PIN_A" >/dev/null 2>&1 \
+    REGALIA_SO_PIN="$SO_PIN_P11" REGALIA_NEW_PIN="$PIN_A" pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --login-type so \
+        --so-pin env:REGALIA_SO_PIN --init-pin --new-pin env:REGALIA_NEW_PIN >/dev/null 2>&1 \
       && P "drill PIN restored (no attacker-chosen PIN left on the card)" \
       || F "could not restore the drill PIN — re-initialise card A before any further use"
   else
