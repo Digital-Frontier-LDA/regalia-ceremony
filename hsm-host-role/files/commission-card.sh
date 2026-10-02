@@ -512,6 +512,11 @@ PYTYPE
         P "C.DevAut chains to the CardContact root in $TRUST_DIR"
         P "EF $(printf 'CE%02X' "$KEK_REF") is signed by this device and attests the $(tr a-z A-Z <<< "$kek_type") key at ID $KEK_ID — generated on this card"
         P "KEK public_key_sha256 = $kek_pin (SubjectPublicKeyInfo of ID $KEK_ID)"
+      elif [ "$ver_rc" -ge 128 ]; then
+        # KILLED: by the 60 s alarm (exit 142) or by any other signal. The verifier never reached a
+        # verdict, so this is not one on the card either; worded as "not a genuine card" it would get
+        # a good card thrown away on a ceremony day.
+        F "the KEK attestation verifier was stopped by signal $((ver_rc - 128))$([ "$ver_rc" -eq 142 ] && printf ' (its 60 s limit)') — CANNOT BE EVALUATED (not a verdict on the card); run it again"
       elif grep -q '^DEPENDENCY_MISSING=' <<< "$ver_out"; then
         # The resolver said this interpreter imports the deps; the verifier disagrees. Still not a
         # verdict on the card, so not worded as one.
