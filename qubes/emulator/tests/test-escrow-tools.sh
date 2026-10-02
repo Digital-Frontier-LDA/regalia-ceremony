@@ -170,6 +170,12 @@ nodash="${lb//-/}"
 out="$(escrow_luks "$la" "$la" "$nodash" "$nodash" "$lc" "$lc")"; rc=$?
 [ "$rc" != 0 ] && grep -q "luks_b disk recovery key must be 8 groups of 8 letters" <<< "$out" && grep -q "the dashes are part of the key" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
   && P "a recovery key typed without its dashes: refused, nothing written (it would be escrowed as a key that opens nothing)" || F "rc=$rc: $out"
+# 71 characters of the right alphabet are not enough: the dashes are at fixed places.
+for bad in "cbdefghij-klnrtuv-${la:18}" "${la%?}-" "${la%?}"; do
+  out="$(escrow_luks "$bad" "$bad" "$lb" "$lb" "$lc" "$lc")"; rc=$?
+  [ "$rc" != 0 ] && grep -q "luks_a disk recovery key must be 8 groups of 8 letters" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+    && P "a ${#bad}-character key with a dash out of place, a trailing dash or a letter missing: refused" || F "accepted a malformed key (${#bad} characters): rc=$rc"
+done
 out="$(escrow_luks "$la" "$la" "$lb" "$lb" "${lc^^}" "${lc^^}")"; rc=$?
 [ "$rc" != 0 ] && grep -q "luks_c disk recovery key must be" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "a recovery key in capitals: refused, nothing written" || F "rc=$rc: $out"
 out="$(escrow_luks "$ta" "$ta" "$lb" "$lb" "$lc" "$lc")"; rc=$?
@@ -198,6 +204,22 @@ rm -f "$T/co/escrow/pins-0002.age"*
 # Over 40 keys (1280 byte positions) about 80 pairs are equal by chance; all 1280 would be if it did.
 pairs="$(for _ in $(seq 1 40); do bash "$T/disc/pin-escrow.sh" --new-recovery-key 2>/dev/null; done | tr -d '\n-' | fold -w2 | awk 'substr($0,1,1)==substr($0,2,1){n++} END{print n+0}')"
 [ "$pairs" -gt 20 ] && [ "$pairs" -lt 200 ] && P "the two letters of a byte are independent ($pairs of 1280 pairs equal; about 80 expected)" || F "the generator's letters are not independent: $pairs of 1280 pairs equal"
+# ...and the whole alphabet, with no group repeated inside a key: a generator drawing from 8 of the 16
+# letters, or repeating its first group, passes the pair test above.
+forty="$(for _ in $(seq 1 40); do bash "$T/disc/pin-escrow.sh" --new-recovery-key 2>/dev/null; done)"
+[ "$(tr -d '\n-' <<< "$forty" | fold -w1 | sort -u | wc -l)" = 16 ] && P "all sixteen letters turn up across 40 keys" || F "the generator does not use the whole alphabet"
+rep=0; while IFS= read -r k; do [ "$(tr '-' '\n' <<< "$k" | sort -u | wc -l)" = 8 ] || rep=1; done <<< "$forty"
+[ "$rep" = 0 ] && [ "$(sort -u <<< "$forty" | wc -l)" = 40 ] && P "no group repeats inside a key, and the 40 keys are 40 different keys" || F "a generated key repeats a group, or two keys are equal"
+# THE CURRENT DIRECTORY MUST NOT CHOOSE THE KEY. The tool is run from the top of the repository
+# checkout, and write access to that checkout alone must not subvert it: a secrets.py there, or one on
+# PYTHONPATH, would otherwise be the module the generator imports.
+mkdir -p "$T/planted"; printf 'def token_bytes(n):\n    return b"\\x00" * n\n' > "$T/planted/secrets.py"
+planted="$(printf 'cccccccc-%.0s' {1..8})"; planted="${planted%-}"
+k="$(cd "$T/planted" && bash "$T/disc/pin-escrow.sh" --new-recovery-key 2>/dev/null)"
+[[ "$k" =~ $RK ]] && [ "$k" != "$planted" ] && P "a secrets.py in the working directory does not decide the key" || F "the working directory's secrets.py chose the key: $k"
+k="$(PYTHONPATH="$T/planted" bash "$T/disc/pin-escrow.sh" --new-recovery-key 2>/dev/null)"
+[[ "$k" =~ $RK ]] && [ "$k" != "$planted" ] && P "nor does one on PYTHONPATH" || F "PYTHONPATH's secrets.py chose the key: $k"
+grep -q "python3 -I -c 'import secrets" "$SCRIPTS/ceremony.sh" && P "step 0's generator is isolated the same way (python3 -I)" || F "step 0's generator can import a secrets.py from the working directory"
 for bad in "--new-recovery-key extra" "--new-recovery-key=1" "--recovery"; do
   # shellcheck disable=SC2086
   out="$(bash "$T/disc/pin-escrow.sh" $bad 2>/dev/null)"; rc=$?
@@ -227,12 +249,16 @@ hdr "the tier-0 payload carries every KMS host's lockout authorization and disk 
 # from k shares is that template, so the fields must be in the list and the list must be what is written.
 fields="$( # shellcheck disable=SC1091
   source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; printf '%s' "$PIN_FIELDS" )"
-payload_body="$( # shellcheck disable=SC1091
-  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; declare -f step_payload )"
 ok=1; for t in a b c; do for f in "tpm_${t}_lockout_auth" "luks_${t}_recovery_key"; do case " $fields " in *" $f "*) ;; *) ok=0;; esac; done; done
 [ "$ok" = 1 ] && P "PIN_FIELDS holds tpm_{a,b,c}_lockout_auth and luks_{a,b,c}_recovery_key" || F "a KMS host field is missing from PIN_FIELDS: $fields"
-grep -q 'for k in $PIN_FIELDS; do' <<< "$payload_body" && grep -qF "printf '%s: %s\n' \"\$k\" \"\${!k-}\"" <<< "$payload_body" \
-  && P "and the payload template writes one line per field of that list" || F "the payload template is not written from PIN_FIELDS"
+# Not a text match: the function the template calls is RUN, with every field set to a value of its own,
+# and each must come out as its "name: value" line. A loop that skipped a field would show here.
+lines="$( # shellcheck disable=SC1091
+  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; for k in $PIN_FIELDS; do printf -v "$k" 'value-of-%s' "$k"; done; payload_pin_lines )"
+ok=1; for f in $fields; do grep -qx "$f: value-of-$f" <<< "$lines" || ok=0; done
+[ "$ok" = 1 ] && [ "$(wc -l <<< "$lines")" = "$(wc -w <<< "$fields")" ] && grep -q '^\$(payload_pin_lines)$' "$SCRIPTS/ceremony.sh" \
+  && P "the payload's credential lines, run with a value per field, hold every field once ($(wc -w <<< "$fields") lines), and the template calls that function" \
+  || F "the payload's credential lines do not hold every field: $lines"
 
 hdr "the archive step refuses a disc without the escrow tools"
 mkdir -p "$T/scripts"; cp "$SCRIPTS"/ceremony.sh "$T/scripts/"

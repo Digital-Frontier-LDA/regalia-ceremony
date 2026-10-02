@@ -56,7 +56,10 @@ RECOVERY_KEY_RE='^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$'
 if [ "${1:-}" = --new-recovery-key ] && [ $# -eq 1 ]; then
   # 32 bytes from the kernel's random source, each half-byte as one letter: what systemd-cryptenroll
   # writes and what step 0 generates (ceremony.sh gen_secret recovery:256).
-  key="$(python3 -c 'import secrets
+  # python3 -I (isolated): without it the CURRENT DIRECTORY is first on the module path, and this tool
+  # is run from the top of the repository checkout. A secrets.py planted there by anyone who can
+  # write to the repository would choose the key (measured: it printed cccccccc-…-cccccccc).
+  key="$(python3 -I -c 'import secrets
 letters = "".join("cbdefghijklnrtuv"[b >> 4] + "cbdefghijklnrtuv"[b & 15] for b in secrets.token_bytes(32))
 print("-".join(letters[i:i + 8] for i in range(0, 64, 8)))')" || die "could not generate a key (python3)"
   [[ "$key" =~ $RECOVERY_KEY_RE ]] || die "the generator produced something that is not a recovery key; nothing shown"

@@ -245,8 +245,9 @@ verified escrow must never hold a key that opens nothing:
 2. At the host: `recovery-key.sh --replace` (KMS repository) with the used key and the new one, then
    `--check` with the key read from the new card.
 3. Only then escrow it (`bin/pin-escrow.sh`).
- An escrow written before these lines existed has
-none; then, and only then, the payload's keys are the ones to use.
+
+An escrow written before these lines existed has no `luks_` lines; then, and only then, the payload's
+keys are the ones to use.
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no

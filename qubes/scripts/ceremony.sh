@@ -1669,7 +1669,9 @@ gen_secret() {   # $1 = digits:N | hex:N | paper:N | recovery:256
   # recovery: a disk recovery key as systemd-cryptenroll writes one: 256 random bits, each half-byte
   # as one letter of "cbdefghijklnrtuv" (letters that sit on the same keys of a QWERTY, QWERTZ and
   # AZERTY keyboard: it is typed at a boot prompt), in 8 groups of 8 with a dash between groups.
-  python3 -c 'import secrets,sys
+  # -I (isolated): the current directory and PYTHONPATH are not on the module path, so a secrets.py
+  # lying beside the ceremony cannot be what generates every PIN and key.
+  python3 -I -c 'import secrets,sys
 kind,n=sys.argv[1].split(":"); n=int(n)
 if kind=="digits": print("".join(secrets.choice("0123456789") for _ in range(n)))
 elif kind=="paper": print("".join(secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(n)))
@@ -1805,6 +1807,10 @@ offer_pin_blobs() {
     fi
   done
 }
+
+# The tier-0 payload's credential lines: one "name: value" per field of PIN_FIELDS, from the variables
+# step 0 loaded. A function so that a test can call it with known values and see every field come out.
+payload_pin_lines() { local k; for k in $PIN_FIELDS; do printf '%s: %s\n' "$k" "${!k-}"; done; }
 
 # Write $WORK/pins.env from generated values (and, if the operator chooses, typed day-to-day PINs).
 generate_pins() {
@@ -2069,7 +2075,7 @@ derivation_wallet_mnemonic_v2:
 funding_wallet_mnemonic_v2:
 ops_age_key:
 API_KEY_HASH_SECRET:
-$(for k in $PIN_FIELDS; do printf '%s: %s\n' "$k" "${!k-}"; done)
+$(payload_pin_lines)
 $(for y in $YUBIKEYS; do s=""; for k in "${!YK_SET_OF[@]}"; do [ "${YK_SET_OF[$k]}" = "$y" ] && s="$k"; done; printf 'yubikey_%s_serial: %s\n' "$y" "$s"; done)
 sle4442_psc:
 TPL

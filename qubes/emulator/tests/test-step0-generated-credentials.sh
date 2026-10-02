@@ -141,9 +141,10 @@ ok=1; for t in a b c; do v="$(field luks_${t}_recovery_key "$W")"
   [[ "$v" =~ $RK ]] && grep -qx "DRIVER: shown luks_${t}_recovery_key=$v" <<< "$out" || ok=0; done
 [ "$ok" = 1 ] && P "each host's recovery key is 8 groups of 8 letters from cbdefghijklnrtuv with dashes, stored, and shown once" || F "a disk recovery key is missing, malformed or not shown"
 [ "$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | sort -u | wc -l)" = 3 ] && P "the three hosts get three different keys" || F "two hosts share a recovery key"
-# All sixteen letters turn up across the three keys (192 letters), and no group repeats.
-[ "$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | tr -d '\n-' | fold -w1 | sort -u | wc -l)" = 16 ] \
-  && [ "$(field luks_a_recovery_key "$W" | tr '-' '\n' | sort -u | wc -l)" = 8 ] && P "the keys use the whole 16-letter alphabet and no group repeats" || F "the recovery keys do not look random"
+# At least fourteen of the sixteen letters turn up across the three keys (192 letters), and no group
+# repeats. Not "all sixteen": an honest generator misses one letter about once in 15,000 runs.
+[ "$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | tr -d '\n-' | fold -w1 | sort -u | wc -l)" -ge 14 ] \
+  && [ "$(field luks_a_recovery_key "$W" | tr '-' '\n' | sort -u | wc -l)" = 8 ] && P "the keys use (nearly) the whole 16-letter alphabet and no group repeats" || F "the recovery keys do not look random"
 # 256 bits, not 128: each byte gives TWO letters, one per half-byte. A generator that used one
 # half-byte for both would make every pair equal (96 of 96 here); by chance about 6 are.
 pairs="$(for t in a b c; do field luks_${t}_recovery_key "$W"; done | tr -d '\n-' | fold -w2 | awk 'substr($0,1,1)==substr($0,2,1){n++} END{print n+0}')"
