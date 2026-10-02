@@ -575,12 +575,12 @@ def main(argv=None):
     # itself on a command line, where /proc shows it to every local user (#94). A literal value is
     # refused loudly, so a script that regresses fails the suites instead of passing quietly; so is a
     # name whose variable is empty, because the real tool would then stop and PROMPT.
-    ap.add_argument("--pin")
-    ap.add_argument("--so-pin")
+    # EVERY occurrence is kept and checked: argparse would otherwise keep only the last one, and
+    # `--pin 123456 --pin env:NAME` would pass with the literal still on the command line.
+    ap.add_argument("--pin", action="append", default=[])
+    ap.add_argument("--so-pin", action="append", default=[])
     args, _unknown = ap.parse_known_args(argv)
-    for option, spec in (("--pin", args.pin), ("--so-pin", args.so_pin)):
-        if spec is None:
-            continue
+    for option, spec in [("--pin", s) for s in args.pin] + [("--so-pin", s) for s in args.so_pin]:
         if not spec.lower().startswith("env:") or len(spec) <= 4:
             sys.exit("sc-hsm-tool(model): %s was given a value on the command line; pass env:NAME and set "
                      "NAME in the command's environment (argv is readable by every local user)" % option)
