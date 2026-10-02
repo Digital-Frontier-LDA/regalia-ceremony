@@ -25,7 +25,7 @@ for r in "KMS HOST CARD - WRITE BY HAND" "KMS host A - TPM lockout authorization
   grep -qF "$r" "$T/d.ps" && P "page 2: $r" || F "page 2 missing: $r"
 done
 for w in "RULES FOR THIS PAGE" "never guess at the host" "after ONE wrong attempt" "24 hours" "never contains 0, 1, I, L or O" "tpm-lockout.sh --set" \
-         "WITHOUT spaces" "KEEP this page" "escrow asks for all of these values again"; do
+         "WITHOUT spaces" "KEEP this page" "for all of these values again"; do
   grep -qF "$w" "$T/d.ps" && P "page 2 rule: $w" || F "page 2 rule missing: $w"
 done
 # The page must not tell the operator to destroy what escrow/pin-escrow.sh will ask for again.
@@ -34,6 +34,12 @@ done
 form="$(cat "$T/d.ps")"
 grep -qiE "destroy|shred|burn" <<< "$form" && F "the form tells the operator to destroy a card that every later escrow needs" || P "neither page tells the operator to destroy it"
 grep -qF "KEEP the card after" <<< "$form" && grep -qF "the next PIN escrow asks for every PIN and the escrow MAC key" <<< "$form" && P "page 1 says to keep the card, and why" || F "page 1 does not say to keep the card"
+# Owner, 2026-10-02: the card is kept because it is how the KMS servers are resuscitated.
+grep -qF "It is how a KMS server is BROUGHT BACK" <<< "$form" && grep -qF "the PIN is sealed again from this card" <<< "$form" \
+  && P "page 1 gives the first reason: a server whose TPM no longer releases the PIN is brought back from this card" || F "page 1 does not say the card brings a KMS server back"
+grep -qF "It is what clears" <<< "$form" && grep -qF "a server's TPM lockout when that server has to be brought back" <<< "$form" \
+  && P "page 2 says the same of the lockout authorizations" || F "page 2 does not say what the values are kept for"
+for paper in letter a4; do python3 "$F_" -o "$T/fit-$paper.ps" --paper "$paper" 2>"$T/fit.err" && P "three HSMs, three YubiKeys and three hosts still fit on $paper with the longer rules" || F "does not fit on $paper: $(cat "$T/fit.err")"; done
 python3 "$F_" -o "$T/nohost.ps" --hosts "" && grep -q "^%%Pages: 1$" "$T/nohost.ps" && ! grep -q "KMS HOST CARD" "$T/nohost.ps" \
   && [ "$(boxes "$T/nohost.ps")" = 103 ] && P "--hosts '' prints the PIN card alone (103 boxes, one page)" || F "--hosts '' did not drop page 2"
 grep -q "ESCROW MAC KEY - 32 hex" "$T/d.ps" && P "the card has the escrow MAC key rows" || F "no escrow MAC key row"
