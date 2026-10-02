@@ -50,8 +50,11 @@ HOST_RULES = [
     "- Copy it EXACTLY and never guess at the host: after ONE wrong attempt the TPM refuses the right",
     "  value too until its lockout-recovery time has passed (24 hours under the KMS policy).",
     "- It never contains 0, 1, I, L or O: a character that looks like one of those is a copying error.",
-    "- It is NOT the backup: each value is also in the encrypted recovery payload and in every PIN",
-    "  escrow. Seal this page with the PIN card, and destroy it the same way once every host is done.",
+    "- Type it at the host WITHOUT spaces, whatever grouping you used here to copy it.",
+    "- KEEP this page, sealed in its tamper-evident envelope, apart from the servers: every later PIN",
+    "  escrow asks for all of these values again. It is NOT the backup (each value is also in the",
+    "  encrypted recovery payload), but without it a PIN change cannot be escrowed.",
+    "- A broken seal means: assume the values are known. Record it as an incident.",
 ]
 
 

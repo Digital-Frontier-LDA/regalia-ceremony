@@ -24,9 +24,12 @@ grep -q "^%%Pages: 2$" "$T/d.ps" && [ "$(grep -c '^showpage$' "$T/d.ps")" = 2 ] 
 for r in "KMS HOST CARD - WRITE BY HAND" "KMS host A - TPM lockout authorization" "KMS host B - TPM lockout authorization" "KMS host C - TPM lockout authorization"; do
   grep -qF "$r" "$T/d.ps" && P "page 2: $r" || F "page 2 missing: $r"
 done
-for w in "RULES FOR THIS PAGE" "never guess at the host" "after ONE wrong attempt" "24 hours" "never contains 0, 1, I, L or O" "tpm-lockout.sh --set"; do
+for w in "RULES FOR THIS PAGE" "never guess at the host" "after ONE wrong attempt" "24 hours" "never contains 0, 1, I, L or O" "tpm-lockout.sh --set" \
+         "WITHOUT spaces" "KEEP this page" "escrow asks for all of these values again"; do
   grep -qF "$w" "$T/d.ps" && P "page 2 rule: $w" || F "page 2 rule missing: $w"
 done
+# The page must not tell the operator to destroy what escrow/pin-escrow.sh will ask for again.
+sed -n '/KMS HOST CARD/,$p' "$T/d.ps" | grep -qiE "destroy|shred|burn" && F "page 2 tells the operator to destroy it, but every later escrow needs it" || P "page 2 does not tell the operator to destroy it"
 python3 "$F_" -o "$T/nohost.ps" --hosts "" && grep -q "^%%Pages: 1$" "$T/nohost.ps" && ! grep -q "KMS HOST CARD" "$T/nohost.ps" \
   && [ "$(boxes "$T/nohost.ps")" = 103 ] && P "--hosts '' prints the PIN card alone (103 boxes, one page)" || F "--hosts '' did not drop page 2"
 grep -q "ESCROW MAC KEY - 32 hex" "$T/d.ps" && P "the card has the escrow MAC key rows" || F "no escrow MAC key row"

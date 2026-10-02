@@ -32,7 +32,8 @@ both; lost, nobody can. So the ceremony generates one per host, 20 characters fr
 digits with no `0`, `1`, `I`, `L` or `O` (99 bits), and treats it like a PIN:
 
 - it rides in the tier-0 payload, and every later escrow repeats it (`escrow/pin-escrow.sh` asks for
-  all three each time, so the newest escrow is always whole);
+  all three each time, so the newest escrow is always whole). The KMS host card is therefore KEPT,
+  sealed like the PIN card, and not destroyed once the hosts are commissioned;
 - it is shown once in step 0 and written by hand on the **KMS host card**, page 2 of the PIN card
   form, because it reaches the host by being typed at its console, once, at commissioning;
 - a hand-made PIN file may hold any 16 to 32 printable characters with no space, which is what the
