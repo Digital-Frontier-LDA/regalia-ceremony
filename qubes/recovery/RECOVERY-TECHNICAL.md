@@ -231,6 +231,16 @@ is a **wrong attempt**, and after one wrong attempt that TPM refuses the right v
 lockout-recovery time (24 hours under the KMS policy). An escrow written before these lines existed
 has none; then, and only then, the payload's values are the ones to use.
 
+The escrow holds each KMS host's **disk recovery key** too, as `luks_a=`, `luks_b=` and `luks_c=` lines
+(the payload has them as `luks_{a,b,c}_recovery_key`). It is what opens a KMS host's encrypted disk
+when nothing else can: all three sites down, or a host whose TPM no longer releases its disk. Type
+it at that host's boot prompt **exactly as written, lower case, dashes included** (8 groups of 8
+letters); without the dashes it does not open the disk. Use the newest verified escrow, not the
+payload: a key is replaced after every use, and the replaced key opens nothing. Once the host is
+back, replace the key again (`recovery-key.sh --replace` in the KMS repository, with a new key from
+a new escrow): it has now been typed at a console. An escrow written before these lines existed has
+none; then, and only then, the payload's keys are the ones to use.
+
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no
 escrow verifies: then use the payload's PINs. Any other failure (a malformed key, git, a full tmpfs)

@@ -1588,6 +1588,7 @@ check_credential_separation() {
       yubikey_?_mgmt_key) [[ "$v" =~ ^[0-9A-Fa-f]{48}$|^[0-9A-Fa-f]{32}$|^[0-9A-Fa-f]{64}$ ]] || problems="$problems|$k: a PIV management key is 32, 48 or 64 hex digits" ;;
       escrow_mac_key) [[ "$v" =~ ^[0-9A-Fa-f]{32}$ ]] || problems="$problems|$k: the escrow MAC key is exactly 32 hex digits (128 bits)" ;;
       tpm_?_lockout_auth) [[ "$v" =~ ^[[:graph:]]{16,32}$ ]] || problems="$problems|$k: a TPM lockout authorization is 16-32 printable characters with no space (what the KMS host's tpm-lockout.sh accepts)" ;;
+      luks_?_recovery_key) [[ "$v" =~ ^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$ ]] || problems="$problems|$k: a disk recovery key is 8 groups of 8 letters from cbdefghijklnrtuv with a dash between groups, lower case (what the KMS host's recovery-key.sh accepts)" ;;
     esac
     for other in $fields; do
       [[ "$other" > "$k" ]] || continue
@@ -1648,28 +1649,49 @@ KMS_HOSTS="a b c"
 TPM_AUTHS="$(for t in $KMS_HOSTS; do printf 'tpm_%s_lockout_auth ' "$t"; done)"
 TPM_AUTHS="${TPM_AUTHS% }"
 PIN_FIELDS="$PIN_FIELDS $TPM_AUTHS"
+# Each KMS host's DISK RECOVERY KEY (regalia-kms#77; regalia-kms deploy/baremetal/recovery-key.sh): a
+# LUKS2 keyslot of its own that opens that host's encrypted root with no TPM and no peer, after a
+# total outage. One per host, always generated, never chosen, in systemd's recovery-key format: 256
+# bits as 8 groups of 8 letters with a dash between groups. THE DASHES ARE PART OF THE KEY. It rides
+# in the tier-0 payload and is carried forward by every later escrow, like the lockout
+# authorizations; it is shown once for the KMS HOST RECOVERY CARD, because it reaches the host by
+# being typed at its console. Unlike everything else here, this one value is enough for a host's
+# disk by itself: its card is sealed and kept apart from the servers and from the other cards.
+LUKS_KEYS="$(for t in $KMS_HOSTS; do printf 'luks_%s_recovery_key ' "$t"; done)"
+LUKS_KEYS="${LUKS_KEYS% }"
+PIN_FIELDS="$PIN_FIELDS $LUKS_KEYS"
 DAY_PINS="$(for h in $HSMS; do printf 'hsm_%s_user_pin ' "$h"; done; for y in $YUBIKEYS; do printf 'yubikey_%s_piv_pin ' "$y"; done)"
 DAY_PINS="${DAY_PINS% }"
-gen_secret() {   # $1 = digits:N | hex:N | paper:N
+gen_secret() {   # $1 = digits:N | hex:N | paper:N | recovery:256
   # paper: N characters a person copies by hand and types on another machine, exactly. Upper-case
   # letters and digits without the pairs that read alike on paper (0/O, 1/I/L): 31 symbols, so 20 of
   # them carry 99 bits.
+  # recovery: a disk recovery key as systemd-cryptenroll writes one: 256 random bits, each half-byte
+  # as one letter of "cbdefghijklnrtuv" (letters that sit on the same keys of a QWERTY, QWERTZ and
+  # AZERTY keyboard: it is typed at a boot prompt), in 8 groups of 8 with a dash between groups.
   python3 -c 'import secrets,sys
 kind,n=sys.argv[1].split(":"); n=int(n)
 if kind=="digits": print("".join(secrets.choice("0123456789") for _ in range(n)))
 elif kind=="paper": print("".join(secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(n)))
+elif kind=="recovery":
+    if n!=256: sys.exit("a recovery key is 256 bits")
+    letters="".join("cbdefghijklnrtuv"[b>>4]+"cbdefghijklnrtuv"[b&15] for b in secrets.token_bytes(32))
+    print("-".join(letters[i:i+8] for i in range(0,64,8)))
 else: print(secrets.token_hex(n//2).upper())' "$1"
 }
 
 # Show one generated day-to-day PIN on the terminal, clear it, and require it typed back from the
 # paper (three tries). Reads and writes /dev/tty only. Returns 1 if the copy was not verified.
-#   show_day_pin <name> <value> [where it is written, default "your PIN card"] [exact]
+#   show_day_pin <name> <value> [where it is written, default "your PIN card"] [exact] [what it is made of]
 # "exact": letter case counts. A hex key or a digit PIN means the same in either case, so by default
 # case is ignored; a TPM lockout authorization does not. Typed at the host in the wrong case it is a
 # WRONG value, and there one wrong attempt costs a day, so a copy that matches only when case is
-# ignored must be caught here, where it costs nothing.
+# ignored must be caught here, where it costs nothing. The fifth argument says what the value is made
+# of, for the hint given when only the letter case is wrong ("CAPITALS and digits" by default).
+# A dash is an ordinary character here: a disk recovery key is shown with its dashes and must be
+# typed with them, because at the host the dashes are part of the key.
 show_day_pin() {
-  local name="$1" value="$2" where="${3:-your PIN card}" exact="${4:-}" typed tries=0
+  local name="$1" value="$2" where="${3:-your PIN card}" exact="${4:-}" made_of="${5:-CAPITALS and digits}" typed tries=0
   while :; do
     read -r -p "   press Enter to SHOW the $name for copying onto $where… " _ </dev/tty
     clear
@@ -1683,7 +1705,7 @@ show_day_pin() {
     typed="${typed//[[:space:]]/}"
     if [ "$exact" = exact ]; then
       [ "$typed" = "$value" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
-      [ "${typed^^}" = "${value^^}" ] && err "your copy has the right characters in the wrong letter case: this value is CAPITALS and digits, and it must be written and typed exactly so."
+      [ "${typed^^}" = "${value^^}" ] && err "your copy has the right characters in the wrong letter case: this value is $made_of, and it must be written and typed exactly so."
     else
       [ "${typed^^}" = "${value^^}" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
     fi
@@ -1794,14 +1816,14 @@ generate_pins() {
   local -A val
   local h; for h in $HSMS; do val[hsm_${h}_so_pin]="$(gen_secret hex:16)"; done
   val[escrow_mac_key]="$(gen_secret hex:32)"
-  local t; for t in $KMS_HOSTS; do val[tpm_${t}_lockout_auth]="$(gen_secret paper:20)"; done
+  local t; for t in $KMS_HOSTS; do val[tpm_${t}_lockout_auth]="$(gen_secret paper:20)"; val[luks_${t}_recovery_key]="$(gen_secret recovery:256)"; done
   local y; for y in $YUBIKEYS; do
     val[yubikey_${y}_piv_puk]="$(gen_secret digits:8)"; val[yubikey_${y}_mgmt_key]="$(gen_secret hex:48)"
   done
   info "Generated: every HSM SO-PIN and every YubiKey PUK and management key. They are NOT shown: they go"
   info "only into the encrypted tier-0 payload (any $(K) of the $(N) shares open it)."
-  info "Generated too, and shown once each at the end of this step: the escrow MAC key and each KMS"
-  info "host's TPM lockout authorization."
+  info "Generated too, and shown once each at the end of this step: the escrow MAC key, each KMS"
+  info "host's TPM lockout authorization, and each KMS host's disk recovery key."
   info "Day-to-day PINs (every HSM and every YubiKey): GENERATED (random, shown once for the PIN card),"
   info "or CHOSEN by you, typed hidden. A chosen PIN must be 10-15 digits for an HSM and 8 for a YubiKey,"
   info "different on every device, and not guessable: no repeated digit, run, short pattern or date."
@@ -1873,6 +1895,12 @@ generate_pins() {
   warn "commissioned (regalia-kms tpm-lockout.sh --set). Copy it EXACTLY: at the host, ONE wrong attempt"
   warn "blocks that TPM's lockout hierarchy for a day, the right value included."
   for k in $TPM_AUTHS; do show_day_pin "$k" "${val[$k]}" "the KMS HOST CARD (page 2)" exact || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
+  # And each KMS host's disk recovery key, for the third page: a card of its own, sealed apart.
+  warn "Each KMS host's DISK RECOVERY KEY is shown ONCE: write it on the KMS HOST RECOVERY CARD (page 3),"
+  warn "8 groups of 8 lower-case letters. THE DASHES ARE PART OF THE KEY: type them back, and type them"
+  warn "at the host. It opens that host's disk BY ITSELF, with no TPM and no other site: seal this page"
+  warn "in its own envelope, apart from the servers and from the other cards."
+  for k in $LUKS_KEYS; do show_day_pin "$k" "${val[$k]}" "the KMS HOST RECOVERY CARD (page 3)" exact "lower-case letters and dashes" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
   for k in "${!val[@]}"; do val[$k]=""; done
   info "PIN file written (0600, RAM-only workdir)."
 }
@@ -1907,7 +1935,10 @@ step_set_pins() {
 #   escrow_mac_key (32 hex: generate it with `openssl rand -hex 16`, write it on the PIN card's
 #   ESCROW MAC KEY rows; it authenticates every later PIN escrow),
 #   tpm_{a,b,c}_lockout_auth (each KMS host's TPM lockout authorization: 16-32 printable characters,
-#   no space; write each on the KMS HOST CARD. At the host, one wrong attempt blocks it for a day)
+#   no space; write each on the KMS HOST CARD. At the host, one wrong attempt blocks it for a day),
+#   luks_{a,b,c}_recovery_key (each KMS host's disk recovery key, in systemd's format: 8 groups of 8
+#   letters from cbdefghijklnrtuv with a dash between groups, lower case; write each on the KMS HOST
+#   RECOVERY CARD. It opens that host's disk by itself)
 # HSM user PINs are 10-15 digits (a 10-try counter), SO-PINs exactly 16 hex digits.
   #
   # DEVICES A, B AND C ARE THE THREE PRODUCTION NITROKEYS (ADR-0002 D17). The staging Pico is NOT

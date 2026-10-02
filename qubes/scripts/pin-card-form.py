@@ -14,6 +14,12 @@ PAGE 2, THE KMS HOST CARD (--hosts, default a,b,c): a row per KMS host for its T
 authorization, which step 0 also generates and shows once. It is typed at that host's console when
 its TPM is commissioned (regalia-kms deploy/baremetal/tpm-lockout.sh --set).
 
+PAGE 3, THE KMS HOST RECOVERY CARD (the same --hosts): per KMS host, 64 boxes in 8 groups of 8 for
+its DISK RECOVERY KEY, with the dashes printed between the groups because they are part of the key.
+Step 0 generates and shows each once; it is typed at that host's console when the key is enrolled
+(regalia-kms deploy/baremetal/recovery-key.sh --enrol) and again only when the host cannot unlock its
+own disk. A page of its own, in an envelope of its own: this one value is enough for a host's disk.
+
 The printer only ever sees this blank form: device names, empty digit boxes and the rules. The PINs,
 and the serial numbers too, are written by hand (ADR-0002 D12).
 
@@ -62,6 +68,28 @@ HOST_RULES = [
 ]
 
 
+# Page 3. What step 0 generates for each KMS host's disk: systemd's recovery-key format, 8 groups of 8
+# letters from "cbdefghijklnrtuv" (ceremony.sh gen_secret recovery:256).
+RECOVERY_GROUPS, RECOVERY_GROUP_CHARS = 8, 8
+RECOVERY_RULES = [
+    "RULES FOR THIS PAGE",
+    "- One key per KMS host. It opens that host's disk BY ITSELF: no TPM, no other site, no running",
+    "  KMS. It is for a total outage, or a host that can no longer unlock its own disk.",
+    "- THE DASHES ARE PART OF THE KEY. They are printed here between the groups: type one after every",
+    "  group of 8, at the ceremony and at the host. Without them the key does not open the disk.",
+    "- Lower-case letters only, and only b c d e f g h i j k l n r t u v. Never a, m, o, p, q, s, w, x,",
+    "  y, z, a capital or a digit: one of those is a copying error.",
+    "- It is typed at that host's console when it is enrolled (regalia-kms recovery-key.sh --enrol)",
+    "  and checked (--check), and after that only when the host has to be brought back.",
+    "- KEEP this page sealed in a tamper-evident envelope OF ITS OWN, apart from the servers and apart",
+    "  from pages 1 and 2. Every later PIN escrow asks for all of these keys again.",
+    "- USING A KEY SPENDS IT: once typed at a host outside the ceremony, a rehearsal included, that",
+    "  host gets a new key and a new card (recovery-key.sh --replace), and a new escrow is written.",
+    "- A broken seal means: assume the keys are known. Replace them all and record it as an incident.",
+    "- It is NOT the backup: each key is also in the encrypted recovery payload and in every escrow.",
+]
+
+
 def esc(s):
     return s.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
 
@@ -71,7 +99,7 @@ def emit(hsms, yubikeys, hsm_digits, yk_digits, paper, hosts=()):
     m = 42.0
     out = ["%!PS-Adobe-3.0", "%%%%BoundingBox: 0 0 %d %d" % (W, H),
            "%%%%DocumentMedia: %s %d %d 0 () ()" % (paper, round(W), round(H)),
-           "%%%%Pages: %d" % (2 if hosts else 1), "%%EndComments",
+           "%%%%Pages: %d" % (3 if hosts else 1), "%%EndComments",
            "%%BeginSetup", "<< /PageSize [%.2f %.2f] >> setpagedevice" % (W, H), "%%EndSetup",
            "%%Page: 1 1", "0.8 setlinewidth"]
 
@@ -171,6 +199,52 @@ def emit(hsms, yubikeys, hsm_digits, yk_digits, paper, hosts=()):
             text(m + 8, yy, ln, "Helvetica-Bold" if ln.isupper() else "Helvetica", 8.5)
             yy -= lh
         out.append("showpage")
+
+        # Page 3, the KMS HOST RECOVERY CARD: each KMS host's disk recovery key (step 0 shows each
+        # once). Its own page so that it can be sealed and kept apart from the other two: a lockout
+        # authorization changes a TPM's settings, a PIN needs its token, but this value alone opens a
+        # host's disk. Two lines of four groups per host; the dash after each group is PRINTED,
+        # including the one that joins the two lines, because it is a character of the key.
+        out += ["%%Page: 3 3", "0.8 setlinewidth"]
+        y = H - m - 6
+        text(m, y, "KMS HOST RECOVERY CARD - WRITE BY HAND, IN PEN", "Helvetica-Bold", 15)
+        y -= 18
+        text(m, y, "Disk recovery keys only. This printed page held no secret when printed.", "Helvetica", 9)
+        y -= 16
+        text(m, y, "Date:", "Helvetica-Bold", 9)
+        line(m + 32, y - 2, m + 180)
+        text(m + 200, y, "Written by (initials):", "Helvetica-Bold", 9)
+        line(m + 305, y - 2, W - m)
+        y -= 26
+        small, gap, dash = 14.0, 1.0, 9.0
+        per_line = RECOVERY_GROUPS // 2
+        for host in hosts:
+            text(m, y, "KMS host %s - disk recovery key" % host.upper(), "Helvetica-Bold", 10.5)
+            text(m + 262, y, "Server serial:", "Helvetica-Bold", 9)
+            line(m + 325, y - 2, W - m)
+            for group in range(RECOVERY_GROUPS):
+                if group % per_line == 0:
+                    y -= 30
+                    x = m
+                for _ in range(RECOVERY_GROUP_CHARS):
+                    box(x, y, small, 24)
+                    x += small + gap
+                if group != RECOVERY_GROUPS - 1:
+                    text(x + 1, y + 8, "-", "Helvetica-Bold", 12)
+                x += dash
+            y -= 14
+            text(m, y, "%d groups of %d lower-case letters; type a dash after every group but the last. Typed back and matched: [  ]"
+                 % (RECOVERY_GROUPS, RECOVERY_GROUP_CHARS), "Helvetica", 9)
+            y -= 22
+        ib_h = lh * len(RECOVERY_RULES) + 12
+        if y < m + ib_h + 8 or x - dash > W - m:
+            raise ValueError("%d recovery-key rows do not fit above the rules on %s paper" % (len(hosts), paper))
+        box(m, m, W - 2 * m, ib_h)
+        yy = m + ib_h - 14
+        for ln in RECOVERY_RULES:
+            text(m + 8, yy, ln, "Helvetica-Bold" if ln.isupper() else "Helvetica", 8.5)
+            yy -= lh
+        out.append("showpage")
     out.append("%%EOF")
     return "\n".join(out) + "\n"
 
@@ -181,7 +255,8 @@ def main():
     ap.add_argument("--hsms", default="a,b,c", help="HSM letters, comma separated (default a,b,c)")
     ap.add_argument("--yubikeys", default="a,b,c", help="YubiKey letters, comma separated (default a,b,c)")
     ap.add_argument("--hosts", default="a,b,c", help="KMS host letters for page 2, the TPM lockout "
-                    "authorizations (default a,b,c; empty for no second page)")
+                    "authorizations, and page 3, the disk recovery keys (default a,b,c; empty for "
+                    "neither page)")
     ap.add_argument("--hsm-digits", type=int, default=10, help="HSM user PIN length (default 10)")
     ap.add_argument("--yubikey-digits", type=int, default=8, help="YubiKey PIN length (default 8)")
     ap.add_argument("--paper", choices=list(PAPER), default="letter")
