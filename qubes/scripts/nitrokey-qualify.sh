@@ -21,6 +21,9 @@ set -uo pipefail
 
 MODULE="${HSM_PKCS11_MODULE:-}"
 SERIAL="" ; PROVISION=0 ; CONFIRM_WIPE=0 ; PIN="${HSM_USER_PIN:-}" ; SO_PIN="${HSM_SO_PIN:-}"
+# The copies are plain shell variables; the exported sources are dropped before the first child runs,
+# so no tool this script starts inherits a PIN it was not handed (as hsm-unwrap-key.sh does).
+unset HSM_USER_PIN HSM_SO_PIN
 OBJ_ID="${HSM_QUAL_OBJECT_ID:-01}"
 
 usage() { sed -n '2,20p' "$0"; }
