@@ -1815,17 +1815,21 @@ offer_pin_blobs() {
 #   sle4442_command   prints the command words to run it (for a command line built as text)
 #   sle4442 <args>    runs it
 sle4442_command() {
-  local tool first interp
+  local tool first interp word
   tool="$(command -v sle4442-manager)" || { printf 'sle4442-manager'; return 1; }
   IFS= read -r first < "$tool" || first=""
-  case "$first" in
-    '#!'*python*)
-      interp="${first#\#!}"; interp="${interp#"${interp%%[![:space:]]*}"}"
-      case "$interp" in /usr/bin/env\ *) interp="${interp#/usr/bin/env }";; esac
-      interp="${interp%% *}"
-      printf '%q -Es %q' "$interp" "$tool" ;;
-    *) printf '%q' "$tool" ;;
-  esac
+  interp=""
+  if [ "${first:0:2}" = '#!' ]; then
+    # The words of the "#!" line. Through env (with or without -S), the interpreter is the word after
+    # it. It counts as Python only if its NAME is python, python3 or python3.N: a shell whose path or
+    # arguments merely contain those letters must not be handed -Es.
+    local -a words; read -r -a words <<< "${first:2}"
+    set -- "${words[@]}"
+    case "${1:-}" in */env|env) shift; [ "${1:-}" = -S ] && shift;; esac
+    word="${1:-}"
+    [[ "${word##*/}" =~ ^python(3(\.[0-9]+)?)?$ ]] && interp="$word"
+  fi
+  if [ -n "$interp" ]; then printf '%q -Es %q' "$interp" "$tool"; else printf '%q' "$tool"; fi
 }
 sle4442() { local cmd; cmd="$(sle4442_command)" || return 127; eval "$cmd \"\$@\""; }
 

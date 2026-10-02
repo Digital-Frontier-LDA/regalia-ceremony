@@ -20,11 +20,17 @@
 #   a script run by path  (python3 x.py, python3 "$HERE/x.py")             must carry -E and -s, or -I
 #   a Python program run through its "#!" line  ("$HERE/x.py" as a command)  is a finding: nothing on
 #        its command line says how Python runs. Start it as  python3 -Es "$HERE/x.py".
-# An interpreter is any word whose name is python, python3 or python3.N, with or without a directory,
-# and a quoted variable at the start of a command with one of the names these scripts use.
+# An interpreter is any word whose name is python, python3, python3.N or pypy3, with or without a
+# directory, and a variable, quoted or not, whose name says it holds one (py, PYBIN, KEK_PY, PYTHON_BIN…).
 #
-# EXEMPTIONS are per LINE, never per file: the line carries the marker "isolation-exempt:" followed by
-# its reason (on the line itself, or on the comment line directly above it). An exemption is a debt.
+# THIS IS A GUARD FOR THE FORMS THESE SCRIPTS USE, NOT A PROOF. A shell line can start Python in ways a
+# line-by-line reading does not see: `eval "$CMD"`, a wrapper function, an interpreter in a variable
+# with another name, a script with no .py in its name, `find -exec`. The tests beside it RUN the
+# generators, the PIN checker and the chip-card tool next to planted modules; that is the proof for those.
+#
+# EXEMPTIONS are per CALL, never per file: one un-isolated call on a line, with the marker
+# "isolation-exempt:" and its reason in a trailing # comment or in the comment line directly above.
+# A marker inside a quoted string, or on a line with two un-isolated calls, exempts nothing.
 # NOT COVERED, and said so rather than implied: files that are not *.sh (the salt state, workflow YAML,
 # commands quoted in documents), `eval "$CMD"`, and Python that starts Python (sys.executable).
 set -uo pipefail
@@ -40,29 +46,38 @@ except (OSError, subprocess.CalledProcessError) as failure:
     sys.exit(2)
 files = [name.decode("utf-8", "surrogateescape") for name in listed.split(b"\0") if name]
 
-# python3 or python3.N as a word; python, python3 or python3.N behind a directory
-# (/usr/bin/python3, "$VENV/bin/python"); ${X:-python3}; or a quoted variable, at the start of a
-# command, with one of the names these scripts give an interpreter.
-INTERP = re.compile(
-    r'(?:(?<![\w./$-])python3(?:\.\d+)?(?![\w.-])["\'}]?'
-    r'|["\']?[\w$/{}.:-]*/python(?:3(?:\.\d+)?)?(?![\w.-])["\'}]?'
-    r'|(?:^|[;&|({!]|\$\(|\bthen\b|\bdo\b|\bif\b|\belse\b|\btimeout\s+\S+|\bsudo\b|\bexec\b)\s*'
-    r'"\$\{?(?:py|PY|_py|PYBIN|KEK_PY|PYTHON|PYTHON3|python|interp|HSM_PYSERIAL_PYTHON)\b[^"]*")')
+# WHAT COUNTS AS AN INTERPRETER:
+#   python3, python3.N, pypy3 or python as a word; any of them behind a directory (/usr/bin/python3,
+#   "$VENV/bin/python"); ${X:-python3}; and a variable, quoted or not, WHEREVER it stands as a whole
+#   word, whose name says it is one: py, PY, PYBIN, KEK_PY, PYTHON, PYTHON_BIN, python_bin, interp …
+WORD = r'(?<![\w./$-])(?:python3(?:\.\d+)?|pypy3|python)(?![\w.-])["\'}]?'
+PATHED = r'["\']?[\w$/{}.:-]*/(?:python(?:3(?:\.\d+)?)?|pypy3)(?![\w.-])["\'}]?'
+VARIABLE = r'(?<![\w$])"?\$\{?(?:\w*_)?(?:py|PY|pybin|PYBIN|python3?|PYTHON3?|interp|INTERP)(?:_\w+)?(?::-[^}]*)?\}?"?(?![\w.])'
+INTERP = re.compile("(?P<word>%s)|(?P<pathed>%s)|(?P<variable>%s)" % (WORD, PATHED, VARIABLE))
 # A Python program started through its "#!" line: a path (with a directory or a variable) ending in
-# .py, as the FIRST word of a command.
-DIRECT = re.compile(r'(?:^|[;&({!]|\|\||&&|\$\(|\bthen\b|\bdo\b|\bif\b|\belse\b)\s*(?:!\s*)?"?(?:\$[\w{(]|\.{0,2}/)[\w$/{}.-]*\.py"?(?=\s|$|\))')
-TAKES_VALUE = ("-X", "-W")      # options whose value is the NEXT word
+# .py, as the first word of a command, also behind VAR=value, timeout N, sudo, nohup or env.
+START = r'(?:^|[;&({!]|\|\||&&|\$\(|\bthen\b|\bdo\b|\bif\b|\belse\b)\s*(?:!\s*)?'
+ASSIGN = r'\w+=(?:[\w./:-]*|"[^"$]*")\s+'       # VAR=value before a command; not VAR="$(…)"
+PREFIX = r'(?:' + ASSIGN + r'|timeout\s+\S+\s+|sudo\s+|nohup\s+|env\s+(?:-\S+\s+\S+\s+|' + ASSIGN + r')*)*'
+COMMAND = re.compile(START + PREFIX + r'(?:exec\s+)?$')
+DIRECT = re.compile(START + PREFIX + r'"?(?:\$[\w{(]|\.{0,2}/)[\w$/{}.-]*\.py"?(?=\s|$|\)|;)')
 
 
-def judge(rest, piped):
-    """What follows the interpreter on the (joined) line -> a finding, or None. `piped`: the interpreter
-    is the right-hand side of a pipe."""
+def judge(rest, piped, loose):
+    """What follows the interpreter on the (joined) line -> a finding, or None. `piped`: it is the
+    right-hand side of a pipe. `loose`: the interpreter is the bare word `python`, or a variable
+    that is not the first word of a command; only an inline program or an evident script counts."""
     words = rest.split()
     flags, i, inline = "", 0, False
-    while i < len(words) and len(words[i]) > 1 and words[i].startswith("-") and not words[i].startswith("--"):
+    while i < len(words) and len(words[i]) > 1 and words[i].startswith("-"):
         word = words[i]
-        if word in TAKES_VALUE:
-            i += 2
+        if word == "--":
+            i += 1
+            break
+        if word.startswith("--"):
+            break
+        if word[:2] in ("-W", "-X"):                    # an option with a value, attached or the next word
+            i += 2 if len(word) == 2 else 1
             continue
         letters = word[1:]
         # -c and -m end the options, also when bundled (-uc, -mvenv, -Ic)
@@ -82,12 +97,29 @@ def judge(rest, piped):
         return None if "I" in flags else "a program on the command line, on standard input or by module name, without -I"
     if not word or re.match(r"^[0-9]*[<>|&;)]", word):  # no program on this line: `command -v python3 >/dev/null`
         return None
-    bare = word.strip("\"'")
-    # A script by path: something with a directory, a variable, or a .py name. A plain word after
-    # "python3" in prose or in a package list ("python3 python3-pip", "python3 is required") is not one.
-    if "/" in bare or bare.startswith("$") or bare.endswith(".py"):
+    bare = word.strip("\"');")
+    if loose:
+        script = bare.endswith(".py") or re.search(r"(?i)^\$\{?\w*py\}?$", bare)
+    else:
+        # A script by path: something with a directory, a variable, or a .py name. A plain word after
+        # "python3" in prose or a package list ("python3 python3-pip", "python3 is required") is not one.
+        script = "/" in bare or bare.startswith("$") or bare.endswith(".py")
+    if script:
         return None if ("I" in flags or ("E" in flags and "s" in flags)) else "a script by path without -E and -s"
     return None
+
+
+def marker(line, above):
+    """The reason of an exemption that applies to this line, or None. It must be a COMMENT: after a #
+    at the end of the line (not inside a quoted string), or the comment line directly above."""
+    trailing = re.search(r'(?:^|\s)#(?P<comment>[^#]*isolation-exempt:(?P<reason>.*))$', line)
+    if trailing:
+        code = line[:trailing.start()]
+        if code.count('"') % 2 == 0 and code.count("'") % 2 == 0:
+            return trailing.group("reason").strip(), code
+    if above.lstrip().startswith("#") and "isolation-exempt:" in above:
+        return above.split("isolation-exempt:", 1)[1].strip(), line
+    return None, line
 
 
 SELF = "tools/python-isolation-lint.sh"
@@ -110,18 +142,27 @@ for name in files:
         number += 1
         if line.lstrip().startswith("#"):
             continue
-        above = lines[start - 1] if start else ""
-        if "isolation-exempt:" in line or (above.lstrip().startswith("#") and "isolation-exempt:" in above):
-            marker = (line if "isolation-exempt:" in line else above).split("isolation-exempt:", 1)[1].strip()
-            if len(marker) < 12:
-                print("%s:%d: an exemption without its reason" % (name, start + 1)); found += 1
-            continue
-        for match in INTERP.finditer(line):
-            what = judge(line[match.end():], bool(re.search(r"(?<!\|)\|\s*$", line[:match.start()])))
+        reason, code = marker(line, lines[start - 1] if start else "")
+        problems = []
+        for match in INTERP.finditer(code):
+            # The bare word `python` also turns up in prose, and a variable also stands as an ARGUMENT
+            # (`imports "$py" "$module"`): for those, only an inline program or an evident script
+            # counts, unless the variable is the first word of a command.
+            loose = match.group(0).strip("\"'}") == "python" or (
+                match.group("variable") is not None and not COMMAND.search(code[:match.start()]))
+            what = judge(code[match.end():], bool(re.search(r"(?<!\|)\|\s*$", code[:match.start()])), loose)
             if what:
-                print("%s:%d: %s: %s" % (name, start + 1, what, line.strip()[:110])); found += 1
-        if DIRECT.search(line):
-            print("%s:%d: a Python program run through its #! line (start it as python3 -Es <path>): %s" % (name, start + 1, line.strip()[:110])); found += 1
+                problems.append(what)
+        if DIRECT.search(code):
+            problems.append("a Python program run through its #! line (start it as python3 -Es <path>)")
+        if reason is not None and problems:
+            # ONE exemption covers ONE call. A marker on a line with two un-isolated calls, or without
+            # its reason, exempts nothing.
+            if len(problems) == 1 and len(reason) >= 12:
+                continue
+            problems.append("an exemption covers one call and states its reason; this one does not")
+        for what in problems:
+            print("%s:%d: %s: %s" % (name, start + 1, what, line.strip()[:110])); found += 1
 if "--list" in sys.argv[1:]:
     print("\n".join(visited))
 print("python-isolation-lint: %d script(s) checked, %d finding(s)%s" % (

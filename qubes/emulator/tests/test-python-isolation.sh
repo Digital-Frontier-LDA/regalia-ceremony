@@ -65,6 +65,27 @@ python3 \\\n  "$HERE/tool.py"
 if ! out="$("$HERE/preflight-environment.py" 2>&1)"; then :; fi
 ./tools/thing.py --flag
 python3 -c 'import cvc'   # isolation-exempt:
+python -c 'print(1)'
+pypy3 -c 'print(1)'
+$py -c 'import importlib'
+$PY "$HERE/seed-to-pkcs12.py"
+"$PYTHON_BIN" -c 'print(1)'
+"$python_bin" - <<'PY'
+env -u X "$PYBIN" -c 'print(1)'
+FOO=1 "$PYBIN" -c 'print(1)'
+nohup "$PYBIN" -c 'print(1)' &
+ver="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut d.bin)"
+x="$(python3 tool.py)"
+python3 tool.py; echo done
+python3 -- "$HERE/x.py"
+python3 -Wdefault::ImportWarning -c 'print(1)'
+FOO=1 "$HERE/x.py" --flag
+timeout 5 "$HERE/x.py"
+python3 -c 'print("isolation-exempt: a reason inside a string, long enough")'
+python3 -c 'print(1)'; echo "isolation-exempt: a reason in another command's string"
+python3 -c 'print(1)'; echo "see # isolation-exempt: a reason after a hash inside a string"
+python3 -c 'import cvc' && key="$(python3 -c 'import secrets')"   # isolation-exempt: one marker for two calls
+python3 -c 'import cvc'   # isolation-exempt: its harness supplies cvc through PYTHONPATH\nkey="$(python3 -c 'import secrets')"
 CASES
 while IFS= read -r line; do
   verdict "$line"
@@ -84,6 +105,10 @@ python3 -IB - <<'PY'
 printf '%s' "$program" | python3 -I > out.txt
 python3 \\\n  -I -c 'print(1)'
 python3 -c 'import cvc'   # isolation-exempt: its harness supplies cvc through PYTHONPATH
+# isolation-exempt: the verifier's pycvc reaches the test through PYTHONPATH\nver="$(perl -e 'exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut d.bin)"
+python3 -Es -- "$HERE/x.py"
+python3 -Wdefault::ImportWarning -I -c 'print(1)'
+python3 -Es "$DERIVE_PY" --hex "$point"
 echo "python3 is required for the seed backup"
 warn "then: zbarimg --raw photo.jpg | payload-qr.py --verify-scan payload.age"
 "$copy" -c 3 "$file"
@@ -145,6 +170,27 @@ out="$(PATH="$T/sle:$PATH" bash -c 'source "$1" >/dev/null 2>&1; sle4442 info' _
 printf '#!/usr/bin/env bash\necho "stand-in $*"\n' > "$T/sle/sle4442-manager"
 out="$(PATH="$T/sle:$PATH" bash -c 'source "$1" >/dev/null 2>&1; sle4442 info' _ "$SCRIPTS/ceremony.sh" 2>&1)"
 [ "$out" = "stand-in info" ] && P "a stand-in that is not Python (the suites' model) still runs as it is" || F "a non-Python sle4442-manager did not run: $out"
+
+hdr "the chip-card tool's three call sites, and what its starter makes of a #! line"
+# Nothing else pins them: a call written back as plain `sle4442-manager store …` would run the tool
+# through its #! line again, with the share and the PSC in a process nobody isolated.
+grep -q 'infout="$(sle4442 info 2>&1)"' "$SCRIPTS/ceremony.sh" && grep -q '$(sle4442_command) store --addr 32' "$SCRIPTS/ceremony.sh" \
+  && grep -q '$(sle4442_command) change-psc --psc-file' "$SCRIPTS/ceremony.sh" && P "info, store and change-psc go through sle4442 / sle4442_command" || F "a chip-card call site no longer goes through sle4442"
+direct="$(grep -nE '(^|[;(&|]|\$\(|env [^"]*)[[:space:]]*sle4442-manager[[:space:]]+(info|store|change-psc|read)' "$SCRIPTS/ceremony.sh" | grep -vE '^[0-9]+:[[:space:]]*(#|show |warn |err |info )' || true)"
+[ -z "$direct" ] && P "no direct sle4442-manager call is left in ceremony.sh" || F "a direct call: $direct"
+starter(){ printf '%b\n' "$1" > "$T/sle/sle4442-manager"; printf 'import sys\nprint("py", sys.flags.ignore_environment, sys.flags.no_user_site, *sys.argv[1:])\n' >> "$T/sle/sle4442-manager"; chmod +x "$T/sle/sle4442-manager"
+  PATH="$T/sle:$PATH" timeout 20 bash -c 'source "$1" >/dev/null 2>&1; sle4442 info "a b"' _ "$SCRIPTS/ceremony.sh" 2>&1 </dev/null; }
+for line in '#!/usr/bin/env python3' '#!/usr/bin/python3' '#!/bin/env python3' '#!/usr/bin/env -S python3 -u' '#!/usr/bin/env\tpython3' '#!/usr/bin/env  python3' '#! /usr/bin/python3'; do
+  out="$(starter "$line")"
+  [ "$out" = "py 1 1 info a b" ] && P "a Python tool is started isolated, arguments intact: $line" || F "$line -> $out"
+done
+# NOT Python, whatever letters its #! line holds: it must run as it is, never be handed -Es.
+mkdir -p "$T/python-tools"; ln -s "$(command -v bash)" "$T/python-tools/sh"
+for line in '#!/usr/bin/env -S bash --norc --rcfile /python' "#!$T/python-tools/sh"; do
+  printf '%s\necho "sh $*"\n' "$line" > "$T/sle/sle4442-manager"; chmod +x "$T/sle/sle4442-manager"
+  out="$(PATH="$T/sle:$PATH" timeout 20 bash -c 'source "$1" >/dev/null 2>&1; sle4442 info' _ "$SCRIPTS/ceremony.sh" 2>&1 </dev/null)"
+  [ "$out" = "sh info" ] && P "a tool that is not Python runs as it is: $line" || F "$line -> $out"
+done
 
 hdr "RESULT"
 printf '  %d passed, %d failed\n' "$pass" "$fail"

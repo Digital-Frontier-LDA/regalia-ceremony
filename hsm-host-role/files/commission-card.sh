@@ -498,6 +498,11 @@ PYTYPE
       # isolation-exempt: "$KEK_PY" is the interpreter chosen because it imports pycvc; its test supplies pycvc through PYTHONPATH
       printf '%s' "$att_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
         > "$kek_tmp/attest.bin" 2>/dev/null
+      # THE ATTESTATION VERDICT. It needs pycvc, and "$KEK_PY" is the interpreter that has it; the suite's
+      # stand-in for that interpreter supplies pycvc through PYTHONPATH (test-commission-card.sh), which
+      # -E would ignore. Converted together with that test, in the emulator suite, where it can be seen
+      # that the verdict still comes out.
+      # isolation-exempt: the attestation verifier's pycvc reaches the test through PYTHONPATH
       ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
                    --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
                    --expect-spki "$kek_tmp/kek.der" 2>&1)"; ver_rc=$?
