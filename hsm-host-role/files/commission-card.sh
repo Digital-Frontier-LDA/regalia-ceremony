@@ -453,10 +453,10 @@ else
   # C.DevAut must be the bytes whose digest B7 compared against the ceremony's pin. Recomputed here
   # from DEVAUT_HEX rather than trusting the reader's DEVAUT_SHA256 field, which is a separate line
   # a reader could get wrong independently of the bytes.
-  # "$KEK_PY" below is the interpreter chosen above BECAUSE it imports pycvc; the suite's stand-in for
-  # it supplies pycvc through PYTHONPATH (test-commission-card.sh), which -I and -E would ignore. These
-  # calls are converted together with that test.  isolation-exempt: pycvc reaches the test through PYTHONPATH
-  printf '%s' "$devaut_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+  # Every "$KEK_PY" below runs isolated (-I, or -Es for the verifier by path): the interpreter is the
+  # one the resolver found able to import pycvc and cryptography UNDER -I, so nothing in the
+  # caller's PYTHON* variables or under ~/.local is part of this verdict.
+  printf '%s' "$devaut_hex" | "$KEK_PY" -I -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
     > "$kek_tmp/devaut.bin" 2>/dev/null
   devaut_recomputed="$(sha256sum < "$kek_tmp/devaut.bin" | awk '{print $1}')"
   if [ ! -s "$kek_tmp/devaut.bin" ] || [ "$devaut_recomputed" != "$EXPECT_DEVAUT_SHA" ]; then
@@ -467,8 +467,7 @@ else
     # What kind of key the token holds at --kek-id: rsa, ec, another type's name, or nothing when the
     # bytes are not a SubjectPublicKeyInfo. Only to NAME the failure for the last two — the verifier
     # compares the key itself, so this answer never decides a pass.
-# isolation-exempt: "$KEK_PY" is the interpreter chosen because it imports pycvc; its test supplies pycvc through PYTHONPATH
-    kek_type="$( [ -s "$kek_tmp/kek.der" ] && "$KEK_PY" - "$kek_tmp/kek.der" 2>/dev/null <<'PYTYPE'
+    kek_type="$( [ -s "$kek_tmp/kek.der" ] && "$KEK_PY" -I - "$kek_tmp/kek.der" 2>/dev/null <<'PYTYPE'
 import sys
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import load_der_public_key
@@ -495,15 +494,10 @@ PYTYPE
       [ -n "$att_why" ] || att_why="$(grep -v '^[[:space:]]*$' "$kek_tmp/att.err" | tail -3)"
       printf '%s\n' "$att_why" | sed 's/^/     /'
     else
-      # isolation-exempt: "$KEK_PY" is the interpreter chosen because it imports pycvc; its test supplies pycvc through PYTHONPATH
-      printf '%s' "$att_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+      printf '%s' "$att_hex" | "$KEK_PY" -I -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
         > "$kek_tmp/attest.bin" 2>/dev/null
-      # THE ATTESTATION VERDICT. It needs pycvc, and "$KEK_PY" is the interpreter that has it; the suite's
-      # stand-in for that interpreter supplies pycvc through PYTHONPATH (test-commission-card.sh), which
-      # -E would ignore. Converted together with that test, in the emulator suite, where it can be seen
-      # that the verdict still comes out.
-      # isolation-exempt: the attestation verifier's pycvc reaches the test through PYTHONPATH
-      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
+      # THE ATTESTATION VERDICT, isolated; the verifier starts its chain walker with -I itself.
+      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" -Es "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
                    --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
                    --expect-spki "$kek_tmp/kek.der" 2>&1)"; ver_rc=$?
       # THE EXIT CODE AND THE THREE VERDICT LINES, ALL OF THEM. A zero exit alone would accept a
