@@ -366,7 +366,13 @@ print("hsm-key-attestation-verify ERROR: the chain walker could not evaluate C.D
 print("DEVAUT_CHAIN=not-evaluated")
 sys.exit(2)
 STUB
-  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py" "$FAKE/verify-notevaluated.py"
+  # A verifier stopped by perl's alarm: it prints a failing verdict line first, then the alarm.
+  cat > "$FAKE/verify-alarmed.py" <<'STUB'
+import os, signal, sys
+print("DEVAUT_CHAIN=failed", flush=True)
+os.kill(os.getpid(), signal.SIGALRM)
+STUB
+  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py" "$FAKE/verify-notevaluated.py" "$FAKE/verify-alarmed.py"
   mkdir -p "$FAKE/args" "$FAKE/empty-trust"
   REG_NONE="$FAKE/reg-none.json"
   printf '{"schema":"regalia.staging-hardware/v1","environment":"staging","devices":[]}\n' > "$REG_NONE"
@@ -458,6 +464,11 @@ EOF
       && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
     && P "a chain that could not be EVALUATED is reported as such, not as 'not a genuine card'" \
     || F "DEVAUT_CHAIN=not-evaluated was misreported as a verdict on the card"
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-alarmed.py" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'stopped by signal 14 (its 60 s limit) — CANNOT BE EVALUATED' "$FAKE/outk" \
+      && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "a verifier killed by its time limit is CANNOT BE EVALUATED, not 'not a genuine card'" \
+    || F "a verifier killed by its alarm was reported as a verdict on the card"
   rc="$(HSM_KEY_ATTEST_VERIFY_PY=/nonexistent cc_kek --kek-id 0a --kek-ref 1)"
   { [ "$rc" != 0 ] && grep -q 'hsm-key-attestation-verify.py not found' "$FAKE/outk" && no_fragment; } \
     && P "no verifier -> CANNOT BE EVALUATED -> failure" || F "the attestation was skipped without a verifier"
