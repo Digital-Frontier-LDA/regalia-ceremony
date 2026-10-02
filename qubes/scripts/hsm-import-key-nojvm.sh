@@ -221,7 +221,8 @@ CERT_ID="$(printf '%02x' "$KEY_ID")"
 SLOT_ARGS=()
 [ -n "$SLOT" ] && SLOT_ARGS=(--slot "$SLOT")
 PIN="$(cat "$PIN_FILE")"
-if ! pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" \
+# THE PIN TRAVELS IN THE ENVIRONMENT OF ONE COMMAND (pkcs11-tool's env: form), never argv.
+if ! REGALIA_P11_PIN="$PIN" pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin env:REGALIA_P11_PIN \
         --write-object "$WORK/cert.der" --type cert --id "$CERT_ID" --label "$LABEL" \
         > "$WORK/cert.log" 2>&1; then
     err "certificate write failed — the key is on the card but INVISIBLE to gpg and ssh"
@@ -231,7 +232,7 @@ fi
 ok "certificate written"
 
 # REPORTING SUCCESS WITHOUT CHECKING is how a key ends up on a card nothing can find.
-objs="$(pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" --list-objects 2>/dev/null)"
+objs="$(REGALIA_P11_PIN="$PIN" pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin env:REGALIA_P11_PIN --list-objects 2>/dev/null)"
 grep -q "Private Key Object" <<< "$objs" || { err "no private key enumerates after the unwrap"; exit 1; }
 grep -q "Certificate Object" <<< "$objs" || { err "no certificate enumerates"; exit 1; }
 # THIS KEY AND THIS CERTIFICATE MUST SHARE AN ID — not every object on the token. A card that
@@ -268,6 +269,32 @@ if ! grep -qx "cert $CERT_ID" <<< "$_pairs"; then
     exit 1
 fi
 ok "verified: key and certificate both present, sharing id $CERT_ID"
+
+# PRESENT IS NOT USABLE. A card can accept an UNWRAP, enumerate the key with the right public key,
+# and still be unable to sign with it: measured on a Nitrokey HSM 2 given a Pico-wrapped P-256 key
+# (regalia-kms#64, 2026-10-02) — "Key successfully imported", the identical public key, and
+# CKR_GENERAL_ERROR on every signature. So the key signs a fresh random digest ON THE CARD, and the
+# signature must verify against the certificate's public key, which is the key the container held.
+head -c 32 /dev/urandom > "$WORK/probe.digest"
+if ! openssl x509 -inform DER -in "$WORK/cert.der" -pubkey -noout > "$WORK/cert-pub.pem" 2>/dev/null; then
+    err "the certificate's public key could not be read, so the imported key cannot be checked"
+    exit 1
+fi
+if ! REGALIA_P11_PIN="$PIN" pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin env:REGALIA_P11_PIN \
+        --sign --mechanism ECDSA --signature-format openssl --id "$CERT_ID" \
+        --input-file "$WORK/probe.digest" --output-file "$WORK/probe.sig" > "$WORK/sign.log" 2>&1 \
+   || [ ! -s "$WORK/probe.sig" ]; then
+    err "the imported key does not SIGN on the card (id $CERT_ID) — it is present but unusable"
+    grep -iE "CKR_|error" "$WORK/sign.log" | head -3 >&2
+    exit 1
+fi
+if ! openssl pkeyutl -verify -pubin -inkey "$WORK/cert-pub.pem" -in "$WORK/probe.digest" \
+        -sigfile "$WORK/probe.sig" > /dev/null 2>&1; then
+    err "the card signed, but NOT with the key in the container: the signature does not verify"
+    err "against the certificate's public key. Refusing."
+    exit 1
+fi
+ok "verified: the key signs on the card, and the signature verifies against the certificate"
 inf "keys on card: $(printf '%s' "$objs" | grep -c 'Private Key Object')"
 inf "certs on card: $(printf '%s' "$objs" | grep -c 'Certificate Object')"
 ok "IMPORT-OK"

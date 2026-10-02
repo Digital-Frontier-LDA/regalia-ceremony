@@ -44,8 +44,12 @@ cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
 open(f"{T}/funding.p12","wb").write(
     pkcs12.serialize_key_and_certificates(b"drill", key, cert, None,
                                           BestAvailableEncryption(b"p12pass")))
-from cryptography.hazmat.primitives.serialization import Encoding
+from cryptography.hazmat.primitives.serialization import Encoding, PrivateFormat, NoEncryption
 open(f"{T}/funding.crt","wb").write(cert.public_bytes(Encoding.PEM))
+# What the stub card signs with: the container's own key, and an unrelated one for the row where the
+# card answers with the wrong key.
+for name, k in (("funding", key), ("other", ec.generate_private_key(ec.SECP256R1()))):
+    open(f"{T}/{name}.key.pem","wb").write(k.private_bytes(Encoding.PEM, PrivateFormat.PKCS8, NoEncryption()))
 PY
 [ -s "$T/funding.p12" ] || { echo "could not build the PKCS#12 fixture" >&2; exit 1; }
 # A DKEK share in sc-hsm-tool's format: Salted__ || salt(8) || AES-256-CBC(3x10M-MD5 KDF) of a
@@ -82,6 +86,19 @@ case "$*" in
     # Remember the id the certificate was written with, so the listing can report it.
     prev=""; for a in "$@"; do [ "$prev" = "--id" ] && printf '%s' "$a" > "${STUB_P11%.txt}.certid"; prev="$a"; done
     exit 0;;
+  *--sign*)
+    # A REAL SIGNATURE, so the script's verification is exercised, not satisfied by an exit status.
+    [ -n "${STUB_SIGN_FAIL:-}" ] && { echo "error: PKCS11 function C_SignFinal failed: rv = CKR_GENERAL_ERROR (0x5)" >&2; exit 1; }
+    in=""; outf=""; prev=""
+    for a in "$@"; do case "$prev" in --input-file|-i) in="$a";; --output-file|-o) outf="$a";; esac; prev="$a"; done
+    python3 - "$in" "$outf" "${STUB_SIGN_KEY:?}" <<'PY'
+import sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+key = serialization.load_pem_private_key(open(sys.argv[3], "rb").read(), None)
+open(sys.argv[2], "wb").write(key.sign(open(sys.argv[1], "rb").read(), ec.ECDSA(utils.Prehashed(hashes.SHA256()))))
+PY
+    exit $?;;
   *--list-objects*)
     certid="$(cat "${STUB_P11%.txt}.certid" 2>/dev/null || echo 1f)"
     # The KEY's id is the one the unwrap used: key reference 31 decimal is 0x1f. The stub is told
@@ -94,6 +111,7 @@ exit 0
 STUB
 chmod +x "$BIN/pkcs11-tool"
 export STUB_P11="$T/p11.txt"; : > "$STUB_P11"
+export STUB_SIGN_KEY="$T/funding.key.pem"
 
 cat > "$BIN/opensc-explorer" <<'STUB'
 #!/usr/bin/env bash
@@ -119,6 +137,28 @@ out="$(STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/fundin
 [ "$rc" -eq 0 ] && P "it succeeds end to end (exit 0)" || F "exit $rc: $(tail -4 <<<"$out")"
 grep -q 'IMPORT-OK' <<<"$out" && P "…and reports IMPORT-OK, the token the callers grep for" \
   || F "no IMPORT-OK in the output"
+grep -q 'the key signs on the card, and the signature verifies' <<<"$out" \
+  && P "…after the key SIGNED on the card and the signature verified against the certificate" \
+  || F "the imported key was never made to sign: $(tail -3 <<<"$out")"
+grep -q -- '--sign' "$STUB_P11" && P "…a real --sign call reached the card" || F "no --sign reached the card"
+grep -q '648219' "$STUB_P11" && F "the PIN appeared on a pkcs11-tool command line" \
+  || P "…and the PIN is on no pkcs11-tool command line (env: form)"
+grep -q -- '--pin env:REGALIA_P11_PIN' "$STUB_P11" && P "…it travels as --pin env:REGALIA_P11_PIN" \
+  || F "pkcs11-tool was not given the env: form"
+
+hdr "present is not usable: a key that does not sign, or signs as another key, is refused"
+# Measured on hardware (regalia-kms#64): a Nitrokey accepted a Pico-wrapped key, showed the right
+# public key, and failed every signature. Listing the objects cannot see that; signing can.
+for row in "STUB_SIGN_FAIL=1|does not SIGN on the card" "STUB_SIGN_KEY=$T/other.key.pem|does not verify"; do
+  setting="${row%%|*}"; want="${row#*|}"
+  : > "$T/stdin.txt"; : > "$STUB_P11"
+  outs="$(env "$setting" STUB_STDIN="$T/stdin.txt" TMPDIR="$T/tmp" bash "$IMPORT" --p12 "$T/funding.p12" \
+          --pw-file "$T/p12.pw" --id 3 --label akash-funding --dkek "$T/dkek.pbe" --dkek-pw "$T/dkek.pw" \
+          --pin-file "$T/pin.txt" --reader 0 --cert "$T/funding.crt" --module /dev/null 2>&1)"; rcs=$?
+  [ "$rcs" -ne 0 ] && grep -q "$want" <<<"$outs" && P "${setting%%=*}: refused, saying it $want" \
+    || F "${setting%%=*}: exit $rcs: $(tail -2 <<<"$outs")"
+  grep -q 'IMPORT-OK' <<<"$outs" && F "${setting%%=*}: printed IMPORT-OK anyway" || P "…and no IMPORT-OK"
+done
 # A TRIPWIRE, NOT A GREP OF THE PROSE. Searching the output for "scsh" failed on this script's own
 # sentence explaining what the scsh path used to do — a test that reads explanations rather than
 # behaviour. These stubs are the only `java` and `scriptrunner` on PATH and they record being run.
@@ -289,6 +329,19 @@ case "$*" in
     # Remember the id the certificate was written with, so the listing can report it.
     prev=""; for a in "$@"; do [ "$prev" = "--id" ] && printf '%s' "$a" > "${STUB_P11%.txt}.certid"; prev="$a"; done
     exit 0;;
+  *--sign*)
+    # A REAL SIGNATURE, so the script's verification is exercised, not satisfied by an exit status.
+    [ -n "${STUB_SIGN_FAIL:-}" ] && { echo "error: PKCS11 function C_SignFinal failed: rv = CKR_GENERAL_ERROR (0x5)" >&2; exit 1; }
+    in=""; outf=""; prev=""
+    for a in "$@"; do case "$prev" in --input-file|-i) in="$a";; --output-file|-o) outf="$a";; esac; prev="$a"; done
+    python3 - "$in" "$outf" "${STUB_SIGN_KEY:?}" <<'PY'
+import sys
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
+key = serialization.load_pem_private_key(open(sys.argv[3], "rb").read(), None)
+open(sys.argv[2], "wb").write(key.sign(open(sys.argv[1], "rb").read(), ec.ECDSA(utils.Prehashed(hashes.SHA256()))))
+PY
+    exit $?;;
   *--list-objects*)
     certid="$(cat "${STUB_P11%.txt}.certid" 2>/dev/null || echo 1f)"
     # The KEY's id is the one the unwrap used: key reference 31 decimal is 0x1f. The stub is told
