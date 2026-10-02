@@ -1663,19 +1663,30 @@ else: print(secrets.token_hex(n//2).upper())' "$1"
 
 # Show one generated day-to-day PIN on the terminal, clear it, and require it typed back from the
 # paper (three tries). Reads and writes /dev/tty only. Returns 1 if the copy was not verified.
+#   show_day_pin <name> <value> [where it is written, default "your PIN card"] [exact]
+# "exact": letter case counts. A hex key or a digit PIN means the same in either case, so by default
+# case is ignored; a TPM lockout authorization does not. Typed at the host in the wrong case it is a
+# WRONG value, and there one wrong attempt costs a day, so a copy that matches only when case is
+# ignored must be caught here, where it costs nothing.
 show_day_pin() {
-  local name="$1" value="$2" typed tries=0
+  local name="$1" value="$2" where="${3:-your PIN card}" exact="${4:-}" typed tries=0
   while :; do
-    read -r -p "   press Enter to SHOW the $name for copying onto your PIN card… " _ </dev/tty
+    read -r -p "   press Enter to SHOW the $name for copying onto $where… " _ </dev/tty
     clear
     b "$name — write it down by hand"
     printf '\n      %s\n\n' "$value" >/dev/tty
     read -r -p "   written down? press Enter to CLEAR the screen… " _ </dev/tty
     clear; printf '\033[3J' >/dev/tty
     read -r -s -p "   type the $name back FROM YOUR PAPER (hidden): " typed </dev/tty; echo
-    # Spaces and letter case do not count: a hex key is easier to copy in groups.
+    # Spaces never count: a long value is easier to copy in groups. Letter case does not count
+    # either, unless "exact" was asked for.
     typed="${typed//[[:space:]]/}"
-    [ "${typed^^}" = "${value^^}" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
+    if [ "$exact" = exact ]; then
+      [ "$typed" = "$value" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
+      [ "${typed^^}" = "${value^^}" ] && err "your copy has the right characters in the wrong letter case: this value is CAPITALS and digits, and it must be written and typed exactly so."
+    else
+      [ "${typed^^}" = "${value^^}" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
+    fi
     typed=""; tries=$((tries+1))
     err "your copy of the $name does NOT match."
     [ "$tries" -ge 3 ] && { err "three mismatches: the $name is NOT verified."; return 1; }
@@ -1861,7 +1872,7 @@ generate_pins() {
   warn "20 characters, capitals and digits. It is typed at that host's console when its TPM is"
   warn "commissioned (regalia-kms tpm-lockout.sh --set). Copy it EXACTLY: at the host, ONE wrong attempt"
   warn "blocks that TPM's lockout hierarchy for a day, the right value included."
-  for k in $TPM_AUTHS; do show_day_pin "$k" "${val[$k]}" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
+  for k in $TPM_AUTHS; do show_day_pin "$k" "${val[$k]}" "the KMS HOST CARD (page 2)" exact || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
   for k in "${!val[@]}"; do val[$k]=""; done
   info "PIN file written (0600, RAM-only workdir)."
 }

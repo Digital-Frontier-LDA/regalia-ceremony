@@ -109,6 +109,7 @@ grep -q "exists but does not verify" <<< "$out" && ! grep -q planted "$T/co/escr
 [ "$(grep -cE '^tpm_[abc]=' "$T/co/escrow/pins-0001.age")" = 3 ] && grep -qx "tpm_a=$ta" "$T/co/escrow/pins-0001.age" && grep -qx "tpm_c=$tc" "$T/co/escrow/pins-0001.age" \
   && P "and exactly the three tpm_<host>=<lockout authorization> lines" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
 grep -qF "$ta" <<< "$out" && F "a TPM lockout authorization appeared in the tool's output" || P "no TPM lockout authorization appears in the tool's output"
+grep -q "6 device PIN(s), 3 TPM lockout authorization(s)" <<< "$out" && P "the confirmation counts six device PINs and three TPM lockout authorizations, not nine devices" || F "confirmation: $(tail -4 <<< "$out")"
 git -C "$T/co" add -A >/dev/null; git -C "$T/co" -c user.name=t -c user.email=t@t commit -qm e >/dev/null
 rm -f "$T/out"; [ "$(python3 "$MAC" select "$T/co" "$T/out" <<< "$KEY" 2>/dev/null)" = pins-0001.age ] \
   && P "its MAC verifies with the key" || F "the producer's MAC does not verify"

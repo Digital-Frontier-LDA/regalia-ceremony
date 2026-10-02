@@ -69,7 +69,12 @@ while time.time() < deadline:
         send("\n"); pending = ""
     elif re.search(r"type the (\S+) back FROM YOUR PAPER \(hidden\): $", pending):
         name = re.search(r"type the (\S+) back", pending).group(1)
-        send(("00000000" if mode == "gen-wrong" else shown.get(name, "?")) + "\n"); pending = ""
+        answer = "00000000" if mode == "gen-wrong" else shown.get(name, "?")
+        if mode == "gen-lowercase" and name.startswith("tpm_"):
+            answer = answer.lower()               # the right characters, copied in the wrong letter case
+        if mode == "gen-grouped" and name.startswith("tpm_"):
+            answer = " ".join(answer[i:i + 4] for i in range(0, len(answer), 4))   # copied in groups of four
+        send(answer + "\n"); pending = ""
     elif re.search(r"(\S+) (\(hidden\)|again): $", pending):
         m = re.search(r"(\S+) (\(hidden\)|again): $", pending)
         name, which = m.group(1), m.group(2)
@@ -111,6 +116,18 @@ leak=0; for k in hsm_a_so_pin hsm_b_so_pin hsm_c_so_pin yubikey_a_piv_puk yubike
 match=1; for k in hsm_a_user_pin hsm_b_user_pin hsm_c_user_pin yubikey_a_piv_pin yubikey_b_piv_pin yubikey_c_piv_pin; do grep -qx "DRIVER: shown $k=$(field $k "$W")" <<< "$out" || match=0; done
 [ "$match" = 1 ] && P "the PINs shown are the PINs stored" || F "shown and stored PINs differ"
 grep -q "every loaded credential is distinct" <<< "$out" && P "credential separation passed" || F "separation not reported"
+
+hdr "a TPM lockout authorization is copied EXACTLY: letter case counts, the grouping does not"
+# At the host the value is case-sensitive and one wrong attempt costs a day, so a copy that matches
+# only when case is ignored must fail here. (A hex key or a digit PIN means the same in either case.)
+WL="$T/lower"; mkdir -p "$WL"; outl="$(drive gen-lowercase "$WL")"
+grep -q "RC=1" <<< "$outl" && [ ! -e "$WL.kept" ] && grep -q "wrong letter case" <<< "$outl" && grep -q "three mismatches: the tpm_a_lockout_auth is NOT verified" <<< "$outl" \
+  && P "typed back in lower case: refused, with the reason, and no PIN file kept" || F "a lower-case copy was accepted: $(tail -8 <<< "$outl")"
+WG="$T/grouped"; mkdir -p "$WG"; outg="$(drive gen-grouped "$WG")"
+grep -q "RC=0" <<< "$outg" && P "typed back in groups of four: accepted (the spaces are the paper's, not the value's)" || F "a grouped copy was refused: $(tail -8 <<< "$outg")"
+grep -q "for copying onto the KMS HOST CARD (page 2)" <<< "$out" && grep -q "for copying onto your PIN card" <<< "$out" \
+  && P "each reveal names the card it goes on: the PIN card for PINs and the escrow key, the KMS host card for these" || F "a reveal names the wrong card"
+! grep -E "SHOW the tpm_[abc]_lockout_auth for copying onto your PIN card" <<< "$out" >/dev/null && P "no TPM lockout authorization is sent to the PIN card" || F "a TPM lockout authorization is revealed for the PIN card"
 
 hdr "generate twice: different values (not a fixed or seeded generator)"
 W2="$T/gen2"; mkdir -p "$W2"; drive gen-ok "$W2" >/dev/null

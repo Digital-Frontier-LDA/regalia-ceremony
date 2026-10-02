@@ -124,13 +124,14 @@ trap 'rm -f "$tmp"' EXIT
   || die "could not write the plaintext to /dev/shm (full?); nothing written"
 n="$(grep -cE '^(hsm|yubikey|tpm)_[abc]=' "$tmp")"
 [ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") values; nothing written"
+pins="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"; tpms="$(grep -cE '^tpm_[abc]=' "$tmp")"
 "$AGE" -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"
 printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \
   || { rm -f "$out" "$out.mac"; die "could not write the MAC; nothing written"; }
 key=""
 cat <<REC
-ESCROWED: $out and $out.mac (sequence $next, $n devices), encrypted to the recipient on the PIN card.
+ESCROWED: $out and $out.mac (sequence $next: $pins device PIN(s), $tpms TPM lockout authorization(s)), encrypted to the recipient on the PIN card.
 Commit both:
   git add $out $out.mac && git commit -m "escrow: PIN escrow $next"
 REC
