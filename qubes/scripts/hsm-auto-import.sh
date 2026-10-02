@@ -145,7 +145,7 @@ cmd_run() {
   # created" (measured on dev-regalia, Debian 13, 2026-09-17). Refuse a short password outright.
   ( umask 077; head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/dkek.pw" )
   [ "$(wc -c < "$WORK/dkek.pw")" -eq 32 ] || { err "DKEK share password was not generated (expected 32 hex chars)"; return 1; }
-  python3 -E "$SCRIPTS/seed-to-pkcs12.py" \
+  python3 -Es "$SCRIPTS/seed-to-pkcs12.py" \
       --mnemonic-file "$WORK/m.txt" \
       --password-file "$WORK/p12.pw" \
       --out "$WORK/funding.p12" || { err "PKCS#12 build failed"; return 1; }

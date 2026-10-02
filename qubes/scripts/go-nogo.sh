@@ -154,7 +154,7 @@ elif [ ! -x "$HERE/preflight-environment.py" ]; then
   bad "preflight-environment.py is missing or not executable — cannot prove a supported disposable profile."
 elif [ ! -x "$HERE/ceremony-teardown.py" ]; then
   bad "ceremony-teardown.py is missing or not executable — cannot prove cleanup after secret exposure."
-elif ! profile_out="$("$HERE/preflight-environment.py" 2>&1)"; then
+elif ! profile_out="$(python3 -Es "$HERE/preflight-environment.py" 2>&1)"; then
   bad "execution profile is unsafe or unsupported:"
   printf '%s\n' "$profile_out" | sed 's/^/       /'
 else
@@ -300,10 +300,10 @@ selftest() { # <label> <expected line> <command...>
     printf '%s\n' "$out" | tail -5 | sed 's/^/       /'
   fi
 }
-selftest "dice-entropy"   "selftest: OK" python3 -E "$HERE/dice-entropy.py" --selftest
-selftest "entropy-mix"    "selftest: OK" python3 -E "$HERE/entropy-mix.py" --selftest
-selftest "payload-qr"     "selftest: OK" python3 -E "$HERE/payload-qr.py" --selftest
-selftest "seed-to-pkcs12" "selftest: OK" python3 -E "$HERE/seed-to-pkcs12.py" --selftest
+selftest "dice-entropy"   "selftest: OK" python3 -Es "$HERE/dice-entropy.py" --selftest
+selftest "entropy-mix"    "selftest: OK" python3 -Es "$HERE/entropy-mix.py" --selftest
+selftest "payload-qr"     "selftest: OK" python3 -Es "$HERE/payload-qr.py" --selftest
+selftest "seed-to-pkcs12" "selftest: OK" python3 -Es "$HERE/seed-to-pkcs12.py" --selftest
 # The breakglass key is born in the ceremony as a post-quantum age key (age >= 1.3, -pq). A throwaway
 # key is captured in memory and discarded unread (a here-string, not a pipe: pipefail + grep -q).
 if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
@@ -314,7 +314,7 @@ fi
 # The printed forms: each must produce a PostScript file with at least one page.
 render() { # <label> <script> <args...>
   local label="$1" script="$2" out f="$st_dir/$2.ps"; shift 2
-  if out="$(timeout 60 python3 -E "$HERE/$script" "$@" -o "$f" 2>&1)" && [ "$(grep -c '^showpage' "$f" 2>/dev/null)" -ge 1 ]; then
+  if out="$(timeout 60 python3 -Es "$HERE/$script" "$@" -o "$f" 2>&1)" && [ "$(grep -c '^showpage' "$f" 2>/dev/null)" -ge 1 ]; then
     ok "$label renders ($(grep -c '^showpage' "$f") page(s))"
   else
     bad "$label does NOT render — the ceremony would stop at the print step:"
@@ -327,7 +327,7 @@ render "PIN card"            pin-card-form.py
 # The HSM's random generator (ceremony step 1 mixes it in). Reading random bytes touches no key;
 # a FAIL only when --need hsm, since a bench run may have no HSM attached. The same 60 s bound as
 # ceremony.sh: a token that hangs mid-exchange must not stall the report before its verdict.
-if timeout 60 python3 -E "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin" 2>/dev/null)" = 32 ]; then
+if timeout 60 python3 -Es "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin" 2>/dev/null)" = 32 ]; then
   ok "$(head -1 "$st_dir/h.out")"
 elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
   # The emulator's HSM is a PKCS#11 software token with no card reader; there is nothing to read.

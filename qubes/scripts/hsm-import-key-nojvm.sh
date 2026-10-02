@@ -148,7 +148,7 @@ if [ -n "$DKEK_SHARES" ]; then
 else
     DKEK_ARGS=(--dkek-pw-file "$DKEK_PW")
 fi
-if ! python3 -E "$ENCODE" --p12 "$P12" --p12-pass-file "$PW_FILE" \
+if ! python3 -Es "$ENCODE" --p12 "$P12" --p12-pass-file "$PW_FILE" \
         --dkek-share "$DKEK_SHARE" "${DKEK_ARGS[@]}" \
         --out "$BLOB" --print-kcv > "$WORK/encode.log" 2>&1; then
     err "could not build the key blob"

@@ -218,7 +218,7 @@ refresh_ref_pub() {
     [ -n "$DRILL_MNEMONIC" ] || { echo "  could not read DRILL_MNEMONIC from $AUTO_IMPORT" >&2; return 1; }
     printf '%s' "$DRILL_MNEMONIC" > "$WORK/ref-m.txt"; chmod 600 "$WORK/ref-m.txt"
     ( umask 077; head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$WORK/ref.pw" )
-    python3 -E "$(hsm_ceremony_script seed-to-pkcs12.py)" --mnemonic-file "$WORK/ref-m.txt" \
+    python3 -Es "$(hsm_ceremony_script seed-to-pkcs12.py)" --mnemonic-file "$WORK/ref-m.txt" \
         --password-file "$WORK/ref.pw" --out "$WORK/ref.p12" >/dev/null 2>&1 || return 1
     openssl pkcs12 -in "$WORK/ref.p12" -nodes -passin file:"$WORK/ref.pw" 2>/dev/null \
         | openssl ec -pubout -outform DER > "$WORK/ref-pub.der" 2>/dev/null
@@ -237,7 +237,7 @@ sign_and_verify() {   # $1 = key id
     head -c 32 /dev/urandom > "$WORK/d.bin"
     REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
         --id "$1" --input-file "$WORK/d.bin" --output-file "$WORK/s.bin" >/dev/null 2>&1 || return 1
-    python3 -E "$VERIFY" --der "$REF_PUB" --digest "$WORK/d.bin" --sig "$WORK/s.bin" >/dev/null 2>&1
+    python3 -Es "$VERIFY" --der "$REF_PUB" --digest "$WORK/d.bin" --sig "$WORK/s.bin" >/dev/null 2>&1
     vrc=$?
     case $vrc in 0) return 0 ;; 1) return 2 ;; *) return 3 ;; esac
 }
@@ -484,7 +484,7 @@ if probe_key S7; then
     okc=0; refused=0; bad=0
     for i in $(seq 1 $K); do
         if [ "$(cat "$WORK/c$i.rc" 2>/dev/null)" = 0 ] && [ -s "$WORK/c$i.sig" ]; then
-            if python3 -E "$VERIFY" --der "$REF_PUB" --digest "$WORK/c$i.bin" \
+            if python3 -Es "$VERIFY" --der "$REF_PUB" --digest "$WORK/c$i.bin" \
                  --sig "$WORK/c$i.sig" >/dev/null 2>&1; then okc=$((okc+1)); else bad=$((bad+1)); fi
         else
             refused=$((refused+1))
@@ -671,7 +671,7 @@ else
                 # the truth is that the VERIFIER could not run — which is what happened here
                 # once Homebrew moved python3 to 3.14 and orphaned the site-packages holding
                 # pycvc. The certificate was fine: 443 bytes, correct CHR/CAR, valid 7F21.
-                cvcout="$(python3 -E "$(hsm_ceremony_script cvc-devaut-verify.py)" \
+                cvcout="$(python3 -Es "$(hsm_ceremony_script cvc-devaut-verify.py)" \
                             --hex "$WORK/devaut.hex" 2>&1)"; cvcrc=$?
                 case $cvcrc in
                     0) P "the post-wipe certificate still parses as a valid TR-03110 CVC offline" ;;

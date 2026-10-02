@@ -37,10 +37,10 @@ F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 echo "checking firmware invariants in $SDK"
 echo
 
-file_code="$(python3 -E "$LEXER" c "$SDK/src/fs/file.c")" || exit 2
-main_code="$(python3 -E "$LEXER" c "$SDK/src/main.c")" || exit 2
-rescue_code="$(python3 -E "$LEXER" c "$SDK/src/rescue.c")" || exit 2
-flash_code="$(python3 -E "$LEXER" c "$SDK/src/fs/flash.c")" || exit 2
+file_code="$(python3 -Es "$LEXER" c "$SDK/src/fs/file.c")" || exit 2
+main_code="$(python3 -Es "$LEXER" c "$SDK/src/main.c")" || exit 2
+rescue_code="$(python3 -Es "$LEXER" c "$SDK/src/rescue.c")" || exit 2
+flash_code="$(python3 -Es "$LEXER" c "$SDK/src/fs/flash.c")" || exit 2
 
 # 1. The scan must validate a chain link BEFORE dereferencing it.
 #    Without this a corrupt link is read directly: MEASURED BFAR=0x40130000, precise bus fault

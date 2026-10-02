@@ -90,6 +90,8 @@ REFUSING: no interpreter here can import the ceremony's pinned dependencies ($*)
   and at the system python3.
 
   Build the venv the way the dev image does:
+  (A `pip install --user` copy does not count: the ceremony runs Python isolated, without the
+  user's site-packages, so that a file planted there cannot replace a module.)
 
       python3 -I -m venv /opt/dev-bin/regalia-venv
       /opt/dev-bin/regalia-venv/bin/pip install --require-hashes -r qubes/requirements.txt

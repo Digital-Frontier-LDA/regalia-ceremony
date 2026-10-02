@@ -97,7 +97,7 @@ say ""; say "PROOF 1 — Nitrokey HSM funding-address derivation"
 hsm_out="$(step_hsm_funding 2>&1)"
 WIZ_ADDR=$(printf '%s' "$hsm_out" | grep -oE 'akash1[0-9a-z]+' | head -1)
 CANON="akash1dc66jys4v4ckt0sxq63ksps34ylra5n9m2qw85"   # cosmjs-canonical for the fixed test DER
-SCRIPT_ADDR=$(python3 -E "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null)
+SCRIPT_ADDR=$(python3 -Es "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null)
 say "   wizard-printed address : ${WIZ_ADDR:-<withheld: fail-closed>}"
 say "   derive-script address  : $SCRIPT_ADDR"
 say "   cosmjs-canonical value : $CANON"
@@ -209,7 +209,7 @@ SOURCE_LEXER="$HERE/../emulator/tests/source_lexing.py"
 # the output, from ceremony.sh having genuinely dropped `-l H`. Reporting the second for the first
 # sends someone to audit print_share() for a change nobody made. Refuse once, for the real reason,
 # and do not run the check that cannot answer.
-if CEREMONY_CODE="$(python3 -E "$SOURCE_LEXER" shell "$HERE/ceremony.sh")"; then
+if CEREMONY_CODE="$(python3 -Es "$SOURCE_LEXER" shell "$HERE/ceremony.sh")"; then
   if grep -qE 'qrencode .*-l H' <<<"$CEREMONY_CODE"; then
     ok "ceremony.sh print_share() requests QR error-correction level H"
   else

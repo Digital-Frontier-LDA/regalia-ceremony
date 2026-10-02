@@ -111,7 +111,7 @@ typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
 key="$(ask "Escrow MAC key (32 hex), from the PIN card: ")"
 # The key reaches Python through a pipe from the printf BUILTIN: never argv, and never a here-string,
 # which some bash versions back with a temporary file on disk.
-kcv="$(printf '%s\n' "$key" | python3 -E "$HERE/pin_escrow_mac.py" kcv)" || die "that is not a 32-hex escrow MAC key; nothing written"
+kcv="$(printf '%s\n' "$key" | python3 -Es "$HERE/pin_escrow_mac.py" kcv)" || die "that is not a 32-hex escrow MAC key; nothing written"
 [ "$kcv" = "$(tr -d '[:space:]' < "$KCV")" ] || die "the escrow MAC key does not match $KCV (mistyped?); nothing written"
 
 declare -A pin
@@ -141,7 +141,7 @@ done
 # From the whole history, as recovery reads it, and from VERIFIED escrows only: a deleted escrow must not
 # let the numbering restart below one recovery would still prefer, and a forged high-numbered file must
 # not push the numbering up (or exhaust it).
-last="$(printf '%s\n' "$key" | python3 -E "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX")" || die "cannot read the escrow history"
+last="$(printf '%s\n' "$key" | python3 -Es "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX")" || die "cannot read the escrow history"
 [ "$last" -lt 9999 ] || die "the escrow sequence is exhausted at 9999 (recovery reads four digits); nothing written"
 next="$(printf '%04d' $((last + 1)))"
 out="escrow/$PREFIX-$next.age"
@@ -169,7 +169,7 @@ n="$(grep -cE '^(hsm|yubikey|tpm|luks)_[abc]=' "$tmp")"
 pins="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"; tpms="$(grep -cE '^tpm_[abc]=' "$tmp")"; luks="$(grep -cE '^luks_[abc]=' "$tmp")"
 "$AGE" -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"
-printf '%s\n' "$key" | python3 -E "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \
+printf '%s\n' "$key" | python3 -Es "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \
   || { rm -f "$out" "$out.mac"; die "could not write the MAC; nothing written"; }
 key=""
 cat <<REC

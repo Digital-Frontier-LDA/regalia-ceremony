@@ -410,7 +410,7 @@ hdr "A2: derive the expected address with no device involved"
 DRILL_DIR="${HSM_FLEET_DRILL_DIR:-${TMPDIR:-/tmp}/hsm-fleet-drill}"
 mkdir -p "$DRILL_DIR"; chmod 700 "$DRILL_DIR"
 MNF="$DRILL_DIR/drill.mnemonic"; printf '%s' "$DRILL_MNEMONIC" > "$MNF"; chmod 600 "$MNF"
-EXPECT="$(python3 -E "$DERIVE" --mnemonic-file "$MNF" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
+EXPECT="$(python3 -Es "$DERIVE" --mnemonic-file "$MNF" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
 if [ -n "$EXPECT" ]; then P "seed derives offline to $EXPECT"; else
   F "offline derivation produced nothing — cannot evaluate the rest"; exit 1; fi
 
@@ -419,7 +419,7 @@ if [ -n "$EXPECT" ]; then P "seed derives offline to $EXPECT"; else
 build_container(){
   P12="$DRILL_DIR/drill.p12"; PWF="$DRILL_DIR/drill.pw"; CERT="$DRILL_DIR/drill.crt"
   head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$PWF"; chmod 600 "$PWF"
-  python3 -E "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" --out "$P12" >/dev/null 2>&1 || return 1
+  python3 -Es "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" --out "$P12" >/dev/null 2>&1 || return 1
   # hsm-import-key.sh requires a certificate, and it is right to: a key without one is invisible
   # to gnupg-pkcs11-scd and ssh-keygen -D while still listing as a private key.
   openssl req -x509 -new -key <(openssl pkcs12 -in "$P12" -nocerts -nodes -passin "file:$PWF" 2>/dev/null) \
@@ -497,7 +497,7 @@ card_address(){ # $1=slot $2=pin
   local der; der="$(mktemp)"
   REGALIA_PIN="$2" pkcs11-tool --module "$P11" --slot "$1" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --label "$DRILL_LABEL" --output-file "$der" >/dev/null 2>&1 || { rm -f "$der"; return 1; }
-  python3 -E "$DERIVE" --der "$der" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1
+  python3 -Es "$DERIVE" --der "$der" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1
   rm -f "$der"
 }
 
@@ -669,14 +669,14 @@ if [ "$MODE" = "run" ]; then
   REGALIA_PIN="$PIN_A" pkcs11-tool --module "$P11" --slot "$SLOTID_A" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --label "$DRILL_LABEL" --output-file "$DER_A" >/dev/null 2>&1
   head -c 32 /dev/urandom > "$D.wrong"
-  if python3 -E "$VERIFY" --der "$DER_A" --digest "$D.wrong" --sig "$S" >/dev/null 2>&1; then
+  if python3 -Es "$VERIFY" --der "$DER_A" --digest "$D.wrong" --sig "$S" >/dev/null 2>&1; then
     F "a signature verified against the WRONG digest — the verifier is blind"
   else
     P "a wrong digest fails verification"
   fi
   # And the positive control: the SAME signature must verify against the RIGHT digest, or the
   # negative result above proves only that the verifier rejects everything.
-  if python3 -E "$VERIFY" --der "$DER_A" --digest "$D" --sig "$S" >/dev/null 2>&1; then
+  if python3 -Es "$VERIFY" --der "$DER_A" --digest "$D" --sig "$S" >/dev/null 2>&1; then
     P "the same signature verifies against the CORRECT digest"
   else
     F "a valid signature did NOT verify — the verifier rejects everything, so the negative control above is meaningless"

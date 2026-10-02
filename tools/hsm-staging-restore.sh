@@ -263,7 +263,7 @@ fi
 say "    key '$KEY_LABEL' is at id $KEY_ID"
 if REGALIA_P11_PIN="$PIN" perl -e 'alarm 45; exec @ARGV' -- pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_P11_PIN --sign \
      --mechanism ECDSA --id "$KEY_ID" --input-file "$W/d" --output-file "$W/s" >/dev/null 2>&1 \
-   && python3 -E "$SCRIPTS/verify-hsm-control.py" --der "$STAGING/expected-pub.der" \
+   && python3 -Es "$SCRIPTS/verify-hsm-control.py" --der "$STAGING/expected-pub.der" \
         --digest "$W/d" --sig "$W/s" >/dev/null 2>&1; then
     say "OK: signs with the staging PIN and verifies against the pin"
     rm -rf "$W"

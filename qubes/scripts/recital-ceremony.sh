@@ -182,12 +182,12 @@ hdr "DERIVE — akash address helper (offline, cosmjs-verified known vector)"
 # vector cross-checked against @cosmjs/crypto: this compressed secp256k1 pubkey -> this akash addr
 KV_PUB="03be0e04ab74bb9375c710c15c40775c3ba902937c4e77d6faa19f26373a359276"
 KV_ADDR="akash1pymqpnzcnu254eu8pjd4l5cc7h6l8wrhnj3cv3"
-got=$(python3 -E "$HERE/derive-akash-address.py" --hex "$KV_PUB" 2>&1)
+got=$(python3 -Es "$HERE/derive-akash-address.py" --hex "$KV_PUB" 2>&1)
 [ "$got" = "$KV_ADDR" ] && P "derive-akash-address.py matches the cosmjs-verified vector" || F "derive mismatch: $got"
 
 hdr "RECOVERY CARD — case/seal binding printed on the card"
 cardps="$(mktemp)"
-python3 -E "$HERE/make-recovery-card.py" -o "$cardps" --case-id DF-BG-07 --seal-serial HOLO-000099 --date 2026-06-29 >/dev/null 2>&1
+python3 -Es "$HERE/make-recovery-card.py" -o "$cardps" --case-id DF-BG-07 --seal-serial HOLO-000099 --date 2026-06-29 >/dev/null 2>&1
 grep -q "DF-BG-07" "$cardps" && grep -q "HOLO-000099" "$cardps" && P "card prints the case id + holo serial (anti-swap binding)" || F "card missing case/seal binding"
 grep -q "%!PS-Adobe" "$cardps" && P "card is valid PostScript" || F "card not valid PS"
 rm -f "$cardps"
@@ -197,14 +197,14 @@ if python3 -I -c "import mnemonic, shamir_mnemonic" 2>/dev/null; then
   bt="$(mktemp -d)"
   BMN="abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
   printf '%s' "$BMN" > "$bt/m.in"
-  python3 -E "$HERE/bip39-slip39-backup.py" --in "$bt/m.in" --threshold "$KK" --shares "$NN" --out "$bt/sh.txt" 2>/dev/null
+  python3 -Es "$HERE/bip39-slip39-backup.py" --in "$bt/m.in" --threshold "$KK" --shares "$NN" --out "$bt/sh.txt" 2>/dev/null
   grep -q "RECONSTRUCT-VERIFIED" "$bt/sh.txt" && P "split auto reconstruct-verifies before emitting shares" || F "no reconstruct-verify"
   grep -vE '^#|^$' "$bt/sh.txt" | tail -n "$KK" > "$bt/c.txt"   # any k of n: the last k
-  brec=$(python3 -E "$HERE/bip39-slip39-backup.py" --recover --in "$bt/c.txt" 2>/dev/null)
+  brec=$(python3 -Es "$HERE/bip39-slip39-backup.py" --recover --in "$bt/c.txt" 2>/dev/null)
   [ "$brec" = "$BMN" ] && P "BIP39 -> SLIP-39 $KK-of-$NN -> recover returns the EXACT mnemonic (HSM-free)" || F "Option B round-trip mismatch"
   # dice/external entropy: all-zero 32B entropy must encode to the known BIP39 vector
   printf '%064d' 0 > "$bt/e.hex"
-  fe=$(python3 -E "$HERE/bip39-slip39-backup.py" --from-entropy --in "$bt/e.hex" 2>/dev/null | awk '{print $1,$NF}')
+  fe=$(python3 -Es "$HERE/bip39-slip39-backup.py" --from-entropy --in "$bt/e.hex" 2>/dev/null | awk '{print $1,$NF}')
   [ "$fe" = "abandon art" ] && P "--from-entropy encodes dice entropy to the known BIP39 vector (RNG out of trust path)" || F "--from-entropy vector mismatch ($fe)"
   rm -rf "$bt"
 else
@@ -219,10 +219,10 @@ ms="$(mktemp -d)"
 # emits ONLY the shares (reconstruct-verified, 0600, master secret never written), which is
 # all the worksheet round-trip needs: one 20-word share line, same shape `shamir create`
 # used to produce among its leaky output.
-python3 -E "$HERE/slip39-mint.py" --threshold "$KK" --shares "$NN" --out "$ms/s.txt" 2>/dev/null
+python3 -Es "$HERE/slip39-mint.py" --threshold "$KK" --shares "$NN" --out "$ms/s.txt" 2>/dev/null
 sh=$(grep -E '^[a-z]+( [a-z]+){15,}$' "$ms/s.txt" | head -1); printf '%s' "$sh" > "$ms/share.in"
-python3 -E "$HERE/metal-stamp-worksheet.py" --in "$ms/share.in" 2>/dev/null | grep -E '^[0-9]' | grep -oE '[0-9]{2} [A-Z]{4}' | awk '{print $2}' > "$ms/pref.txt"
-rec=$(python3 -E "$HERE/metal-stamp-worksheet.py" --verify --in "$ms/pref.txt" 2>/dev/null | tail -2 | head -1)
+python3 -Es "$HERE/metal-stamp-worksheet.py" --in "$ms/share.in" 2>/dev/null | grep -E '^[0-9]' | grep -oE '[0-9]{2} [A-Z]{4}' | awk '{print $2}' > "$ms/pref.txt"
+rec=$(python3 -Es "$HERE/metal-stamp-worksheet.py" --verify --in "$ms/pref.txt" 2>/dev/null | tail -2 | head -1)
 [ "$rec" = "$sh" ] && P "metal worksheet -> 4-letter prefixes -> verify reconstructs the exact share" || F "metal stamping round-trip mismatch"
 rm -rf "$ms"
 

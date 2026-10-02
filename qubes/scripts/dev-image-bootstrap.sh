@@ -237,7 +237,7 @@ for c in git go gh jq rg node npm code claude codex unzip xxd shellcheck pkg-con
 done
 pkg-config --exists libpcsclite || { echo "MISSING: libpcsclite pkg-config (needed by -tags piv)" >&2; missing=1; }
 [ -x "/opt/dev-bin/scsh-${SCSH_VERSION}/scriptrunner" ] || { echo "MISSING: Smart Card Shell scriptrunner" >&2; missing=1; }
-/opt/dev-bin/regalia-venv/bin/python -c 'import cvc, cryptography, shamir_mnemonic, mnemonic' \
+/opt/dev-bin/regalia-venv/bin/python -I -c 'import cvc, cryptography, shamir_mnemonic, mnemonic' \
   || { echo "MISSING: a Python package in /opt/dev-bin/regalia-venv" >&2; missing=1; }
 # The PAIR at the same index, for the reason above: 0x2E8A present against another product is not
 # a registered Pico, and a self-check that accepts it declares an image ready that cannot see the
