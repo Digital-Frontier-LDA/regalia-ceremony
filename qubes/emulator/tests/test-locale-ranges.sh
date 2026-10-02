@@ -19,7 +19,9 @@ P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 LOC=en_US.UTF-8
-if ! locale -a 2>/dev/null | grep -qiE '^en_US\.utf-?8$'; then
+# Not `locale -a | grep -q`: under pipefail a grep that stops reading early can fail the producer.
+locales="$(locale -a 2>/dev/null)"
+if ! grep -qiE '^en_US\.utf-?8$' <<< "$locales"; then
   if [ "${REQUIRE_UTF8_LOCALE:-0}" = 1 ]; then echo "test-locale-ranges: $LOC is not installed and REQUIRE_UTF8_LOCALE=1"; exit 1; fi
   echo "test-locale-ranges: SKIP: $LOC is not installed (locale-gen $LOC); REQUIRE_UTF8_LOCALE=1 makes this a failure"; exit 0
 fi
