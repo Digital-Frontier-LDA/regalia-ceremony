@@ -578,6 +578,22 @@ print_share() {
 # Ceremony steps
 # =============================================================================
 
+# yk_piv_change <serial> <change-pin|change-puk> <current> <new>: the two values go to ykman on its
+# STANDARD INPUT, one per line, never as -P/-p/-n option values: a command line is readable by every
+# local user in /proc/<pid>/cmdline for as long as the command runs (#98). With the options left out
+# ykman asks for each value, and when its stdin is not a terminal it takes one line per question:
+# the current value, then the new one, asked once (ykman/_cli/util.py click_prompt; the same in every
+# release from 4.0.0 to 5.8.0, read from the sources). printf is a shell builtin, so no process
+# carries the values as arguments. A value that is empty or holds a line break is refused here:
+# ykman would read it as a different answer, and a wrong current PIN spends a try.
+yk_piv_change() {
+  local serial="$1" verb="$2" cur="$3" new="$4"
+  case "$verb" in change-pin|change-puk) ;; *) err "yk_piv_change: unknown verb $verb"; return 1;; esac
+  [ -n "$cur" ] && [ -n "$new" ] || { err "yk_piv_change: an empty value was given for $verb; nothing was sent to the card"; return 1; }
+  case "$cur$new" in *$'\n'*|*$'\r'*) err "yk_piv_change: a value for $verb holds a line break; nothing was sent to the card"; return 1;; esac
+  printf '%s\n%s\n' "$cur" "$new" | ykman --device "$serial" piv access "$verb"
+}
+
 step_yubikey_ops() {
   b "YubiKey — hardware 'ops' age/SOPS identity (PIV / P-256)"
   info "Generates an age identity ON the YubiKey; the private key never leaves it,"
@@ -641,7 +657,8 @@ step_yubikey_ops() {
   # The card's PIN and PUK are set to the values step 0 loaded for ESCROW (pins.env →
   # yubikey_<set>_piv_pin / _piv_puk → the tier-0 payload), never to values typed at a prompt:
   # otherwise the payload can hold a PIN this card does not answer to, discovered on recovery day.
-  # The commands are shown redacted and run directly, because run() would print the PIN.
+  # The commands are shown without the values and run directly, because run() would print the PIN;
+  # the values reach ykman on its standard input (yk_piv_change), never on its command line.
   if grep -q "Using default PIN" <<< "$info" || grep -q "Using default PUK" <<< "$info"; then
     if [ -z "$pin" ] || [ -z "$puk" ]; then
       err "This YubiKey still has a factory PIN or PUK, and step 0 has not loaded $pinv and"
@@ -652,21 +669,21 @@ step_yubikey_ops() {
     if grep -q "Using default PIN" <<< "$info"; then
       # Each token has its own set (regalia#17: distinct PINs per token), so a second or third
       # factory token in the same run gets set B or C, never set A again.
-      show "ykman piv access change-pin -P <factory PIN> -n <$pinv from step 0>"
+      show "ykman piv access change-pin   (factory PIN, then $pinv from step 0, on its standard input)"
       ask "set the card's PIN to the escrowed value?" || { err "the factory PIN was kept, so age-plugin-yubikey would replace it with an unescrowed one"; return 1; }
-      ykman --device "$serial" piv access change-pin -P 123456 -n "$pin" >/dev/null || { err "PIN change failed"; return 1; }
+      yk_piv_change "$serial" change-pin 123456 "$pin" >/dev/null || { err "PIN change failed"; return 1; }
     fi
     if grep -q "Using default PUK" <<< "$info"; then
-      show "ykman piv access change-puk -p <factory PUK> -n <$pukv from step 0>"
+      show "ykman piv access change-puk   (factory PUK, then $pukv from step 0, on its standard input)"
       ask "set the card's PUK to the escrowed value?" || { err "the factory PUK was kept"; return 1; }
-      ykman --device "$serial" piv access change-puk -p 12345678 -n "$puk" >/dev/null || { err "PUK change failed"; return 1; }
+      yk_piv_change "$serial" change-puk 12345678 "$puk" >/dev/null || { err "PUK change failed"; return 1; }
     fi
   fi
   # PIN-BINDING PROOF, as for the HSM in step_payload: present the escrowed PIN to the card now,
   # while both are known. Changing the PIN to itself verifies it; a wrong value costs one try here
   # instead of one on recovery day.
   if [ -n "$pin" ] && grep -q "Management key algorithm" <<< "$info"; then
-    ykman --device "$serial" piv access change-pin -P "$pin" -n "$pin" >/dev/null 2>&1 \
+    yk_piv_change "$serial" change-pin "$pin" "$pin" >/dev/null 2>&1 \
       || { err "PIN BINDING FAILED: the escrowed $pinv does not open this YubiKey"; return 1; }
     info "   PIN BINDING PROVEN — the escrowed $pinv opens YubiKey ${letter^^}."
   else
