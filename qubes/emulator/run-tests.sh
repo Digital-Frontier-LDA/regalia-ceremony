@@ -362,6 +362,8 @@ say "PIN ESCROW TOOLS (on the archive disc; MAC-authenticated escrow, chosen acr
 "$HERE/tests/test-escrow-tools.sh" || suite_failed "test-escrow-tools.sh"
 say "CUSTODY SITES (k-of-n site rules: n-k per region, nobody reaches k, directory holders reach nothing)"
 "$HERE/tests/test-custody-plan-check.sh" || suite_failed "test-custody-plan-check.sh"
+say "LOCALE (a bracket range in a validator means ASCII, under a UTF-8 locale too)"
+"$HERE/tests/test-locale-ranges.sh" || suite_failed "test-locale-ranges.sh"
 say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"
 "$HERE/tests/test-go-nogo-one-script.sh" || suite_failed "test-go-nogo-one-script.sh"
 
