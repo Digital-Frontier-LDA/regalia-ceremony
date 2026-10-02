@@ -121,6 +121,14 @@ SOARG=env:S PINARG="$PIN_A"; out="$(model S="$SO_PIN")"; rc=$?
 [ "$rc" != 0 ] && grep -q -- "--pin was given a value on the command line" <<< "$out" && P "a literal --pin is refused" || F "literal --pin (exit $rc): $out"
 SOARG=env:S PINARG=env:P; out="$(model S="$SO_PIN")"; rc=$?
 [ "$rc" != 0 ] && grep -q "P is unset/empty (the real tool would prompt)" <<< "$out" && P "env:NAME with NAME unset is refused (the real tool would prompt)" || F "unset name (exit $rc): $out"
+# Every occurrence, not only the last: a literal followed by an env: form is still a literal on argv.
+for opt in --pin --so-pin; do
+  out="$(env EMU_SCHSM_STATE="$T/model" S="$SO_PIN" P="$PIN_A" python3 "$MODEL" --initialize "$opt" "$PIN_B" --so-pin env:S --pin env:P 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q -- "$opt was given a value on the command line" <<< "$out" && ! grep -qF "$PIN_B" <<< "$out" \
+    && P "a literal $opt is refused even when an env: form follows it" || F "repeated $opt (exit $rc): $out"
+done
+out="$(env EMU_SCHSM_STATE="$T/model" S="$SO_PIN" P="$PIN_A" python3 "$MODEL" --initialize --so-pin env:S --pin env:P "--pin=$PIN_B" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q -- "--pin was given a value on the command line" <<< "$out" && P "…and in the --pin=VALUE spelling, after a valid one" || F "--pin=VALUE (exit $rc): $out"
 out="$(model S="$SO_PIN" P="$PIN_A")"; rc=$?
 [ "$rc" = 0 ] && P "env:NAME with both variables set is accepted" || F "env: forms refused (exit $rc): $out"
 grep -qF "$PIN_A" <<< "$out" || grep -qF "$SO_PIN" <<< "$out" && F "the model printed a PIN" || P "and the model prints no PIN"
