@@ -275,7 +275,12 @@ ok "verified: key and certificate both present, sharing id $CERT_ID"
 # (regalia-kms#64, 2026-10-02) — "Key successfully imported", the identical public key, and
 # CKR_GENERAL_ERROR on every signature. So the key signs a fresh random digest ON THE CARD, and the
 # signature must verify against the certificate's public key, which is the key the container held.
-head -c 32 /dev/urandom > "$WORK/probe.digest"
+# A FRESH 32-byte challenge or nothing: this script does not run under set -e, and an empty input
+# both signs and verifies, which would turn the check into a formality.
+if ! head -c 32 /dev/urandom > "$WORK/probe.digest" || [ "$(wc -c < "$WORK/probe.digest")" -ne 32 ]; then
+    err "could not read a 32-byte random challenge; refusing to report the import as checked"
+    exit 1
+fi
 if ! openssl x509 -inform DER -in "$WORK/cert.der" -pubkey -noout > "$WORK/cert-pub.pem" 2>/dev/null; then
     err "the certificate's public key could not be read, so the imported key cannot be checked"
     exit 1
