@@ -139,7 +139,7 @@ printf '### provisioning: WIPING and re-initialising serial %s at reader %s\n' "
 # missing", and a SmartCard-HSM refuses on-card key generation in that state: C_GenerateKeyPair
 # returned CKR_GENERAL_ERROR on a Nitrokey HSM 2 (DENK0404144, fw 4.1, 2026-09-17). This path only
 # needs a key GENERATED on the card, so it initialises without a DKEK domain.
-sc-hsm-tool --reader "$reader" --initialize --so-pin "$SO_PIN" --pin "$PIN" --label nitrokey-qual \
+REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$PIN" sc-hsm-tool --reader "$reader" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN --label nitrokey-qual \
   || die "sc-hsm-tool --initialize failed"
 # Re-resolve the slot (re-init can renumber) and generate a key ON the card.
 mapfile -t SLOTS < <(pkcs11-tool --module "$MODULE" -L 2>/dev/null | awk -v want="$SERIAL" '

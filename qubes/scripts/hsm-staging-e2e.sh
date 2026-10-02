@@ -247,8 +247,8 @@ rec 0 PASS "tools present; card is the staging serial $SERIAL"
 hdr "PHASE 0b — the SO-PIN, tried EXACTLY ONCE"
 printf '  FAILURE CONDITION: CKR_PIN_INCORRECT — the documented staging SO-PIN is wrong and ALL\n'
 printf '  destructive phases are skipped. The SO-PIN counter is finite; nothing here guesses.\n'
-out="$(pkcs11-tool --module "$P11" --slot "$SLOTID" --login --login-type so \
-    --so-pin "$SO_PIN_P11" --list-objects 2>&1)"; rc=$?
+out="$(REGALIA_SO_PIN="$SO_PIN_P11" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --login-type so \
+    --so-pin env:REGALIA_SO_PIN --list-objects 2>&1)"; rc=$?
 CAN_WRITE=0
 if [ "$rc" = 0 ]; then
   CAN_WRITE=1
@@ -301,19 +301,19 @@ hdr "PHASE b — behavioural RRC verify (the SO-PIN reset attack MUST be refused
 printf '  FAILURE CONDITION: C_InitPIN succeeds, the attacker PIN opens the card, the original\n'
 printf '  PIN stops working, or sc-hsm-tool prints the vulnerable-config tell.\n'
 B_OK=1
-out="$(pkcs11-tool --module "$P11" --slot "$SLOTID" --login --login-type so \
-    --so-pin "$SO_PIN_P11" --init-pin --new-pin "$ATTACK_PIN" 2>&1)"; rc=$?
+out="$(REGALIA_SO_PIN="$SO_PIN_P11" REGALIA_NEW_PIN="$ATTACK_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --login-type so \
+    --so-pin env:REGALIA_SO_PIN --init-pin --new-pin env:REGALIA_NEW_PIN 2>&1)"; rc=$?
 if [ "$rc" != 0 ] && grep -q 'CKR_GENERAL_ERROR' <<< "$out"; then
   P "C_InitPIN REFUSED with CKR_GENERAL_ERROR — the attack is blocked"
 else
   F "C_InitPIN was NOT refused as expected (rc=$rc: $(printf '%s' "$out" | tail -1))"; B_OK=0
 fi
-if pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$ATTACK_PIN" --list-objects >/dev/null 2>&1; then
+if REGALIA_PIN="$ATTACK_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --list-objects >/dev/null 2>&1; then
   F "the attacker-chosen PIN OPENED the card — the reset took"; B_OK=0
 else
   P "the attacker-chosen PIN is refused"
 fi
-if pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN_B" --list-objects >/dev/null 2>&1; then
+if REGALIA_PIN="$PIN_B" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --list-objects >/dev/null 2>&1; then
   P "the init-time PIN still opens the card (retry counter restored)"
 else
   F "the init-time PIN no longer works"; B_OK=0
@@ -359,14 +359,14 @@ D_GATE=0
 # "Failed to connect to card" to a discarded stream, writes NO FILE, and still satisfies a bare
 # `&&` (measured 2026-09-03). The failure then surfaced two steps later as a card problem. A step
 # that is supposed to produce a file has not succeeded until the file exists and is non-empty.
-sc-hsm-tool --reader "$READER" --create-dkek-share "$DW/dkek.pbe" --password "$(cat "$DW/dkek.pw")" >/dev/null 2>&1 \
+REGALIA_DKEK_PW="$(cat "$DW/dkek.pw")" sc-hsm-tool --reader "$READER" --create-dkek-share "$DW/dkek.pbe" --password env:REGALIA_DKEK_PW >/dev/null 2>&1 \
   && [ -s "$DW/dkek.pbe" ] \
-  && sc-hsm-tool --reader "$READER" --initialize --so-pin "$SO_PIN_HEX" --pin "$PIN_D" \
+  && REGALIA_SO_PIN="$SO_PIN_HEX" REGALIA_PIN="$PIN_D" sc-hsm-tool --reader "$READER" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN \
        --dkek-shares 1 --label pka-e2e --public-key-auth 3 --required-pub-keys 2 > "$DW/init.log" 2>&1 || true
 printf '  (init exit status ignored — the Pico drops off the USB bus; verifying by behaviour)\n'
 if wait_card "card" \
-  && sc-hsm-tool --reader "$READER" --import-dkek-share "$DW/dkek.pbe" \
-       --password "$(cat "$DW/dkek.pw")" --so-pin "$SO_PIN_HEX" >/dev/null 2>&1; then
+  && REGALIA_DKEK_PW="$(cat "$DW/dkek.pw")" REGALIA_SO_PIN="$SO_PIN_HEX" sc-hsm-tool --reader "$READER" --import-dkek-share "$DW/dkek.pbe" \
+       --password env:REGALIA_DKEK_PW --so-pin env:REGALIA_SO_PIN >/dev/null 2>&1; then
   st="$(sc-hsm-tool --reader "$READER" --public-key-auth-status 2>&1)"
   printf '%s\n' "$st" | sed 's/^/  status: /'
   # Measured Pico format (2026-08-02): "Number of public keys: 3 / Missing public keys: 3 /
@@ -505,7 +505,7 @@ if [ "$D_GATE" = 1 ]; then
     else
       # OPEN QUESTION (a): with custodians enrolled, does the PIN alone still use the card?
       head -c 32 /dev/urandom > "$DW/d.bin"
-      if pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN_D" --sign \
+      if REGALIA_PIN="$PIN_D" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign \
            --mechanism ECDSA --label recovery-drill-throwaway \
            --input-file "$DW/d.bin" --output-file "$DW/s.bin" >/dev/null 2>&1; then
         rec d PASS "FINDING (a): PIN-only sign SUCCEEDED with 2 custodians enrolled — PKA does NOT replace the PIN at enrolment on the Pico"

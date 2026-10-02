@@ -241,8 +241,8 @@ say "self-testing the trace channel with a single write"
 # the deciding program — so remove the gap rather than teach it to ignore one.
 capture_bg 620 "$OUT/trace.bin"
 sleep 2
-perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}" \
-    --login --pin "${HSM_USER_PIN:-648219}" --keypairgen --key-type EC:prime256v1 \
+REGALIA_PIN="${HSM_USER_PIN:-648219}" perl -e 'alarm 30; exec @ARGV' -- pkcs11-tool --module "${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}" \
+    --login --pin env:REGALIA_PIN --keypairgen --key-type EC:prime256v1 \
     --id 7f --label forensic-selftest >/dev/null 2>&1
 sleep 2
 # Peek at the live capture WITHOUT stopping it: copy what has arrived so far and decode that.
@@ -285,9 +285,9 @@ say "starting the write-heavy workload (repeated keygens, run tag $RUN_TAG)"
 : > "$OUT/workload.ok"
 (
   for i in 1 2 3 4 5 6 7 8; do
-      if perl -e 'alarm 25; exec @ARGV' -- pkcs11-tool \
+      if REGALIA_PIN="${HSM_USER_PIN:-648219}" perl -e 'alarm 25; exec @ARGV' -- pkcs11-tool \
           --module "${HSM_PKCS11_MODULE:-/opt/homebrew/lib/opensc-pkcs11.so}" \
-          --login --pin "${HSM_USER_PIN:-648219}" --keypairgen --key-type EC:prime256v1 \
+          --login --pin env:REGALIA_PIN --keypairgen --key-type EC:prime256v1 \
           --id "$(printf '%04x' $(( (RUN_TAG * 16 + i) % 65536 )))" --label "bug6-$RUN_TAG-$i" \
           >/dev/null 2>&1; then
           echo "$i" >> "$OUT/workload.ok"

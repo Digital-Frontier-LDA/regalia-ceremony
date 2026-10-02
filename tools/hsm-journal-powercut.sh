@@ -71,7 +71,7 @@ power(){
 slot(){ hsm_slot_id_for "$SERIAL" 2>/dev/null; }
 p11(){ local s; s="$(slot)"; [ -n "$s" ] || return 9; timeout 40 pkcs11-tool --module "$MODULE" --slot "$s" "$@"; }
 answers(){ p11 -I >/dev/null 2>&1; }
-labels(){ p11 --login --pin "$PIN" -O --type privkey 2>/dev/null | sed -n 's/^ *label: *//p'; }
+labels(){ REGALIA_PIN="$PIN" p11 --login --pin env:REGALIA_PIN -O --type privkey 2>/dev/null | sed -n 's/^ *label: *//p'; }
 
 mkdir -p "$OUT"
 say "output: $OUT"
@@ -121,14 +121,16 @@ declare -A TALLY=()
 for c in $(seq 1 "$CYCLES"); do
     D="$OUT/cycle-$(printf '%03d' "$c")"; mkdir -p "$D"
     # CAPACITY: remove this rig's own keys from earlier cycles, never anything else.
-    for l in $(labels | grep -E '^jcut-' ); do p11 --login --pin "$PIN" --delete-object --type privkey --label "$l" >/dev/null 2>&1; p11 --login --pin "$PIN" --delete-object --type pubkey --label "$l" >/dev/null 2>&1; done
+    for l in $(labels | grep -E '^jcut-' ); do REGALIA_PIN="$PIN" p11 --login --pin env:REGALIA_PIN --delete-object --type privkey --label "$l" >/dev/null 2>&1; REGALIA_PIN="$PIN" p11 --login --pin env:REGALIA_PIN --delete-object --type pubkey --label "$l" >/dev/null 2>&1; done
     TAG="$(( ($(date +%s) + c) % 4096 ))"
     capture "$D/uart.log"
     : > "$D/acked"
-    setsid bash -c '
+    # The PIN goes to the workload in its ENVIRONMENT: spliced into the script text it was on the
+    # command line of this bash -c and of every pkcs11-tool it started.
+    REGALIA_PIN="$PIN" setsid bash -c '
         for j in $(seq 1 '"$KEYGENS"'); do
             id="$(printf "%04x" $(( ('"$TAG"' * 16 + j) % 65536 )))"
-            if timeout 30 pkcs11-tool --module "'"$MODULE"'" --slot "$1" --login --pin "'"$PIN"'" \
+            if timeout 30 pkcs11-tool --module "'"$MODULE"'" --slot "$1" --login --pin env:REGALIA_PIN \
                  --keypairgen --key-type EC:prime256v1 --id "$id" --label "jcut-'"$TAG"'-$j" >/dev/null 2>&1; then
                 echo "jcut-'"$TAG"'-$j" >> "'"$D"'/acked"
             fi

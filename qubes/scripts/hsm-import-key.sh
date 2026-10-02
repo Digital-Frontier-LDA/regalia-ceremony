@@ -211,7 +211,7 @@ case "$CERT" in
 esac
 
 PIN="$(cat "$PIN_FILE")"
-if ! pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" \
+if ! REGALIA_PIN="$PIN" pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin env:REGALIA_PIN \
         --write-object "$WORK/cert.der" --type cert --id "$KEY_ID" --label "$LABEL" \
         > "$WORK/cert.log" 2>&1; then
     err "certificate write failed — the key is on the card but INVISIBLE to gpg and ssh"
@@ -224,7 +224,7 @@ ok "certificate written"
 
 # ---- 3. verify BOTH landed -------------------------------------------------------------------
 # Reporting success without checking is how a key ends up on a card that nothing can find.
-objs="$(pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin "$PIN" --list-objects 2>/dev/null)"
+objs="$(REGALIA_PIN="$PIN" pkcs11-tool --module "$MODULE" ${SLOT_ARGS[@]+"${SLOT_ARGS[@]}"} --login --pin env:REGALIA_PIN --list-objects 2>/dev/null)"
 grep -q "Private Key Object" <<< "$objs" || { err "no private key enumerates"; exit 1; }
 grep -q "Certificate Object" <<< "$objs" || { err "no certificate enumerates"; exit 1; }
 ok "verified: key and certificate both present"

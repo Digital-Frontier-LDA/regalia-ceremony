@@ -102,12 +102,15 @@ done
 # ---------------------------------------------------------------------------- card stubs on PATH
 cat > "$FAKE/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
-# FAKE_LEAK=1 echoes the PIN from the ARGUMENT LIST, not the environment: that is the actual
-# shape of the future bug (a tool printing what it was handed), and unlike an env echo it fires
-# on the DEFAULT path too, where the effective PIN is the published default and nothing in the
-# environment names it (found on #211).
+# FAKE_LEAK=1 echoes the PIN the tool was HANDED: that is the actual shape of the future bug (a
+# tool printing its PIN), and it fires on the DEFAULT path too, where the effective PIN is the
+# published default (found on #211). The PIN is handed as `--pin env:NAME` (#94: never on argv), so
+# the value comes from the variable the option names; a literal value would be echoed as it is.
 [ "${FAKE_LEAK:-0}" = 1 ] && for a in "$@"; do
-  [ "${prev:-}" = "--pin" ] && printf 'error: argv --pin %s (simulating a tool that starts echoing its arguments)\n' "$a" >&2
+  if [ "${prev:-}" = "--pin" ]; then
+    case "$a" in env:*) n="${a#env:}"; a="${!n:-}";; esac
+    printf 'error: handed --pin %s (simulating a tool that starts echoing the PIN it was given)\n' "$a" >&2
+  fi
   prev="$a"
 done
 case "$*" in
@@ -583,13 +586,16 @@ fi
 # unset and asserts on the argv the tool was actually handed.
 rc="$(FAKE_LEAK=1 FAKE_SIGN_RC=1 run_ci --tier gate)"
 rdir="$(latest_run_dir)"
-if grep -qa 'error: argv --pin 648219' "$rdir/hw_sign.log" 2>/dev/null; then
+if grep -qa 'error: handed --pin 648219' "$rdir/hw_sign.log" 2>/dev/null; then
   F "the DEFAULT effective PIN (the published value) reached the artifact unredacted — the export does not carry the effective value"
-elif grep -qa 'error: argv --pin \[redacted:user-pin\]' "$rdir/hw_sign.log" 2>/dev/null; then
+elif grep -qa 'error: handed --pin \[redacted:user-pin\]' "$rdir/hw_sign.log" 2>/dev/null; then
   P "with HSM_USER_PIN unset the effective default PIN is redacted too — the default path is covered"
 else
-  F "hw_sign.log shows neither the default PIN nor its marker — the argv echo did not reach the capture"
+  F "hw_sign.log shows neither the default PIN nor its marker — the tool's echo did not reach the capture"
 fi
+# And the PIN was HANDED through the environment, not on the command line (#94).
+grep -qa 'error: handed --pin env:' "$rdir/hw_sign.log" 2>/dev/null && F "the stub was handed the NAME but found no value in it: the PIN was not delivered" \
+  || P "the PIN reached the tool through the variable its --pin option names"
 
 # -- the per-step child logs, and a shape that is not a PIN ---------------------------------------
 # nightly so the destructive children run; the card is the healthy pinned stub. LEAKEX stands in

@@ -426,7 +426,7 @@ python3 "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" 
 PIN_FILE="$WORK/pin"; printf '%s' "$PIN" > "$PIN_FILE"; chmod 600 "$PIN_FILE"
 
 init_scratch(){ # ${1..}=extra init flags (PKA for the rotation phases)
-  sc-hsm-tool --reader "$READER" --initialize --so-pin "$SO_PIN" --pin "$PIN" \
+  REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$PIN" sc-hsm-tool --reader "$READER" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN \
       --dkek-shares 1 --label recovery-drill "$@" > "$WORK/init.log" 2>&1 || true
   # Why the status is ignored depends on the device, and saying "the Pico" on a Nitrokey run is a
   # false statement in a transcript. The verification is behavioural either way.
@@ -468,14 +468,14 @@ head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$DKEK_AUTO_PW"; chmod 600 "$
 # "Failed to connect to card" to a discarded stream, writes NO FILE, and still satisfies a bare
 # `&&` (measured 2026-09-03). The failure then surfaced two steps later as a card problem. A step
 # that is supposed to produce a file has not succeeded until the file exists and is non-empty.
-sc-hsm-tool -r "$READER" --create-dkek-share "$DKEK_AUTO" --password "$(cat "$DKEK_AUTO_PW")" >/dev/null 2>&1 \
+REGALIA_DKEK_PW="$(cat "$DKEK_AUTO_PW")" sc-hsm-tool -r "$READER" --create-dkek-share "$DKEK_AUTO" --password env:REGALIA_DKEK_PW >/dev/null 2>&1 \
   && [ -s "$DKEK_AUTO" ] \
   && P "provisioning DKEK created (password path, ceremony-time stand-in)" \
   || { F "provisioning DKEK creation failed"; exit 1; }
 
 import_auto_dkek(){
-  sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_AUTO" \
-      --password "$(cat "$DKEK_AUTO_PW")" --so-pin "$SO_PIN" >/dev/null 2>&1
+  REGALIA_DKEK_PW="$(cat "$DKEK_AUTO_PW")" REGALIA_SO_PIN="$SO_PIN" sc-hsm-tool --reader "$READER" --import-dkek-share "$DKEK_AUTO" \
+      --password env:REGALIA_DKEK_PW --so-pin env:REGALIA_SO_PIN >/dev/null 2>&1
 }
 
 # KEEP THE CHILD'S OUTPUT. This sent everything to /dev/null, so a failure surfaced only as
@@ -531,9 +531,9 @@ card_address(){ # read the pubkey back and derive the address; echo nothing on f
   local der; der="$(mktemp)"
   # Imported keys land at PKCS#11 id 0x31 even though unwrap reports keyId=1 (measured quirk) —
   # try the label first, then the quirk id.
-  pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --read-object --type pubkey \
+  REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --label "$DRILL_LABEL" --output-file "$der" >/dev/null 2>&1 \
-  || pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --read-object --type pubkey \
+  || REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --id 31 --output-file "$der" >/dev/null 2>&1 || { rm -f "$der"; return 1; }
   python3 "$DERIVE" --der "$der" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1
   rm -f "$der"
@@ -545,9 +545,9 @@ sign_proof(){ # sign on the card, verify against $1 (pubkey DER), with a wrong-d
   head -c 32 /dev/urandom > "$d"; head -c 32 /dev/urandom > "$w"
   # After --unwrap-key the restored key has NO label and no cert (measured quirk: unwrapped
   # keys enumerate with an empty label and land at id 0x31), so sign by label first, then by id.
-  pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --sign --mechanism ECDSA \
+  REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
       --label "$DRILL_LABEL" --input-file "$d" --output-file "$s" >/dev/null 2>&1 \
-  || pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --sign --mechanism ECDSA \
+  || REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
       --id 31 --input-file "$d" --output-file "$s" >/dev/null 2>&1 || { rm -f "$d" "$s" "$w"; return 1; }
   python3 "$VERIFY" --der "$pub" --digest "$d" --sig "$s" >/dev/null 2>&1 || { rm -f "$d" "$s" "$w"; return 1; }
   if python3 "$VERIFY" --der "$pub" --digest "$w" --sig "$s" >/dev/null 2>&1; then
@@ -567,7 +567,7 @@ import_drill_key && P "seed-derived drill key imported" \
 ADDR="$(card_address)"
 [ "$ADDR" = "$EXPECT" ] && P "card holds the seed's key ($ADDR)" || { F "card: ${ADDR:-none} != $EXPECT"; exit 1; }
 PUB_ORIG="$WORK/original-pub.der"
-pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --read-object --type pubkey \
+REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --read-object --type pubkey \
     --label "$DRILL_LABEL" --output-file "$PUB_ORIG" >/dev/null 2>&1 \
   && P "original public key recorded (the restore proofs verify against it)" \
   || U "pubkey not readable by label — restore proofs will rely on the sign/verify arm alone"
@@ -589,7 +589,7 @@ pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --read-object 
 # behavioural-proof rule.
 unwrap_key(){ # $1=blob $2=destination key reference
   local out
-  out="$(sc-hsm-tool --reader "$READER" --unwrap-key "$1" --key-reference "$2" --pin "$PIN" 2>&1)"
+  out="$(REGALIA_PIN="$PIN" sc-hsm-tool --reader "$READER" --unwrap-key "$1" --key-reference "$2" --pin env:REGALIA_PIN 2>&1)"
   grep -qi 'successfully imported' <<< "$(printf '%s' "$out")"
 }
 
@@ -607,7 +607,7 @@ unwrap_key(){ # $1=blob $2=destination key reference
 # the card — measured 2026-08-06, six probe attempts locked a card outright. So never probe on an
 # unverified PIN.
 pin_is_good(){
-  pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --list-objects >/dev/null 2>&1
+  REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --list-objects >/dev/null 2>&1
 }
 
 wrappable_refs(){ # echoes the references that currently wrap, e.g. " 1 2"
@@ -618,7 +618,7 @@ wrappable_refs(){ # echoes the references that currently wrap, e.g. " 1 2"
   fi
   for r in 1 2 3 4 5 6; do
     t="$(mktemp)"
-    if sc-hsm-tool --reader "$READER" --wrap-key "$t" --key-reference "$r" --pin "$PIN" \
+    if REGALIA_PIN="$PIN" sc-hsm-tool --reader "$READER" --wrap-key "$t" --key-reference "$r" --pin env:REGALIA_PIN \
          >/dev/null 2>&1 && [ -s "$t" ]; then
       out="$out $r"
     fi
@@ -681,7 +681,7 @@ assert_dkek_complete "before wrapping the funding key" || exit 1
 FUNDING_REFS="$(wrappable_refs)"
 [ -n "$FUNDING_REFS" ] || { F "no wrappable key on the card — the import did not land"; exit 1; }
 FUNDING_REF="${FUNDING_REFS##* }"
-sc-hsm-tool --reader "$READER" --wrap-key "$WRAPPED" --key-reference "$FUNDING_REF" --pin "$PIN" >/dev/null 2>&1 \
+REGALIA_PIN="$PIN" sc-hsm-tool --reader "$READER" --wrap-key "$WRAPPED" --key-reference "$FUNDING_REF" --pin env:REGALIA_PIN >/dev/null 2>&1 \
   && [ -s "$WRAPPED" ] && P "key wrapped under the provisioning DKEK -> funding-wrapped.bin (key-reference $FUNDING_REF)" \
   || { F "--wrap-key failed (key-reference $FUNDING_REF) — step 4 has nothing to unwrap"; exit 1; }
 
@@ -752,7 +752,7 @@ fi
 # succeeded. Measured 2026-08-06.
 assert_dkek_complete "before generating the carrier key" || exit 1
 REFS_BEFORE="$(wrappable_refs)"
-pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin "$PIN" --keypairgen --key-type EC:prime256v1 \
+REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --keypairgen --key-type EC:prime256v1 \
     --id 02 --label "$DRILL_LABEL" >/dev/null 2>&1 \
   && P "throwaway carrier key generated on-card (drill blob-carrier only — B2 governs the funding key)" \
   || { F "on-card keygen failed — cannot create the carrier blob"; exit 1; }
@@ -764,7 +764,7 @@ CARRIER_REF="$(new_ref "$REFS_BEFORE" "$REFS_AFTER")" \
 # the two references is therefore meaningless — an earlier version of this guard did exactly that
 # and failed a perfectly good run. What IS meaningful is that the carrier blob is not the funding
 # blob, which is checked after the wrap below.
-sc-hsm-tool --reader "$READER" --wrap-key "$BLOB_S" --key-reference "$CARRIER_REF" --pin "$PIN" >/dev/null 2>&1 \
+REGALIA_PIN="$PIN" sc-hsm-tool --reader "$READER" --wrap-key "$BLOB_S" --key-reference "$CARRIER_REF" --pin env:REGALIA_PIN >/dev/null 2>&1 \
   && [ -s "$BLOB_S" ] && P "carrier blob wrapped under the break-glass DKEK (key-reference $CARRIER_REF)" \
   || { F "carrier wrap failed (key-reference $CARRIER_REF)"; exit 1; }
 # The carrier must be a THROWAWAY key, never the funding key (B2). Identical bytes would mean the
@@ -909,10 +909,10 @@ else
   CUST_WORK="$(mktemp -d)"; chmod 700 "$CUST_WORK"
   CW_PIN="$CUST_WORK/pin"; printf '%s' "$PIN" > "$CW_PIN"; chmod 600 "$CW_PIN"
   DK="$CUST_WORK/dkek.pw"; head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$DK"; chmod 600 "$DK"
-  sc-hsm-tool --reader "$CUST_READER" --create-dkek-share "$CUST_WORK/dkek.pbe" --password "$(cat "$DK")" >/dev/null 2>&1 \
-    && sc-hsm-tool --reader "$CUST_READER" --initialize --so-pin "$SO_PIN" --pin "$PIN" --dkek-shares 1 --label cust-standin >/dev/null 2>&1 || true
+  REGALIA_DKEK_PW="$(cat "$DK")" sc-hsm-tool --reader "$CUST_READER" --create-dkek-share "$CUST_WORK/dkek.pbe" --password env:REGALIA_DKEK_PW >/dev/null 2>&1 \
+    && REGALIA_SO_PIN="$SO_PIN" REGALIA_PIN="$PIN" sc-hsm-tool --reader "$CUST_READER" --initialize --so-pin env:REGALIA_SO_PIN --pin env:REGALIA_PIN --dkek-shares 1 --label cust-standin >/dev/null 2>&1 || true
   wait_card "$CUST_SLOT" "custodian stand-in" || exit 1
-  sc-hsm-tool --reader "$CUST_READER" --import-dkek-share "$CUST_WORK/dkek.pbe" --password "$(cat "$DK")" --so-pin "$SO_PIN" >/dev/null 2>&1 \
+  REGALIA_DKEK_PW="$(cat "$DK")" REGALIA_SO_PIN="$SO_PIN" sc-hsm-tool --reader "$CUST_READER" --import-dkek-share "$CUST_WORK/dkek.pbe" --password env:REGALIA_DKEK_PW --so-pin env:REGALIA_SO_PIN >/dev/null 2>&1 \
     && P "custodian stand-in initialised" || { F "custodian stand-in DKEK import failed"; exit 1; }
 
   EXPORT_OK=1

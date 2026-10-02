@@ -94,7 +94,7 @@ require_slot(){
 }
 
 inventory(){   # -> sorted "id label" lines, one per key object
-    perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --slot "$(require_slot)" --login --pin "$PIN" \
+    REGALIA_PIN="$PIN" perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --slot "$(require_slot)" --login --pin env:REGALIA_PIN \
         --list-objects 2>/dev/null \
         | awk '/^(Private|Public) Key Object/{t=$1} /^  label:/{l=$2} /^  ID:/{print t" "$2" "l}' \
         | sort
@@ -120,7 +120,7 @@ run_arm(){   # $1 = elf, $2 = label, $3 = HEX id for the new key
 
     # ONE write. The hypothesis is about the next allocation, so do not obscure it with a burst.
     say "  creating one key"
-    if perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --slot "$(require_slot)" --login --pin "$PIN" \
+    if REGALIA_PIN="$PIN" perl -e 'alarm 90; exec @ARGV' -- pkcs11-tool --module "$MOD" --slot "$(require_slot)" --login --pin env:REGALIA_PIN \
         --keypairgen --key-type EC:prime256v1 --id "$3" --label "lastbase-$2" \
         > "$OUT/keygen-$2.log" 2>&1; then
         say "  key created"
