@@ -147,7 +147,8 @@ rm -f "$WORK/payload.txt"
 unset hsm_a_user_pin hsm_a_so_pin hsm_b_user_pin hsm_b_so_pin hsm_c_user_pin hsm_c_so_pin
 unset yubikey_a_piv_pin yubikey_a_piv_puk yubikey_a_mgmt_key yubikey_b_piv_pin yubikey_b_piv_puk yubikey_b_mgmt_key \
       yubikey_c_piv_pin yubikey_c_piv_puk yubikey_c_mgmt_key escrow_mac_key \
-      tpm_a_lockout_auth tpm_b_lockout_auth tpm_c_lockout_auth
+      tpm_a_lockout_auth tpm_b_lockout_auth tpm_c_lockout_auth \
+      luks_a_recovery_key luks_b_recovery_key luks_c_recovery_key
 cat > "$WORK/payload.txt" <<'EOF'
 # EXAMPLE SERVICE — TIER-0 RECOVERY ROOTS
 derivation_wallet_mnemonic_v2:
@@ -173,6 +174,9 @@ escrow_mac_key:
 tpm_a_lockout_auth:
 tpm_b_lockout_auth:
 tpm_c_lockout_auth:
+luks_a_recovery_key:
+luks_b_recovery_key:
+luks_c_recovery_key:
 sle4442_psc:
 EOF
 out="$(BREAKGLASS_RECIPIENT="$RECIP" step_payload 2>&1)"

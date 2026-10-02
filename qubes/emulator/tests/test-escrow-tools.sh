@@ -96,20 +96,27 @@ six="7310048261 7310048261 8420159372 8420159372 9531260483 9531260483 90817263 
 # ...and each KMS host's TPM lockout authorization, twice (regalia-ceremony#92): 20-character
 # placeholders built at runtime, so no secret-shaped literal sits in the repository.
 ta="$(printf 'QA%.0s' {1..10})"; tb="$(printf 'QB%.0s' {1..10})"; tc="$(printf 'QC%.0s' {1..10})"
-pins_only="$six"; six="$six $ta $ta $tb $tb $tc $tc"
+# ...and each KMS host's disk recovery key, twice (regalia-kms#77): systemd's format, one group
+# repeated eight times, built at runtime too.
+rk(){ printf "$1-%.0s" {1..8} | sed 's/-$//'; }
+la="$(rk cbdefghi)"; lb="$(rk jklnrtuv)"; lc="$(rk vutrnlkj)"
+pins_only="$six"; pins_tpm="$six $ta $ta $tb $tb $tc $tc"; six="$pins_tpm $la $la $lb $lb $lc $lc"
 printf 'planted' > "$T/co/escrow/pins-0001.age"   # a squatter on the next name, written without the key
 before="$(ls /dev/shm)"
 out="$(cd "$T/co" && printf '%s\n' "$fp" "$KEY" $six | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1)"; rc=$?
 grep -q "exists but does not verify" <<< "$out" && ! grep -q planted "$T/co/escrow/pins-0001.age" \
   && P "an unverified file on the next name is replaced, and reported" || F "squatter: $out"
 [ "$rc" = 0 ] && [ -s "$T/co/escrow/pins-0001.age" ] && [ -s "$T/co/escrow/pins-0001.age.mac" ] \
-  && P "six devices and three TPM lockout authorizations escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
+  && P "six devices, three TPM lockout authorizations and three disk recovery keys escrowed to pins-0001.age + .mac (a 6-character YubiKey PIN accepted)" || F "rc=$rc: $out"
 [ "$(grep -cE '^(hsm|yubikey)_[abc]=' "$T/co/escrow/pins-0001.age")" = 6 ] && grep -qx 'yubikey_b=a1b2c3' "$T/co/escrow/pins-0001.age" \
   && P "the plaintext handed to age holds exactly the six device=PIN lines" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
 [ "$(grep -cE '^tpm_[abc]=' "$T/co/escrow/pins-0001.age")" = 3 ] && grep -qx "tpm_a=$ta" "$T/co/escrow/pins-0001.age" && grep -qx "tpm_c=$tc" "$T/co/escrow/pins-0001.age" \
   && P "and exactly the three tpm_<host>=<lockout authorization> lines" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
 grep -qF "$ta" <<< "$out" && F "a TPM lockout authorization appeared in the tool's output" || P "no TPM lockout authorization appears in the tool's output"
-grep -q "6 device PIN(s), 3 TPM lockout authorization(s)" <<< "$out" && P "the confirmation counts six device PINs and three TPM lockout authorizations, not nine devices" || F "confirmation: $(tail -4 <<< "$out")"
+[ "$(grep -cE '^luks_[abc]=' "$T/co/escrow/pins-0001.age")" = 3 ] && grep -qx "luks_a=$la" "$T/co/escrow/pins-0001.age" && grep -qx "luks_c=$lc" "$T/co/escrow/pins-0001.age" \
+  && P "and exactly the three luks_<host>=<disk recovery key> lines, dashes included" || F "plaintext: $(cat "$T/co/escrow/pins-0001.age")"
+grep -qF "$la" <<< "$out" || grep -qF "cbdefghi" <<< "$out" && F "a disk recovery key appeared in the tool's output" || P "no disk recovery key appears in the tool's output"
+grep -q "6 device PIN(s), 3 TPM lockout authorization(s), 3 disk recovery key(s)" <<< "$out" && P "the confirmation counts six device PINs, three TPM lockout authorizations and three disk recovery keys apart" || F "confirmation: $(tail -4 <<< "$out")"
 git -C "$T/co" add -A >/dev/null; git -C "$T/co" -c user.name=t -c user.email=t@t commit -qm e >/dev/null
 rm -f "$T/out"; [ "$(python3 "$MAC" select "$T/co" "$T/out" <<< "$KEY" 2>/dev/null)" = pins-0001.age ] \
   && P "its MAC verifies with the key" || F "the producer's MAC does not verify"
@@ -152,6 +159,26 @@ out="$(escrow_with "$ta" "$ta" "$tb" "$tb" "$ta" "$ta")"; rc=$?
 out="$(escrow_with "$ta" "$tb")"; rc=$?
 [ "$rc" != 0 ] && grep -q "two entries for tpm_a differ" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "two different entries for a lockout authorization: refused" || F "rc=$rc: $out"
 
+# The disk recovery keys are required at every escrow too, and have a shape: systemd's, dashes included.
+escrow_luks(){ (cd "$T/co" && printf '%s\n' "$fp" "$KEY" $pins_tpm "$@" | PATH="$T/stub:$PATH" bash "$T/disc/pin-escrow.sh" 2>&1); }
+out="$(escrow_luks)"; rc=$?
+[ "$rc" != 0 ] && grep -q "luks_a disk recovery key must be 8 groups of 8 letters" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+  && P "PINs and lockout authorizations with no disk recovery key: refused, nothing written (the newest escrow must be whole)" || F "rc=$rc: $out"
+nodash="${lb//-/}"
+out="$(escrow_luks "$la" "$la" "$nodash" "$nodash" "$lc" "$lc")"; rc=$?
+[ "$rc" != 0 ] && grep -q "luks_b disk recovery key must be 8 groups of 8 letters" <<< "$out" && grep -q "the dashes are part of the key" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+  && P "a recovery key typed without its dashes: refused, nothing written (it would be escrowed as a key that opens nothing)" || F "rc=$rc: $out"
+out="$(escrow_luks "$la" "$la" "$lb" "$lb" "${lc^^}" "${lc^^}")"; rc=$?
+[ "$rc" != 0 ] && grep -q "luks_c disk recovery key must be" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "a recovery key in capitals: refused, nothing written" || F "rc=$rc: $out"
+out="$(escrow_luks "$ta" "$ta" "$lb" "$lb" "$lc" "$lc")"; rc=$?
+[ "$rc" != 0 ] && grep -q "luks_a disk recovery key must be" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "a lockout authorization typed where a recovery key belongs: refused" || F "rc=$rc: $out"
+out="$(escrow_luks "$la" "$la" "$lb" "$lb" "$la" "$la")"; rc=$?
+[ "$rc" != 0 ] && grep -q "luks_c disk recovery key is the same as luks_a's" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] \
+  && P "one recovery key typed for two hosts: refused, nothing written" || F "rc=$rc: $out"
+out="$(escrow_luks "$la" "$lb")"; rc=$?
+[ "$rc" != 0 ] && grep -q "two entries for luks_a differ" <<< "$out" && [ ! -e "$T/co/escrow/pins-0002.age" ] && P "two different entries for a recovery key: refused" || F "rc=$rc: $out"
+for bad in "$la" "$nodash" "${lc^^}"; do grep -qF "$bad" <<< "$out" && F "a recovery key was printed while refusing"; done
+
 hdr "the hand-edited (e) step 0 template names the escrow MAC key"
 body="$( # shellcheck disable=SC1091
   source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1; declare -f step_set_pins )"
@@ -159,6 +186,8 @@ grep -q 'escrow_mac_key (32 hex' <<< "$body" \
   && P "the template lists escrow_mac_key and how to make it" || F "the manual template omits escrow_mac_key"
 grep -q 'tpm_{a,b,c}_lockout_auth' <<< "$body" && grep -q 'one wrong attempt blocks it for a day' <<< "$body" \
   && P "the template lists the TPM lockout authorizations and the cost of a wrong attempt" || F "the manual template omits the TPM lockout authorizations"
+grep -q 'luks_{a,b,c}_recovery_key' <<< "$body" && grep -q 'with a dash between groups' <<< "$body" && grep -q "It opens that host's disk by itself" <<< "$body" \
+  && P "the template lists the disk recovery keys, their format and what one opens" || F "the manual template omits the disk recovery keys"
 
 hdr "the archive step refuses a disc without the escrow tools"
 mkdir -p "$T/scripts"; cp "$SCRIPTS"/ceremony.sh "$T/scripts/"

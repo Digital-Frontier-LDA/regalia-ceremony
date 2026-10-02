@@ -30,11 +30,14 @@ pins(){ # pins KEY=VALUE overrides...
   local pin=$GOOD_PIN puk=$GOOD_PUK mgmt=$GOOD_MGMT kv
   # each KMS host's TPM lockout authorization: 20-character placeholders, built at runtime
   local tpm_a tpm_b tpm_c; tpm_a="$(printf 'QA%.0s' {1..10})"; tpm_b="$(printf 'QB%.0s' {1..10})"; tpm_c="$(printf 'QC%.0s' {1..10})"
+  # each KMS host's disk recovery key (regalia-kms#77): systemd's format, one group repeated, built at runtime
+  local luks_a luks_b luks_c; luks_a="$(printf 'cbdefghi-%.0s' {1..8})"; luks_a="${luks_a%-}"
+  luks_b="$(printf 'jklnrtuv-%.0s' {1..8})"; luks_b="${luks_b%-}"; luks_c="$(printf 'vutrnlkj-%.0s' {1..8})"; luks_c="${luks_c%-}"
   for kv in "$@"; do eval "${kv%%=*}=\${kv#*=}"; done
   local emk; emk="$(printf 'E5%.0s' {1..16})"   # 32-hex escrow MAC key placeholder, built at runtime
   for kv in "$@"; do [ "${kv%%=*}" = emk ] && emk="${kv#*=}"; done
-  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_a_piv_pin=%s\nyubikey_a_piv_puk=%s\nyubikey_a_mgmt_key=%s\n%b\n%b\nescrow_mac_key=%s\ntpm_a_lockout_auth=%s\ntpm_b_lockout_auth=%s\ntpm_c_lockout_auth=%s\n' \
-    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" "$YK_B" "$YK_C" "$emk" "$tpm_a" "$tpm_b" "$tpm_c" > "$WORK/pins.env"
+  printf 'hsm_a_user_pin=%s\nhsm_a_so_pin=%s\nhsm_b_user_pin=%s\nhsm_b_so_pin=%s\nhsm_c_user_pin=%s\nhsm_c_so_pin=%s\nyubikey_a_piv_pin=%s\nyubikey_a_piv_puk=%s\nyubikey_a_mgmt_key=%s\n%b\n%b\nescrow_mac_key=%s\ntpm_a_lockout_auth=%s\ntpm_b_lockout_auth=%s\ntpm_c_lockout_auth=%s\nluks_a_recovery_key=%s\nluks_b_recovery_key=%s\nluks_c_recovery_key=%s\n' \
+    "$a_user" "$a_so" "$b_user" "$b_so" "$c_user" "$c_so" "$pin" "$puk" "$mgmt" "$YK_B" "$YK_C" "$emk" "$tpm_a" "$tpm_b" "$tpm_c" "$luks_a" "$luks_b" "$luks_c" > "$WORK/pins.env"
 }
 run_step0(){ ( CEREMONY_MODE="$1" step_set_pins 2>&1 ); }
 leaks(){ grep -qE "$GOOD_A_USER|$GOOD_A_SO|$GOOD_B_USER|$GOOD_B_SO|$GOOD_C_USER|$GOOD_C_SO|$GOOD_PIN|$GOOD_PUK|$GOOD_MGMT|111111" <<< "$1"; }
@@ -66,6 +69,15 @@ refuses "a 10-character TPM lockout authorization" "tpm_a_lockout_auth: a TPM lo
 refuses "a TPM lockout authorization with spaces" "tpm_b_lockout_auth: a TPM lockout authorization is 16-32 printable characters with no space" "tpm_b=QBQB QBQB QBQB QBQB"
 refuses "a 33-character TPM lockout authorization" "tpm_c_lockout_auth: a TPM lockout authorization is 16-32 printable characters with no space" tpm_c="$(printf 'Q%.0s' {1..33})"
 refuses "one TPM lockout authorization on two hosts" "tpm_a_lockout_auth and tpm_b_lockout_auth hold the same value" tpm_b="$(printf 'QA%.0s' {1..10})"
+# Each KMS host's disk recovery key (regalia-kms#77): its own value, in systemd's format, dashes included.
+RK_MSG="a disk recovery key is 8 groups of 8 letters from cbdefghijklnrtuv with a dash between groups, lower case"
+good_rk="$(printf 'cbdefghi-%.0s' {1..8})"; good_rk="${good_rk%-}"
+refuses "a disk recovery key without its dashes" "luks_a_recovery_key: $RK_MSG" luks_a="${good_rk//-/}"
+refuses "a disk recovery key in capitals" "luks_b_recovery_key: $RK_MSG" luks_b="${good_rk^^}"
+refuses "a disk recovery key with a letter outside its alphabet" "luks_c_recovery_key: $RK_MSG" luks_c="${good_rk/c/a}"
+refuses "a disk recovery key of seven groups" "luks_a_recovery_key: $RK_MSG" luks_a="${good_rk%-*}"
+refuses "a disk recovery key with spaces for dashes" "luks_b_recovery_key: $RK_MSG" "luks_b=${good_rk//-/ }"
+refuses "one disk recovery key on two hosts" "luks_a_recovery_key and luks_b_recovery_key hold the same value" luks_b="$good_rk"
 
 refuses "the YubiKey factory PIN" "PROD GUARD: yubikey_a_piv_pin is unset or holds a recognised dev default" pin=123456
 refuses "the YubiKey factory PUK" "PROD GUARD: yubikey_a_piv_puk is unset or holds a recognised dev default" puk=12345678
