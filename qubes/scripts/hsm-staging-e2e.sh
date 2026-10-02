@@ -435,7 +435,7 @@ if [ "$D_GATE" = 1 ]; then
   # Same treatment as the custodian loop: "signing-key import failed" spanned a seed derivation, a
   # certificate mint and an on-card import, which fail for unrelated reasons.
   STAGE=""; STAGE_OUT=""
-  cust_stage "seed-to-pkcs12.py" python3 "$HERE/seed-to-pkcs12.py" --mnemonic-file "$DW/mnemonic" \
+  cust_stage "seed-to-pkcs12.py" python3 -Es "$HERE/seed-to-pkcs12.py" --mnemonic-file "$DW/mnemonic" \
       --password-file "$DW/drill.pw" --out "$DW/drill.p12"
   if [ -z "$STAGE" ]; then
     # The key is extracted in its own step rather than inside a process substitution, so a failure

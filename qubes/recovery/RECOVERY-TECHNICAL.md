@@ -216,7 +216,7 @@ repository's copy:
 ```sh
 # the key goes straight from the payload into the verifier: never into a file of its own
 rm -f /dev/shm/pins.age      # a stale copy must never be what gets decrypted
-sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
+sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 -Es bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
 case $? in
   0) bin/age -d -i breakglass.key /dev/shm/pins.age ;;               # the verified escrow
   3) echo "no escrow verifies: use the payload's PINs" ;;

@@ -186,7 +186,7 @@ elif [ -z "$_cc_reg" ] || [ ! -r "$_cc_reg" ]; then
 elif ! command -v python3 >/dev/null; then
   F "a staging registry is present but python3 is not — the wipeable interlock CANNOT BE EVALUATED"
 else
-  _cc_role="$(python3 - "$_cc_reg" "$EXPECT_SERIAL" <<'PYREG'
+  _cc_role="$(python3 -I - "$_cc_reg" "$EXPECT_SERIAL" <<'PYREG'
 import json, sys
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -364,7 +364,7 @@ else
       0441*) point="${point#0441}";;
       0421*) point="${point#0421}";;
     esac
-    got="$(perl -e 'alarm 30; exec @ARGV' -- python3 "$DERIVE_PY" --hex "$point" 2>/dev/null | tr -d '[:space:]')"
+    got="$(perl -e 'alarm 30; exec @ARGV' -- python3 -Es "$DERIVE_PY" --hex "$point" 2>/dev/null | tr -d '[:space:]')"
     if [ -z "$got" ]; then
       F "could not derive an address from the key on this card — CANNOT BE EVALUATED"
     elif [ "$got" = "$EXPECT_ADDR" ]; then
@@ -453,6 +453,9 @@ else
   # C.DevAut must be the bytes whose digest B7 compared against the ceremony's pin. Recomputed here
   # from DEVAUT_HEX rather than trusting the reader's DEVAUT_SHA256 field, which is a separate line
   # a reader could get wrong independently of the bytes.
+  # "$KEK_PY" below is the interpreter chosen above BECAUSE it imports pycvc; the suite's stand-in for
+  # it supplies pycvc through PYTHONPATH (test-commission-card.sh), which -I and -E would ignore. These
+  # calls are converted together with that test.  isolation-exempt: pycvc reaches the test through PYTHONPATH
   printf '%s' "$devaut_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
     > "$kek_tmp/devaut.bin" 2>/dev/null
   devaut_recomputed="$(sha256sum < "$kek_tmp/devaut.bin" | awk '{print $1}')"
@@ -464,6 +467,7 @@ else
     # What kind of key the token holds at --kek-id: rsa, ec, another type's name, or nothing when the
     # bytes are not a SubjectPublicKeyInfo. Only to NAME the failure for the last two — the verifier
     # compares the key itself, so this answer never decides a pass.
+# isolation-exempt: "$KEK_PY" is the interpreter chosen because it imports pycvc; its test supplies pycvc through PYTHONPATH
     kek_type="$( [ -s "$kek_tmp/kek.der" ] && "$KEK_PY" - "$kek_tmp/kek.der" 2>/dev/null <<'PYTYPE'
 import sys
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
@@ -491,8 +495,14 @@ PYTYPE
       [ -n "$att_why" ] || att_why="$(grep -v '^[[:space:]]*$' "$kek_tmp/att.err" | tail -3)"
       printf '%s\n' "$att_why" | sed 's/^/     /'
     else
+      # isolation-exempt: "$KEK_PY" is the interpreter chosen because it imports pycvc; its test supplies pycvc through PYTHONPATH
       printf '%s' "$att_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
         > "$kek_tmp/attest.bin" 2>/dev/null
+      # THE ATTESTATION VERDICT. It needs pycvc, and "$KEK_PY" is the interpreter that has it; the suite's
+      # stand-in for that interpreter supplies pycvc through PYTHONPATH (test-commission-card.sh), which
+      # -E would ignore. Converted together with that test, in the emulator suite, where it can be seen
+      # that the verdict still comes out.
+      # isolation-exempt: the attestation verifier's pycvc reaches the test through PYTHONPATH
       ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
                    --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
                    --expect-spki "$kek_tmp/kek.der" 2>&1)"; ver_rc=$?

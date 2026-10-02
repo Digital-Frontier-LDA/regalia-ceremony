@@ -47,7 +47,7 @@ FLASH_SIZE="${HSM_FS_DUMP_BYTES:-0x10000}"
 
 # AN ALL-ERASED DUMP IS NOT EVIDENCE. Refuse to treat it as one.
 assert_dump_is_real(){
-    python3 - "$1" <<'EOP'
+    python3 -I - "$1" <<'EOP'
 import sys
 d = open(sys.argv[1], "rb").read()
 if not d:
@@ -216,13 +216,13 @@ pkill -f "$(basename "$OCD_BIN")" 2>/dev/null; sleep 2
 CAPTURE="$REPO/tools/hsm-forensic-capture.py"
 PYBIN="${HSM_PYSERIAL_PYTHON:-$HOME/.local/share/akash-hsm-venv/bin/python3}"
 [ -x "$PYBIN" ] || PYBIN=python3
-if ! "$PYBIN" -c "import serial" 2>/dev/null; then
+if ! "$PYBIN" -I -c "import serial" 2>/dev/null; then
     echo "REFUSING TO RUN: pyserial is unavailable to $PYBIN." >&2
     echo "  stty+cat is NOT an acceptable fallback here — it mis-clocks this bridge and yields" >&2
     echo "  a confident verdict from an unreadable trace." >&2
     exit 2
 fi
-capture_bg(){ "$PYBIN" "$CAPTURE" "$1" "$2" "$DEV" "$BAUD" 2>/dev/null & CAP_PID=$!; }
+capture_bg(){ "$PYBIN" -Es "$CAPTURE" "$1" "$2" "$DEV" "$BAUD" 2>/dev/null & CAP_PID=$!; }
 say "trace channel: $DEV @ $BAUD (pyserial)"
 # ---- 2a. PROVE THE CHANNEL DELIVERS FRAMES BEFORE SPENDING A RUN ---------------------------------
 #
@@ -247,7 +247,7 @@ REGALIA_PIN="${HSM_USER_PIN:-648219}" perl -e 'alarm 30; exec @ARGV' -- pkcs11-t
 sleep 2
 # Peek at the live capture WITHOUT stopping it: copy what has arrived so far and decode that.
 cp "$OUT/trace.bin" "$OUT/selftest.bin" 2>/dev/null || true
-_st="$(python3 "$REPO/tools/hsm-forensic-decode.py" "$OUT/selftest.bin" 2>&1 >/dev/null | grep -oE '^decoded [0-9]+' | awk '{print $2}')"
+_st="$(python3 -Es "$REPO/tools/hsm-forensic-decode.py" "$OUT/selftest.bin" 2>&1 >/dev/null | grep -oE '^decoded [0-9]+' | awk '{print $2}')"
 if [ "${_st:-0}" -lt 5 ]; then
     echo "REFUSING TO RUN: the trace channel delivered ${_st:-0} records for a known write." >&2
     echo "  The firmware emits (check g_seq over SWD) but the bytes are not arriving intact." >&2
@@ -351,7 +351,7 @@ fi
 # INCOMPLETE from a near-empty trace is correct but reads like "tested and found clean" when it
 # really means "never tested". The hunt counts attempts, so a void run silently inflates the
 # denominator and makes a negative look stronger than the evidence supports.
-_rec="$(python3 "$REPO/tools/hsm-forensic-decode.py" "$OUT/trace.bin" 2>&1 >/dev/null \
+_rec="$(python3 -Es "$REPO/tools/hsm-forensic-decode.py" "$OUT/trace.bin" 2>&1 >/dev/null \
         | grep -oE '^decoded [0-9]+' | awk '{print $2}')"
 _ok="$(wc -l < "$OUT/workload.ok" 2>/dev/null | tr -d ' ')"
 if [ "${_ok:-0}" -eq 0 ]; then
@@ -373,16 +373,16 @@ if [ $(( ${_rec:-0} - ${_st:-0} )) -lt 300 ]; then
     exit 3
 fi
 say "decoding the trace"
-python3 "$REPO/tools/hsm-forensic-decode.py" "$OUT/trace.bin" > "$OUT/trace.jsonl" 2>"$OUT/decode.log"
+python3 -Es "$REPO/tools/hsm-forensic-decode.py" "$OUT/trace.bin" > "$OUT/trace.jsonl" 2>"$OUT/decode.log"
 cat "$OUT/decode.log" | sed 's/^/    /'
 
 say "running the analyzer against the post-cut flash"
 if [ -n "$POST_FLASH" ]; then
-    python3 "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" \
+    python3 -Es "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" \
         --post-flash "$POST_FLASH" --flash-base "$FLASH_BASE" \
         > "$OUT/verdict.txt" 2>&1
 else
-    python3 "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" > "$OUT/verdict.txt" 2>&1
+    python3 -Es "$REPO/tools/hsm-drain-analyzer.py" "$OUT/trace.jsonl" > "$OUT/verdict.txt" 2>&1
     echo "PHYSICAL_EVIDENCE=UNAVAILABLE (post-cut flash dump was not real flash)" >> "$OUT/verdict.txt"
 fi
 sed 's/^/    /' "$OUT/verdict.txt"

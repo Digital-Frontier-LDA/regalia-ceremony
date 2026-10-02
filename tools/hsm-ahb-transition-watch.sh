@@ -65,7 +65,7 @@ end=$(( $(date +%s) + SECS ))
 n=0; last_ok=""; blocked_at=""
 
 while [ "$(date +%s)" -lt "$end" ]; do
-    t0=$(python3 -c 'import time;print(f"{time.time():.4f}")')
+    t0=$(python3 -I -c 'import time;print(f"{time.time():.4f}")')
     v="$(printf 'rp2350.dap apreg %s 0xd04 0xe000edf0\nrp2350.dap apreg %s 0xd0c\nexit\n' \
             "$AHB_AP" "$AHB_AP" \
          | perl -e 'alarm 5; exec @ARGV' -- nc localhost 4444 2>/dev/null \
@@ -76,14 +76,14 @@ while [ "$(date +%s)" -lt "$end" ]; do
     # strips the echo lines first, so the value is token 1. Copying the '2p' across returned nothing
     # every time: 0 of 159 samples on a healthy card, which the summary then had to be taught not to
     # call a clean run.
-    t1=$(python3 -c 'import time;print(f"{time.time():.4f}")')
+    t1=$(python3 -I -c 'import time;print(f"{time.time():.4f}")')
 
     # An unreadable value and the artifact word are the same answer: the read did not work.
     ok=1
     case "${v:-}" in ""|0x00000000|"$ARTIFACT") ok=0 ;; esac
 
     printf '{"t":%s,"dt":%s,"raw":"%s","ok":%s}\n' \
-        "$t0" "$(python3 -c "print(f'{$t1-$t0:.4f}')")" "${v:-none}" "$ok" >> "$OUT"
+        "$t0" "$(python3 -I -c "print(f'{$t1-$t0:.4f}')")" "${v:-none}" "$ok" >> "$OUT"
 
     if [ "$ok" = "1" ]; then
         last_ok="$t0"
@@ -98,7 +98,7 @@ done
 kill "$OCD_PID" 2>/dev/null
 printf 'samples %s -> %s\n' "$n" "$OUT"
 if [ -n "$blocked_at" ]; then
-    python3 - "$last_ok" "$blocked_at" <<'EOP'
+    python3 -I - "$last_ok" "$blocked_at" <<'EOP'
 import sys
 last, blocked = float(sys.argv[1]), float(sys.argv[2])
 print(f"  block window: {blocked-last:.4f}s wide (between the last good read and the first failure)")
