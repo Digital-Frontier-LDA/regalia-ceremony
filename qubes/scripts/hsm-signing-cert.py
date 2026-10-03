@@ -5,8 +5,10 @@
     hsm-signing-cert.py tbs      --public-key PUB.der --subject CN --days N --serial-hex HEX --out TBS.der
     hsm-signing-cert.py assemble --tbs TBS.der --signature SIG.bin --out CERT.pem
     hsm-signing-cert.py check    --certificate CERT.pem --public-key PUB.der
+    hsm-signing-cert.py key-type --public-key PUB.der              (prints rsa:2048 or ec:prime256v1)
     hsm-signing-cert.py evidence --device-serial S --object-id ID --key-reference R --label L --public-key PUB.der
-                                 --certificate CERT.pem --blob BLOB --out EVIDENCE.json
+                                 --certificate CERT.pem --blob BLOB --devaut DEVAUT.bin --attestation ATTEST.bin
+                                 --out EVIDENCE.json
 
 WHY A CERTIFICATE. The tools that sign a boot image take an X.509 certificate beside a key held in a
 token (systemd-measure --certificate, sbsign --cert), and the Secure Boot certificate is what each KMS
@@ -15,14 +17,22 @@ host enrols. The key never leaves the card, so the certificate is built here as 
 put in place (`assemble`). A certificate that verifies under its own public key is then also a
 signature the card made: `check` is the proof that the key at that object signs.
 
-The certificate is self-signed, RSA-2048, sha256WithRSAEncryption, version 3, with basicConstraints
+TWO KEY TYPES. RSA-2048 (sha256WithRSAEncryption; the card signs with SHA256-RSA-PKCS), for the boot
+image's keys (regalia#554); and ECDSA P-256 (ecdsa-with-SHA256; the card signs with ECDSA-SHA256 and
+pkcs11-tool --signature-format openssl gives the DER ECDSA-Sig-Value X.509 carries), for the membership
+root (regalia-kms#156, option C). The type is read from the public key, and the signature algorithm is
+the one that type implies, never chosen separately.
+
+The certificate is self-signed, version 3, with basicConstraints
 CA:FALSE (critical) and keyUsage digitalSignature (critical). Nothing in it is a trust decision: the
 hosts trust the key because the root-signed measurement document and the enrolled Secure Boot
 certificate name it, not because of what the certificate says.
 
 NO VERDICT IN THE RECORD. `evidence` writes what was observed: the device serial, the object id and
-key reference, the public key, the certificate, the SHA-256 of the wrapped blob. Whether they agree is
-recomputed by whoever reads them (`check`).
+key reference, the public key, the certificate, the SHA-256 of the wrapped blob, and the card's own
+evidence that it generated the key: its device certificate C.DevAut (EF 2F02) and the authenticated
+request the generation left in EF CE<key reference>, both as read. Whether they agree is recomputed by
+whoever reads them (`check`; hsm-key-attestation-verify.py for the device's).
 """
 import argparse
 import base64
@@ -33,9 +43,11 @@ import os
 import re
 import sys
 
-SCHEMA = "regalia.hsm-signing-key/v1"
+SCHEMA = "regalia.hsm-signing-key/v2"     # v2: the key type, and the card's device certificate and key attestation
 SHA256_WITH_RSA = bytes.fromhex("06092a864886f70d01010b0500")      # AlgorithmIdentifier body: OID + NULL
 RSA_ENCRYPTION_OID = bytes.fromhex("06092a864886f70d0101010500")
+ECDSA_WITH_SHA256 = bytes.fromhex("06082a8648ce3d040302")          # AlgorithmIdentifier body: OID, NO parameters (RFC 5758)
+EC_P256 = bytes.fromhex("06072a8648ce3d0201" "06082a8648ce3d030107")  # id-ecPublicKey, prime256v1
 
 
 class Refused(Exception):
@@ -107,8 +119,40 @@ def rsa_public_key(spki):
     return int.from_bytes(modulus, "big").bit_length()       # in bits: 2041 is not 2048
 
 
+def key_type(spki):
+    """"rsa:2048" or "ec:prime256v1" for the two keys this tool certifies; refuses any other."""
+    tag, body, end = read_tlv(spki)
+    require(tag == 0x30 and end == len(spki), "the public key is not one DER SubjectPublicKeyInfo")
+    tag, algorithm, offset = read_tlv(body)
+    require(tag == 0x30, "the public key has no algorithm")
+    if algorithm == EC_P256:
+        tag, bits, end = read_tlv(body, offset)
+        require(tag == 0x03 and end == len(body) and bits[:2] == b"\0\x04" and len(bits) == 66,
+                "the P-256 public key is not one uncompressed point")
+        return "ec:prime256v1"
+    require(rsa_public_key(spki) == 2048, "the key is not RSA-2048 (nor ECDSA P-256)")
+    return "rsa:2048"
+
+
+def signature_algorithm(spki):
+    return SHA256_WITH_RSA if key_type(spki) == "rsa:2048" else ECDSA_WITH_SHA256
+
+
+def ecdsa_signature(signature):
+    """A DER ECDSA-Sig-Value of two positive INTEGERs no longer than a P-256 scalar; refuses anything else
+    (a raw r||s from a tool that was not asked for --signature-format openssl, for instance)."""
+    tag, body, end = read_tlv(signature)
+    require(tag == 0x30 and end == len(signature), "the ECDSA signature is not one DER SEQUENCE")
+    tag_r, r, offset = read_tlv(body)
+    tag_s, s, offset = read_tlv(body, offset)
+    require(tag_r == 0x02 and tag_s == 0x02 and offset == len(body), "the ECDSA signature is not two INTEGERs")
+    for v in (r, s):
+        require(1 <= len(v) <= 33 and v[0] < 0x80 and int.from_bytes(v, "big") > 0, "the ECDSA signature's integers are out of range")
+    return signature
+
+
 def tbs_certificate(spki, common_name, days, serial, now=None):
-    require(rsa_public_key(spki) == 2048, "the key is not RSA-2048")
+    algorithm = signature_algorithm(spki)
     require(1 <= days <= 7300, "--days must be 1 to 7300")
     require(re.fullmatch(r"[0-9a-f]{16,40}", serial) is not None and serial[0] in "1234567", "--serial-hex must be 16 to 40 hex, positive")
     now = (now or datetime.datetime.now(datetime.timezone.utc)).replace(microsecond=0)
@@ -119,7 +163,7 @@ def tbs_certificate(spki, common_name, days, serial, now=None):
     return seq(
         tlv(0xA0, tlv(0x02, b"\x02")),                     # version 3
         tlv(0x02, bytes.fromhex(serial)),
-        seq(SHA256_WITH_RSA),
+        seq(algorithm),
         subject,                                           # issuer: self
         seq(utc(now), utc(now + datetime.timedelta(days=days))),
         subject,
@@ -128,8 +172,19 @@ def tbs_certificate(spki, common_name, days, serial, now=None):
 
 
 def certificate(tbs, signature):
-    require(len(signature) == 256, "the signature is not an RSA-2048 signature (%d bytes)" % len(signature))
-    return seq(tbs, seq(SHA256_WITH_RSA), tlv(0x03, b"\0" + signature))
+    tag, body, _ = read_tlv(tbs)
+    require(tag == 0x30, "the TBSCertificate is not a SEQUENCE")
+    offset = 0
+    for _ in range(6):                                        # version, serial, algorithm, issuer, validity, subject
+        _, _, offset = read_tlv(body, offset)
+    _, _, end = read_tlv(body, offset)
+    spki = body[offset:end]
+    algorithm = signature_algorithm(spki)
+    if algorithm == SHA256_WITH_RSA:
+        require(len(signature) == 256, "the signature is not an RSA-2048 signature (%d bytes)" % len(signature))
+    else:
+        ecdsa_signature(signature)
+    return seq(tbs, seq(algorithm), tlv(0x03, b"\0" + signature))
 
 
 def pem(der):
@@ -151,7 +206,8 @@ def certificate_parts(der):
     require(tag == 0x30, "the certificate's first field is not a TBSCertificate")
     tbs = body[:tbs_end]
     tag, algorithm, offset = read_tlv(body, tbs_end)
-    require(tag == 0x30 and algorithm == SHA256_WITH_RSA, "the certificate is not signed with sha256WithRSAEncryption")
+    require(tag == 0x30 and algorithm in (SHA256_WITH_RSA, ECDSA_WITH_SHA256),
+            "the certificate is not signed with sha256WithRSAEncryption or ecdsa-with-SHA256")
     tag, bits, end = read_tlv(body, offset)
     require(tag == 0x03 and bits[:1] == b"\0" and end == len(body), "the certificate's signature is malformed")
     fields = []
@@ -164,14 +220,17 @@ def certificate_parts(der):
     # version, serial, signature algorithm, issuer, validity, subject, public key, extensions: by tag, and the
     # inner algorithm must be the outer one. A structure that merely has eight parts is not a certificate.
     require([f[0] for f in fields] == [0xA0, 0x02, 0x30, 0x30, 0x30, 0x30, 0x30, 0xA3], "the certificate's fields are not the ones this tool writes")
-    require(fields[2] == seq(SHA256_WITH_RSA), "the certificate names another signature algorithm inside than outside")
+    require(fields[2] == seq(algorithm), "the certificate names another signature algorithm inside than outside")
     require(fields[3] == fields[5], "the certificate is not self-signed (issuer and subject differ)")
-    require(rsa_public_key(fields[6]) == 2048, "the certificate's key is not RSA-2048")
+    require(signature_algorithm(fields[6]) == algorithm, "the certificate's signature algorithm is not its key's")
+    if algorithm == ECDSA_WITH_SHA256:
+        ecdsa_signature(bits[1:])
     return tbs, fields[6], bits[1:]
 
 
 def verifies(spki, data, signature):
-    """RSASSA-PKCS1-v1_5 / SHA-256, checked by openssl (this file implements no cryptography)."""
+    """RSASSA-PKCS1-v1_5 / SHA-256, or ECDSA / SHA-256 over a DER signature, checked by openssl (this file
+    implements no cryptography)."""
     import subprocess
     import tempfile
     with tempfile.TemporaryDirectory() as work:
@@ -186,6 +245,19 @@ def verifies(spki, data, signature):
         done = subprocess.run(["openssl", "dgst", "-sha256", "-verify", os.path.join(work, "pub.pem"), "-signature", paths["sig"], paths["data"]],
                               capture_output=True)
     return done.returncode == 0
+
+
+def blob_kcv(blob):
+    """The DKEK key check value a sc-hsm-tool --wrap-key blob names: SEQUENCE { OCTET STRING { KCV(8) || … }, … }.
+
+    Measured 2026-10-03 on DENK0404380: the eight bytes equal sc-hsm-tool's "DKEK key check value" of the card
+    that wrapped it, and a card of another DKEK refuses the blob with "Data object not found".
+    """
+    tag, body, end = read_tlv(blob)
+    require(tag == 0x30 and end == len(blob), "the blob is not one DER SEQUENCE")
+    tag, key_blob, _ = read_tlv(body)
+    require(tag == 0x04 and len(key_blob) > 8, "the blob does not start with a key blob")
+    return key_blob[:8].hex().upper()
 
 
 def _read(path, limit=1 << 20):
@@ -215,11 +287,18 @@ def main(argv=None):
     c.add_argument("--tbs", required=True)
     c.add_argument("--signature", required=True)
     c.add_argument("--out", required=True)
+    c = sub.add_parser("unhex")
+    c.add_argument("--out", required=True)
+    c = sub.add_parser("key-type")
+    c.add_argument("--public-key", required=True)
     c = sub.add_parser("check")
     c.add_argument("--certificate", required=True)
     c.add_argument("--public-key", required=True)
+    c = sub.add_parser("blob-kcv")
+    c.add_argument("--blob", required=True)
     c = sub.add_parser("evidence")
-    for a in ("--device-serial", "--object-id", "--key-reference", "--label", "--public-key", "--certificate", "--blob", "--out"):
+    for a in ("--device-serial", "--object-id", "--key-reference", "--label", "--public-key", "--certificate", "--blob",
+              "--dkek-kcv", "--devaut", "--attestation", "--out"):
         c.add_argument(a, required=True)
     a = p.parse_args(argv)
     try:
@@ -227,22 +306,38 @@ def main(argv=None):
             _write(a.out, tbs_certificate(_read(a.public_key), a.subject, a.days, a.serial_hex))
         elif a.command == "assemble":
             _write(a.out, pem(certificate(_read(a.tbs), _read(a.signature))), "w")
+        elif a.command == "unhex":
+            text = sys.stdin.read(1 << 22).strip()
+            require(re.fullmatch(r"(?:[0-9A-Fa-f]{2})+", text) is not None, "not hex")
+            _write(a.out, bytes.fromhex(text))
+        elif a.command == "key-type":
+            print(key_type(_read(a.public_key)))
         elif a.command == "check":
             tbs, spki, signature = certificate_parts(unpem(_read(a.certificate).decode("ascii")))
             require(spki == _read(a.public_key), "the certificate is for another public key than the card's")
             require(verifies(spki, tbs, signature), "the certificate's signature does not verify under its own key")
             print("CERTIFICATE-VERIFIES %s" % hashlib.sha256(spki).hexdigest())
+        elif a.command == "blob-kcv":
+            print(blob_kcv(_read(a.blob)))
         else:
             require(re.fullmatch(r"[A-Za-z0-9]{4,32}", a.device_serial) is not None, "--device-serial is not a serial")
             require(re.fullmatch(r"[0-9a-f]{2,4}", a.object_id) is not None, "--object-id is not a hex id")
             require(re.fullmatch(r"[1-9][0-9]{0,2}", a.key_reference) is not None, "--key-reference is not a key reference")
             spki, text = _read(a.public_key), _read(a.certificate).decode("ascii")
-            certificate_parts(unpem(text))
-            record = {"evidence": SCHEMA, "device_serial": a.device_serial, "object_id": a.object_id,
+            _, cert_key, _ = certificate_parts(unpem(text))
+            require(cert_key == spki, "the certificate is for another public key than the card's")
+            devaut, attestation = _read(a.devaut), _read(a.attestation)
+            require(devaut and attestation, "the device certificate and the attestation must not be empty")
+            blob = _read(a.blob)
+            require(blob_kcv(blob) == a.dkek_kcv, "the blob was wrapped under DKEK %s, not %s" % (blob_kcv(blob), a.dkek_kcv))
+            record = {"evidence": SCHEMA, "device_serial": a.device_serial, "object_id": a.object_id, "key_type": key_type(spki),
+                      "devaut_b64": base64.b64encode(devaut).decode("ascii"), "devaut_sha256": hashlib.sha256(devaut).hexdigest(),
+                      "attestation_b64": base64.b64encode(attestation).decode("ascii"),
+                      "attestation_sha256": hashlib.sha256(attestation).hexdigest(),
                       "key_reference": int(a.key_reference), "label": a.label,
                       "public_key_der_b64": base64.b64encode(spki).decode("ascii"),
                       "public_key_sha256": hashlib.sha256(spki).hexdigest(), "certificate_pem": text,
-                      "wrapped_blob_sha256": hashlib.sha256(_read(a.blob)).hexdigest()}
+                      "dkek_kcv": a.dkek_kcv, "wrapped_blob_sha256": hashlib.sha256(blob).hexdigest()}
             _write(a.out, json.dumps(record, indent=2, sort_keys=True) + "\n", "w")
         return 0
     except (Refused, OSError, ValueError) as refusal:

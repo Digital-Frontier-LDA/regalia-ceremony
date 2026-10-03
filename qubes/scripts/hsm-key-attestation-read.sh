@@ -25,7 +25,7 @@
 #   ATTEST_KEY_REF=1   ATTEST_FID=CE01   ATTEST_SHA256=…   ATTEST_BYTES=…   ATTEST_HEX=…
 #
 # FAILS CLOSED. Exit 2 with a named reason on: a missing EF (SW 6A82 — no key at that reference, or
-# a key that was IMPORTED rather than generated, which leaves no attestation), a failed read at any
+# a key IMPORTED from software rather than generated, which leaves no attestation), a failed read at any
 # offset, an empty file, or a card that is not the one named by --expect-serial. It never prints a
 # partial file as if it were the whole one. Parsing and signature checking are deliberately NOT done
 # here: that is hsm-key-attestation-verify.py's job, and a second parser is a second place to be
@@ -140,9 +140,12 @@ while :; do
   resp="$(apdu_data "$(printf '00B1%s04540%s%02X%02X%02X' "$FID" 2 $(( (off >> 8) & 0xFF )) $(( off & 0xFF )) "$CHUNK")")" || {
     sw="${resp%% *}"
     # A MISSING FILE HAS ITS OWN NAME. 6A82 at offset 0 means there is no attestation at this key
-    # reference: no key there, the wrong reference, or a key that was IMPORTED (UNWRAP KEY writes no
-    # CExx). The last one is exactly what commissioning exists to refuse, so it is named, not
-    # reported as a generic I/O error an operator would retry.
+    # reference: no key there, the wrong reference, or a key IMPORTED from software (its blob has no
+    # certificate to bring along; a DKEK blob made by a card does, and unwrapping it writes the
+    # generating card's CExx, measured 2026-10-03 on DENK0404380). The import is exactly what
+    # commissioning exists to refuse, so it is named, not reported as a generic I/O error an operator
+    # would retry. The converse also holds: deleting a key leaves its CExx, so a file here does not
+    # prove a key is still at this reference.
     if [ "$off" -eq 0 ] && [ "$sw" = "6A82" ]; then
       die "EF $FID does not exist (SW 6A82) — no attestation at key reference $KEY_REF: wrong --key-ref, no key there, or an IMPORTED key (only on-card generation leaves one)"
     fi
