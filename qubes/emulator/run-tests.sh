@@ -44,6 +44,18 @@ export EMU_RUN="${EMU_RUN:-/run/vault-emu}"
 export PATH="$EMU_BIN:$CEREMONY_SCRIPTS:$PATH"
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 
+# NO SUITE OF THE MODEL TIER MAY REACH A REAL CARD (regalia-ceremony#104). The emulator shadows
+# pkcs11-tool, sc-hsm-tool and ykman, but go-nogo.sh also runs the real opensc-tool, and
+# hsm-random.py talks to pcscd through pyscard, which no stub on PATH can catch. Both find pcscd
+# through PCSCLITE_CSOCK_NAME: pointed at a socket that does not exist, every one of them sees no
+# daemon, exactly as on a CI runner with no reader. On a bench machine this run reached the real
+# tokens three times on 2026-10-02 (#104). The daemon tier below boots its OWN pcscd and lifts this.
+# LIMIT: sudo (env_reset), `env -i` and systemd-run units drop this variable. No model-tier suite or
+# script it calls runs a card tool that way (audited 2026-10-02; test-emulator-hermetic.sh keeps it
+# so). A suite started BY HAND outside this runner is not covered either: export the variable first.
+PCSC_NOWHERE="$(mktemp -d)/no-pcscd.comm"
+export PCSCLITE_CSOCK_NAME="$PCSC_NOWHERE"
+
 INSTALL=0; MODELS_ONLY=0
 for a in "$@"; do case "$a" in
   --install-deps) INSTALL=1;;
@@ -367,6 +379,7 @@ say "LOCALE (a bracket range in a validator means ASCII, under a UTF-8 locale to
 say "NO PIN ON ARGV (the fleet drill against recording stubs; every script passes secrets as env:NAME)"
 "$HERE/tests/test-no-pin-on-argv.sh" || suite_failed "test-no-pin-on-argv.sh"
 "$HERE/tests/test-python-isolation.sh" || suite_failed "test-python-isolation.sh"
+"$HERE/tests/test-emulator-hermetic.sh" || suite_failed "test-emulator-hermetic.sh"
 say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"
 "$HERE/tests/test-go-nogo-one-script.sh" || suite_failed "test-go-nogo-one-script.sh"
 
@@ -416,15 +429,20 @@ if [ "$(id -u)" != 0 ]; then
   exit 1
 fi
 
+# THE DAEMON TIER KILLS AND RESTARTS pcscd AND TURNS SWAP OFF: refused on a machine with a real
+# reader or token attached (emu-boot.sh, emu_refuse_on_real_readers).
+# shellcheck disable=SC1090
+source "$EMU_BIN/emu-boot.sh"
+emu_refuse_on_real_readers || exit 2
+unset PCSCLITE_CSOCK_NAME
+
 # The ceremony preflight (run by the dress-rehearsal + go/no-go suites) fails closed if
 # swap is active — correct for a real vault qube, but CI runners/dev boxes have swap. In
 # this TEST context turn it off so preflight genuinely passes (faithful, not faked).
 swapoff -a 2>/dev/null || true
 
 say "booting emulator daemons natively (pcscd + vpcd + SLE-4442 + SoftHSM2 + cups-pdf)"
-# shellcheck disable=SC1090
-source "$EMU_BIN/emu-boot.sh"
-boot_all
+boot_all || exit 2
 trap 'stop_all' EXIT
 
 # THE DAEMON-BACKED SUITES DRIVE REAL TOOLS. Without them, route-coverage.sh reports seven route
