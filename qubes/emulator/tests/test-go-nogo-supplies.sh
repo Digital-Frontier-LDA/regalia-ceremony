@@ -4,6 +4,7 @@
 # it, derived from CEREMONY_SHARES; any "no" is a FAIL; without a terminal it cannot be confirmed and
 # is a FAIL. Driven through a real pty (script), as in the vault's xterm.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GN="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

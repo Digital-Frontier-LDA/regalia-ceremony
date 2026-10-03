@@ -6,6 +6,7 @@
 # runs; a full run runs every self-test; a broken tool is a FAIL and a NO-GO; every item line reads
 # OK, WARN or FAIL, and the last line is GO or NO-GO.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

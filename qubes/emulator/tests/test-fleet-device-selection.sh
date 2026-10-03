@@ -14,6 +14,7 @@
 # So the rule is: with more than one token attached and no explicit --slot, REFUSE. This suite
 # proves the refusal actually happens, because a guard that has never been fired is a comment.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 IMPORT="$HERE/../../scripts/hsm-import-key.sh"

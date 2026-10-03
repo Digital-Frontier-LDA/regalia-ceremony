@@ -4,6 +4,7 @@
 # to type it back from the paper. Driven through a real pseudo-terminal (script), as in the vault's
 # xterm; a stub lp records everything sent to the printer.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

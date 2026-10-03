@@ -17,6 +17,7 @@
 # that the check EXISTS, that it FAILS CLOSED, and that its message tells an operator what to do.
 # Whether it fires correctly belongs to the hardware drill.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CEREMONY="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/ceremony.sh"

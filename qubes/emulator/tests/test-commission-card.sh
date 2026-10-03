@@ -9,6 +9,7 @@
 # A commissioning script that exits 0 because a tool was missing certifies nothing while looking
 # like it certified everything — and that is the exact failure this project has shipped repeatedly.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CC="$HERE/../../../hsm-host-role/files/commission-card.sh"

@@ -18,6 +18,7 @@
 # derived from the imported share file, and a wrapped blob carries the domain it was made under
 # so a foreign-DKEK unwrap fails exactly as the real card fails. No SoftHSM2 / OpenSC needed.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 
 # THE CLONE PATH IS NOW OPT-IN (PLAN.md 3.2 / decision D1). It rebuilds the SAME DKEK domain on

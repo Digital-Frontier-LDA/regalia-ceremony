@@ -5,6 +5,7 @@
 # step. It refuses to overwrite a secret already in the workdir and refuses to fall back to a
 # classical key when age cannot make a post-quantum one.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

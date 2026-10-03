@@ -4,6 +4,7 @@
 # step must refuse without either. Runs natively: hsm-random.py is a stub, the dice come from a
 # file (dice-entropy.py --from-stdin), hsm-random.py is a stub, everything else is the real code.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

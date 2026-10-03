@@ -4,6 +4,7 @@
 # replayed here from what DENK0400664 did: a serial that flips to 01A001000000000 on re-enumeration,
 # a 3-byte ATR, and APDUs that die after 242 exchanges.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TOOL="$HERE/../../scripts/nitrokey-acceptance.sh"

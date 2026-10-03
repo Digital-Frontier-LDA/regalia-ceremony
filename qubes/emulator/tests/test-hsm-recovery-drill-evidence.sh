@@ -8,6 +8,7 @@
 # or the card accepted a share. The drill's transcript is pasted into doc/drills, so the evidence
 # must go through elide_hex first.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRILL="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/hsm-recovery-drill.sh"

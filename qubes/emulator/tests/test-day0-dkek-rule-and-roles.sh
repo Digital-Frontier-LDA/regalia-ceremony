@@ -14,6 +14,7 @@
 #       gnupg-pkcs11-scd and ssh-keygen -D enumerate a token BY CERTIFICATE. A key imported without
 #       one is invisible to the tools that need it, while still appearing in --list-objects.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ASSERT="$HERE/../../../hsm-host-role/files/assert-no-dkek.sh"
