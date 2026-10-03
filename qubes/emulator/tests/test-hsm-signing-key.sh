@@ -69,14 +69,14 @@ LIB
 cat > "$FAKE/pkcs11-tool" <<'STUB'
 #!/usr/bin/env bash
 ARGS="$*"; . "$(dirname "$0")/card-lib.sh"
-list=0 login=0 objects=0 keygen=0 read=0 sign=0 delete=0 slot="" id="" label="" type="" out="" in="" mech="" keytype="" pin=""
+list=0 login=0 objects=0 keygen=0 read=0 sign=0 delete=0 slot="" id="" label="" type="" out="" in="" mech="" keytype="" pin="" sigfmt=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --module) shift 2;; --list-token-slots) list=1; shift;; --login) login=1; shift;; --list-objects) objects=1; shift;;
     --keypairgen) keygen=1; shift;; --read-object) read=1; shift;; --sign) sign=1; shift;; --delete-object) delete=1; shift;;
     --slot) slot="$2"; shift 2;; --id) id="$2"; shift 2;; --label) label="$2"; shift 2;; --type) type="$2"; shift 2;;
     --output-file) out="$2"; shift 2;; --input-file) in="$2"; shift 2;; --mechanism) mech="$2"; shift 2;;
-    --key-type) keytype="$2"; shift 2;; --pin) pin="$2"; shift 2;;
+    --key-type) keytype="$2"; shift 2;; --pin) pin="$2"; shift 2;; --signature-format) sigfmt="$2"; shift 2;;
     *) echo "pkcs11-tool [STUB]: unsupported $1" >&2; exit 2;;
   esac
 done
@@ -102,9 +102,13 @@ if [ "$objects" = 1 ]; then
   done; exit 0
 fi
 if [ "$keygen" = 1 ]; then
-  [ "$login" = 1 ] && [ "$keytype" = rsa:2048 ] || { echo "error: keypairgen [STUB]" >&2; exit 1; }
+  [ "$login" = 1 ] && case "$keytype" in rsa:2048|EC:prime256v1) true;; *) false;; esac || { echo "error: keypairgen [STUB]" >&2; exit 1; }
   [ ! -d "$C/keys/$id" ] || { echo "error: id in use [STUB]" >&2; exit 1; }
-  mkdir -p "$C/keys/$id"; openssl genrsa -out "$C/keys/$id/key.pem" 2048 2>/dev/null; printf '%s' "$label" > "$C/keys/$id/label"
+  [ -n "${STUB_KEYGEN_TYPE:-}" ] && keytype="$STUB_KEYGEN_TYPE"     # a card that makes another type than asked
+  mkdir -p "$C/keys/$id"
+  if [ "$keytype" = rsa:2048 ]; then openssl genrsa -out "$C/keys/$id/key.pem" 2048 2>/dev/null
+  else openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$C/keys/$id/key.pem" 2>/dev/null; fi
+  printf '%s' "$label" > "$C/keys/$id/label"
   openssl pkey -in "$C/keys/$id/key.pem" -pubout -outform DER -out "$C/keys/$id/pub.der" 2>/dev/null
   # the card assigns the next free key reference itself, whatever the id
   r=1; while grep -q "^$r " "$C/refs" 2>/dev/null; do r=$((r+1)); done; echo "$r $id" >> "$C/refs"
@@ -122,7 +126,13 @@ if [ "$delete" = 1 ]; then
 fi
 if [ "$read" = 1 ]; then [ -f "$C/keys/$id/pub.der" ] || { echo "error: object $id not found [STUB]" >&2; exit 1; }; cp "$C/keys/$id/pub.der" "$out"; exit; fi
 if [ "$sign" = 1 ]; then
-  [ "$login" = 1 ] && [ "$mech" = SHA256-RSA-PKCS ] && [ -f "$C/keys/$id/key.pem" ] || { echo "error: sign [STUB]" >&2; exit 1; }
+  [ "$login" = 1 ] && [ -f "$C/keys/$id/key.pem" ] || { echo "error: sign [STUB]" >&2; exit 1; }
+  # the mechanism must be the key's: SHA256-RSA-PKCS for RSA, ECDSA-SHA256 with the DER format for EC
+  if grep -q "BEGIN PRIVATE KEY" "$C/keys/$id/key.pem" && openssl pkey -in "$C/keys/$id/key.pem" -noout -text 2>/dev/null | grep -q "ASN1 OID: prime256v1"; then
+    [ "$mech" = ECDSA-SHA256 ] && [ "$sigfmt" = openssl ] || { echo "error: ECDSA key, mechanism $mech format $sigfmt [STUB]" >&2; exit 1; }
+  else
+    [ "$mech" = SHA256-RSA-PKCS ] || { echo "error: RSA key, mechanism $mech [STUB]" >&2; exit 1; }
+  fi
   sha256sum "$in" | cut -d' ' -f1 >> "$ARGV_LOG.signed"
   data="$in"; [ "${STUB_SIGN_OTHER:-0}" = 1 ] && { data="$out.other"; { cat "$in"; printf 'x'; } > "$data"; }   # signs other data than asked
   openssl dgst -sha256 -sign "$C/keys/$id/key.pem" -out "$out" "$data"; rc=$?; rm -f "$out.other"; exit "$rc"
@@ -175,7 +185,53 @@ exec %s "$@"
 chmod +x "$FAKE/openssl"
 # Tripwires: the script calls no other card tool. If it ever does, the test fails here instead of
 # reaching whatever is attached to the machine running it.
-for t in opensc-tool opensc-explorer pkcs15-tool pkcs15-init scsh3 ykman; do
+cat > "$FAKE/opensc-tool" <<'STUB'
+#!/usr/bin/env bash
+# only `--list-readers`: an empty laptop reader first (number 0), then one reader per attached card
+[ "$*" = "--list-readers" ] || { echo "TRIPWIRE: opensc-tool $*" >&2; echo "opensc-tool $*" >> "$TRIPWIRE"; exit 99; }
+echo "# Detected readers (pcsc)"; echo "Nr.  Card  Features  Name"; echo "0    No              Lenovo Integrated Smart Card Reader"
+i=1; for c in "$ATTACHED"/*; do [ -e "$c" ] && { echo "$i    Yes             Nitrokey HSM ($(basename "$c")) 00 00"; i=$((i+1)); }; done
+STUB
+chmod +x "$FAKE/opensc-tool"; export TRIPWIRE="$ROOT/tripwire"
+# The card's own evidence, modelled: C.DevAut names the card; the attestation of key reference R names the card
+# and the SHA-256 of the key at R; the verifier accepts it when both match what it is given.
+cat > "$FAKE/devaut-read.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'devaut-read %s\n' "$*" >> "$ARGV_LOG"
+r="" s=""; while [ $# -gt 0 ]; do case "$1" in --reader) r="$2"; shift 2;; --expect-serial) s="$2"; shift 2;; *) shift;; esac; done
+i=1; for c in "$ATTACHED"/*; do [ -e "$c" ] || continue; if [ "$i" = "$r" ]; then
+  [ "$(basename "$c")" = "$s" ] || { echo "not the expected card" >&2; exit 2; }
+  printf 'DEVAUT_HEX=%s
+' "$(printf 'DEVAUT:%s' "$s" | od -An -tx1 | tr -d ' \n')"; exit 0; fi; i=$((i+1)); done
+echo "no card in reader $r" >&2; exit 2
+STUB
+cat > "$FAKE/attest-read.sh" <<'STUB'
+#!/usr/bin/env bash
+printf 'attest-read %s\n' "$*" >> "$ARGV_LOG"
+r="" s="" k=""; while [ $# -gt 0 ]; do case "$1" in --reader) r="$2"; shift 2;; --expect-serial) s="$2"; shift 2;; --key-ref) k="$2"; shift 2;; *) shift;; esac; done
+[ "${STUB_ATTEST_MISSING:-0}" = 1 ] && { echo "hsm-key-attestation-read: SW 6A82: no attestation (an imported key)" >&2; exit 2; }
+C="$CARDS/$s"; id="$(sed -n "s/^$k //p" "$C/refs")"; [ -n "$id" ] || { echo "no key at reference $k" >&2; exit 2; }
+key="$C/keys/$id/pub.der"; [ "${STUB_ATTEST_OTHER_KEY:-0}" = 1 ] && key="$0"
+printf 'ATTEST_HEX=%s
+' "$(printf 'ATTEST:%s:%s' "$s" "$(sha256sum < "$key" | cut -c1-64)" | od -An -tx1 | tr -d ' \n')"
+STUB
+cat > "$FAKE/attest-verify.py" <<'STUB'
+import hashlib, sys
+a = dict(zip(sys.argv[1::2], sys.argv[2::2]))
+devaut, att = open(a["--devaut"], "rb").read().decode(), open(a["--attestation"], "rb").read().decode()
+spki = open(a["--expect-spki"], "rb").read()
+_, serial, digest = att.split(":")
+print("DEVAUT_CHAIN=verified" if devaut == "DEVAUT:" + serial else "DEVAUT_CHAIN=failed")
+print("ATTEST_SIGNATURE=verified")
+match = digest == hashlib.sha256(spki).hexdigest()
+print("ATTESTED_KEY_MATCHES=" + ("yes" if match else "no"))
+sys.exit(0 if match and devaut == "DEVAUT:" + serial else 1)
+STUB
+printf 'ceremony_python_find(){ dirname "$(command -v python3)"; }\n' > "$FAKE/ceremony-python.sh"
+chmod +x "$FAKE/devaut-read.sh" "$FAKE/attest-read.sh"
+export HSM_DEVAUT_READ_SH="$FAKE/devaut-read.sh" HSM_KEY_ATTEST_READ_SH="$FAKE/attest-read.sh" HSM_KEY_ATTEST_VERIFY_PY="$FAKE/attest-verify.py"
+export HSM_TRUST_DIR="$ROOT" HSM_CEREMONY_PYTHON_SH="$FAKE/ceremony-python.sh"
+for t in opensc-explorer pkcs15-tool pkcs15-init scsh3 ykman; do
   printf '#!/bin/sh\necho "TRIPWIRE: %s was called" >&2; echo "%s $*" >> "%s"; exit 99\n' "$t" "$t" "$ROOT/tripwire" > "$FAKE/$t"; chmod +x "$FAKE/$t"
 done
 
@@ -216,7 +272,8 @@ for spec in pcr-initrd:11:1 pcr-system:12:2 secure-boot:13:3; do
   openssl verify -check_ss_sig -partial_chain -CAfile "$OUT/$label.crt.pem" "$OUT/$label.crt.pem" >/dev/null 2>&1 \
     && openssl x509 -in "$OUT/$label.crt.pem" -noout -pubkey | openssl pkey -pubin -outform DER | cmp -s - "$OUT/$label.pub.der" \
     && P "$label: the certificate verifies under the card's own key (openssl)" || F "$label: certificate"
-  [ "$(field "$E" evidence)" = regalia.hsm-signing-key/v1 ] && [ "$(field "$E" device_serial)" = DENK0500001 ] \
+  [ "$(field "$E" evidence)" = regalia.hsm-signing-key/v2 ] && [ "$(field "$E" device_serial)" = DENK0500001 ] \
+    && [ "$(field "$E" key_type)" = rsa:2048 ] && [ -n "$(field "$E" attestation_sha256)" ] && [ -n "$(field "$E" devaut_sha256)" ] \
     && [ "$(field "$E" object_id)" = "$id" ] && [ "$(field "$E" key_reference)" = "$ref" ] && [ "$(field "$E" label)" = "$label" ] \
     && [ "$(field "$E" wrapped_blob_sha256)" = "$(sha256sum "$OUT/$label.wrapped.bin" | cut -d' ' -f1)" ] \
     && [ "$(field "$E" public_key_sha256)" = "$(sha256sum "$OUT/$label.pub.der" | cut -d' ' -f1)" ] \
@@ -422,8 +479,10 @@ out="$(cd "$ROOT/planted" && PYTHONPATH="$ROOT/planted" bash "$KEYTOOL" generate
   --out "$ROOT/out-planted" --pin-fd 3 3<<< "$PIN_SIGNING" 2>&1)"; rc=$?
 [ "$rc" = 0 ] && ! grep -q PLANTED <<< "$out" && openssl verify -check_ss_sig -partial_chain -CAfile "$ROOT/out-planted/planted.crt.pem" "$ROOT/out-planted/planted.crt.pem" >/dev/null 2>&1 \
   && P "a hashlib.py and a base64.py in the working directory and on PYTHONPATH are not imported" || F "planted modules (rc=$rc): $out"
-grep -q 'python3 -I "$CERT_TOOL"' "$KEYTOOL" && [ "$(grep -c 'python3' "$KEYTOOL")" = "$(grep -c 'python3 -I "$CERT_TOOL"\|for t in pkcs11-tool' "$KEYTOOL")" ] \
-  && P "every Python the script runs is python3 -I on its own tool" || F "a Python call that is not isolated"
+# every Python the script runs: its own tool under -I, and the attestation verifier under -Es with the
+# interpreter that has pycvc (the one line that names "$py_bin/python3")
+grep -q 'python3 -I "$CERT_TOOL"' "$KEYTOOL" && [ "$(grep -c 'python3' "$KEYTOOL")" = "$(grep -c 'python3 -I "$CERT_TOOL"\|for t in pkcs11-tool\|"$py_bin/python3" -Es "$ATTEST_PY"\|\[ -x "$py_bin/python3" \]' "$KEYTOOL")" ] \
+  && P "every Python the script runs is python3 -I on its own tool, or -Es on the attestation verifier" || F "a Python call that is not isolated"
 CT=(python3 -I "$SCRIPTS/hsm-signing-cert.py")
 "${CT[@]}" check --certificate "$OUT/secure-boot.crt.pem" --public-key "$OUT/pcr-initrd.pub.der" >/dev/null 2>&1 \
   && F "check accepted a certificate for another key" || P "check refuses a certificate for another key"
@@ -468,6 +527,65 @@ EOF
 imports="$(grep -oE '^[[:space:]]*(import|from)[[:space:]]+[A-Za-z0-9_.]+' "$SCRIPTS/hsm-signing-cert.py" | awk '{print $2}' | sort -u | tr '\n' ' ')"
 [ "$imports" = "argparse base64 datetime hashlib json os re subprocess sys tempfile " ] && ! grep -qE '__import__|importlib|-engine|-provider|python3 -I -c|python3 -c' "$KEYTOOL" "$SCRIPTS/hsm-signing-cert.py" \
   && P "the Python imports exactly ten standard modules and nothing is loaded by name; no openssl engine or provider" || F "imports: $imports"
+hdr "6  the membership root: ECDSA P-256, the card's own attestation, and the separate DKEK domain (regalia-kms#156)"
+card DENK0600001 "$PIN_SIGNING" root-domain
+card DENK0600002 "$PIN_SPARE" root-domain
+attach DENK0600001
+groot(){ # groot LABEL ID [extra]: generate on the root HSM
+  local label="$1" id="$2"; shift 2
+  bash "$KEYTOOL" generate --serial DENK0600001 --id "$id" --label "$label" --subject "TEST $label, not for production" --out "$OUT" \
+    --key-type ec:prime256v1 --pin-fd 3 "$@" 3<<< "$PIN_SIGNING" 2>&1 | tee -a "$ALL"
+  return "${PIPESTATUS[0]}"
+}
+out="$(groot root 20)"; rc=$?
+E="$OUT/root.evidence.json"
+if [ "$rc" = 0 ] && [ -s "$E" ]; then
+  openssl x509 -in "$OUT/root.crt.pem" -noout -text 2>/dev/null | grep -q "Signature Algorithm: ecdsa-with-SHA256" \
+    && openssl x509 -in "$OUT/root.crt.pem" -noout -text | grep -q "ASN1 OID: prime256v1" \
+    && openssl verify -check_ss_sig -partial_chain -CAfile "$OUT/root.crt.pem" "$OUT/root.crt.pem" >/dev/null 2>&1 \
+    && P "a P-256 key generated on the card; its certificate is ecdsa-with-SHA256 and verifies under the card's key" || F "P-256 certificate: $out"
+  [ "$(field "$E" key_type)" = ec:prime256v1 ] && grep -q "the card attests it generated THIS key" <<< "$out" \
+    && [ "$(field "$E" attestation_sha256)" = "$(python3 -c 'import base64,hashlib,json,sys; print(hashlib.sha256(base64.b64decode(json.load(open(sys.argv[1]))["attestation_b64"])).hexdigest())' "$E")" ] \
+    && P "the record carries the key type, C.DevAut and the attestation that this key was generated on the card" || F "root record: $(cat "$E")"
+  grep -q "ECDSA-SHA256" "$ARGV_LOG" && grep -q -- "--signature-format openssl" "$ARGV_LOG" \
+    && P "the card signed with ECDSA-SHA256, in DER (--signature-format openssl)" || F "the EC mechanism was not used"
+else F "generating the P-256 root failed (rc=$rc): $out"; fi
+# the reader: the laptop's own empty reader is number 0, the card's is found by its serial
+grep -q "^attest-read --reader 1 --expect-serial DENK0600001 --key-ref " "$ARGV_LOG" && ! grep -q "^attest-read --reader 0 " "$ARGV_LOG" \
+  && P "the attestation is read from the reader that holds the card, found by serial (not the laptop's reader 0)" || F "attestation reader: $(grep -E '^(attest|devaut)-read' "$ARGV_LOG" | tail -3)"
+# restore on the spare: the EC challenge, with its wrong-data control
+attach DENK0600002
+out="$(bash "$KEYTOOL" restore --serial DENK0600002 --blob "$OUT/root.wrapped.bin" --certificate "$OUT/root.crt.pem" --pin-fd 3 3<<< "$PIN_SPARE" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q "^RESTORED .* it signs for the certificate key" <<< "$out" && P "the root's blob restores on its spare and signs (ECDSA) for the certificate's key" || F "root restore (rc=$rc): $out"
+# refuse: a card of ANOTHER domain (the image-signing pair's, the KMS hosts') must not unwrap it
+for other in DENK0500002:"$PIN_SPARE" DENK0400101:"$PIN_KMS"; do
+  s="${other%%:*}" pin="${other#*:}"; attach "$s"; before="$(keys_on "$s")"
+  out="$(bash "$KEYTOOL" refuse --serial "$s" --blob "$OUT/root.wrapped.bin" --certificate "$OUT/root.crt.pem" --pin-fd 3 3<<< "$pin" 2>&1)"; rc=$?
+  [ "$rc" = 0 ] && grep -q "^REFUSED-AS-REQUIRED card $s" <<< "$out" && [ "$(keys_on "$s")" = "$before" ] \
+    && P "card $s, of another DKEK domain, refuses the root's blob, and nothing was added to it" || F "refuse on $s (rc=$rc): $out"
+done
+# ... and on a card of the SAME domain the "refusal" fails loudly, and the key it took is deleted again
+card DENK0600003 "$PIN_SPARE" root-domain; attach DENK0600003
+out="$(bash "$KEYTOOL" refuse --serial DENK0600003 --blob "$OUT/root.wrapped.bin" --certificate "$OUT/root.crt.pem" --pin-fd 3 3<<< "$PIN_SPARE" 2>&1)"; rc=$?
+[ "$rc" = 1 ] && grep -q "UNWRAPPED THE BLOB" <<< "$out" && [ -z "$(ls "$CARDS/DENK0600003/keys")" ] \
+  && P "a card that DOES unwrap it is a failure, and the key it took is deleted" || F "same-domain refuse (rc=$rc): $(ls "$CARDS/DENK0600003/keys"): $out"
+# the attestation is required: an imported-looking key (no EF CExx), or one for ANOTHER key, is refused, and the key deleted
+attach DENK0600001
+for fault in STUB_ATTEST_MISSING STUB_ATTEST_OTHER_KEY; do
+  rm -f "$OUT"/root2.*
+  out="$(env "$fault=1" bash "$KEYTOOL" generate --serial DENK0600001 --id 21 --label root2 --subject "TEST root2" --out "$OUT" \
+          --key-type ec:prime256v1 --pin-fd 3 3<<< "$PIN_SIGNING" 2>&1)"; rc=$?
+  [ "$rc" = 1 ] && grep -q "REFUSED" <<< "$out" && [ ! -e "$CARDS/DENK0600001/keys/21" ] && ! ls "$OUT"/root2.* >/dev/null 2>&1 \
+    && P "$fault: refused, no record written, and the key generated for it was deleted" || F "$fault (rc=$rc): $out"
+done
+# a card that generates another type than asked
+out="$(env STUB_KEYGEN_TYPE=rsa:2048 bash "$KEYTOOL" generate --serial DENK0600001 --id 22 --label root3 --subject "TEST root3" --out "$OUT" \
+        --key-type ec:prime256v1 --pin-fd 3 3<<< "$PIN_SIGNING" 2>&1)"; rc=$?
+[ "$rc" = 1 ] && grep -q "generated a rsa:2048 key at id 22, not the ec:prime256v1 asked for" <<< "$out" && [ ! -e "$CARDS/DENK0600001/keys/22" ] \
+  && P "a key of another type than asked for is refused and deleted" || F "type mismatch (rc=$rc): $out"
+out="$(bash "$KEYTOOL" generate --serial DENK0600001 --id 23 --label x --subject x --out "$OUT" --key-type ec:secp384r1 --pin-fd 3 3<<< "$PIN_SIGNING" 2>&1)"
+grep -q -- "--key-type is rsa:2048 or ec:prime256v1" <<< "$out" && P "an unknown key type is refused before the card is touched" || F "unknown key type: $out"
+
 [ ! -e "$ROOT/tripwire" ] && P "no other card tool was called by any run above" || F "another card tool was called: $(cat "$ROOT/tripwire")"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"; [ "$fail" -eq 0 ]

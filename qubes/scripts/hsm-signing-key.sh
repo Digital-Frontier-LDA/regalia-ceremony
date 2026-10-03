@@ -4,9 +4,29 @@
 # regalia#554 (regalia-kms#57: the two PCR keys and the Secure Boot key of the KMS hosts' boot image).
 #
 #   hsm-signing-key.sh generate --serial SERIAL --id HEX --label LABEL --subject "COMMON NAME" --out DIR
-#                               [--days N] [--pin-fd N]
+#                               [--key-type rsa:2048|ec:prime256v1] [--days N] [--pin-fd N]
 #   hsm-signing-key.sh restore  --serial SPARE_SERIAL --blob LABEL.wrapped.bin --certificate LABEL.crt.pem
 #                               [--pin-fd N]
+#   hsm-signing-key.sh refuse   --serial OTHER_SERIAL --blob LABEL.wrapped.bin --certificate LABEL.crt.pem
+#                               [--pin-fd N]
+#
+# KEY TYPES. rsa:2048 (the default) for the boot image's keys (regalia#554); ec:prime256v1 for the membership
+# root (regalia-kms#156, option C), which lives on its OWN HSM and spare under a DKEK used by nothing else.
+# The card signs with SHA256-RSA-PKCS or ECDSA-SHA256 accordingly; restore and refuse read the type from the
+# certificate's key.
+#
+# THE CARD'S OWN EVIDENCE (both types). After generating, the device certificate C.DevAut (EF 2F02) and the
+# authenticated request the generation left in EF CE<key reference> are read with opensc-tool alone
+# (hsm-devaut-read.sh, hsm-key-attestation-read.sh: no PIN), and hsm-key-attestation-verify.py checks that
+# C.DevAut chains to CardContact's root in qubes/trust-anchors/smartcard-hsm, that the device signed the
+# request, and that the attested key IS the public key the card exposes. Refused otherwise: a key that was
+# imported, not generated, has no attestation, and that is the difference this step is for. Both files go
+# into the evidence; the verifier needs pycvc and runs under the interpreter tools/ceremony-python.sh finds.
+#
+# refuse, on a card of ANOTHER DKEK domain (the KMS hosts', the image-signing pair's), with ONLY that card
+# attached: the blob must NOT unwrap there. It passes only when the card says no and no new key reference
+# appeared; an unwrap that succeeded is the failure this proves cannot happen, and the key it put there is
+# deleted before the script stops.
 #
 # CUSTODY, ADR-0002 D19: "a new HSM key: generated on the token; its DKEK-wrapped blob is its backup."
 # The key is never outside a card. The signing HSM and its spare share a DKEK of their own, used by
@@ -89,7 +109,7 @@ need(){ [ -n "${2-}" ] || die "$1 needs a value"; }
 ok(){ printf '  ok  %s\n' "$*"; }
 
 COMMAND="${1-}"; [ $# -gt 0 ] && shift
-SERIAL="" ID="" LABEL="" SUBJECT="" OUT="" DAYS=3650 PIN_FD="" BLOB="" CERT=""
+SERIAL="" ID="" LABEL="" SUBJECT="" OUT="" DAYS=3650 PIN_FD="" BLOB="" CERT="" KEY_TYPE="rsa:2048"
 while [ $# -gt 0 ]; do
   case "$1" in
     --serial)      need "$1" "${2-}"; SERIAL="$2"; shift 2;;
@@ -101,13 +121,15 @@ while [ $# -gt 0 ]; do
     --pin-fd)      need "$1" "${2-}"; PIN_FD="$2"; shift 2;;
     --blob)        need "$1" "${2-}"; BLOB="$2"; shift 2;;
     --certificate) need "$1" "${2-}"; CERT="$2"; shift 2;;
+    --key-type)    need "$1" "${2-}"; KEY_TYPE="$2"; shift 2;;
     --pin|-p|--pin=*|--so-pin|--so-pin=*)
       die "a PIN is never taken on the command line — it is asked for with echo off, or read from --pin-fd";;
     -h|--help) sed -n '2,8p' "$0"; exit 0;;
     *) die "unknown argument: $1";;
   esac
 done
-case "$COMMAND" in generate|restore) ;; *) die "the first argument is generate or restore";; esac
+case "$COMMAND" in generate|restore|refuse) ;; *) die "the first argument is generate, restore or refuse";; esac
+case "$KEY_TYPE" in rsa:2048|ec:prime256v1) ;; *) die "--key-type is rsa:2048 or ec:prime256v1";; esac
 [ -n "$SERIAL" ] || die "--serial is required"
 case "$SERIAL" in *[!A-Za-z0-9]*) die "--serial '$SERIAL' is not a serial";; esac
 case "$PIN_FD" in ''|[0-9]|[1-9][0-9]) ;; *) die "--pin-fd takes a file-descriptor number";; esac
@@ -123,7 +145,7 @@ if [ "$COMMAND" = generate ]; then
     { [ ! -e "$OUT/$LABEL.$f" ] && [ ! -L "$OUT/$LABEL.$f" ]; } || die "$OUT/$LABEL.$f already exists: nothing is overwritten"
   done
 else
-  [ -s "$BLOB" ] && [ -s "$CERT" ] || die "restore needs --blob and --certificate, both non-empty files"
+  [ -s "$BLOB" ] && [ -s "$CERT" ] || die "$COMMAND needs --blob and --certificate, both non-empty files"
 fi
 
 first_file(){ local c; for c in "$@"; do [ -f "$c" ] && { printf '%s' "$c"; return 0; }; done; return 1; }
@@ -131,7 +153,7 @@ MODULE="${CEREMONY_PKCS11_MODULE:-${HSM_PKCS11_MODULE:-}}"
 [ -n "$MODULE" ] || MODULE="$(first_file /usr/lib/*/opensc-pkcs11.so /usr/lib/opensc-pkcs11.so /usr/local/lib/opensc-pkcs11.so)" \
   || die "no opensc-pkcs11 module found (set CEREMONY_PKCS11_MODULE)"
 [ -f "$MODULE" ] || die "PKCS#11 module $MODULE does not exist"
-for t in pkcs11-tool sc-hsm-tool openssl python3 timeout; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
+for t in pkcs11-tool sc-hsm-tool opensc-tool openssl python3 timeout; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
 
 W="$(mktemp -d "${CEREMONY_SIGNING_TMP:-${TMPDIR:-/dev/shm}}/signing-key.XXXXXX" 2>/dev/null || mktemp -d)" || die "cannot create a work directory"
 
@@ -141,6 +163,17 @@ p11(){ timeout 60 pkcs11-tool --module "$MODULE" "$@"; }
 p11_pin(){ REGALIA_PIN="$PIN" timeout 60 pkcs11-tool --module "$MODULE" --slot "$SLOT_ID" --login --pin env:REGALIA_PIN "$@"; }
 schsm_pin(){ REGALIA_PIN="$PIN" timeout 60 sc-hsm-tool "$@" --pin env:REGALIA_PIN; }
 cert_tool(){ python3 -I "$CERT_TOOL" "$@"; }
+
+# The card's own evidence: readers (opensc-tool only, no PIN) and the verifier (pycvc).
+DEVAUT_SH="${HSM_DEVAUT_READ_SH:-$HERE/hsm-devaut-read.sh}"
+ATTEST_SH="${HSM_KEY_ATTEST_READ_SH:-$HERE/hsm-key-attestation-read.sh}"
+ATTEST_PY="${HSM_KEY_ATTEST_VERIFY_PY:-$HERE/hsm-key-attestation-verify.py}"
+TRUST_DIR="${HSM_TRUST_DIR:-$HERE/../trust-anchors/smartcard-hsm}"
+CEREMONY_PY_SH="${HSM_CEREMONY_PYTHON_SH:-$HERE/../../tools/ceremony-python.sh}"
+# The mechanism and the signature format follow from the key type: the card signs, openssl verifies DER.
+mechanism_for(){ # $1 = key type
+  case "$1" in rsa:2048) printf '%s' "--mechanism SHA256-RSA-PKCS";; ec:prime256v1) printf '%s' "--mechanism ECDSA-SHA256 --signature-format openssl";; esac
+}
 
 # The ids of the public-key objects on the card, one per line. FAILS when the card does not answer: a
 # listing that failed is not an empty card, and every check built on it would pass for the wrong reason.
@@ -271,7 +304,9 @@ sign_check(){ # $1 = id, $2 = public key DER: a fresh challenge signed on the ca
   head -c 32 /dev/urandom > "$W/challenge"; head -c 32 /dev/urandom > "$W/other"
   cmp -s "$W/challenge" "$W/other" && return 1
   openssl pkey -pubin -inform DER -in "$2" -out "$W/check.pem" 2>/dev/null || return 1
-  p11_pin --id "$1" --sign --mechanism SHA256-RSA-PKCS --input-file "$W/challenge" --output-file "$W/challenge.sig" >/dev/null 2>&1 || return 1
+  local kt mech; kt="$(cert_tool key-type --public-key "$2")" || return 1
+  read -ra mech <<< "$(mechanism_for "$kt")"
+  p11_pin --id "$1" --sign "${mech[@]}" --input-file "$W/challenge" --output-file "$W/challenge.sig" >/dev/null 2>&1 || return 1
   openssl dgst -sha256 -verify "$W/check.pem" -signature "$W/challenge.sig" "$W/challenge" >/dev/null 2>&1 || return 1
   if openssl dgst -sha256 -verify "$W/check.pem" -signature "$W/challenge.sig" "$W/other" >/dev/null 2>&1; then return 2; fi
   return 0
@@ -291,9 +326,10 @@ if [ "$COMMAND" = generate ]; then
   # From here the card may hold a key at $ID whatever this script learns of it (a lost answer, a signal):
   # the exit trap looks.
   KEY_ASKED=1
-  gen="$(p11_pin --keypairgen --key-type rsa:2048 --id "$ID" --label "$LABEL" 2>&1)" \
+  case "$KEY_TYPE" in rsa:2048) p11_type=rsa:2048;; ec:prime256v1) p11_type=EC:prime256v1;; esac
+  gen="$(p11_pin --keypairgen --key-type "$p11_type" --id "$ID" --label "$LABEL" 2>&1)" \
     || die "the card did not report a generated key ($(grep -aoE 'CKR_[A-Z_]+' <<< "$gen" | head -1 | sed 's/$/, /')pkcs11-tool failed)"
-  ok "RSA-2048 key $LABEL generated on card $SERIAL at id $ID"
+  ok "$KEY_TYPE key $LABEL generated on card $SERIAL at id $ID"
   # ---- 5. its key reference -------------------------------------------------------------------------
   after="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after generating"
   REF=""; count=0
@@ -306,20 +342,53 @@ if [ "$COMMAND" = generate ]; then
   ok "its key reference is $REF"
   # ---- 6. the certificate, signed by the card ---------------------------------------------------------
   read_pubkey "$ID" "$W/pub.der" || die "cannot read the public key of id $ID"
+  got="$(cert_tool key-type --public-key "$W/pub.der")" || die "the public key at id $ID is of no type this tool certifies"
+  [ "$got" = "$KEY_TYPE" ] || die "the card generated a $got key at id $ID, not the $KEY_TYPE asked for"
   serial_hex="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"; serial_hex="1${serial_hex:1}"   # 128 bits, positive
   cert_tool tbs --public-key "$W/pub.der" --subject "$SUBJECT" --days "$DAYS" --serial-hex "$serial_hex" --out "$W/tbs.der" || exit 1
-  p11_pin --id "$ID" --sign --mechanism SHA256-RSA-PKCS --input-file "$W/tbs.der" --output-file "$W/tbs.sig" >/dev/null 2>&1 \
+  read -ra mech <<< "$(mechanism_for "$KEY_TYPE")"
+  p11_pin --id "$ID" --sign "${mech[@]}" --input-file "$W/tbs.der" --output-file "$W/tbs.sig" >/dev/null 2>&1 \
     || die "the card did not sign the certificate"
   cert_tool assemble --tbs "$W/tbs.der" --signature "$W/tbs.sig" --out "$W/crt.pem" || exit 1
   cert_tool check --certificate "$W/crt.pem" --public-key "$W/pub.der" >/dev/null || die "the certificate the card signed does not verify"
   ok "certificate signed by the card, and it verifies under the card's key"
+  sign_check "$ID" "$W/pub.der"; rc=$?
+  case "$rc" in 0) ;; 2) die "the signature check accepted other data: the check proves nothing";;
+    *) die "the key at id $ID did not sign a fresh challenge that verifies under its public key";; esac
+  ok "it signs a fresh challenge, and the signature does not verify for other data"
+  # ---- 6b. the card's own evidence: C.DevAut, and the attestation of THIS key ------------------------------
+  [ -r "$DEVAUT_SH" ] && [ -r "$ATTEST_SH" ] && [ -r "$ATTEST_PY" ] && [ -d "$TRUST_DIR" ] \
+    || die "the device-attestation tools or the CardContact trust anchors are missing (hsm-devaut-read.sh, hsm-key-attestation-read.sh, hsm-key-attestation-verify.py, qubes/trust-anchors/smartcard-hsm)"
+  # The reader that holds THIS card: the readers in order, the first whose card reports serial $SERIAL
+  # (opensc-tool numbers readers, and a laptop's own empty reader may be number 0).
+  READER="" devout=""
+  for r in $(timeout 30 opensc-tool --list-readers 2>/dev/null | sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p'); do
+    if out="$(timeout 60 bash "$DEVAUT_SH" --reader "$r" --expect-serial "$SERIAL" 2>/dev/null)" && grep -q '^DEVAUT_HEX=' <<< "$out"; then
+      READER="$r"; devout="$out"; break
+    fi
+  done
+  [ -n "$READER" ] || die "no reader holds card $SERIAL with a readable device certificate (EF 2F02)"
+  attout="$(timeout 60 bash "$ATTEST_SH" --reader "$READER" --expect-serial "$SERIAL" --key-ref "$REF" 2>&1)" \
+    || die "the card has no attestation for key reference $REF (EF CE$(printf '%02X' "$REF")): a generated key always has one. $(tail -1 <<< "$attout")"
+  hex_to(){ cert_tool unhex --out "$1"; }
+  grep -oE '^DEVAUT_HEX=[0-9A-Fa-f]+' <<< "$devout" | cut -d= -f2 | hex_to "$W/devaut.bin" && [ -s "$W/devaut.bin" ] || die "the device certificate could not be read whole"
+  grep -oE '^ATTEST_HEX=[0-9A-Fa-f]+' <<< "$attout" | cut -d= -f2 | hex_to "$W/attest.bin" && [ -s "$W/attest.bin" ] || die "the attestation could not be read whole"
+  # shellcheck source=/dev/null
+  py_bin="$(. "$CEREMONY_PY_SH" && ceremony_python_find cryptography cvc)" && [ -x "$py_bin/python3" ] \
+    || die "no Python interpreter here can import pycvc and cryptography: the card's attestation CANNOT BE EVALUATED"
+  ver="$(timeout 60 "$py_bin/python3" -Es "$ATTEST_PY" --devaut "$W/devaut.bin" --attestation "$W/attest.bin" \
+           --trust-dir "$TRUST_DIR" --expect-spki "$W/pub.der" 2>&1)"; vrc=$?
+  { [ "$vrc" -eq 0 ] && grep -qx 'DEVAUT_CHAIN=verified' <<< "$ver" && grep -qx 'ATTEST_SIGNATURE=verified' <<< "$ver" \
+      && grep -qx 'ATTESTED_KEY_MATCHES=yes' <<< "$ver"; } \
+    || die "the card's attestation does not prove this key was generated on this genuine card (exit $vrc): $(grep -E '^(DEVAUT_CHAIN|ATTEST_SIGNATURE|ATTESTED_KEY_MATCHES)=' <<< "$ver" | tr '\n' ' ')"
+  ok "C.DevAut chains to CardContact's root, and the card attests it generated THIS key (EF CE$(printf '%02X' "$REF"))"
   # ---- 7. the backup ----------------------------------------------------------------------------------
   schsm_pin --wrap-key "$W/wrapped.bin" --key-reference "$REF" >/dev/null 2>&1 && [ -s "$W/wrapped.bin" ] \
     || die "sc-hsm-tool --wrap-key failed for key reference $REF (does the card hold its DKEK?)"
   ok "DKEK-wrapped blob written"
   # ---- 8. the record, last; then all four files, or none ----------------------------------------------
   cert_tool evidence --device-serial "$SERIAL" --object-id "$ID" --key-reference "$REF" --label "$LABEL" --public-key "$W/pub.der" \
-    --certificate "$W/crt.pem" --blob "$W/wrapped.bin" --out "$W/evidence.json" || exit 1
+    --certificate "$W/crt.pem" --blob "$W/wrapped.bin" --devaut "$W/devaut.bin" --attestation "$W/attest.bin" --out "$W/evidence.json" || exit 1
   # Staged under temporary names in --out, then renamed, the record last. Until DONE the exit trap removes
   # every name listed in WRITTEN and deletes the key: a blob that restores must not outlive a refusal.
   for f in crt.pem pub.der wrapped.bin evidence.json; do
@@ -360,6 +429,18 @@ for r in $(seq 1 "$MAX_REF"); do case " $used " in *" $r "*) ;; *) DEST="$r"; br
 UNWRAPPED=1
 # sc-hsm-tool --unwrap-key EXITS 1 EVEN ON SUCCESS (measured 2026-08-06, hsm-recovery-drill.sh): judged by its output.
 out="$(schsm_pin --unwrap-key "$BLOB" --key-reference "$DEST" 2>&1)"
+if [ "$COMMAND" = refuse ]; then
+  # The proof that ANOTHER domain's card cannot hold this key. Passes only when the card said no AND no
+  # new key reference wraps afterwards (probed twice). Anything else leaves the exit trap to delete what
+  # the unwrap put there, and refuses loudly: the separation this domain exists for did not hold.
+  now="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after the attempt: whether it took the key is not known"
+  if ! grep -qi 'successfully imported' <<< "$out" && [ "$now" = "$used" ]; then
+    UNWRAPPED=""; DONE=1; unset PIN
+    printf 'REFUSED-AS-REQUIRED card %s would not unwrap %s: its DKEK is not the blob'"'"'s (%s)\n' "$SERIAL" "$(basename "$BLOB")" "$(tail -1 <<< "$out")"
+    exit 0
+  fi
+  die "CARD $SERIAL UNWRAPPED THE BLOB: its DKEK is the blob's, so the key's domain is NOT separate from this card's. The key it put there is being deleted; do not use this blob or this DKEK until that is understood"
+fi
 grep -qi 'successfully imported' <<< "$out" \
   || die "card $SERIAL did not unwrap the blob (a card whose DKEK is not the blob's refuses it): $(tail -1 <<< "$out")"
 now="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after the unwrap"
