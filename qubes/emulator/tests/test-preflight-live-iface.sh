@@ -6,6 +6,8 @@
 # a global-scope IPv4 with no default gateway was reported as WARN, so preflight exited 0 and
 # go-nogo inherited a false GO while secrets could be exfiltrated to any directly-connected
 # peer. Runs natively, no daemons needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

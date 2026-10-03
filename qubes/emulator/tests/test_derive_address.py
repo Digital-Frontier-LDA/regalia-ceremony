@@ -6,6 +6,9 @@ Uses the secp256k1 generator point G as a fixed vector. ripemd160(sha256(compres
 751e76e8199196d454941c45d1b3a323f1433bd6 — the canonical BIP-173 bech32 example witness
 program — so the expected address is an INDEPENDENT check, not circular.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import importlib.machinery
 import importlib.util
 import os

@@ -36,6 +36,26 @@ lift="$(grep -n '^unset PCSCLITE_CSOCK_NAME' "$RT" | head -1 | cut -d: -f1)"
 [ "$(grep -c '^unset PCSCLITE_CSOCK_NAME' "$RT")" = 1 ] && P "and lifted in exactly one place" || F "PCSCLITE_CSOCK_NAME is unset in more than one place"
 grep -q '^boot_all || exit 2' "$RT" && P "a refused boot stops the run" || F "run-tests.sh goes on after boot_all refuses"
 
+hdr "every suite of the model tier carries the guard itself, so a suite run BY HAND is covered too"
+unset_at="$(grep -n '^unset PCSCLITE_CSOCK_NAME' "$RT" | head -1 | cut -d: -f1)"
+missing=""; nostub=""; counted=0
+for t in $(head -n "$((unset_at - 1))" "$RT" | grep -o '"\$HERE/tests/test-[A-Za-z0-9_-]*\.sh"' | sed 's#"\$HERE/tests/##;s#"$##' | sort -u); do
+  counted=$((counted + 1))
+  grep -q '^export PCSCLITE_CSOCK_NAME="\${PCSCLITE_CSOCK_NAME:-/nonexistent/' "$HERE/$t" \
+    || [ "$t" = test-emulator-hermetic.sh ] || grep -q 'PCSCLITE_CSOCK_NAME=' "$HERE/$t" || missing="$missing $t"
+  grep -qF 'PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"' "$HERE/$t" \
+    || [ "$t" = test-emulator-hermetic.sh ] || grep -q 'PCSCLITE_CSOCK_NAME=' "$HERE/$t" || nostub="$nostub $t"
+done
+pymissing=""; pycounted=0
+for t in $(head -n "$((unset_at - 1))" "$RT" | grep -o 'tests/test_[A-Za-z0-9_]*\.py' | sed 's#tests/##' | sort -u); do
+  pycounted=$((pycounted + 1))
+  grep -q 'environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/' "$HERE/$t" && grep -q '"\.\.", "bin")' "$HERE/$t" || pymissing="$pymissing $t"
+done
+[ "$pycounted" -gt 20 ] && [ -z "$pymissing" ] && P "the $pycounted Python suites of the model tier set both too, before their imports" || F "Python suites without the guards ($pycounted read):$pymissing"
+[ "$counted" -gt 80 ] && P "$counted model-tier suites found in run-tests.sh" || F "only $counted model-tier suites found: the list was not read"
+[ -z "$missing" ] && P "each sets PCSCLITE_CSOCK_NAME to a socket that does not exist unless the runner already did" || F "suites without the guard:$missing"
+[ -z "$nostub" ] && P "each puts the emulator's stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first on PATH, as the runner does" || F "suites that would run the real tools by hand:$nostub"
+
 hdr "nothing the model tier runs elevates a card tool (sudo, env -i and systemd-run drop the variable)"
 QUBES="$(cd "$EMU/.." && pwd)"
 CARD='opensc-tool|pkcs11-tool|pkcs15-tool|sc-hsm-tool|ykman|pcsc_scan|gpg --card|hsm-random|smartcard|scriptrunner'

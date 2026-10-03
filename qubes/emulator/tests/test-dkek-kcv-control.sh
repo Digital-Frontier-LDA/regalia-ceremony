@@ -10,6 +10,8 @@
 # The key check value is what distinguishes them: two cards hold the same DKEK iff their KCVs
 # match. This pins the parse (one definition, shared), the all-zero rejection (a Pico prints zeros
 # and two unrelated cards would compare EQUAL), and the fact that the drill actually compares.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

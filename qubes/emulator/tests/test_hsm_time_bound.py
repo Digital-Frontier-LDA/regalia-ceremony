@@ -12,6 +12,9 @@ make the next round empty.
 Each test names the defect it pins: "delete this fix and the failure message tells you why the
 test exists." That is the falsification pattern this repository uses elsewhere.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import ast
 import datetime as dt
 import importlib.util

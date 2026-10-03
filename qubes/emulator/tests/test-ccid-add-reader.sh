@@ -3,6 +3,8 @@
 # accept the Pico HSM (2e8a:10fd; Debian 13's libccid 1.6.2 does not list it). Runs on a small
 # fixture shaped like /etc/libccid_Info.plist and, when this machine has libccid, on a copy of the
 # real one.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 S="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/ccid-add-reader.py"

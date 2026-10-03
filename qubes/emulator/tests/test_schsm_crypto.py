@@ -6,6 +6,9 @@ keystream + key reused for cipher and MAC) is the kind of thing a reviewer right
 and it would let an observer of two wrapped keys recover their XOR. These tests lock in:
 round-trip, NOT-a-two-time-pad, authenticated (tamper-evident), and wrong-DKEK rejection.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import contextlib
 import importlib.machinery
 import importlib.util

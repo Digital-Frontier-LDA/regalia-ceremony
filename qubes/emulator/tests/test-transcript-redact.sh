@@ -11,6 +11,8 @@
 # /dev/urandom: high-entropy (a low-entropy fixture reads as "no finding" to both the secret
 # scanner and to any future entropy gate), and never a repo literal. A filter that had the value
 # baked in could not pass, and a filter that silently passes values through fails below by name.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REDACT="$HERE/../../../tools/hsm-transcript-redact.sh"

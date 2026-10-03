@@ -16,6 +16,9 @@ someone who has never seen this repo:
   * plaintext is REFUSED — the emitter will not print an unencrypted secret onto paper
   * the digest covers the DECODED payload, which is what the recoverer verifies
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import base64
 import hashlib
 import os

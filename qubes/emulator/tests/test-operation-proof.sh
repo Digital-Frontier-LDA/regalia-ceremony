@@ -11,6 +11,8 @@
 # named libykcs11*, backed by the ykman shim's per-serial keys; Nitrokeys under EMU_P11_TOKENS. Real
 # openssl keys throughout. EMU_PKCS11_REAL is a tripwire: anything that would reach the real OpenSC
 # binary — and through it a card attached to this machine — fails the suite instead.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 TESTS="$(cd "$(dirname "$0")" && pwd)"
 OP="${CEREMONY_SCRIPTS:-$TESTS/../../scripts}/operation-proof.sh"
