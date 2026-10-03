@@ -90,8 +90,8 @@
 # and one P-256 key generated, attested and wrapped; the P-256 blob restored onto a free reference and signed;
 # a card of another DKEK refused it. Measured there: deleting the private key also removes the public-key
 # object; an unwrapped key comes back with its label, its id and a public-key object; the unwrap exited 0.
-# Still: sc-hsm-tool is called without --reader (one token attached is required first); with a card of
-# another kind in a second reader it may pick that reader and stop the step.
+# Every sc-hsm-tool call names the reader found by the card's serial (--reader), and one token attached is
+# still required first.
 set -uo pipefail
 umask 077
 # The PIN lives in a shell variable that is NOT exported. A caller's environment that already has PIN or
@@ -176,7 +176,7 @@ W="$(mktemp -d "${CEREMONY_SIGNING_TMP:-${TMPDIR:-/dev/shm}}/signing-key.XXXXXX"
 # (timeout, not a perl one-liner: perl would carry the PIN and honour PERL5OPT.)
 p11(){ timeout 60 pkcs11-tool --module "$MODULE" "$@"; }
 p11_pin(){ REGALIA_PIN="$PIN" timeout 60 pkcs11-tool --module "$MODULE" --slot "$SLOT_ID" --login --pin env:REGALIA_PIN "$@"; }
-schsm_pin(){ REGALIA_PIN="$PIN" timeout 60 sc-hsm-tool "$@" --pin env:REGALIA_PIN; }
+schsm_pin(){ REGALIA_PIN="$PIN" timeout 60 sc-hsm-tool --reader "$READER" "$@" --pin env:REGALIA_PIN; }
 cert_tool(){ python3 -I "$CERT_TOOL" "$@"; }
 
 # The card's own evidence: readers (opensc-tool only, no PIN) and the verifier (pycvc).
@@ -298,13 +298,17 @@ while IFS= read -r line; do
   esac
 done <<< "$slots"
 [ "$n" -eq 1 ] || die "serial $SERIAL matches $n tokens — attach exactly that card"
-[ "$total" -eq 1 ] || die "$total tokens are attached; attach ONLY card $SERIAL (sc-hsm-tool addresses the card without a reader index)"
+[ "$total" -eq 1 ] || die "$total tokens are attached; attach ONLY card $SERIAL (one card on the table is one card a mistake can reach)"
 ok "card $SERIAL is the only token attached (slot $SLOT_ID)"
 
 # ---- 1b. the card's DKEK domain, by its key check value ---------------------------------------------
 # sc-hsm-tool prints "DKEK key check value : <16 hex>" only once every share is in; while an import is
 # pending it prints the shares still missing instead, and a card without a DKEK prints neither. No PIN.
-status="$(timeout 60 sc-hsm-tool </dev/null 2>&1)" || die "sc-hsm-tool could not read card $SERIAL's status"
+# Every sc-hsm-tool call names the reader that holds THIS card (found by its serial, as opensc-tool numbers
+# readers, and sc-hsm-tool numbers them alike), so none of them falls to OpenSC's default reader.
+[ -r "$DEVAUT_SH" ] || die "hsm-devaut-read.sh is needed to find the reader that holds card $SERIAL"
+find_reader
+status="$(timeout 60 sc-hsm-tool --reader "$READER" </dev/null 2>&1)" || die "sc-hsm-tool could not read card $SERIAL's status"
 CARD_KCV="$(sed -n 's/^DKEK key check value[[:space:]]*:[[:space:]]*\([0-9A-Fa-f]\{16\}\)[[:space:]]*$/\1/p' <<< "$status" | tr 'a-f' 'A-F')"
 [ "$(grep -c '^DKEK key check value' <<< "$status")" -eq 1 ] && [ -n "$CARD_KCV" ] \
   || die "card $SERIAL holds no complete DKEK (no key check value; an import may be pending): $(grep -i dkek <<< "$status" | tr '\n' ' ')"
@@ -418,7 +422,6 @@ if [ "$COMMAND" = generate ]; then
   # ---- 6b. the card's own evidence: C.DevAut, and the attestation of THIS key ------------------------------
   [ -r "$DEVAUT_SH" ] && [ -r "$ATTEST_SH" ] && [ -r "$ATTEST_PY" ] && [ -d "$TRUST_DIR" ] \
     || die "the device-attestation tools or the CardContact trust anchors are missing (hsm-devaut-read.sh, hsm-key-attestation-read.sh, hsm-key-attestation-verify.py, qubes/trust-anchors/smartcard-hsm)"
-  find_reader
   devout="$DEVOUT"
   attout="$(timeout 60 bash "$ATTEST_SH" --reader "$READER" --expect-serial "$SERIAL" --key-ref "$REF" 2>&1)" \
     || die "the card has no attestation for key reference $REF (EF CE$(printf '%02X' "$REF")): a generated key always has one. $(tail -1 <<< "$attout")"
@@ -475,8 +478,7 @@ for id in $IDS_BEFORE; do
   cmp -s "$W/before-$id.der" "$W/want.der" && die "card $SERIAL already holds this key (id $id): a restore onto it would prove nothing about the blob"
 done
 used="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap: nothing was unwrapped"
-[ -r "$ATTEST_SH" ] && [ -r "$DEVAUT_SH" ] || die "hsm-key-attestation-read.sh and hsm-devaut-read.sh are needed to find a free key reference"
-find_reader
+[ -r "$ATTEST_SH" ] || die "hsm-key-attestation-read.sh is needed to find a free key reference"
 DEST=""
 for r in $(seq 1 "$MAX_REF"); do
   case " $used " in *" $r "*) continue;; esac

@@ -150,15 +150,18 @@ cat > "$FAKE/sc-hsm-tool" <<'STUB'
 #!/usr/bin/env bash
 ARGS="$*"; . "$(dirname "$0")/card-lib.sh"
 mapfile -t cards < <(attached)
-[ "${#cards[@]}" -eq 1 ] || { echo "sc-hsm-tool [STUB]: ${#cards[@]} readers with a card; the default reader is a guess" >&2; exit 9; }
-C="$CARDS/${cards[0]}" wrap="" unwrap="" ref="" pin=""
+wrap="" unwrap="" ref="" pin="" reader=""
 while [ $# -gt 0 ]; do
   case "$1" in --wrap-key) wrap="$2"; shift 2;; --unwrap-key) unwrap="$2"; shift 2;; --key-reference) ref="$2"; shift 2;;
-    --pin) pin="$2"; shift 2;; *) echo "sc-hsm-tool [STUB]: unsupported $1" >&2; exit 2;; esac
+    --pin) pin="$2"; shift 2;; --reader) reader="$2"; shift 2;; *) echo "sc-hsm-tool [STUB]: unsupported $1" >&2; exit 2;; esac
 done
+# readers as the opensc-tool stub numbers them: 0 the laptop's empty reader, then one per attached card
+case "$reader" in [1-9]) ;; *) echo "sc-hsm-tool [STUB]: no --reader: OpenSC's default reader is a guess" >&2; exit 9;; esac
+[ "$reader" -le "${#cards[@]}" ] || { echo "sc-hsm-tool [STUB]: no card in reader $reader" >&2; exit 9; }
+C="$CARDS/${cards[$((reader - 1))]}"
 if [ -z "$wrap$unwrap" ]; then                          # the status, as the real tool prints it: no PIN
   fault && { echo "sc-hsm-tool [STUB fault]: SW 6F00" >&2; exit 1; }
-  printf 'Using reader with a card: Nitrokey HSM (%s)\nVersion              : 4.1\nSO-PIN tries left    : 15\nUser PIN tries left  : %s\n' "${cards[0]}" "$(cat "$C/pin-tries")"
+  printf 'Using reader with a card: Nitrokey HSM (%s)\nVersion              : 4.1\nSO-PIN tries left    : 15\nUser PIN tries left  : %s\n' "$(basename "$C")" "$(cat "$C/pin-tries")"
   if [ -s "$C/dkek" ]; then
     echo "DKEK shares          : 1"
     if [ -e "$C/dkek-pending" ]; then echo "DKEK import pending, 1 share(s) still missing"
@@ -675,5 +678,7 @@ out="$(bash "$KEYTOOL" generate --serial DENK0600001 --id 23 --label x --subject
 grep -q -- "--key-type is rsa:2048 or ec:prime256v1" <<< "$out" && P "an unknown key type is refused before the card is touched" || F "unknown key type: $out"
 
 [ ! -e "$ROOT/tripwire" ] && P "no other card tool was called by any run above" || F "another card tool was called: $(cat "$ROOT/tripwire")"
+! grep -E '^sc-hsm-tool ' "$ARGV_LOG" | grep -qv -- '--reader [1-9]' && grep -q '^sc-hsm-tool --reader 1 ' "$ARGV_LOG" \
+  && P "every sc-hsm-tool call names the reader found by the card's serial" || F "an sc-hsm-tool call without --reader: $(grep '^sc-hsm-tool' "$ARGV_LOG" | grep -v -- '--reader' | head -2)"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"; [ "$fail" -eq 0 ]
