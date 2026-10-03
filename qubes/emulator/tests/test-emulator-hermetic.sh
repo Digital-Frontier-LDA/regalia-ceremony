@@ -36,6 +36,15 @@ lift="$(grep -n '^unset PCSCLITE_CSOCK_NAME' "$RT" | head -1 | cut -d: -f1)"
 [ "$(grep -c '^unset PCSCLITE_CSOCK_NAME' "$RT")" = 1 ] && P "and lifted in exactly one place" || F "PCSCLITE_CSOCK_NAME is unset in more than one place"
 grep -q '^boot_all || exit 2' "$RT" && P "a refused boot stops the run" || F "run-tests.sh goes on after boot_all refuses"
 
+hdr "nothing the model tier runs elevates a card tool (sudo, env -i and systemd-run drop the variable)"
+QUBES="$(cd "$EMU/.." && pwd)"
+CARD='opensc-tool|pkcs11-tool|pkcs15-tool|sc-hsm-tool|ykman|pcsc_scan|gpg --card|hsm-random|smartcard|scriptrunner'
+elevated="$(grep -nE "(\bsudo\b|env -i|systemd-run)[^#]*($CARD)" "$QUBES"/scripts/*.sh "$QUBES"/scripts/*.py "$EMU"/tests/*.sh "$QUBES"/../tools/*.sh 2>/dev/null \
+  | grep -vE '^[^:]+:[0-9]+:[[:space:]]*#|printf|echo|test-emulator-hermetic' || true)"
+[ -z "$elevated" ] && P "no card tool is run through sudo, env -i or systemd-run" || F "these would reach the real pcscd: $elevated"
+# the premise of that limit, without sudo: env -i really drops it
+[ -z "$(env -i PATH="$PATH" bash -c 'printf %s "${PCSCLITE_CSOCK_NAME:-}"')" ] && P "the premise: env -i drops PCSCLITE_CSOCK_NAME" || F "env -i kept the variable"
+
 hdr "with that socket, the tools that reached the bench see no daemon"
 if command -v opensc-tool >/dev/null 2>&1; then
   out="$(timeout 20 opensc-tool -l 2>&1)"

@@ -50,6 +50,9 @@ export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 # through PCSCLITE_CSOCK_NAME: pointed at a socket that does not exist, every one of them sees no
 # daemon, exactly as on a CI runner with no reader. On a bench machine this run reached the real
 # tokens three times on 2026-10-02 (#104). The daemon tier below boots its OWN pcscd and lifts this.
+# LIMIT: sudo (env_reset), `env -i` and systemd-run units drop this variable. No model-tier suite or
+# script it calls runs a card tool that way (audited 2026-10-02; test-emulator-hermetic.sh keeps it
+# so). A suite started BY HAND outside this runner is not covered either: export the variable first.
 PCSC_NOWHERE="$(mktemp -d)/no-pcscd.comm"
 export PCSCLITE_CSOCK_NAME="$PCSC_NOWHERE"
 
