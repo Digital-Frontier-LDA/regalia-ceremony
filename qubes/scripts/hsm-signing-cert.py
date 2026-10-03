@@ -101,9 +101,10 @@ def rsa_public_key(spki):
     tag, bits, _ = read_tlv(body, offset)
     require(tag == 0x03 and bits[:1] == b"\0", "the public key's bit string is malformed")
     tag, key, _ = read_tlv(bits[1:])
+    require(tag == 0x30, "the RSA key is not a SEQUENCE")
     tag_n, modulus, offset = read_tlv(key)
     require(tag_n == 0x02, "the RSA key has no modulus")
-    return (len(modulus.lstrip(b"\0")) * 8)
+    return int.from_bytes(modulus, "big").bit_length()       # in bits: 2041 is not 2048
 
 
 def tbs_certificate(spki, common_name, days, serial, now=None):
@@ -147,9 +148,10 @@ def certificate_parts(der):
     tag, body, end = read_tlv(der)
     require(tag == 0x30 and end == len(der), "not one DER certificate")
     tag, _, tbs_end = read_tlv(body)
+    require(tag == 0x30, "the certificate's first field is not a TBSCertificate")
     tbs = body[:tbs_end]
     tag, algorithm, offset = read_tlv(body, tbs_end)
-    require(algorithm == SHA256_WITH_RSA, "the certificate is not signed with sha256WithRSAEncryption")
+    require(tag == 0x30 and algorithm == SHA256_WITH_RSA, "the certificate is not signed with sha256WithRSAEncryption")
     tag, bits, end = read_tlv(body, offset)
     require(tag == 0x03 and bits[:1] == b"\0" and end == len(body), "the certificate's signature is malformed")
     fields = []
@@ -159,7 +161,12 @@ def certificate_parts(der):
         tag, _, nxt = read_tlv(tbs_body, offset)
         fields.append(tbs_body[offset:nxt])
         offset = nxt
-    require(len(fields) == 8, "the certificate's fields are not the ones this tool writes")
+    # version, serial, signature algorithm, issuer, validity, subject, public key, extensions: by tag, and the
+    # inner algorithm must be the outer one. A structure that merely has eight parts is not a certificate.
+    require([f[0] for f in fields] == [0xA0, 0x02, 0x30, 0x30, 0x30, 0x30, 0x30, 0xA3], "the certificate's fields are not the ones this tool writes")
+    require(fields[2] == seq(SHA256_WITH_RSA), "the certificate names another signature algorithm inside than outside")
+    require(fields[3] == fields[5], "the certificate is not self-signed (issuer and subject differ)")
+    require(rsa_public_key(fields[6]) == 2048, "the certificate's key is not RSA-2048")
     return tbs, fields[6], bits[1:]
 
 

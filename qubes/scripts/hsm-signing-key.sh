@@ -41,10 +41,32 @@
 # THE PIN is never on a command line: pkcs11-tool and sc-hsm-tool get the literal `--pin env:REGALIA_PIN`
 # and the value only in the environment of that one process. One attempt; a wrong PIN spends a retry.
 #
-# NOT RUN ON A CARD. Written against the emulator's model and the quirks the drills measured; it must be
-# run once on a bench Nitrokey HSM 2 before the ceremony relies on it.
+# WHAT IS LEFT BEHIND WHEN IT STOPS. generate ends in one of two states: the four files in --out and the
+# key on the card, or no file and no key. A refusal, a failed card command or a signal (INT, TERM, HUP)
+# after the key was asked for removes whatever reached --out and deletes the key, then says which: DELETED,
+# or STILL ON CARD with what to do, judged by listing the card again and not by the delete's exit status.
+# Those messages go to the terminal the script was started on even while a card command's output is
+# discarded. restore, refused after the unwrap, deletes the key it just put on the spare and says so.
+#
+# THE BLOB IS TIED TO THE KEY ONLY BY restore. On the card that made it, nothing can open a wrapped blob,
+# so generate knows the blob only as "what key reference R wrapped", and R as "the reference that wraps
+# now and did not before" (probed twice each time; one new reference, or refused). Until restore has run
+# on the spare, the backup is a claim.
+#
+# NOT RUN ON A CARD. Written against a stubbed card model and the quirks the drills measured; it must be
+# run once on a bench Nitrokey HSM 2 before the ceremony relies on it. To settle there:
+#   * whether deleting the private key also removes the public-key object (the result is judged by
+#     listing the card again, so either answer works, but the message may differ);
+#   * whether an unwrapped key has a public-key object at all (the id-in-use and already-holds checks,
+#     and restore's search, read public-key objects);
+#   * sc-hsm-tool is called without --reader (one token attached is required first); with a card of
+#     another kind in a second reader it may pick that reader and stop the step.
 set -uo pipefail
 umask 077
+# The PIN lives in a shell variable that is NOT exported. A caller's environment that already has PIN or
+# REGALIA_PIN would make `read` keep the export attribute, and every child would carry the PIN; a caller's
+# OPENSSL_CONF could hand openssl an engine. None of them is inherited.
+unset PIN REGALIA_PIN OPENSSL_CONF OPENSSL_MODULES OPENSSL_ENGINES
 # ASCII RANGES. A check here that says [0-9] means ten digits, and [a-z] twenty-six letters. In a
 # UTF-8 locale bash matches a bracket range by the locale's collation instead: [0-9] also takes
 # full-width and Arabic-Indic digits, [a-z0-9] takes accented letters, and a negated range such as
@@ -95,8 +117,10 @@ if [ "$COMMAND" = generate ]; then
   case "$LABEL" in ''|*[!a-z0-9-]*) die "--label is lowercase letters, digits and dashes";; esac
   case "$DAYS" in ''|*[!0-9]*) die "--days is a number";; esac
   [ -d "$OUT" ] || die "--out $OUT is not a directory"
+  [ -w "$OUT" ] || die "--out $OUT is not writable (found before anything is generated)"
   for f in crt.pem pub.der wrapped.bin evidence.json; do
-    [ ! -e "$OUT/$LABEL.$f" ] || die "$OUT/$LABEL.$f already exists: nothing is overwritten"
+    # -L too: a dangling link is "not there" to -e and would be written through, or refused at the end
+    { [ ! -e "$OUT/$LABEL.$f" ] && [ ! -L "$OUT/$LABEL.$f" ]; } || die "$OUT/$LABEL.$f already exists: nothing is overwritten"
   done
 else
   [ -s "$BLOB" ] && [ -s "$CERT" ] || die "restore needs --blob and --certificate, both non-empty files"
@@ -107,32 +131,72 @@ MODULE="${CEREMONY_PKCS11_MODULE:-${HSM_PKCS11_MODULE:-}}"
 [ -n "$MODULE" ] || MODULE="$(first_file /usr/lib/*/opensc-pkcs11.so /usr/lib/opensc-pkcs11.so /usr/local/lib/opensc-pkcs11.so)" \
   || die "no opensc-pkcs11 module found (set CEREMONY_PKCS11_MODULE)"
 [ -f "$MODULE" ] || die "PKCS#11 module $MODULE does not exist"
-for t in pkcs11-tool sc-hsm-tool openssl python3; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
+for t in pkcs11-tool sc-hsm-tool openssl python3 timeout; do command -v "$t" >/dev/null 2>&1 || die "$t is not installed"; done
 
 W="$(mktemp -d "${CEREMONY_SIGNING_TMP:-${TMPDIR:-/dev/shm}}/signing-key.XXXXXX" 2>/dev/null || mktemp -d)" || die "cannot create a work directory"
-# A key generated on the card and then refused (no certificate, no backup, no record) must not stay on
-# an offline SIGNING card: a key nobody recorded and nobody can restore is one that can still sign. It
-# is deleted, and if that fails the operator is told to delete it before the card leaves the table.
-KEY_MADE="" DONE=""
+
+# Every card command is bounded: a wedged reader must end the step, not hang it with a PIN in memory.
+# (timeout, not a perl one-liner: perl would carry the PIN and honour PERL5OPT.)
+p11(){ timeout 60 pkcs11-tool --module "$MODULE" "$@"; }
+p11_pin(){ REGALIA_PIN="$PIN" timeout 60 pkcs11-tool --module "$MODULE" --slot "$SLOT_ID" --login --pin env:REGALIA_PIN "$@"; }
+schsm_pin(){ REGALIA_PIN="$PIN" timeout 60 sc-hsm-tool "$@" --pin env:REGALIA_PIN; }
+cert_tool(){ python3 -I "$CERT_TOOL" "$@"; }
+
+# The ids of the public-key objects on the card, one per line. FAILS when the card does not answer: a
+# listing that failed is not an empty card, and every check built on it would pass for the wrong reason.
+object_ids(){ # $1 = pubkey | privkey
+  local listing
+  listing="$(p11_pin --list-objects --type "$1" 2>/dev/null)" || return 1
+  sed -n 's/^[[:space:]]*ID:[[:space:]]*\([0-9a-fA-F]*\)[[:space:]]*$/\1/p' <<< "$listing" | tr 'A-F' 'a-f'
+}
+pubkey_ids(){ object_ids pubkey; }
+
+# ---- what is left behind ---------------------------------------------------------------------------------
+# fd 9 is the stderr the script was started with. The trap can run while a card command's output is being
+# discarded (a signal during `… >/dev/null 2>&1`), and its messages must still reach the operator.
+exec 9>&2
+KEY_ASKED="" UNWRAPPED="" DONE="" WRITTEN=() IDS_BEFORE=""
+say9(){ printf 'hsm-signing-key: %s\n' "$*" >&9 2>/dev/null || true; }
+remove_key(){ # $1 = id: delete both objects, then LIST BOTH KINDS AGAIN: the listings decide, not the deletes' status
+  local pub priv
+  p11_pin --delete-object --type privkey --id "$1" >/dev/null 2>&1
+  p11_pin --delete-object --type pubkey --id "$1" >/dev/null 2>&1
+  pub="$(object_ids pubkey)" && priv="$(object_ids privkey)" || return 2
+  ! grep -qx "$1" <<< "$pub" && ! grep -qx "$1" <<< "$priv"
+}
 on_exit(){
-  if [ -n "$KEY_MADE" ] && [ -z "$DONE" ] && [ -n "${PIN:-}" ]; then
-    if p11_pin --delete-object --type privkey --id "$ID" >/dev/null 2>&1 && p11_pin --delete-object --type pubkey --id "$ID" >/dev/null 2>&1; then
-      printf 'hsm-signing-key: the key generated at id %s was DELETED from card %s (nothing was recorded for it)
-' "$ID" "$SERIAL" >&2
-    else
-      printf 'hsm-signing-key: THE KEY GENERATED AT id %s IS STILL ON CARD %s and nothing recorded it: delete it (pkcs11-tool --delete-object --type privkey --id %s, then pubkey) before the card leaves the table
-' "$ID" "$SERIAL" "$ID" >&2
+  trap '' PIPE INT TERM HUP                 # nothing interrupts the cleanup, and a closed terminal does not end it
+  local f ids id left=""
+  if [ -z "$DONE" ]; then
+    for f in ${WRITTEN[@]+"${WRITTEN[@]}"}; do rm -f "$f"; done
+    if [ -n "$KEY_ASKED" ] && [ -n "${PIN:-}" ]; then
+      # the key may or may not be there: the card was asked, and the answer may have been lost
+      if ! ids="$(pubkey_ids)"; then
+        left="COULD NOT ASK card $SERIAL whether a key is at id $ID. Nothing recorded it. List the card and delete it (pkcs11-tool --delete-object --type privkey --id $ID, then pubkey) before the card leaves the table"
+      elif grep -qx "$ID" <<< "$ids"; then
+        if remove_key "$ID"; then left="the key generated at id $ID was DELETED from card $SERIAL (nothing was recorded for it, and no file of it was kept)"
+        else left="THE KEY GENERATED AT id $ID IS STILL ON CARD $SERIAL and nothing recorded it: delete it (pkcs11-tool --delete-object --type privkey --id $ID, then pubkey) before the card leaves the table"; fi
+      fi
+    fi
+    if [ -n "$UNWRAPPED" ] && [ -n "${PIN:-}" ]; then
+      # restore was refused after the unwrap: the spare holds a key nothing vouched for
+      if ! ids="$(pubkey_ids)"; then
+        left="a key WAS UNWRAPPED at key reference $DEST on card $SERIAL and the restore was refused. COULD NOT LIST the card: delete that key before the card is used"
+      else
+        left="the refused restore left no key on card $SERIAL"
+        for id in $ids; do
+          grep -qx "$id" <<< "$IDS_BEFORE" && continue
+          if remove_key "$id"; then left="the key the refused restore had unwrapped (id $id, key reference $DEST) was DELETED from card $SERIAL"
+          else left="THE KEY UNWRAPPED AT id $id (key reference $DEST) IS STILL ON CARD $SERIAL after a refused restore: delete it before the card is used"; break; fi
+        done
+      fi
     fi
   fi
   rm -rf "$W"; unset PIN REGALIA_PIN
+  [ -z "$left" ] || say9 "$left"
 }
 trap on_exit EXIT
-
-# Every card command is bounded: a wedged reader must end the step, not hang it with a PIN in memory.
-p11(){ perl -e 'alarm shift; exec @ARGV' 60 pkcs11-tool --module "$MODULE" "$@"; }
-p11_pin(){ REGALIA_PIN="$PIN" perl -e 'alarm shift; exec @ARGV' 60 pkcs11-tool --module "$MODULE" --slot "$SLOT_ID" --login --pin env:REGALIA_PIN "$@"; }
-schsm_pin(){ REGALIA_PIN="$PIN" perl -e 'alarm shift; exec @ARGV' 60 sc-hsm-tool "$@" --pin env:REGALIA_PIN; }
-cert_tool(){ python3 -I "$CERT_TOOL" "$@"; }
+trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 # ---- 1. the one token, by serial --------------------------------------------------------------------
 slots="$(p11 --list-token-slots 2>/dev/null)" || die "cannot list the PKCS#11 token slots of $MODULE"
@@ -170,7 +234,7 @@ if [ "$rc" -ne 0 ]; then
 fi
 ok "the PIN verifies"
 
-wrappable_refs(){ # the key references that wrap now; --wrap-key does not modify the key
+probe_refs(){ # the key references that wrap now; --wrap-key does not modify the key
   local r t out=""
   for r in $(seq 1 "$MAX_REF"); do
     t="$W/probe-$r"
@@ -179,11 +243,21 @@ wrappable_refs(){ # the key references that wrap now; --wrap-key does not modify
   done
   printf '%s' "$out"
 }
-pubkey_ids(){ # the ids of the public-key objects on the card
-  p11_pin --list-objects --type pubkey 2>/dev/null | sed -n 's/^[[:space:]]*ID:[[:space:]]*\([0-9a-fA-F]*\)[[:space:]]*$/\1/p' | tr 'A-F' 'a-f'
+# Probed TWICE, and the two answers must agree: a probe that failed once for another reason would make an
+# existing key look new, and its blob would be recorded as the new key's.
+wrappable_refs(){
+  local a b
+  a="$(probe_refs)"; b="$(probe_refs)"
+  [ "$a" = "$b" ] || return 1
+  printf '%s' "$a"
+}
+read_pubkey(){ # $1 = id, $2 = output file
+  rm -f "$2"
+  p11 --slot "$SLOT_ID" --read-object --type pubkey --id "$1" --output-file "$2" >/dev/null 2>&1 && [ -s "$2" ]
 }
 sign_check(){ # $1 = id, $2 = public key DER: a fresh challenge signed on the card, with a wrong-data control
   head -c 32 /dev/urandom > "$W/challenge"; head -c 32 /dev/urandom > "$W/other"
+  cmp -s "$W/challenge" "$W/other" && return 1
   openssl pkey -pubin -inform DER -in "$2" -out "$W/check.pem" 2>/dev/null || return 1
   p11_pin --id "$1" --sign --mechanism SHA256-RSA-PKCS --input-file "$W/challenge" --output-file "$W/challenge.sig" >/dev/null 2>&1 || return 1
   openssl dgst -sha256 -verify "$W/check.pem" -signature "$W/challenge.sig" "$W/challenge" >/dev/null 2>&1 || return 1
@@ -193,22 +267,25 @@ sign_check(){ # $1 = id, $2 = public key DER: a fresh challenge signed on the ca
 
 if [ "$COMMAND" = generate ]; then
   # ---- 3. the id is free; what wraps before ---------------------------------------------------------
-  grep -qx "$ID" <<< "$(pubkey_ids)" && die "object id $ID is already in use on card $SERIAL"
-  before="$(wrappable_refs)"
+  ids="$(pubkey_ids)" || die "the card did not list its public keys: whether id $ID is free is not known"
+  grep -qx "$ID" <<< "$ids" && die "object id $ID is already in use on card $SERIAL"
+  before="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap: nothing was generated"
   # ---- 4. the key, on the card ----------------------------------------------------------------------
+  # From here the card may hold a key at $ID whatever this script learns of it (a lost answer, a signal):
+  # the exit trap looks.
+  KEY_ASKED=1
   gen="$(p11_pin --keypairgen --key-type rsa:2048 --id "$ID" --label "$LABEL" 2>&1)" \
-    || die "the card did not generate the key: $(grep -aoE 'CKR_[A-Z_]+' <<< "$gen" | head -1)"
-  KEY_MADE=1
+    || die "the card did not report a generated key (${gen:+$(grep -aoE 'CKR_[A-Z_]+' <<< "$gen" | head -1)}; pkcs11-tool failed)"
   ok "RSA-2048 key $LABEL generated on card $SERIAL at id $ID"
   # ---- 5. its key reference -------------------------------------------------------------------------
-  after="$(wrappable_refs)"
+  after="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after generating"
   REF=""; count=0
   for r in $after; do case " $before " in *" $r "*) ;; *) REF="$r"; count=$((count + 1));; esac; done
   [ "$count" -eq 1 ] || die "expected exactly one new key reference after generating, found $count (before:${before:- none}, after:${after:- none})"
+  for r in $before; do case " $after " in *" $r "*) ;; *) die "key reference $r wrapped before generating and does not now: the card's answers are not stable";; esac; done
   ok "its key reference is $REF"
   # ---- 6. the certificate, signed by the card ---------------------------------------------------------
-  p11 --slot "$SLOT_ID" --read-object --type pubkey --id "$ID" --output-file "$W/pub.der" >/dev/null 2>&1 && [ -s "$W/pub.der" ] \
-    || die "cannot read the public key of id $ID"
+  read_pubkey "$ID" "$W/pub.der" || die "cannot read the public key of id $ID"
   serial_hex="$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')"; serial_hex="1${serial_hex:1}"   # 128 bits, positive
   cert_tool tbs --public-key "$W/pub.der" --subject "$SUBJECT" --days "$DAYS" --serial-hex "$serial_hex" --out "$W/tbs.der" || exit 1
   p11_pin --id "$ID" --sign --mechanism SHA256-RSA-PKCS --input-file "$W/tbs.der" --output-file "$W/tbs.sig" >/dev/null 2>&1 \
@@ -220,10 +297,18 @@ if [ "$COMMAND" = generate ]; then
   schsm_pin --wrap-key "$W/wrapped.bin" --key-reference "$REF" >/dev/null 2>&1 && [ -s "$W/wrapped.bin" ] \
     || die "sc-hsm-tool --wrap-key failed for key reference $REF (does the card hold its DKEK?)"
   ok "DKEK-wrapped blob written"
-  # ---- 8. the record, last ----------------------------------------------------------------------------
+  # ---- 8. the record, last; then all four files, or none ----------------------------------------------
   cert_tool evidence --device-serial "$SERIAL" --object-id "$ID" --key-reference "$REF" --label "$LABEL" --public-key "$W/pub.der" \
     --certificate "$W/crt.pem" --blob "$W/wrapped.bin" --out "$W/evidence.json" || exit 1
-  for f in crt.pem pub.der wrapped.bin evidence.json; do cp "$W/$f" "$OUT/$LABEL.$f" || die "cannot write $OUT/$LABEL.$f"; done
+  # Staged under temporary names in --out, then renamed, the record last. Until DONE the exit trap removes
+  # every name listed in WRITTEN and deletes the key: a blob that restores must not outlive a refusal.
+  for f in crt.pem pub.der wrapped.bin evidence.json; do
+    WRITTEN+=("$OUT/.$LABEL.$f.tmp" "$OUT/$LABEL.$f")
+    cp "$W/$f" "$OUT/.$LABEL.$f.tmp" || die "cannot write into $OUT"
+  done
+  for f in crt.pem pub.der wrapped.bin evidence.json; do
+    mv -n "$OUT/.$LABEL.$f.tmp" "$OUT/$LABEL.$f" && [ ! -e "$OUT/.$LABEL.$f.tmp" ] || die "cannot put $OUT/$LABEL.$f in place"
+  done
   DONE=1; unset PIN
   printf 'SIGNING-KEY %s card %s id %s ref %s public key %s\n' "$LABEL" "$SERIAL" "$ID" "$REF" \
     "$(sha256sum "$OUT/$LABEL.pub.der" | cut -d' ' -f1)"
@@ -234,31 +319,39 @@ fi
 openssl x509 -in "$CERT" -noout -pubkey 2>/dev/null | openssl pkey -pubin -outform DER -out "$W/want.der" 2>/dev/null && [ -s "$W/want.der" ] \
   || die "$CERT is not a certificate"
 cert_tool check --certificate "$CERT" --public-key "$W/want.der" >/dev/null || die "$CERT does not verify under its own key"
-# The proof is that THIS blob restores the key. A card that already holds it would pass with any blob.
-for id in $(pubkey_ids); do
-  p11 --slot "$SLOT_ID" --read-object --type pubkey --id "$id" --output-file "$W/have.der" >/dev/null 2>&1 || continue
+# The proof is that THIS blob restores the key. A card that already holds it would pass with any blob, so
+# every key on the card is read first, and a listing or a read that fails is a refusal, not "no such key".
+IDS_BEFORE="$(pubkey_ids)" || die "card $SERIAL did not list its public keys: whether it already holds this key is not known"
+for id in $IDS_BEFORE; do
+  read_pubkey "$id" "$W/have.der" || die "cannot read the public key at id $id on card $SERIAL: whether it already holds this key is not known"
   cmp -s "$W/have.der" "$W/want.der" && die "card $SERIAL already holds this key (id $id): a restore onto it would prove nothing about the blob"
 done
-used="$(wrappable_refs)"
+used="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap: nothing was unwrapped"
 DEST=""
 for r in $(seq 1 "$MAX_REF"); do case " $used " in *" $r "*) ;; *) DEST="$r"; break;; esac; done
 [ -n "$DEST" ] || die "no free key reference on card $SERIAL"
+# From here the spare may hold a key nothing vouched for: the exit trap removes it unless DONE.
+UNWRAPPED=1
 # sc-hsm-tool --unwrap-key EXITS 1 EVEN ON SUCCESS (measured 2026-08-06, hsm-recovery-drill.sh): judged by its output.
 out="$(schsm_pin --unwrap-key "$BLOB" --key-reference "$DEST" 2>&1)"
 grep -qi 'successfully imported' <<< "$out" \
   || die "card $SERIAL did not unwrap the blob (a card whose DKEK is not the blob's refuses it): $(tail -1 <<< "$out")"
+now="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after the unwrap"
+case " $now " in *" $DEST "*) ;; *) die "after the unwrap key reference $DEST does not wrap: the blob did not put a key there";; esac
+ids="$(pubkey_ids)" || die "card $SERIAL did not list its public keys after the unwrap"
 found=""
-for id in $(pubkey_ids); do
-  p11 --slot "$SLOT_ID" --read-object --type pubkey --id "$id" --output-file "$W/have.der" >/dev/null 2>&1 || continue
+for id in $ids; do
+  grep -qx "$id" <<< "$IDS_BEFORE" && continue              # only a key that was NOT there before can be the blob's
+  read_pubkey "$id" "$W/have.der" || die "cannot read the public key at id $id after the unwrap"
   cmp -s "$W/have.der" "$W/want.der" && { found="$id"; break; }
 done
-[ -n "$found" ] || die "after the unwrap no key on card $SERIAL has the certificate's public key"
+[ -n "$found" ] || die "after the unwrap no NEW key on card $SERIAL has the certificate's public key: the blob is not that key's"
 sign_check "$found" "$W/want.der"; rc=$?
-unset PIN
 case "$rc" in
   0) ;;
   2) die "the signature check accepted other data: the check proves nothing";;
   *) die "the restored key at id $found did not sign a challenge that verifies under the certificate's key";;
 esac
+DONE=1; unset PIN
 printf 'RESTORED %s on card %s at id %s ref %s: it signs for the certificate key\n' \
   "$(openssl x509 -in "$CERT" -noout -subject 2>/dev/null | sed 's/^subject=//')" "$SERIAL" "$found" "$DEST"
