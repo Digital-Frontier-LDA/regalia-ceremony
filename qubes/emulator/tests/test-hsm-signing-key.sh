@@ -134,7 +134,8 @@ if [ "$read" = 1 ]; then [ -f "$C/keys/$id/pub.der" ] || { echo "error: object $
 if [ "$sign" = 1 ]; then
   [ "$login" = 1 ] && [ -f "$C/keys/$id/key.pem" ] || { echo "error: sign [STUB]" >&2; exit 1; }
   # the mechanism must be the key's: SHA256-RSA-PKCS for RSA, ECDSA-SHA256 with the DER format for EC
-  if grep -q "BEGIN PRIVATE KEY" "$C/keys/$id/key.pem" && openssl pkey -in "$C/keys/$id/key.pem" -noout -text 2>/dev/null | grep -q "ASN1 OID: prime256v1"; then
+  keytext="$(openssl pkey -in "$C/keys/$id/key.pem" -noout -text 2>/dev/null)"
+  if grep -q "BEGIN PRIVATE KEY" "$C/keys/$id/key.pem" && grep -q "ASN1 OID: prime256v1" <<< "$keytext"; then
     [ "$mech" = ECDSA-SHA256 ] && [ "$sigfmt" = openssl ] || { echo "error: ECDSA key, mechanism $mech format $sigfmt [STUB]" >&2; exit 1; }
   else
     [ "$mech" = SHA256-RSA-PKCS ] || { echo "error: RSA key, mechanism $mech [STUB]" >&2; exit 1; }
@@ -620,8 +621,8 @@ groot(){ # groot LABEL ID [extra]: generate on the root HSM
 out="$(groot root 20)"; rc=$?
 E="$OUT/root.evidence.json"
 if [ "$rc" = 0 ] && [ -s "$E" ]; then
-  openssl x509 -in "$OUT/root.crt.pem" -noout -text 2>/dev/null | grep -q "Signature Algorithm: ecdsa-with-SHA256" \
-    && openssl x509 -in "$OUT/root.crt.pem" -noout -text | grep -q "ASN1 OID: prime256v1" \
+  certtext="$(openssl x509 -in "$OUT/root.crt.pem" -noout -text 2>/dev/null)"
+  grep -q "Signature Algorithm: ecdsa-with-SHA256" <<< "$certtext" && grep -q "ASN1 OID: prime256v1" <<< "$certtext" \
     && openssl verify -check_ss_sig -partial_chain -CAfile "$OUT/root.crt.pem" "$OUT/root.crt.pem" >/dev/null 2>&1 \
     && P "a P-256 key generated on the card; its certificate is ecdsa-with-SHA256 and verifies under the card's key" || F "P-256 certificate: $out"
   [ "$(field "$E" key_type)" = ec:prime256v1 ] && grep -q "the card attests it generated THIS key" <<< "$out" \
@@ -678,7 +679,8 @@ out="$(bash "$KEYTOOL" generate --serial DENK0600001 --id 23 --label x --subject
 grep -q -- "--key-type is rsa:2048 or ec:prime256v1" <<< "$out" && P "an unknown key type is refused before the card is touched" || F "unknown key type: $out"
 
 [ ! -e "$ROOT/tripwire" ] && P "no other card tool was called by any run above" || F "another card tool was called: $(cat "$ROOT/tripwire")"
-! grep -E '^sc-hsm-tool ' "$ARGV_LOG" | grep -qv -- '--reader [1-9]' && grep -q '^sc-hsm-tool --reader 1 ' "$ARGV_LOG" \
+calls="$(grep -E '^sc-hsm-tool ' "$ARGV_LOG")"
+! grep -qv -- '--reader [1-9]' <<< "$calls" && grep -q '^sc-hsm-tool --reader 1 ' <<< "$calls" \
   && P "every sc-hsm-tool call names the reader found by the card's serial" || F "an sc-hsm-tool call without --reader: $(grep '^sc-hsm-tool' "$ARGV_LOG" | grep -v -- '--reader' | head -2)"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"; [ "$fail" -eq 0 ]
