@@ -208,10 +208,10 @@ def compare_to_spki(key, der):
 
 
 def missing_dependencies(need_pycvc):
-    """Names of the modules this run needs and cannot import. pycvc is imported the way the chain
-    walker imports it — in THIS interpreter, which is the one the walker is run under (sys.executable),
-    with this environment — so the answer is the child's answer, obtained before the child can give
-    a misleading one."""
+    """Names of the modules this run needs and cannot import. pycvc is imported in THIS interpreter,
+    which is the one the walker is run under (sys.executable, with -I). In the product this process
+    runs -Es, where the answer is the child's; in a plain run with pycvc only on PYTHONPATH the child
+    cannot import it and says "could not evaluate", which still fails closed."""
     missing = [] if ec is not None else ["cryptography"]
     if need_pycvc:
         try:
@@ -280,9 +280,18 @@ def main():
             cached.write(devaut)
             cached_path = cached.name
         try:
-            chain = subprocess.run([sys.executable, verifier, "--cert", cached_path,
+            # THE CHAIN WALKER ALWAYS RUNS ISOLATED (-I), however this process was started. A child does
+            # not inherit -E, -s, -S or -P, and mirroring them is six flags to get right; -I drops the
+            # caller's PYTHON* variables, the user's site-packages and the walker's own directory
+            # (which it does not need: it imports only the standard library and pycvc). A virtual
+            # environment's own site-packages survive -I, so the interpreter that imports pycvc here
+            # imports it there. Standard input is closed and the run is bounded, so a walker that
+            # waits (PYTHONINSPECT in a plain run, a hang) ends as "could not evaluate".
+            chain = subprocess.run([sys.executable, "-I", verifier, "--cert", cached_path,
                                     "--trust-dir", a.trust_dir, "--require-external-car"],
-                                   capture_output=True, text=True)
+                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=45)
+        except subprocess.TimeoutExpired:
+            chain = subprocess.CompletedProcess([], 2, "", "the chain walker did not finish within 45 s")
         finally:
             os.unlink(cached_path)
         if chain.returncode == 2:

@@ -27,7 +27,7 @@ WORK="$(mktemp -d)"; trap 'rm -rf "$WORK"' EXIT
 python3 - "$SCRIPT" "$WORK/register.py" <<'EXTRACT'
 import sys
 src = open(sys.argv[1]).read()
-marker = "python3 - \"$plist\" <<'PICO'\n"
+marker = "python3 -I - \"$plist\" <<'PICO'\n"
 if marker not in src:
     sys.exit("could not find the libccid registration heredoc in the bootstrap script")
 body = src.split(marker, 1)[1].split("\nPICO\n", 1)[0]

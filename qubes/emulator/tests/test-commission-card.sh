@@ -366,7 +366,13 @@ print("hsm-key-attestation-verify ERROR: the chain walker could not evaluate C.D
 print("DEVAUT_CHAIN=not-evaluated")
 sys.exit(2)
 STUB
-  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py" "$FAKE/verify-notevaluated.py"
+  # A verifier stopped by perl's alarm: it prints a failing verdict line first, then the alarm.
+  cat > "$FAKE/verify-alarmed.py" <<'STUB'
+import os, signal, sys
+print("DEVAUT_CHAIN=failed", flush=True)
+os.kill(os.getpid(), signal.SIGALRM)
+STUB
+  chmod +x "$FAKE/attest-read.sh" "$FAKE/verify-silent.py" "$FAKE/verify-notevaluated.py" "$FAKE/verify-alarmed.py"
   mkdir -p "$FAKE/args" "$FAKE/empty-trust"
   REG_NONE="$FAKE/reg-none.json"
   printf '{"schema":"regalia.staging-hardware/v1","environment":"staging","devices":[]}\n' > "$REG_NONE"
@@ -458,6 +464,11 @@ EOF
       && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
     && P "a chain that could not be EVALUATED is reported as such, not as 'not a genuine card'" \
     || F "DEVAUT_CHAIN=not-evaluated was misreported as a verdict on the card"
+  rc="$(HSM_KEY_ATTEST_VERIFY_PY="$FAKE/verify-alarmed.py" cc_kek --kek-id 0a --kek-ref 1)"
+  { [ "$rc" != 0 ] && grep -q 'stopped by signal 14 (its 60 s limit) — CANNOT BE EVALUATED' "$FAKE/outk" \
+      && ! grep -q 'DID NOT VERIFY' "$FAKE/outk" && no_fragment; } \
+    && P "a verifier killed by its time limit is CANNOT BE EVALUATED, not 'not a genuine card'" \
+    || F "a verifier killed by its alarm was reported as a verdict on the card"
   rc="$(HSM_KEY_ATTEST_VERIFY_PY=/nonexistent cc_kek --kek-id 0a --kek-ref 1)"
   { [ "$rc" != 0 ] && grep -q 'hsm-key-attestation-verify.py not found' "$FAKE/outk" && no_fragment; } \
     && P "no verifier -> CANNOT BE EVALUATED -> failure" || F "the attestation was skipped without a verifier"
@@ -541,15 +552,18 @@ sys.exit(0 if (b["state"], b["public_key_sha256"]) == ("qualified", sys.argv[2])
     && P "bytes that are not an SPKI are a named failure" || F "an unparseable public key was not refused by name"
 
   # ---- the interpreter (the bench, 2026-09-23) -----------------------------------------------------
-  # The python3 first on PATH cannot import pycvc — the bench's system interpreter. A package named
-  # `cvc` that refuses to import stands in for the missing one, for that interpreter only (its own
-  # PYTHONPATH, set by a wrapper), so commission-card.sh must FIND the one that can rather than use
-  # this one. Everything else in the run is unchanged, so this row fails only on the interpreter.
-  mkdir -p "$FAKE/nopycvc/cvc" "$FAKE/pybin"
-  printf 'raise ImportError("simulated: pycvc is not installed")\n' > "$FAKE/nopycvc/cvc/__init__.py"
-  printf '#!/usr/bin/env bash\nPYTHONPATH=%q exec %q "$@"\n' "$FAKE/nopycvc" "$REAL_PY" > "$FAKE/pybin/python3"
+  # The python3 first on PATH cannot import pycvc — the bench's system interpreter. The stand-in is
+  # the real interpreter started with -S (no site-packages at all), so it lacks pycvc HOWEVER it is
+  # asked: the resolver and commission-card.sh run Python isolated (-I, -Es), and the earlier
+  # stand-in, a `cvc` that refused to import placed on PYTHONPATH, is ignored by exactly those flags
+  # and so no longer stood for anything. commission-card.sh must FIND the interpreter that can
+  # import pycvc rather than use this one. NOTE: CEREMONY_VENV below is the resolver's FIRST
+  # candidate, so the resolver never probes this stand-in: the row proves that the KEK section does
+  # not run the bare python3 on PATH, not how the resolver ranks interpreters.
+  mkdir -p "$FAKE/pybin"
+  printf '#!/usr/bin/env bash\nexec %q -S "$@"\n' "$REAL_PY" > "$FAKE/pybin/python3"
   chmod +x "$FAKE/pybin/python3"
-  if "$FAKE/pybin/python3" -c 'import cvc' 2>/dev/null; then
+  if "$FAKE/pybin/python3" -I -c 'import cvc' 2>/dev/null || "$FAKE/pybin/python3" -c 'import cvc' 2>/dev/null; then
     F "the pycvc-less python3 stand-in imports cvc — the interpreter rows prove nothing"
   else
     rc="$(PATH="$FAKE/pybin:$PATH" CEREMONY_VENV="$REAL_PY_ROOT" KID=21 KDER="$RSA_DER" ATHEX="$CE04_RSA" cc_kek --kek-id 21 --kek-ref 4)"

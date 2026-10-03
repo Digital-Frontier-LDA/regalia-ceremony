@@ -43,6 +43,12 @@ jobs:
         # ever run in private CI.
         run: tools/hsm-lint-predicates.sh
 
+      - name: Python runs isolated (tools/python-isolation-lint.sh and its test; gating, no hardware)
+        # `python3 -c` puts the working directory first on the module path: a secrets.py beside the
+        # ceremony chose the key a generator printed. The static rule, then the generators run
+        # beside planted modules.
+        run: qubes/emulator/tests/test-python-isolation.sh
+
       - name: python compiles
         # -exec … {} + instead of $(find …) — no word-splitting on paths (SC2046).
         run: find . -name '*.py' -not -path './.git/*' -exec python3 -m py_compile {} +

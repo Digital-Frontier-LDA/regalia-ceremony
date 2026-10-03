@@ -80,7 +80,7 @@ say "output: $OUT"
 [ -r "$MODULE" ] || { echo "REFUSING: no PKCS#11 module at $MODULE" >&2; exit 2; }
 [ -n "$UART" ] && [ -e "$UART" ] || { echo "REFUSING: no Debug Probe UART found (set HSM_UART)" >&2; exit 2; }
 [ -r "$UART" ] && [ -w "$UART" ] || { echo "REFUSING: $UART is not readable (dialout group, or: sudo chmod o+rw $(readlink -f "$UART"))" >&2; exit 2; }
-"$PYBIN" -c 'import serial' 2>/dev/null || { echo "REFUSING: pyserial missing for $PYBIN (set HSM_PYSERIAL_PYTHON)" >&2; exit 2; }
+"$PYBIN" -I -c 'import serial' 2>/dev/null || { echo "REFUSING: pyserial missing for $PYBIN (set HSM_PYSERIAL_PYTHON)" >&2; exit 2; }
 [ "$POWER_MODE" = manual ] || command -v qrexec-client-vm >/dev/null || { echo "REFUSING: not a Qubes qube, no power control" >&2; exit 2; }
 # ONLY A REGISTERED DISPOSABLE CARD. The serial resolves the slot; nothing here defaults to slot 0.
 command -v hsm_assert_staging_card >/dev/null 2>&1 \
@@ -92,7 +92,7 @@ say "power: $(tail -1 "$OUT/power-status.txt")"
 
 # THE BOOT LOG IS THE ONLY WAY TO TELL "NO DAMAGE" FROM "DAMAGE, REPAIRED". Prove it arrives before
 # spending cuts on a channel that is silent: one cycle's boot must print SOMETHING.
-capture(){ "$PYBIN" - "$UART" "$1" <<'EOPY' &
+capture(){ "$PYBIN" -I - "$UART" "$1" <<'EOPY' &
 import serial, sys
 s = serial.Serial(sys.argv[1], 115200, timeout=0.5)
 with open(sys.argv[2], "ab", buffering=0) as f:

@@ -41,7 +41,7 @@ done
 [ "$converged" -eq 1 ] || dpkg --unpack "$HERE"/apt/*.deb
 DEBIAN_FRONTEND=noninteractive dpkg --configure -a
 dpkg --audit
-python3 "$HERE/bundle-tool.py" verify "$HERE"
+python3 -Es "$HERE/bundle-tool.py" verify "$HERE"
 PIP_NO_CACHE_DIR=1 pip3 install --no-index --find-links "$HERE/wheels" --require-hashes --break-system-packages -r "$HERE/requirements.txt" \
   || PIP_NO_CACHE_DIR=1 pip3 install --no-index --find-links "$HERE/wheels" --require-hashes -r "$HERE/requirements.txt"
 install -D -m 0755 "$HERE/bin/sops" /opt/vault-bin/sops

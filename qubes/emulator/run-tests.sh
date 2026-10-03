@@ -366,6 +366,7 @@ say "LOCALE (a bracket range in a validator means ASCII, under a UTF-8 locale to
 "$HERE/tests/test-locale-ranges.sh" || suite_failed "test-locale-ranges.sh"
 say "NO PIN ON ARGV (the fleet drill against recording stubs; every script passes secrets as env:NAME)"
 "$HERE/tests/test-no-pin-on-argv.sh" || suite_failed "test-no-pin-on-argv.sh"
+"$HERE/tests/test-python-isolation.sh" || suite_failed "test-python-isolation.sh"
 say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"
 "$HERE/tests/test-go-nogo-one-script.sh" || suite_failed "test-go-nogo-one-script.sh"
 
