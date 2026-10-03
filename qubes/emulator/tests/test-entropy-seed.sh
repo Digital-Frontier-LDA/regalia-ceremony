@@ -3,6 +3,7 @@
 # Owner's rule (2026-09-25): dice are ALWAYS mixed in on top of the Nitrokey HSM's RNG, so the
 # step must refuse without either. Runs natively: hsm-random.py is a stub, the dice come from a
 # file (dice-entropy.py --from-stdin), hsm-random.py is a stub, everything else is the real code.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

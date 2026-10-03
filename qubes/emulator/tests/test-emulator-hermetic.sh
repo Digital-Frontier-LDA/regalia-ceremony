@@ -36,6 +36,17 @@ lift="$(grep -n '^unset PCSCLITE_CSOCK_NAME' "$RT" | head -1 | cut -d: -f1)"
 [ "$(grep -c '^unset PCSCLITE_CSOCK_NAME' "$RT")" = 1 ] && P "and lifted in exactly one place" || F "PCSCLITE_CSOCK_NAME is unset in more than one place"
 grep -q '^boot_all || exit 2' "$RT" && P "a refused boot stops the run" || F "run-tests.sh goes on after boot_all refuses"
 
+hdr "every suite of the model tier carries the guard itself, so a suite run BY HAND is covered too"
+unset_at="$(grep -n '^unset PCSCLITE_CSOCK_NAME' "$RT" | head -1 | cut -d: -f1)"
+missing=""; counted=0
+for t in $(head -n "$((unset_at - 1))" "$RT" | grep -o '"\$HERE/tests/test-[A-Za-z0-9_-]*\.sh"' | sed 's#"\$HERE/tests/##;s#"$##' | sort -u); do
+  counted=$((counted + 1))
+  grep -q '^export PCSCLITE_CSOCK_NAME="\${PCSCLITE_CSOCK_NAME:-/nonexistent/' "$HERE/$t" \
+    || [ "$t" = test-emulator-hermetic.sh ] || grep -q 'PCSCLITE_CSOCK_NAME=' "$HERE/$t" || missing="$missing $t"
+done
+[ "$counted" -gt 80 ] && P "$counted model-tier suites found in run-tests.sh" || F "only $counted model-tier suites found: the list was not read"
+[ -z "$missing" ] && P "each sets PCSCLITE_CSOCK_NAME to a socket that does not exist unless the runner already did" || F "suites without the guard:$missing"
+
 hdr "nothing the model tier runs elevates a card tool (sudo, env -i and systemd-run drop the variable)"
 QUBES="$(cd "$EMU/.." && pwd)"
 CARD='opensc-tool|pkcs11-tool|pkcs15-tool|sc-hsm-tool|ykman|pcsc_scan|gpg --card|hsm-random|smartcard|scriptrunner'

@@ -3,6 +3,7 @@
 # mistyped --need token. An unrecognised device name must be a hard error BEFORE any probe,
 # so an operator can't accidentally skip (e.g.) the SLE-4442 reader check and still get GO.
 # Runs natively, no daemons needed (it asserts the arg-validation path, which exits early).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GN="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

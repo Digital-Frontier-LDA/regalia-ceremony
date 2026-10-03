@@ -5,6 +5,7 @@
 # Asserts: preflight.sh is gone and nothing calls it; --env-only is the environment gate ceremony.sh
 # runs; a full run runs every self-test; a broken tool is a FAIL and a NO-GO; every item line reads
 # OK, WARN or FAIL, and the last line is GO or NO-GO.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

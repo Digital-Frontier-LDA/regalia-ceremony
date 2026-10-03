@@ -13,6 +13,7 @@
 #       part that silently breaks: each role needs its KEY *and* its CERTIFICATE, because
 #       gnupg-pkcs11-scd and ssh-keygen -D enumerate a token BY CERTIFICATE. A key imported without
 #       one is invisible to the tools that need it, while still appearing in --list-objects.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ASSERT="$HERE/../../../hsm-host-role/files/assert-no-dkek.sh"

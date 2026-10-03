@@ -10,6 +10,7 @@
 # Runs natively, no daemons: `timeout` and `pkcs11-tool` are stubbed on PATH so
 # `--list-slots` returns a configurable slot dump. We assert on the HSM section only
 # (preflight noise on a non-vault host is irrelevant to this check).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GN="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

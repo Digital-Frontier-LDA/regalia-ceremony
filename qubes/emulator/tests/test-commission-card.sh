@@ -8,6 +8,7 @@
 # So the property under test is not "does it check things" but "does it REFUSE when it cannot tell".
 # A commissioning script that exits 0 because a tool was missing certifies nothing while looking
 # like it certified everything — and that is the exact failure this project has shipped repeatedly.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CC="$HERE/../../../hsm-host-role/files/commission-card.sh"

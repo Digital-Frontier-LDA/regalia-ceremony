@@ -4,6 +4,7 @@
 # share-splitting path: it MUST reconstruct-verify before distributing, MUST abort if the
 # split doesn't rebuild the secret, and MUST refuse multi-line / oversized secrets that
 # ssss would silently truncate. Runs natively (ssss + bash); qrencode/lp are stubbed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

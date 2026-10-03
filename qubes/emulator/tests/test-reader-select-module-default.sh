@@ -13,6 +13,7 @@
 # The staging battery then fell back to slot 0 — a Virtual PCD — and reported
 # "serial 'DENK0404144' != pinned 'ESP41D722E2'". It refused for the right reason about the wrong
 # card, which is the most misleading way for a guard to be right.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"

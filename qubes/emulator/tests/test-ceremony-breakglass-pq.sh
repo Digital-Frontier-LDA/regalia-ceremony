@@ -4,6 +4,7 @@
 # splits it with ssss and verifies the split, and hands only the public recipient to the payload
 # step. It refuses to overwrite a secret already in the workdir and refuses to fall back to a
 # classical key when age cannot make a post-quantum one.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

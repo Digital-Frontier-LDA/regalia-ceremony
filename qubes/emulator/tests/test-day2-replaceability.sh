@@ -21,6 +21,7 @@
 # new DKEK (kcv A18E58706FDF611C) re-imported the same seed key to the same address. A stub that
 # made the address depend on the DKEK would pass a broken system, so the negative controls below
 # exist to prove this stub can distinguish the two.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 

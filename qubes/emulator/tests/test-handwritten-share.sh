@@ -3,6 +3,7 @@
 # prints only a blank form, shows the share on the terminal, clears it, and requires the operator
 # to type it back from the paper. Driven through a real pseudo-terminal (script), as in the vault's
 # xterm; a stub lp records everything sent to the printer.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

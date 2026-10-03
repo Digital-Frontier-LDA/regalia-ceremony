@@ -17,6 +17,7 @@
 #   3) the toolkit dir the recoverer cd's into (the one holding bip39-slip39-backup.py) must
 #      co-locate wheels/ + requirements.txt so the runbook's RELATIVE pip command resolves.
 # Runs natively (bash + coreutils); no hardware/printer/python needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

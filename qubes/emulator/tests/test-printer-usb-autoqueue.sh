@@ -4,6 +4,7 @@
 # make-and-model (no model hard-coded); only a usb:// device is ever used; the device URI and the
 # driver name reach lpadmin as checked plain arguments. Fake lpstat/lpinfo/lpadmin/sudo; the
 # lpinfo output is shaped like CUPS 2.4 with Debian's printer-driver-brlaser installed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

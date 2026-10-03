@@ -10,6 +10,7 @@
 # card's 256 bytes, and never put the share on the terminal.
 #
 # Runs natively with a stubbed sle4442-manager modelling the counter, capacity and read-back.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

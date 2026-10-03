@@ -7,6 +7,7 @@
 # `pkcs11-tool --login --list-objects` listed no private key at all. A script that sent the first
 # APDU and not the second would look like it worked, and the failure would surface as "the ceremony
 # imported nothing" days later. So both APDUs, and all four status words, are the test.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 UNWRAP="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/hsm-unwrap-key.sh"

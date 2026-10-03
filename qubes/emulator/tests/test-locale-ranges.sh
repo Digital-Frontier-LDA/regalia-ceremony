@@ -11,6 +11,7 @@
 #
 # No hardware: the token tools and qvm-* are replaced by stubs that say they were reached and fail.
 # REQUIRE_UTF8_LOCALE=1 (CI) turns a missing en_US.UTF-8 into a failure instead of a skip.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"

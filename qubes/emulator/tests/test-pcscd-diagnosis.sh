@@ -10,6 +10,7 @@
 # hsm_ensure_readers reports rather than repairs: a drill that silently fixes the host hides the
 # condition from its own transcript, and restarting pcscd under another operator's session on a
 # shared bench is not a drill's decision.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../../.." && pwd)"

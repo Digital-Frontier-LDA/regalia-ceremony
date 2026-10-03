@@ -32,6 +32,7 @@
 # operational mistakes live. Where the suite touches a firmware behaviour (power-off clearing
 # auth), it pins the SHAPE the hardware must satisfy so a contradicting hardware result is
 # caught, not absorbed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 
 pass=0; fail=0

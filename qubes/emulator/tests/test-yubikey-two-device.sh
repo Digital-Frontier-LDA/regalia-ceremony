@@ -3,6 +3,7 @@
 # A two-site ceremony relies on both recipients remaining usable after the second
 # token is commissioned; overwriting the first identity would make that rehearsal
 # falsely green until recovery day.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HERE/../bin/age-plugin-yubikey"

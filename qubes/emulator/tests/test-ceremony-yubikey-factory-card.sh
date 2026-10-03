@@ -4,6 +4,7 @@
 # it sets the PUK to the new PIN. So the step must set the PIN and PUK to the values step 0 loaded
 # for ESCROW (never prompt-typed ones), prove the escrowed PIN opens the card, switch to a
 # PIN-protected TDES management key, and only then generate. A failed generation is a failure.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(mktemp -d)"

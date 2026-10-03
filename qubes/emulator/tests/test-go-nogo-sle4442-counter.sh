@@ -8,6 +8,7 @@
 # Runs natively, no daemons: `timeout` and `opensc-tool` are stubbed on PATH so the SLE-4442
 # security-memory read returns a configurable error counter. We assert on the SLE-4442 section
 # only (preflight noise on a non-vault host is irrelevant to these checks).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GN="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

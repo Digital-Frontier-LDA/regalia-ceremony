@@ -14,6 +14,7 @@
 # This test extracts the verify command step_archive actually shows the operator, points its
 # mount at a BLANK disc and at a CORRUPT disc, runs it from the source dir, and asserts it
 # FAILS in both cases (a sound verify rejects a bad burn). Runs natively (bash + coreutils).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

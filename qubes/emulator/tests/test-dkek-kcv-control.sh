@@ -10,6 +10,7 @@
 # The key check value is what distinguishes them: two cards hold the same DKEK iff their KCVs
 # match. This pins the parse (one definition, shared), the all-zero rejection (a Pico prints zeros
 # and two unrelated cards would compare EQUAL), and the fact that the drill actually compares.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

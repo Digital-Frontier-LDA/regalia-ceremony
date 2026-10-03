@@ -9,6 +9,7 @@
 # when nothing can be done about it. So every one of those cases must abort loudly, here.
 #
 # Runs natively: real `age` and `qrencode` if present, otherwise the suite self-skips.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

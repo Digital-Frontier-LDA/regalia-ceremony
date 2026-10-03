@@ -13,6 +13,7 @@
 #
 # The rule is narrow: the token may appear on a SUCCESS line, in a grep that looks for it, or in a
 # comment explaining any of this. Anywhere else in a script that emits it, it is a hazard.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -euo pipefail
 # The orchestrator under test is regalia-kms's e2e/run.sh: it drives this repository's emulator
 # and battery, and lives in the repository whose suites it runs first. Point REGALIA_KMS_DIR at a

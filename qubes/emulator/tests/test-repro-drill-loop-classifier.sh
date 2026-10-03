@@ -8,6 +8,7 @@
 # the bench, so without this suite a broken classifier would be found by a wasted hardware run.
 #
 # SELFTEST-ONLY MODE touches no bench: it exits after the self-test, before the bench lock is taken.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 LOOP="${REPRO_LOOP:-$HERE/../../../tools/repro-397-import-loop.sh}"

@@ -19,6 +19,7 @@
 #
 # This suite covers the second kind only, and says so. It pins the SHAPE the hardware must satisfy,
 # so a hardware result that contradicts it is caught rather than absorbed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 

@@ -9,6 +9,7 @@
 # preflight reports OK while the money's backup would fail mid-ceremony on the air-gapped
 # (no-pip) qube. This is the regression guard: preflight must import the modules and FAIL
 # CLOSED when a package is missing. Runs natively, no daemons needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

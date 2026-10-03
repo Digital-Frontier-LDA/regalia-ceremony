@@ -15,6 +15,7 @@
 # No hardware: openocd is stubbed, and its invocation LOG is the proof. A refusal is only proven
 # by the absence of any program/dump/erase command in that log — an exit code alone could be any
 # failure, and a refusal that still flashed is not a refusal.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

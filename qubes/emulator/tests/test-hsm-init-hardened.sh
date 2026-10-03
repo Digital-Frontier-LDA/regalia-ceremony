@@ -8,6 +8,7 @@
 # new user PIN and then uses every key (measured 2026-08-01, doc/drills/2026-08-01-so-pin-reset.md).
 # Nothing downstream would notice: the card initialises, the label is right, every later step
 # passes, and the only tell is a bit in an APDU nobody reads back. So the bytes are the test.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 INIT="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/hsm-init-hardened.sh"

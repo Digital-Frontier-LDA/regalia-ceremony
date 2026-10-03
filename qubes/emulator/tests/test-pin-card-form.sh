@@ -2,6 +2,7 @@
 # test-pin-card-form.sh — the blank paper PIN card (ADR-0002 D16): a row per device with a box per
 # digit and a handwritten serial, the rules printed on it, and no PIN anywhere (the printer sees only
 # the blank form). Step 0 prints it before showing the day-to-day PINs.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

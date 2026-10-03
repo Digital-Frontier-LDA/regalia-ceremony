@@ -14,6 +14,7 @@
 #   2) the manifest does not checksum any share file
 #   3) the encrypted artifacts + recovery-kit ARE present (we still burn the real backup)
 # Runs natively (bash + coreutils); no hardware, printer, or python needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

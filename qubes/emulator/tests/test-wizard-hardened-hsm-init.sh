@@ -5,6 +5,7 @@
 # missing step 0 and a missing reader; under the emulator (CEREMONY_SIMULATE=1) the modelled
 # `sc-hsm-tool --initialize` runs, byte-identical to what the step always ran.
 # hsm-devaut-read.sh and hsm-init-hardened.sh are stubbed; they record what they receive.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

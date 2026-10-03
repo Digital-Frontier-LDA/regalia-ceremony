@@ -2,6 +2,7 @@
 # test-python-isolation.sh — a file in the working directory, or a PYTHON* variable, must not be what
 # the ceremony's Python runs. Two halves: the static rule over every script (tools/python-isolation-
 # lint.sh), and the generators and the PIN checker actually RUN beside planted modules.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

@@ -7,6 +7,7 @@
 # Runs natively, no daemons: we fake `lpstat` (a queue with a chosen device-uri) and `ip`
 # (air-gap probe), and assert the gate's verdict. This is the regression guard for the
 # blocklist->allowlist fix.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

@@ -10,6 +10,7 @@
 # The second half matters more than the first. A dangling link is annoying; an UNREACHABLE document
 # is worse, because it is where a stale claim survives — nobody reads it, so nobody notices it now
 # contradicts the ratified plan.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"

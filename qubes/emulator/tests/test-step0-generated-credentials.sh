@@ -3,6 +3,7 @@
 # Driven through a real pseudo-terminal, like the vault's xterm: the driver reads each day-to-day
 # PIN off the "screen" and types it back, as the operator does from paper. No test hook exists in
 # the generator: the values come from `secrets`, and the test learns them only as a person would.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

@@ -4,6 +4,7 @@
 # PATH, go-nogo.sh must NOT silently conclude "no default route (air-gapped)". A swallowed
 # missing-binary error becoming a false-safe verdict would let a networked qube pass, and
 # go-nogo.sh would inherit a false GO. Runs natively, no daemons needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

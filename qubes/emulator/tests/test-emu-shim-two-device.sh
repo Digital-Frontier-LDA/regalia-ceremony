@@ -10,6 +10,7 @@
 #
 # Runs natively (bash only): every assertion here exercises a shim path that returns BEFORE the
 # real OpenSC binary is invoked, and EMU_PKCS11_REAL points at a stub for the rest. No SoftHSM2.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HERE/../bin"

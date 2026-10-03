@@ -10,6 +10,7 @@
 # Runs natively (bash only). sc-hsm-tool / pkcs11-tool are stubbed with a faithful state
 # model of the relevant device behaviour (wrap needs an active DKEK; list-objects shows the
 # funding pubkey once a key exists). No SoftHSM2 / OpenSC needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 # step_hsm_funding is UNSUPPORTED and gated off by default (a born-in-HSM key is not

@@ -21,6 +21,7 @@
 #                 passing between polls: keep polling and the queue eventually drains.
 #   * cancel -x : purges ALL still-pending jobs WITHOUT printing them (they are lost) and deletes
 #                 completed job DATA files. Purging while jobs are pending drops the backup.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

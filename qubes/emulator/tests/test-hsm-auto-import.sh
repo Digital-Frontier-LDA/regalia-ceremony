@@ -16,6 +16,7 @@
 #
 # The API-usage assertions below are REGRESSION tests. Each one encodes a mistake that actually
 # cost debugging time against the real device, so a future edit cannot silently reintroduce it.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

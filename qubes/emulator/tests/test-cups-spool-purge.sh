@@ -14,6 +14,7 @@
 # Runs natively, no daemons/deps: we fake `lp` (renders the document into a spool file and
 # marks the job COMPLETE, exactly as CUPS does), `cancel` (models -x = purge data files vs.
 # no -x = keep completed jobs), and `qrencode`, then assert no plaintext lingers in the spool.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

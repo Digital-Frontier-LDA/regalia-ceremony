@@ -7,6 +7,7 @@
 #   - pin-escrow.sh refuses to run from inside the checkout it writes to (the disc's copy is the
 #     producer);
 #   - step_archive refuses to stage a disc without both tools.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

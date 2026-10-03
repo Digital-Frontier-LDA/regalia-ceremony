@@ -3,6 +3,7 @@
 # and accept a healthy unit. The defective unit is not on any bench, so the three symptoms are
 # replayed here from what DENK0400664 did: a serial that flips to 01A001000000000 on re-enumeration,
 # a 3-byte ATR, and APDUs that die after 242 exchanges.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TOOL="$HERE/../../scripts/nitrokey-acceptance.sh"

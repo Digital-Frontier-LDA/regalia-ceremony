@@ -7,6 +7,7 @@
 #   - takes the PIN on file descriptor 3, never argv;
 #   - writes RSA-OAEP SHA-256, which a TPM-resident key opens with tpm2_rsadecrypt (proven here with
 #     swtpm when tpm2-tools and swtpm are installed, as regalia-kms seal-hsm-pin.sh --from-blob does).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

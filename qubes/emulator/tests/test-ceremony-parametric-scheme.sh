@@ -3,6 +3,7 @@
 # user wants 3 of 5 or 3 of 4"). CEREMONY_THRESHOLD / CEREMONY_SHARES (default 4 / 6) drive every split,
 # its reconstruct-verify, the share forms and the recovery card; nonsense schemes are refused before
 # anything is split. Runs natively (ssss; SLIP-39 cases when shamir_mnemonic imports).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

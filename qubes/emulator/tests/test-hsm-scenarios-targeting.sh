@@ -10,6 +10,7 @@
 # when a second card makes the default ambiguous. Both halves of that are asserted here.
 #
 # No hardware: opensc-tool and pkcs15-tool are stubbed on PATH.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

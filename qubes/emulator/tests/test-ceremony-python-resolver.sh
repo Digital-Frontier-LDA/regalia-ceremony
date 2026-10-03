@@ -6,6 +6,7 @@
 # against the system python3 and six suites failed with messages about missing modules. The
 # resolver must (a) know every location, (b) accept a venv only when its interpreter can actually
 # IMPORT the modules — a bin/python3 that exists is not evidence — and (c) refuse when none can.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 RES="$HERE/../../../tools/ceremony-python.sh"

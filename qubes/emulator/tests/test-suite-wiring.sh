@@ -9,6 +9,7 @@
 # It was found only because a new assertion was added to one of them and did not appear in a full
 # run. "A test file exists" and "a test runs" are different claims; only the second protects
 # anything, and nothing here was checking the second.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

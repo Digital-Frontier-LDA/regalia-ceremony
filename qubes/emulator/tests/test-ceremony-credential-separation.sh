@@ -3,6 +3,7 @@
 # SO PIN, PUK and management key the ceremony escrows must be its OWN value and have the shape its
 # device accepts. PROD refuses a file that breaks either rule; DEV warns and continues. No value is
 # ever printed, in either mode.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"

@@ -16,6 +16,7 @@
 #
 # No hardware: opensc-tool, pkcs15-tool, pkcs11-tool, sc-hsm-tool and scsh's scriptrunner are
 # stubbed on PATH and driven by FAKE_* variables.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

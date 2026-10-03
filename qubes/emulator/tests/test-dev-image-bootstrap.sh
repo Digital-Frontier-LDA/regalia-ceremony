@@ -10,6 +10,7 @@
 #   2. Where the requirements file comes from. `--require-hashes` pins the PACKAGES it names; it
 #      says nothing about the file. Fetched from a branch, whoever can move that branch chooses
 #      what pip installs AS ROOT on the image.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/../../scripts/dev-image-bootstrap.sh"

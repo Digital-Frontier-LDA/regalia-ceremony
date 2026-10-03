@@ -13,6 +13,7 @@
 #
 # So the rule is: with more than one token attached and no explicit --slot, REFUSE. This suite
 # proves the refusal actually happens, because a guard that has never been fired is a comment.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 IMPORT="$HERE/../../scripts/hsm-import-key.sh"

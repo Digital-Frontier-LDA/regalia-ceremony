@@ -18,6 +18,7 @@
 # pkcs11-tool shim's token model (ykcs11 for the YubiKeys, EMU_P11_TOKENS for the Nitrokey), which is
 # real openssl crypto and never reaches the real OpenSC binary: EMU_PKCS11_REAL points at a tripwire
 # that fails the suite if anything tries.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 # TESTS, not HERE: sourcing ceremony.sh below sets HERE to qubes/scripts.
 TESTS="$(cd "$(dirname "$0")" && pwd)"

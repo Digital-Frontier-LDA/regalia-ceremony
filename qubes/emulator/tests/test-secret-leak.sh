@@ -5,6 +5,7 @@
 #
 # Runs natively (ssss + age + python3); the parts needing pcscd/qrencode self-skip. The
 # vpicc per-APDU log redaction is covered by tests/test_sle4442_model.py (TestSecretLeak).
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Honor the env the runners set (CEREMONY_SCRIPTS/EMU_BIN) so this works both from a repo

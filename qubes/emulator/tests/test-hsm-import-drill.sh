@@ -10,6 +10,7 @@
 #
 # The card is modelled with real secp256k1 math (the ceremony's own verifier), so the
 # address-match and sign proofs are genuine crypto, not string comparison.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

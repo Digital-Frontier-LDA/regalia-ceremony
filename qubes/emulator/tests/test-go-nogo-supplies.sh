@@ -3,6 +3,7 @@
 # 2026-09-29: "too many interpretations possible"). Each item is one yes/no question with a number in
 # it, derived from CEREMONY_SHARES; any "no" is a FAIL; without a terminal it cannot be confirmed and
 # is a FAIL. Driven through a real pty (script), as in the vault's xterm.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 GN="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

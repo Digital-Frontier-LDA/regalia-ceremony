@@ -6,6 +6,7 @@
 # a global-scope IPv4 with no default gateway was reported as WARN, so preflight exited 0 and
 # go-nogo inherited a false GO while secrets could be exfiltrated to any directly-connected
 # peer. Runs natively, no daemons needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

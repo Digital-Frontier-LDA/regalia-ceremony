@@ -7,6 +7,7 @@
 # the one occurrence could not say whether sc-hsm-tool's host-side decrypt accepted a wrong password
 # or the card accepted a share. The drill's transcript is pasted into doc/drills, so the evidence
 # must go through elide_hex first.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 DRILL="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/hsm-recovery-drill.sh"

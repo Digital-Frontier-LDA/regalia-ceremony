@@ -17,6 +17,7 @@
 # `sc-hsm-tool` and `opensc-tool` are stubbed on PATH and driven by environment variables, so
 # every card state — absent, wrong serial, near-locked, vulnerable RRC, wrong ATR — is reachable.
 # The orchestrator itself is never modified for testability; it runs exactly as CI runs it.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REAL_CI="$HERE/../../scripts/hsm-staging-ci.sh"

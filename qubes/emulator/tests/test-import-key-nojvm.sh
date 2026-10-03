@@ -8,6 +8,7 @@
 # KEY, and the PrKD is written for the id and label the caller asked for.
 #
 # NO CARD, AND NO JVM — if this suite ever needs a JVM to pass, the point has been lost.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

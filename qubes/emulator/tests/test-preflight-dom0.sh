@@ -4,6 +4,7 @@
 # No Qubes needed — a mock `qvm-prefs` + a mock /proc/swaps drive scripts/preflight-dom0.sh through its
 # netvm=''/maxmem=0(no-ballooning)/DispVM asserts, proving dom0 REFUSES a misconfigured vault and PASSES a
 # hardened one. Mirrors how the real ceremony runs `preflight-dom0.sh vault` in dom0.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$(cd "$HERE/../../scripts" && pwd)}"

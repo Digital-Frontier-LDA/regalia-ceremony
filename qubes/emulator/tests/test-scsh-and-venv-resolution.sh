@@ -12,6 +12,7 @@
 # THE CEREMONY VENV. A drill run from a shell without the venv on PATH reported
 # "python 'mnemonic'/'shamir-mnemonic' packages missing — SLIP-39 arm skipped": an UNVERIFIED on
 # requirement B5's arm caused by nothing but PATH.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

@@ -12,6 +12,7 @@
 # or refused (PRINTER cleared) the queue. Regression guard for the greedy-sed scheme-strip
 # bug where `sed -E 's/.*: *//'` turned smb://host/path into //host/path and the `/*` case
 # arm treated it as a safe local absolute-path device.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"

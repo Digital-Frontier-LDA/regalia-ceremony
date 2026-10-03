@@ -22,6 +22,7 @@
 #   C. A faithful burn with a complete manifest still PASSES (no false rejection).
 #
 # Needs xorriso (+ the growisofs shim); self-skips if xorriso is unavailable.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BIN="$HERE/../bin"
