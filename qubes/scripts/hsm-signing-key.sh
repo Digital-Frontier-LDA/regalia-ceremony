@@ -3,12 +3,20 @@
 # certificate and its DKEK-wrapped backup; and the proof that the backup restores and signs on the spare.
 # regalia#554 (regalia-kms#57: the two PCR keys and the Secure Boot key of the KMS hosts' boot image).
 #
-#   hsm-signing-key.sh generate --serial SERIAL --id HEX --label LABEL --subject "COMMON NAME" --out DIR
-#                               [--key-type rsa:2048|ec:prime256v1] [--days N] [--pin-fd N]
-#   hsm-signing-key.sh restore  --serial SPARE_SERIAL --blob LABEL.wrapped.bin --certificate LABEL.crt.pem
-#                               [--pin-fd N]
-#   hsm-signing-key.sh refuse   --serial OTHER_SERIAL --blob LABEL.wrapped.bin --certificate LABEL.crt.pem
-#                               [--pin-fd N]
+#   hsm-signing-key.sh generate --serial SERIAL --expect-kcv KCV --id HEX --label LABEL --subject "COMMON NAME"
+#                               --out DIR [--key-type rsa:2048|ec:prime256v1] [--days N] [--pin-fd N]
+#   hsm-signing-key.sh restore  --serial SPARE_SERIAL --expect-kcv KCV --blob LABEL.wrapped.bin
+#                               --certificate LABEL.crt.pem [--pin-fd N]
+#   hsm-signing-key.sh refuse   --serial OTHER_SERIAL --expect-kcv OTHER_KCV --blob LABEL.wrapped.bin
+#                               --certificate LABEL.crt.pem [--pin-fd N]
+#
+# THE DOMAIN, BY ITS KEY CHECK VALUE. --expect-kcv is the DKEK key check value the ceremony record gives
+# for the card's own domain (sixteen hex digits, as sc-hsm-tool prints "DKEK key check value"). Before the
+# PIN, the card's status must show a complete DKEK with exactly that value; an import still pending, no
+# DKEK, or another value is refused. A wrapped blob names the DKEK it was made under in its first eight
+# bytes (SEQUENCE { OCTET STRING { KCV || … } }, measured 2026-10-03 on DENK0404380), so: generate checks
+# the blob it wrote names the card's KCV and records it (dkek_kcv); restore needs the blob's KCV to be the
+# card's; refuse needs them to DIFFER, and is never tried on a card of the blob's own domain.
 #
 # KEY TYPES. rsa:2048 (the default) for the boot image's keys (regalia#554); ec:prime256v1 for the membership
 # root (regalia-kms#156, option C), which lives on its OWN HSM and spare under a DKEK used by nothing else.
@@ -19,14 +27,17 @@
 # authenticated request the generation left in EF CE<key reference> are read with opensc-tool alone
 # (hsm-devaut-read.sh, hsm-key-attestation-read.sh: no PIN), and hsm-key-attestation-verify.py checks that
 # C.DevAut chains to CardContact's root in qubes/trust-anchors/smartcard-hsm, that the device signed the
-# request, and that the attested key IS the public key the card exposes. Refused otherwise: a key that was
-# imported, not generated, has no attestation, and that is the difference this step is for. Both files go
+# request, and that the attested key IS the public key the card exposes. Refused otherwise: a key imported
+# from software has no attestation, and that is the difference this step is for. (A key restored from a
+# DKEK blob does have one: the blob carries the generating card's EF CE<ref>, measured 2026-10-03.) Both files go
 # into the evidence; the verifier needs pycvc and runs under the interpreter tools/ceremony-python.sh finds.
 #
 # refuse, on a card of ANOTHER DKEK domain (the KMS hosts', the image-signing pair's), with ONLY that card
-# attached: the blob must NOT unwrap there. It passes only when the card says no and no new key reference
-# appeared; an unwrap that succeeded is the failure this proves cannot happen, and the key it put there is
-# deleted before the script stops.
+# attached: the blob must NOT unwrap there. It passes only when the card gives the answer a card of another
+# DKEK gives ("SC_CARDCTL_SC_HSM_UNWRAP_KEY … failed with Data object not found": it looks the DKEK up by the
+# blob's KCV and has none, measured 2026-10-03) and no new key reference appeared. Any other failure proves
+# nothing about the domain and is refused. An unwrap that succeeded is the failure this proves cannot
+# happen, and the key it put there is deleted before the script stops.
 #
 # CUSTODY, ADR-0002 D19: "a new HSM key: generated on the token; its DKEK-wrapped blob is its backup."
 # The key is never outside a card. The signing HSM and its spare share a DKEK of their own, used by
@@ -53,7 +64,9 @@
 #   Out: DIR/LABEL.crt.pem, DIR/LABEL.pub.der, DIR/LABEL.wrapped.bin, DIR/LABEL.evidence.json.
 #
 # restore, on the spare, with ONLY the spare attached: the blob is unwrapped into the first free key
-# reference; the restored key is found by its public key (an unwrapped key may come back with no label
+# reference, one with neither a key nor an EF CE<ref>: deleting a key leaves its EF CE<ref> behind, and the
+# unwrap refuses a reference that still has one (measured 2026-10-03). The blob carries the key's EF CE<ref>
+# along, so the restored key's attestation is the generating card's. The restored key is found by its public key (an unwrapped key may come back with no label
 # and another id, measured on the drill); it signs a fresh challenge, which must verify under the
 # certificate's key and must NOT verify for other data (a verifier that accepts anything proves nothing).
 # A card whose DKEK is not the blob's refuses the unwrap: that is the refusal the separate domain is for.
@@ -73,14 +86,12 @@
 # now and did not before" (probed twice each time; one new reference, or refused). Until restore has run
 # on the spare, the backup is a claim.
 #
-# NOT RUN ON A CARD. Written against a stubbed card model and the quirks the drills measured; it must be
-# run once on a bench Nitrokey HSM 2 before the ceremony relies on it. To settle there:
-#   * whether deleting the private key also removes the public-key object (the result is judged by
-#     listing the card again, so either answer works, but the message may differ);
-#   * whether an unwrapped key has a public-key object at all (the id-in-use and already-holds checks,
-#     and restore's search, read public-key objects);
-#   * sc-hsm-tool is called without --reader (one token attached is required first); with a card of
-#     another kind in a second reader it may pick that reader and stop the step.
+# RUN ON A CARD 2026-10-03 (DENK0404380, firmware 4.1, OpenSC with every other reader ignored): one RSA-2048
+# and one P-256 key generated, attested and wrapped; the P-256 blob restored onto a free reference and signed;
+# a card of another DKEK refused it. Measured there: deleting the private key also removes the public-key
+# object; an unwrapped key comes back with its label, its id and a public-key object; the unwrap exited 0.
+# Still: sc-hsm-tool is called without --reader (one token attached is required first); with a card of
+# another kind in a second reader it may pick that reader and stop the step.
 set -uo pipefail
 umask 077
 # The PIN lives in a shell variable that is NOT exported. A caller's environment that already has PIN or
@@ -109,9 +120,10 @@ need(){ [ -n "${2-}" ] || die "$1 needs a value"; }
 ok(){ printf '  ok  %s\n' "$*"; }
 
 COMMAND="${1-}"; [ $# -gt 0 ] && shift
-SERIAL="" ID="" LABEL="" SUBJECT="" OUT="" DAYS=3650 PIN_FD="" BLOB="" CERT="" KEY_TYPE="rsa:2048"
+SERIAL="" ID="" LABEL="" SUBJECT="" OUT="" DAYS=3650 PIN_FD="" BLOB="" CERT="" KEY_TYPE="rsa:2048" KCV=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --expect-kcv)  need "$1" "${2-}"; KCV="$(printf '%s' "$2" | tr 'a-f' 'A-F')"; shift 2;;
     --serial)      need "$1" "${2-}"; SERIAL="$2"; shift 2;;
     --id)          need "$1" "${2-}"; ID="$(printf '%s' "$2" | tr 'A-F' 'a-f')"; shift 2;;
     --label)       need "$1" "${2-}"; LABEL="$2"; shift 2;;
@@ -133,6 +145,9 @@ case "$KEY_TYPE" in rsa:2048|ec:prime256v1) ;; *) die "--key-type is rsa:2048 or
 [ -n "$SERIAL" ] || die "--serial is required"
 case "$SERIAL" in *[!A-Za-z0-9]*) die "--serial '$SERIAL' is not a serial";; esac
 case "$PIN_FD" in ''|[0-9]|[1-9][0-9]) ;; *) die "--pin-fd takes a file-descriptor number";; esac
+[ -n "$KCV" ] || die "--expect-kcv is required: the DKEK key check value the ceremony record gives for THIS card's domain"
+case "$KCV" in [0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F]) ;;
+  *) die "--expect-kcv is sixteen hex digits, as sc-hsm-tool prints the DKEK key check value";; esac
 if [ "$COMMAND" = generate ]; then
   [ -n "$ID" ] && [ -n "$LABEL" ] && [ -n "$SUBJECT" ] && [ -n "$OUT" ] || die "generate needs --id, --label, --subject and --out"
   case "$ID" in [0-9a-f][0-9a-f]) ;; *) die "--id must be one byte in hex (two digits)";; esac
@@ -183,6 +198,32 @@ object_ids(){ # $1 = pubkey | privkey
   sed -n 's/^[[:space:]]*ID:[[:space:]]*\([0-9a-fA-F]*\)[[:space:]]*$/\1/p' <<< "$listing" | tr 'A-F' 'a-f'
 }
 pubkey_ids(){ object_ids pubkey; }
+
+# The reader that holds THIS card: the readers in order, the first whose card reports serial $SERIAL
+# (opensc-tool numbers readers, and a laptop's own empty reader may be number 0). Sets READER and DEVOUT.
+find_reader(){
+  local r out
+  READER="" DEVOUT=""
+  for r in $(timeout 30 opensc-tool --list-readers 2>/dev/null | sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p'); do
+    if out="$(timeout 60 bash "$DEVAUT_SH" --reader "$r" --expect-serial "$SERIAL" 2>/dev/null)" && grep -q '^DEVAUT_HEX=' <<< "$out"; then
+      READER="$r"; DEVOUT="$out"; return 0
+    fi
+  done
+  die "no reader holds card $SERIAL with a readable device certificate (EF 2F02)"
+}
+# Whether EF CE<ref> exists: "present", "absent", or a failure. DELETING A KEY LEAVES ITS EF CE<ref> BEHIND
+# (measured 2026-10-03, DENK0404380), and sc-hsm-tool --unwrap-key refuses a reference that still has one
+# ("Found existing certificate in EF with fid ce01"): a reference whose key was deleted is not free.
+ce_file(){ # $1 = key reference
+  local out
+  if out="$(timeout 60 bash "$ATTEST_SH" --reader "$READER" --expect-serial "$SERIAL" --key-ref "$1" 2>&1)"; then
+    printf 'present'
+  elif grep -q '(SW 6A82)' <<< "$out"; then
+    printf 'absent'
+  else
+    return 1
+  fi
+}
 
 # ---- what is left behind ---------------------------------------------------------------------------------
 # fd 9 is the stderr the script was started with. The trap can run while a card command's output is being
@@ -259,6 +300,24 @@ done <<< "$slots"
 [ "$n" -eq 1 ] || die "serial $SERIAL matches $n tokens — attach exactly that card"
 [ "$total" -eq 1 ] || die "$total tokens are attached; attach ONLY card $SERIAL (sc-hsm-tool addresses the card without a reader index)"
 ok "card $SERIAL is the only token attached (slot $SLOT_ID)"
+
+# ---- 1b. the card's DKEK domain, by its key check value ---------------------------------------------
+# sc-hsm-tool prints "DKEK key check value : <16 hex>" only once every share is in; while an import is
+# pending it prints the shares still missing instead, and a card without a DKEK prints neither. No PIN.
+status="$(timeout 60 sc-hsm-tool </dev/null 2>&1)" || die "sc-hsm-tool could not read card $SERIAL's status"
+CARD_KCV="$(sed -n 's/^DKEK key check value[[:space:]]*:[[:space:]]*\([0-9A-Fa-f]\{16\}\)[[:space:]]*$/\1/p' <<< "$status" | tr 'a-f' 'A-F')"
+[ "$(grep -c '^DKEK key check value' <<< "$status")" -eq 1 ] && [ -n "$CARD_KCV" ] \
+  || die "card $SERIAL holds no complete DKEK (no key check value; an import may be pending): $(grep -i dkek <<< "$status" | tr '\n' ' ')"
+[ "$CARD_KCV" = "$KCV" ] || die "card $SERIAL holds DKEK $CARD_KCV, not $KCV, the domain --expect-kcv names: wrong card, or wrong share imported"
+ok "card $SERIAL holds DKEK $CARD_KCV"
+if [ "$COMMAND" != generate ]; then
+  BLOB_KCV="$(cert_tool blob-kcv --blob "$BLOB")" || die "$BLOB is not a sc-hsm-tool wrapped key"
+  if [ "$COMMAND" = restore ]; then
+    [ "$BLOB_KCV" = "$CARD_KCV" ] || die "the blob was wrapped under DKEK $BLOB_KCV and card $SERIAL holds $CARD_KCV: it cannot restore here"
+  else
+    [ "$BLOB_KCV" != "$CARD_KCV" ] || die "card $SERIAL holds DKEK $CARD_KCV, the blob's own: it is the key's domain, not another one, and nothing is tried"
+  fi
+fi
 
 # ---- 2. the PIN, once, verified before any probe ----------------------------------------------------
 if [ -n "$PIN_FD" ]; then
@@ -359,15 +418,8 @@ if [ "$COMMAND" = generate ]; then
   # ---- 6b. the card's own evidence: C.DevAut, and the attestation of THIS key ------------------------------
   [ -r "$DEVAUT_SH" ] && [ -r "$ATTEST_SH" ] && [ -r "$ATTEST_PY" ] && [ -d "$TRUST_DIR" ] \
     || die "the device-attestation tools or the CardContact trust anchors are missing (hsm-devaut-read.sh, hsm-key-attestation-read.sh, hsm-key-attestation-verify.py, qubes/trust-anchors/smartcard-hsm)"
-  # The reader that holds THIS card: the readers in order, the first whose card reports serial $SERIAL
-  # (opensc-tool numbers readers, and a laptop's own empty reader may be number 0).
-  READER="" devout=""
-  for r in $(timeout 30 opensc-tool --list-readers 2>/dev/null | sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p'); do
-    if out="$(timeout 60 bash "$DEVAUT_SH" --reader "$r" --expect-serial "$SERIAL" 2>/dev/null)" && grep -q '^DEVAUT_HEX=' <<< "$out"; then
-      READER="$r"; devout="$out"; break
-    fi
-  done
-  [ -n "$READER" ] || die "no reader holds card $SERIAL with a readable device certificate (EF 2F02)"
+  find_reader
+  devout="$DEVOUT"
   attout="$(timeout 60 bash "$ATTEST_SH" --reader "$READER" --expect-serial "$SERIAL" --key-ref "$REF" 2>&1)" \
     || die "the card has no attestation for key reference $REF (EF CE$(printf '%02X' "$REF")): a generated key always has one. $(tail -1 <<< "$attout")"
   hex_to(){ cert_tool unhex --out "$1"; }
@@ -385,10 +437,11 @@ if [ "$COMMAND" = generate ]; then
   # ---- 7. the backup ----------------------------------------------------------------------------------
   schsm_pin --wrap-key "$W/wrapped.bin" --key-reference "$REF" >/dev/null 2>&1 && [ -s "$W/wrapped.bin" ] \
     || die "sc-hsm-tool --wrap-key failed for key reference $REF (does the card hold its DKEK?)"
-  ok "DKEK-wrapped blob written"
+  [ "$(cert_tool blob-kcv --blob "$W/wrapped.bin")" = "$CARD_KCV" ] || die "the blob does not name DKEK $CARD_KCV"
+  ok "DKEK-wrapped blob written, under DKEK $CARD_KCV"
   # ---- 8. the record, last; then all four files, or none ----------------------------------------------
   cert_tool evidence --device-serial "$SERIAL" --object-id "$ID" --key-reference "$REF" --label "$LABEL" --public-key "$W/pub.der" \
-    --certificate "$W/crt.pem" --blob "$W/wrapped.bin" --devaut "$W/devaut.bin" --attestation "$W/attest.bin" --out "$W/evidence.json" || exit 1
+    --certificate "$W/crt.pem" --blob "$W/wrapped.bin" --dkek-kcv "$CARD_KCV" --devaut "$W/devaut.bin" --attestation "$W/attest.bin" --out "$W/evidence.json" || exit 1
   # Staged under temporary names in --out, then renamed, the record last. Until DONE the exit trap removes
   # every name listed in WRITTEN and deletes the key: a blob that restores must not outlive a refusal.
   for f in crt.pem pub.der wrapped.bin evidence.json; do
@@ -422,18 +475,33 @@ for id in $IDS_BEFORE; do
   cmp -s "$W/before-$id.der" "$W/want.der" && die "card $SERIAL already holds this key (id $id): a restore onto it would prove nothing about the blob"
 done
 used="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap: nothing was unwrapped"
+[ -r "$ATTEST_SH" ] && [ -r "$DEVAUT_SH" ] || die "hsm-key-attestation-read.sh and hsm-devaut-read.sh are needed to find a free key reference"
+find_reader
 DEST=""
-for r in $(seq 1 "$MAX_REF"); do case " $used " in *" $r "*) ;; *) DEST="$r"; break;; esac; done
-[ -n "$DEST" ] || die "no free key reference on card $SERIAL"
+for r in $(seq 1 "$MAX_REF"); do
+  case " $used " in *" $r "*) continue;; esac
+  ce="$(ce_file "$r")" || die "could not tell whether EF CE$(printf '%02X' "$r") exists on card $SERIAL: nothing was unwrapped"
+  [ "$ce" = absent ] && { DEST="$r"; break; }
+done
+[ -n "$DEST" ] || die "no free key reference on card $SERIAL (none of 1..$MAX_REF has neither a key nor a left-over EF CE<ref>)"
 # From here the spare may hold a key nothing vouched for: the exit trap removes it unless DONE.
 UNWRAPPED=1
-# sc-hsm-tool --unwrap-key EXITS 1 EVEN ON SUCCESS (measured 2026-08-06, hsm-recovery-drill.sh): judged by its output.
+# sc-hsm-tool --unwrap-key exited 1 even on success on 2026-08-06 (hsm-recovery-drill.sh) and 0 on 2026-10-03
+# (DENK0404380): judged by its output, never by its status.
 out="$(schsm_pin --unwrap-key "$BLOB" --key-reference "$DEST" 2>&1)"
+# A card whose DKEK is not the blob's answers this, and only this (measured 2026-10-03, DENK0404380): it
+# looks the DKEK up by the blob's check value and has none. Any other failure (a left-over EF CE<ref>, a
+# reader error, a wrong PIN) says nothing about the domain.
+WRONG_DKEK='SC_CARDCTL_SC_HSM_UNWRAP_KEY, \*) failed with Data object not found'
 if [ "$COMMAND" = refuse ]; then
-  # The proof that ANOTHER domain's card cannot hold this key. Passes only when the card said no AND no
-  # new key reference wraps afterwards (probed twice). Anything else leaves the exit trap to delete what
-  # the unwrap put there, and refuses loudly: the separation this domain exists for did not hold.
+  # The proof that ANOTHER domain's card cannot hold this key. Passes only when the card gave the wrong-DKEK
+  # answer AND no new key reference wraps afterwards (probed twice). An unwrap that succeeded leaves the exit
+  # trap to delete what it put there, and refuses loudly: the separation this domain exists for did not hold.
   now="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after the attempt: whether it took the key is not known"
+  if ! grep -qi 'successfully imported' <<< "$out" && [ "$now" = "$used" ] && ! grep -q "$WRONG_DKEK" <<< "$out"; then
+    UNWRAPPED=""
+    die "card $SERIAL did not unwrap the blob, but not with the answer a card of another DKEK gives, so this proves nothing about the domain: $(tail -1 <<< "$out")"
+  fi
   if ! grep -qi 'successfully imported' <<< "$out" && [ "$now" = "$used" ]; then
     UNWRAPPED=""; DONE=1; unset PIN
     printf 'REFUSED-AS-REQUIRED card %s would not unwrap %s: its DKEK is not the blob'"'"'s (%s)\n' "$SERIAL" "$(basename "$BLOB")" "$(tail -1 <<< "$out")"
@@ -442,7 +510,7 @@ if [ "$COMMAND" = refuse ]; then
   die "CARD $SERIAL UNWRAPPED THE BLOB: its DKEK is the blob's, so the key's domain is NOT separate from this card's. The key it put there is being deleted; do not use this blob or this DKEK until that is understood"
 fi
 grep -qi 'successfully imported' <<< "$out" \
-  || die "card $SERIAL did not unwrap the blob (a card whose DKEK is not the blob's refuses it): $(tail -1 <<< "$out")"
+  || die "card $SERIAL did not unwrap the blob: $(tail -1 <<< "$out")"
 now="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after the unwrap"
 case " $now " in *" $DEST "*) ;; *) die "after the unwrap key reference $DEST does not wrap: the blob did not put a key there";; esac
 ids="$(pubkey_ids)" || die "card $SERIAL did not list its public keys after the unwrap"

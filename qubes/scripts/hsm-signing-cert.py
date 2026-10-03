@@ -247,6 +247,19 @@ def verifies(spki, data, signature):
     return done.returncode == 0
 
 
+def blob_kcv(blob):
+    """The DKEK key check value a sc-hsm-tool --wrap-key blob names: SEQUENCE { OCTET STRING { KCV(8) || … }, … }.
+
+    Measured 2026-10-03 on DENK0404380: the eight bytes equal sc-hsm-tool's "DKEK key check value" of the card
+    that wrapped it, and a card of another DKEK refuses the blob with "Data object not found".
+    """
+    tag, body, end = read_tlv(blob)
+    require(tag == 0x30 and end == len(blob), "the blob is not one DER SEQUENCE")
+    tag, key_blob, _ = read_tlv(body)
+    require(tag == 0x04 and len(key_blob) > 8, "the blob does not start with a key blob")
+    return key_blob[:8].hex().upper()
+
+
 def _read(path, limit=1 << 20):
     with open(path, "rb") as f:
         data = f.read(limit + 1)
@@ -281,9 +294,11 @@ def main(argv=None):
     c = sub.add_parser("check")
     c.add_argument("--certificate", required=True)
     c.add_argument("--public-key", required=True)
+    c = sub.add_parser("blob-kcv")
+    c.add_argument("--blob", required=True)
     c = sub.add_parser("evidence")
     for a in ("--device-serial", "--object-id", "--key-reference", "--label", "--public-key", "--certificate", "--blob",
-              "--devaut", "--attestation", "--out"):
+              "--dkek-kcv", "--devaut", "--attestation", "--out"):
         c.add_argument(a, required=True)
     a = p.parse_args(argv)
     try:
@@ -302,6 +317,8 @@ def main(argv=None):
             require(spki == _read(a.public_key), "the certificate is for another public key than the card's")
             require(verifies(spki, tbs, signature), "the certificate's signature does not verify under its own key")
             print("CERTIFICATE-VERIFIES %s" % hashlib.sha256(spki).hexdigest())
+        elif a.command == "blob-kcv":
+            print(blob_kcv(_read(a.blob)))
         else:
             require(re.fullmatch(r"[A-Za-z0-9]{4,32}", a.device_serial) is not None, "--device-serial is not a serial")
             require(re.fullmatch(r"[0-9a-f]{2,4}", a.object_id) is not None, "--object-id is not a hex id")
@@ -311,6 +328,8 @@ def main(argv=None):
             require(cert_key == spki, "the certificate is for another public key than the card's")
             devaut, attestation = _read(a.devaut), _read(a.attestation)
             require(devaut and attestation, "the device certificate and the attestation must not be empty")
+            blob = _read(a.blob)
+            require(blob_kcv(blob) == a.dkek_kcv, "the blob was wrapped under DKEK %s, not %s" % (blob_kcv(blob), a.dkek_kcv))
             record = {"evidence": SCHEMA, "device_serial": a.device_serial, "object_id": a.object_id, "key_type": key_type(spki),
                       "devaut_b64": base64.b64encode(devaut).decode("ascii"), "devaut_sha256": hashlib.sha256(devaut).hexdigest(),
                       "attestation_b64": base64.b64encode(attestation).decode("ascii"),
@@ -318,7 +337,7 @@ def main(argv=None):
                       "key_reference": int(a.key_reference), "label": a.label,
                       "public_key_der_b64": base64.b64encode(spki).decode("ascii"),
                       "public_key_sha256": hashlib.sha256(spki).hexdigest(), "certificate_pem": text,
-                      "wrapped_blob_sha256": hashlib.sha256(_read(a.blob)).hexdigest()}
+                      "dkek_kcv": a.dkek_kcv, "wrapped_blob_sha256": hashlib.sha256(blob).hexdigest()}
             _write(a.out, json.dumps(record, indent=2, sort_keys=True) + "\n", "w")
         return 0
     except (Refused, OSError, ValueError) as refusal:
