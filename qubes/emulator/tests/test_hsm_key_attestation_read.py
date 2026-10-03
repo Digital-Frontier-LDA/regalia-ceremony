@@ -13,6 +13,9 @@ the pin the daemon will compare against.
 Every accept has a matching reject (TESTING.md §18): a missing EF, a failed read part-way, an empty
 file, the wrong card, a malformed key reference, and an APDU that is neither SELECT nor READ BINARY.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import hashlib
 import os
 import subprocess

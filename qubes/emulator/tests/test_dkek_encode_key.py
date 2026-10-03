@@ -14,6 +14,9 @@ agreement with scsh. That one was measured: for the staging share the encoder pr
 (`STEP wrap: keyblob=363 bytes under kcv=BC3174FA8A01D070`, 2026-09-21), and the card accepted the
 resulting blob with SW=9000.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import hashlib
 import importlib.util
 import os

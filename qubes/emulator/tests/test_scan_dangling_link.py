@@ -19,6 +19,9 @@ follows it.
 Run against a synthetic image rather than the card: deterministic, and it does not risk bricking the
 one board on the bench by deliberately corrupting its filesystem.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import unittest
 
 FLASH_BASE = 0x103F0000

@@ -17,6 +17,9 @@ chain, and REJECT a tampered blob, a self-signed cert under --require-external-c
 --expect-* pin, a missing trust anchor, and unparsable input — with the house exit-code
 contract (0 verified / 1 failed / 2 operator error).
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import hashlib
 import importlib.machinery
 import importlib.util

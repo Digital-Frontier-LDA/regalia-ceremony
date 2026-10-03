@@ -7,6 +7,9 @@ on a DIFFERENT but still-valid SLIP-39 word (e.g. ACADEMIC->ACID) — prefix-val
 cannot catch that, but the SLIP-39 RS1024 share checksum can. These tests require verify to
 reject a checksum-invalid reconstruction, not just confirm the prefixes are real words.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import importlib.machinery
 import importlib.util
 import os

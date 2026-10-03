@@ -6,6 +6,9 @@ Locks in the three properties that make it set-once-safe:
   * every k-of-n subset reconstructs (verified, not assumed)
   * --from-entropy is honoured exactly (operator-supplied entropy ends up as the secret)
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import importlib.machinery
 import importlib.util
 import itertools

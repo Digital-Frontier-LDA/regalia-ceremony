@@ -46,6 +46,12 @@ for t in $(head -n "$((unset_at - 1))" "$RT" | grep -o '"\$HERE/tests/test-[A-Za
   grep -qF 'PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"' "$HERE/$t" \
     || [ "$t" = test-emulator-hermetic.sh ] || grep -q 'PCSCLITE_CSOCK_NAME=' "$HERE/$t" || nostub="$nostub $t"
 done
+pymissing=""; pycounted=0
+for t in $(head -n "$((unset_at - 1))" "$RT" | grep -o 'tests/test_[A-Za-z0-9_]*\.py' | sed 's#tests/##' | sort -u); do
+  pycounted=$((pycounted + 1))
+  grep -q 'environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/' "$HERE/$t" && grep -q '"\.\.", "bin")' "$HERE/$t" || pymissing="$pymissing $t"
+done
+[ "$pycounted" -gt 20 ] && [ -z "$pymissing" ] && P "the $pycounted Python suites of the model tier set both too, before their imports" || F "Python suites without the guards ($pycounted read):$pymissing"
 [ "$counted" -gt 80 ] && P "$counted model-tier suites found in run-tests.sh" || F "only $counted model-tier suites found: the list was not read"
 [ -z "$missing" ] && P "each sets PCSCLITE_CSOCK_NAME to a socket that does not exist unless the runner already did" || F "suites without the guard:$missing"
 [ -z "$nostub" ] && P "each puts the emulator's stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first on PATH, as the runner does" || F "suites that would run the real tools by hand:$nostub"

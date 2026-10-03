@@ -6,6 +6,9 @@ The blobs are EF 2F02 and EF CE01 read from DENK0404144 (fw 4.1) on 2026-09-17, 
 certificate chain and a public key. Every accept has a matching reject, because a verifier that
 only ever goes green proves nothing (TESTING.md §18).
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import hashlib
 import importlib.util
 import os
