@@ -268,7 +268,7 @@ refuse_after_keygen(){ # refuse_after_keygen WHAT REASON [env assignments…]
   out="$(env "$@" bash -c 'gen(){ :; }; exec bash "$0" generate --serial DENK0500001 --id 15 --label refused --subject "TEST refused" --out "$1" --pin-fd 3 3<<< "$2"' \
           "$KEYTOOL" "$OUT" "$PIN_SIGNING" 2>&1 | tee -a "$ALL")"; rc=$?
   if grep -q -- "$reason" <<< "$out" && grep -q "the key generated at id 15 was DELETED from card DENK0500001" <<< "$out" \
-     && [ ! -d "$CARDS/DENK0500001/keys/15" ] && ! ls "$OUT" | grep -q refused && [ -z "$(ls -A "$OUT" | grep '^\.')" ]; then P "$what: refused, the key deleted and announced, no file kept"
+     && [ ! -d "$CARDS/DENK0500001/keys/15" ] && ! grep -q refused <<< "$(ls "$OUT")" && ! grep -q '^\.' <<< "$(ls -A "$OUT")"; then P "$what: refused, the key deleted and announced, no file kept"
   else F "$what: $out; card keys: $(keys_on DENK0500001); out: $(ls -A "$OUT")"; fi
   : > "$FAULTS"
 }
@@ -314,7 +314,7 @@ for sig in TERM INT HUP; do
   for _ in $(seq 1 150); do grep -q 'wrapped.bin --key-reference' "$ARGV_LOG" && break; sleep 0.1; done
   kill -"$sig" "$bg" 2>/dev/null; wait "$bg" 2>/dev/null
   cat "$ROOT/sig.out" >> "$ALL"
-  grep -q "the key generated at id 15 was DELETED from card DENK0500001" "$ROOT/sig.out" && [ ! -d "$CARDS/DENK0500001/keys/15" ] && ! ls -A "$OUT" | grep -q signal \
+  grep -q "the key generated at id 15 was DELETED from card DENK0500001" "$ROOT/sig.out" && [ ! -d "$CARDS/DENK0500001/keys/15" ] && ! grep -q signal <<< "$(ls -A "$OUT")" \
     && P "SIG$sig during the final wrap: the key is deleted and the operator is told" || F "SIG$sig: $(cat "$ROOT/sig.out"); keys $(keys_on DENK0500001)"
   : > "$ARGV_LOG"
 done
