@@ -155,8 +155,9 @@ dom="$(sed -n 's/^DOMAIN://p' "$unwrap")"
 [ "$dom" = "$(cat "$C/dkek")" ] || { echo "Error unwrapping key: SW 6A80 (the DKEK is not the blob's)"; exit 1; }
 ! grep -q "^$ref " "$C/refs" 2>/dev/null || { echo "sc-hsm-tool [STUB]: key reference $ref in use" >&2; exit 1; }
 id=31; while [ -d "$C/keys/$id" ]; do id=$((id+1)); done          # an unwrapped key lands at another id, with no label
-mkdir -p "$C/keys/$id"; sed -n 's/^KEY://p' "$unwrap" | base64 -d > "$C/keys/$id/key.pem"; : > "$C/keys/$id/label"
-openssl pkey -in "$C/keys/$id/key.pem" -pubout -outform DER -out "$C/keys/$id/pub.der" 2>/dev/null
+[ -n "${STUB_UNWRAP_AT:-}" ] && id="$STUB_UNWRAP_AT"                # ... or on an id that holds a public object already
+mkdir -p "$C/keys/$id"; sed -n 's/^KEY://p' "$unwrap" | base64 -d > "$C/keys/$id/key.pem"; [ -e "$C/keys/$id/label" ] || : > "$C/keys/$id/label"
+[ -n "${STUB_UNWRAP_AT:-}" ] || [ "${STUB_UNWRAP_NO_PUB:-0}" = 1 ] || openssl pkey -in "$C/keys/$id/key.pem" -pubout -outform DER -out "$C/keys/$id/pub.der" 2>/dev/null
 echo "$ref $id" >> "$C/refs"
 printf 'Wrapped key contains:\n  Key blob\n  Private Key Description (PRKD)\nKey successfully imported\n'
 exit 1                                                                   # measured: exits 1 even on success
@@ -273,7 +274,9 @@ refuse_after_keygen(){ # refuse_after_keygen WHAT REASON [env assignments…]
   : > "$FAULTS"
 }
 : > "$CARDS/DENK0500001/dkek"
-refuse_after_keygen "a card with no DKEK" "expected exactly one new key reference"
+out="$(gen nodkek 15)"; rc=$?
+[ "$rc" = 1 ] && grep -q "0 key references wrap but the card lists 3 private keys: the probes did not see every key; nothing was generated" <<< "$out" \
+  && [ ! -d "$CARDS/DENK0500001/keys/15" ] && P "a card with no DKEK: refused before anything is generated (no reference wraps)" || F "no DKEK (rc=$rc): $out"
 printf 'signing-domain' > "$CARDS/DENK0500001/dkek"
 refuse_after_keygen "the card generates the key and the tool's answer is lost" "did not report a generated key" STUB_KEYGEN_LIES=1
 refuse_after_keygen "a certificate that does not verify" "does not verify" STUB_SIGN_OTHER=1
@@ -288,8 +291,15 @@ refuse_after_keygen "the card does not sign the certificate" "the card did not s
 # and which is the new key's cannot be told. Refused.
 printf 'sc-hsm-tool --key-reference 1 --pin\nsc-hsm-tool --key-reference 1 --pin\n' > "$FAULTS"
 out="$(gen tworefs 15)"; rc=$?
-[ "$rc" = 1 ] && grep -q "expected exactly one new key reference after generating, found 2" <<< "$out" && [ ! -d "$CARDS/DENK0500001/keys/15" ] \
-  && P "two new key references after generating: refused, the key deleted" || F "two new references (rc=$rc): $out"
+[ "$rc" = 1 ] && grep -q "2 key references wrap but the card lists 3 private keys" <<< "$out" && [ ! -d "$CARDS/DENK0500001/keys/15" ] \
+  && P "a key reference that fails both probes: refused before generating (references counted against private keys)" || F "two new references (rc=$rc): $out"
+# N2: the same key's reference failing both probes BEFORE, and the new key's both probes AFTER: without the count,
+# the old key's reference would be taken for the new one and its blob recorded
+printf 'sc-hsm-tool --key-reference 1 --pin\nsc-hsm-tool --key-reference 1 --pin\n' > "$FAULTS"
+out="$(gen fourfaults 15)"; rc=$?
+[ "$rc" = 1 ] && ! grep -q SIGNING-KEY <<< "$out" && [ ! -e "$OUT/fourfaults.evidence.json" ] && [ ! -d "$CARDS/DENK0500001/keys/15" ] \
+  && P "an existing key's reference unseen before generating: refused, no record names it" || F "four faults (rc=$rc): $out"
+
 : > "$FAULTS"
 # one probe of an EXISTING key fails before generating, and one of the new key after: without the second
 # probe the old key's reference would be taken for the new one, and its blob recorded as the new key's
@@ -351,15 +361,24 @@ done
 card DENK0500003 "$PIN_SPARE" signing-domain; attach DENK0500003
 out="$(restore DENK0500003 pcr-initrd "$PIN_SPARE" secure-boot)"
 [ $? = 1 ] && grep -q "after the unwrap no NEW key on card DENK0500003 has the certificate's public key: the blob is not that key's" <<< "$out" \
-  && grep -q "the key the refused restore had unwrapped (id 31, key reference 1) was DELETED from card DENK0500003" <<< "$out" && [ -z "$(keys_on DENK0500003)" ] \
+  && grep -q "the key the refused restore had unwrapped (key reference 1, id 31) was DELETED from card DENK0500003" <<< "$out" && [ -z "$(keys_on DENK0500003)" ] \
   && P "a blob that is not the certificate's key: refused, and the key it unwrapped is deleted and announced" || F "mismatched blob: $out; keys $(keys_on DENK0500003)"
 out="$(STUB_SIGN_OTHER=1 restore DENK0500003 pcr-system "$PIN_SPARE")"
 [ $? = 1 ] && grep -q "did not sign a challenge that verifies" <<< "$out" && grep -q "was DELETED from card DENK0500003" <<< "$out" && [ -z "$(keys_on DENK0500003)" ] \
   && P "a restored key that signs other data than asked: refused, and deleted" || F "wrong signature: $out; keys $(keys_on DENK0500003)"
 out="$(STUB_SIGN_OTHER=1 STUB_DELETE_FAILS=1 restore DENK0500003 pcr-system "$PIN_SPARE")"
-grep -q "THE KEY UNWRAPPED AT id 31 (key reference 1) IS STILL ON CARD DENK0500003 after a refused restore" <<< "$out" \
+grep -q "A KEY IS STILL AT KEY REFERENCE 1 ON CARD DENK0500003 after a refused restore (deleting id 31 did not remove it)" <<< "$out" \
   && P "a refused restore whose key cannot be deleted says the key is still there" || F "refused restore, failed delete: $out"
 rm -rf "$CARDS/DENK0500003/keys/31"; : > "$CARDS/DENK0500003/refs"
+out="$(STUB_UNWRAP_NO_PUB=1 restore DENK0500003 pcr-initrd "$PIN_SPARE" secure-boot)"
+[ $? = 1 ] && grep -q "the key the refused restore had unwrapped (key reference 1, id 31) was DELETED" <<< "$out" && [ -z "$(keys_on DENK0500003)" ] \
+  && P "an unwrapped key with NO public object is still found and deleted after a refusal" || F "unwrap without a public object: $out; keys $(keys_on DENK0500003)"
+mkdir -p "$CARDS/DENK0500003/keys/40"; cp "$OUT/pcr-system.pub.der" "$CARDS/DENK0500003/keys/40/pub.der"     # an unrelated public object, no private key
+out="$(STUB_UNWRAP_AT=40 restore DENK0500003 pcr-initrd "$PIN_SPARE" secure-boot)"
+[ $? = 1 ] && grep -q "was DELETED" <<< "$out" && [ ! -f "$CARDS/DENK0500003/keys/40/key.pem" ] && [ -f "$CARDS/DENK0500003/keys/40/pub.der" ] \
+  && ! grep -q "^1 " "$CARDS/DENK0500003/refs" \
+  && P "a key unwrapped onto an id holding an unrelated public object: the private key is deleted, the public object kept" || F "unwrap onto an existing id: $out; $(ls "$CARDS/DENK0500003/keys/40")"
+rm -rf "$CARDS/DENK0500003/keys/40"; : > "$CARDS/DENK0500003/refs"
 python3 -I "$SCRIPTS/hsm-signing-cert.py" tbs --public-key "$OUT/secure-boot.pub.der" --subject "TEST forged" --days 30 --serial-hex 1234567890abcdef12 --out "$ROOT/forged.tbs"
 openssl genrsa -out "$ROOT/other.key" 2048 2>/dev/null; openssl dgst -sha256 -sign "$ROOT/other.key" -out "$ROOT/forged.sig" "$ROOT/forged.tbs"
 python3 -I "$SCRIPTS/hsm-signing-cert.py" assemble --tbs "$ROOT/forged.tbs" --signature "$ROOT/forged.sig" --out "$OUT/forged.crt.pem"

@@ -155,7 +155,7 @@ pubkey_ids(){ object_ids pubkey; }
 # fd 9 is the stderr the script was started with. The trap can run while a card command's output is being
 # discarded (a signal during `… >/dev/null 2>&1`), and its messages must still reach the operator.
 exec 9>&2
-KEY_ASKED="" UNWRAPPED="" DONE="" WRITTEN=() IDS_BEFORE=""
+KEY_ASKED="" UNWRAPPED="" DONE="" WRITTEN=() IDS_BEFORE="" PRIV_BEFORE=""
 say9(){ printf 'hsm-signing-key: %s\n' "$*" >&9 2>/dev/null || true; }
 remove_key(){ # $1 = id: delete both objects, then LIST BOTH KINDS AGAIN: the listings decide, not the deletes' status
   local pub priv
@@ -179,16 +179,24 @@ on_exit(){
       fi
     fi
     if [ -n "$UNWRAPPED" ] && [ -n "${PIN:-}" ]; then
-      # restore was refused after the unwrap: the spare holds a key nothing vouched for
-      if ! ids="$(pubkey_ids)"; then
-        left="a key WAS UNWRAPPED at key reference $DEST on card $SERIAL and the restore was refused. COULD NOT LIST the card: delete that key before the card is used"
-      else
-        left="the refused restore left no key on card $SERIAL"
-        for id in $ids; do
-          grep -qx "$id" <<< "$IDS_BEFORE" && continue
-          if remove_key "$id"; then left="the key the refused restore had unwrapped (id $id, key reference $DEST) was DELETED from card $SERIAL"
-          else left="THE KEY UNWRAPPED AT id $id (key reference $DEST) IS STILL ON CARD $SERIAL after a refused restore: delete it before the card is used"; break; fi
+      # restore was refused after the unwrap: the spare may hold a key nothing vouched for, at key reference
+      # $DEST. It is looked for among the private keys too (an unwrapped key may have no public object), only
+      # what is NEW is deleted (a private key at an id whose public object was there before loses only the
+      # private key), and the key REFERENCE decides the message: "no key" only when $DEST no longer wraps.
+      local priv pub gone=""
+      if priv="$(object_ids privkey)" && pub="$(object_ids pubkey)"; then
+        for id in $(printf '%s\n%s\n' "$priv" "$pub" | sort -u); do
+          grep -qx "$id" <<< "$PRIV_BEFORE" && continue        # a private key that was there before is not the blob's
+          p11_pin --delete-object --type privkey --id "$id" >/dev/null 2>&1
+          grep -qx "$id" <<< "$IDS_BEFORE" || p11_pin --delete-object --type pubkey --id "$id" >/dev/null 2>&1
+          gone="$gone $id"
         done
+      fi
+      if ! grep -qw "$DEST" <<< "$(probe_refs)"; then
+        if [ -n "$gone" ]; then left="the key the refused restore had unwrapped (key reference $DEST, id$gone) was DELETED from card $SERIAL"
+        else left="the refused restore left no key on card $SERIAL (key reference $DEST does not wrap)"; fi
+      else
+        left="A KEY IS STILL AT KEY REFERENCE $DEST ON CARD $SERIAL after a refused restore${gone:+ (deleting id$gone did not remove it)}: delete it before the card is used"
       fi
     fi
   fi
@@ -270,12 +278,17 @@ if [ "$COMMAND" = generate ]; then
   ids="$(pubkey_ids)" || die "the card did not list its public keys: whether id $ID is free is not known"
   grep -qx "$ID" <<< "$ids" && die "object id $ID is already in use on card $SERIAL"
   before="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap: nothing was generated"
+  # ... and as many as the card's private keys: a reference that failed to wrap in BOTH probes would
+  # otherwise look new after generating, and another key's blob would be recorded as this one's
+  privs="$(object_ids privkey)" || die "the card did not list its private keys"
+  [ "$(wc -w <<< "$before")" = "$(grep -c . <<< "$privs")" ] \
+    || die "$(wc -w <<< "$before") key references wrap but the card lists $(grep -c . <<< "$privs") private keys: the probes did not see every key; nothing was generated"
   # ---- 4. the key, on the card ----------------------------------------------------------------------
   # From here the card may hold a key at $ID whatever this script learns of it (a lost answer, a signal):
   # the exit trap looks.
   KEY_ASKED=1
   gen="$(p11_pin --keypairgen --key-type rsa:2048 --id "$ID" --label "$LABEL" 2>&1)" \
-    || die "the card did not report a generated key (${gen:+$(grep -aoE 'CKR_[A-Z_]+' <<< "$gen" | head -1)}; pkcs11-tool failed)"
+    || die "the card did not report a generated key ($(grep -aoE 'CKR_[A-Z_]+' <<< "$gen" | head -1 | sed 's/$/, /')pkcs11-tool failed)"
   ok "RSA-2048 key $LABEL generated on card $SERIAL at id $ID"
   # ---- 5. its key reference -------------------------------------------------------------------------
   after="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap after generating"
@@ -283,6 +296,9 @@ if [ "$COMMAND" = generate ]; then
   for r in $after; do case " $before " in *" $r "*) ;; *) REF="$r"; count=$((count + 1));; esac; done
   [ "$count" -eq 1 ] || die "expected exactly one new key reference after generating, found $count (before:${before:- none}, after:${after:- none})"
   for r in $before; do case " $after " in *" $r "*) ;; *) die "key reference $r wrapped before generating and does not now: the card's answers are not stable";; esac; done
+  privs="$(object_ids privkey)" || die "the card did not list its private keys after generating"
+  [ "$(wc -w <<< "$after")" = "$(grep -c . <<< "$privs")" ] \
+    || die "$(wc -w <<< "$after") key references wrap but the card lists $(grep -c . <<< "$privs") private keys after generating: which reference is the new key's is not known"
   ok "its key reference is $REF"
   # ---- 6. the certificate, signed by the card ---------------------------------------------------------
   read_pubkey "$ID" "$W/pub.der" || die "cannot read the public key of id $ID"
@@ -303,11 +319,14 @@ if [ "$COMMAND" = generate ]; then
   # Staged under temporary names in --out, then renamed, the record last. Until DONE the exit trap removes
   # every name listed in WRITTEN and deletes the key: a blob that restores must not outlive a refusal.
   for f in crt.pem pub.der wrapped.bin evidence.json; do
-    WRITTEN+=("$OUT/.$LABEL.$f.tmp" "$OUT/$LABEL.$f")
+    WRITTEN+=("$OUT/.$LABEL.$f.tmp")
     cp "$W/$f" "$OUT/.$LABEL.$f.tmp" || die "cannot write into $OUT"
   done
   for f in crt.pem pub.der wrapped.bin evidence.json; do
+    # mv -n returns 0 without moving when the target appeared meanwhile: the .tmp still being there says so,
+    # and then the target is someone else's file, which the trap must not remove
     mv -n "$OUT/.$LABEL.$f.tmp" "$OUT/$LABEL.$f" && [ ! -e "$OUT/.$LABEL.$f.tmp" ] || die "cannot put $OUT/$LABEL.$f in place"
+    WRITTEN+=("$OUT/$LABEL.$f")
   done
   DONE=1; unset PIN
   printf 'SIGNING-KEY %s card %s id %s ref %s public key %s\n' "$LABEL" "$SERIAL" "$ID" "$REF" \
@@ -322,9 +341,12 @@ cert_tool check --certificate "$CERT" --public-key "$W/want.der" >/dev/null || d
 # The proof is that THIS blob restores the key. A card that already holds it would pass with any blob, so
 # every key on the card is read first, and a listing or a read that fails is a refusal, not "no such key".
 IDS_BEFORE="$(pubkey_ids)" || die "card $SERIAL did not list its public keys: whether it already holds this key is not known"
+PRIV_BEFORE="$(object_ids privkey)" || die "card $SERIAL did not list its private keys"
+# One public object per id: with two under one id, a read returns one of them and the other is never compared.
+[ -z "$(sort <<< "$IDS_BEFORE" | uniq -d)" ] || die "card $SERIAL lists two public keys under one id: what it holds cannot be read reliably"
 for id in $IDS_BEFORE; do
-  read_pubkey "$id" "$W/have.der" || die "cannot read the public key at id $id on card $SERIAL: whether it already holds this key is not known"
-  cmp -s "$W/have.der" "$W/want.der" && die "card $SERIAL already holds this key (id $id): a restore onto it would prove nothing about the blob"
+  read_pubkey "$id" "$W/before-$id.der" || die "cannot read the public key at id $id on card $SERIAL: whether it already holds this key is not known"
+  cmp -s "$W/before-$id.der" "$W/want.der" && die "card $SERIAL already holds this key (id $id): a restore onto it would prove nothing about the blob"
 done
 used="$(wrappable_refs)" || die "the card gave two different answers about which key references wrap: nothing was unwrapped"
 DEST=""
@@ -341,8 +363,9 @@ case " $now " in *" $DEST "*) ;; *) die "after the unwrap key reference $DEST do
 ids="$(pubkey_ids)" || die "card $SERIAL did not list its public keys after the unwrap"
 found=""
 for id in $ids; do
-  grep -qx "$id" <<< "$IDS_BEFORE" && continue              # only a key that was NOT there before can be the blob's
   read_pubkey "$id" "$W/have.der" || die "cannot read the public key at id $id after the unwrap"
+  # only a public key that was NOT there before can be the blob's: a new id, or an id whose bytes changed
+  [ -f "$W/before-$id.der" ] && cmp -s "$W/have.der" "$W/before-$id.der" && continue
   cmp -s "$W/have.der" "$W/want.der" && { found="$id"; break; }
 done
 [ -n "$found" ] || die "after the unwrap no NEW key on card $SERIAL has the certificate's public key: the blob is not that key's"
