@@ -32,6 +32,22 @@ RUN="$EMU_RUN"
 emu_log(){ printf '\033[36m[emu]\033[0m %s\n' "$*"; }
 emu_warn(){ printf '\033[33m[emu] %s\033[0m\n' "$*"; }
 
+# emu_refuse_on_real_readers: fail (and say why) when a real smart-card reader or token is attached:
+# a USB interface of class 0b (CCID), read from sysfs WITHOUT talking to pcscd. Booting kills and
+# restarts pcscd, which takes every token away from whoever is using it (regalia-ceremony#104).
+# REGALIA_BENCH=1 says the bench belongs to this run. EMU_SYSFS_USB exists for the test.
+emu_refuse_on_real_readers() {
+  local f ccid=""
+  for f in "${EMU_SYSFS_USB:-/sys/bus/usb/devices}"/*/bInterfaceClass; do
+    [ -r "$f" ] && [ "$(cat "$f" 2>/dev/null)" = 0b ] && ccid="$ccid ${f%/bInterfaceClass}"
+  done
+  [ -z "$ccid" ] || [ "${REGALIA_BENCH:-}" = 1 ] && return 0
+  echo ">> REFUSING to boot the emulator daemons: a smart-card interface is attached here (${ccid# })."
+  echo "   Booting restarts pcscd under every token on this machine. Use the emulator container or a"
+  echo "   machine without readers, or set REGALIA_BENCH=1 if the bench is yours. --models-only is safe."
+  return 1
+}
+
 # --- 1. PC/SC daemon + virtual reader (vpcd) ----------------------------------------
 start_pcsc() {
   emu_log "starting pcscd + vpcd virtual reader"
@@ -125,6 +141,7 @@ start_optical() {
 }
 
 boot_all() {
+  emu_refuse_on_real_readers || return 1
   start_pcsc
   start_sle4442
   start_softhsm

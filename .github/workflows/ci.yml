@@ -49,6 +49,9 @@ jobs:
         # beside planted modules.
         run: qubes/emulator/tests/test-python-isolation.sh
 
+      - name: The emulator suite cannot reach a real card (regalia-ceremony#104; gating, no hardware)
+        run: qubes/emulator/tests/test-emulator-hermetic.sh
+
       - name: python compiles
         # -exec … {} + instead of $(find …) — no word-splitting on paths (SC2046).
         run: find . -name '*.py' -not -path './.git/*' -exec python3 -m py_compile {} +
