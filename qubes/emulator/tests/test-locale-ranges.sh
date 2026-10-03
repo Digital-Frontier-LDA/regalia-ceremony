@@ -88,6 +88,7 @@ hdr "5  every script whose ranges check caller input pins the collation, before 
 for s in qubes/scripts/ceremony.sh qubes/scripts/go-nogo.sh qubes/scripts/hsm-fleet-drill.sh qubes/scripts/hsm-init-hardened.sh \
          qubes/scripts/hsm-recovery-drill.sh qubes/scripts/hsm-staging-e2e.sh qubes/scripts/nitrokey-acceptance.sh \
          qubes/scripts/operation-proof.sh qubes/scripts/hsm-import-key.sh qubes/scripts/hsm-unwrap-key.sh \
+         qubes/scripts/hsm-signing-key.sh \
          qubes/scripts/dev-image-bootstrap.sh qubes/scripts/hsm-key-attestation-read.sh qubes/scripts/hsm-staging-ci.sh \
          qubes/dom0/vault-tools-update.sh hsm-host-role/files/commission-card.sh tools/hsm-dkek-refusal-probe.sh \
          tools/hsm-capacity-check.sh debian/offline-bundle/build.sh debian/offline-bundle/verify-release.sh; do

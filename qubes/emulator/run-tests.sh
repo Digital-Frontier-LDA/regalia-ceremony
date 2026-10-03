@@ -402,6 +402,9 @@ python3 "$HERE/tests/test_ceremony_manifest.py" || suite_failed "test_ceremony_m
 say "OPERATION PROOF (regalia#28 criterion 3): each new key signs a fresh challenge with its PIN — by serial, PIN never on argv, one retry at most"
 "$HERE/tests/test-operation-proof.sh" || suite_failed "test-operation-proof.sh"
 
+say "SIGNING KEYS GENERATED ON AN OFFLINE HSM (regalia#554): certificate signed by the card, DKEK-wrapped backup, restore on the spare, a KMS-domain card refuses the blob"
+"$HERE/tests/test-hsm-signing-key.sh" || suite_failed "test-hsm-signing-key.sh"
+
 say "OFFLINE BUNDLE metadata, complete hash coverage, and centralized release signature verification"
 python3 "$HERE/../../debian/offline-bundle/test_bundle.py" || suite_failed "test_bundle.py"
 

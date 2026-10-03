@@ -139,6 +139,16 @@ correctly, about 1 time in 256, so the key check value is compared. Test: `test-
 **10. YubiKeys have no DKEK.** A PIV key cannot be exported or imported under a key-encryption key.
 Continuity is multi-enrollment (rule 5, ADR-0002 D5). Nothing in this ceremony wraps a YubiKey key.
 
+**10a. The offline signing HSM and its spare are a DKEK domain of their own** (regalia#554). The keys
+that sign the KMS hosts' boot image are generated on an offline Nitrokey HSM 2 and backed up as
+DKEK-wrapped blobs (ADR-0002 D19). That card and its spare share a DKEK that no KMS host's card holds,
+so an image-signing key cannot be unwrapped onto an online host. That DKEK's share is not split again:
+it is a software secret under the break-glass key.
+*Verified by:* `hsm-signing-key.sh restore`, which proves a blob restores and signs on the spare.
+Test: `test-hsm-signing-key.sh` (a card of the KMS hosts' domain refuses the blob). *Prose only:* that
+the two cards were initialised with their own DKEK, and where its share is kept; the script has not
+run on a card.
+
 ## Transport artifacts
 
 **11. Only ciphertext leaves the ceremony machine.**
