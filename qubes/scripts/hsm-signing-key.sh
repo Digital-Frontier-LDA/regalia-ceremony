@@ -192,7 +192,11 @@ on_exit(){
           gone="$gone $id"
         done
       fi
-      if ! grep -qw "$DEST" <<< "$(probe_refs)"; then
+      # probed twice: a probe that failed for another reason must not read as "no key there"
+      local refs_now
+      if ! refs_now="$(wrappable_refs)"; then
+        left="COULD NOT DETERMINE whether the refused restore left a key at key reference $DEST on card $SERIAL${gone:+ (id$gone was deleted)}: list the card and delete that key before the card is used"
+      elif ! grep -qw "$DEST" <<< "$refs_now"; then
         if [ -n "$gone" ]; then left="the key the refused restore had unwrapped (key reference $DEST, id$gone) was DELETED from card $SERIAL"
         else left="the refused restore left no key on card $SERIAL (key reference $DEST does not wrap)"; fi
       else
