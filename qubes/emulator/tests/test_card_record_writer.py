@@ -204,6 +204,11 @@ class Writer(unittest.TestCase):
                                     "run again to sign 4, superseding it"):
             self.sign()
         self.assertIn("card-record-3.damaged.json", os.listdir(self.out))
+        with open(pending, "w") as f:                           # damaged again at the same sequence: both copies kept
+            f.write("{")
+        with self.assertRaisesRegex(ok.Refused, "kept as card-record-3.damaged.1.json"):
+            self.sign()
+        self.assertEqual(json.load(open(os.path.join(self.out, "card-record-3.damaged.json")))["signature"], "00" * 64)
         fourth, path = self.sign()
         lines = [json.loads(l) for l in open(os.path.join(self.state, ok.SIGNING_RECORD))]
         self.assertEqual((fourth["sequence"], fourth["supersedes"]), (4, lines[2]["digest"]))

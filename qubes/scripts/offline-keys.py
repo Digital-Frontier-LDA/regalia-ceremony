@@ -1405,10 +1405,14 @@ def card_record(sealed_path, cards_path, release_paths, state_dir, out, stream, 
             record = verify_card_record(document, root_hex)
             require(record["sequence"] == n and card_record_digest(record) == card_lines[-1]["digest"], "not the record the log names")
         except (Refused, ValueError, KeyError, TypeError):
-            os.rename(path, path.replace(".pending.json", ".damaged.json"))          # kept as evidence, out of the way
+            kept, k = path.replace(".pending.json", ".damaged.json"), 0
+            while os.path.lexists(kept):        # never over earlier evidence (d9 on #128)
+                k += 1
+                kept = path.replace(".pending.json", ".damaged.%d.json" % k)
+            os.rename(path, kept)               # kept as evidence, out of the way
             _fsync_dir(out)
-            raise Refused("card record %d is on the log but its file is damaged (kept as card-record-%d.damaged.json): run again "
-                          "to sign %d, superseding it" % (n, n, n + 1)) from None
+            raise Refused("card record %d is on the log but its file is damaged (kept as %s): run again to sign %d, superseding it"
+                          % (n, os.path.basename(kept), n + 1)) from None
         final = path.replace(".pending.json", ".record.json")
         require(not os.path.lexists(final), "%s exists beside its pending copy" % final)
         os.rename(path, final)
