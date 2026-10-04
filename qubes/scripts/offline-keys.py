@@ -54,7 +54,8 @@ regalia-kms tool that checks what it signs (regalia-kms-24, -d9 and -1e on #115)
   The session record is written first, whatever the command did, and then any refusal: who, the keys, the command as
   typed, the tree and its digest, the exit status, the SHA-256 of its stdout and stderr (passed through to the
   operator as they come) and of every --output it was to write, any file in the RAM directory written meanwhile that
-  holds a private key (refused, and named), the share numbers used, the set's identifier and master id; signed by the
+  holds a private key, there or in /tmp or /dev/shm (refused, and named), the tool tree's digest again after the
+  command (refused if it changed), the share numbers used, the set's identifier and master id; signed by the
   root over RECORD_DOMAIN, as at generation. What a tool could still keep of a key is bounded by the laptop: no
   network, RAM only, no swap, and the process's end.
 
@@ -448,6 +449,7 @@ TOOLS = {
                          "--secure-boot-key-fd", "{keyfd:secure-boot}", "--offline-session", "{session}")},
 }
 PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY")
+SCAN_DIRS = ("/tmp", "/dev/shm")      # beside the session's own directory: where else a tool could write (both RAM there)
 
 
 def tree_digest(root):
@@ -509,12 +511,20 @@ def _tee(stream, sink, digest):
 
 
 def _leaks(out, since, keys_der):
-    """Files in the session's RAM directory written since the command started that hold a private key: a PEM marker,
-    or the DER of a key this session opened (regalia-kms-d9 on #115)."""
+    """Files written since the command started, in the session's RAM directory and in SCAN_DIRS, that hold a private
+    key: a PEM marker, or the DER of a key this session opened (regalia-kms-d9 on #115). Named relative to the session
+    directory when inside it, absolute otherwise."""
     found = []
-    for here, _, files in os.walk(out):
+    for top in (out,) + tuple(d for d in SCAN_DIRS if os.path.isdir(d)):
+        found += [p for p in _leaks_under(top, since, keys_der) if p not in found]
+    return sorted(os.path.relpath(p, out) if p.startswith(os.path.abspath(out) + os.sep) else p for p in found)
+
+
+def _leaks_under(top, since, keys_der):
+    found = []
+    for here, _, files in os.walk(top):
         for name in files:
-            path = os.path.join(here, name)
+            path = os.path.abspath(os.path.join(here, name))
             try:
                 if os.lstat(path).st_mtime < since:
                     continue
@@ -523,8 +533,8 @@ def _leaks(out, since, keys_der):
             except OSError:
                 continue
             if any(m in data for m in PRIVATE_MARKERS) or any(der in data for der in keys_der):
-                found.append(os.path.relpath(path, out))
-    return sorted(found)
+                found.append(path)
+    return found
 
 
 def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs=(), now=None, popen=subprocess.Popen,
@@ -593,12 +603,18 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
         else:
             session["outputs"][os.path.abspath(path)] = None
     session["key_material_found"] = _leaks(out, started, ders)
+    try:                                 # anything the command wrote into the tree it ran from (regalia-kms-d9 on #115)
+        session["tool_digest_after"] = tree_digest(tool_root)
+    except Refused as refusal:
+        session["tool_digest_after"] = "refused: %s" % refusal
     # recorded first, whatever happened (regalia-kms-d9 on #115): every refusal below names a record that exists
     record_path = write_record(out, "session-%s-%s" % (at.replace(":", ""), tool), root, session)
     del root
     require(exit_status == 0, "the command exited %d: the session is recorded (%s), nothing it wrote is vouched for" % (exit_status, record_path))
     require(not session["key_material_found"], "KEY MATERIAL LEFT IN %s by the command: %s. Recorded (%s); destroy those files and this RAM "
             "directory before anything leaves the laptop" % (out, ", ".join(session["key_material_found"]), record_path))
+    require(session["tool_digest_after"] == tool_digest, "the regalia-kms tree changed while the command ran (%s): recorded (%s); "
+            "nothing it wrote is vouched for" % (session["tool_digest_after"], record_path))
     missing = [path for path, digest in session["outputs"].items() if digest is None]
     require(not missing, "the command did not write %s: recorded (%s)" % (", ".join(missing), record_path))
     return session, record_path

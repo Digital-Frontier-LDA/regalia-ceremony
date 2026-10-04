@@ -292,6 +292,12 @@ for flag in [a for a in args if a.endswith("key-fd")]:
     if "leak" in args:
         with open(os.path.join(os.path.dirname(val("--out")), "kept.pem"), "wb") as f:
             f.write(data)
+    if "leak-elsewhere" in args:
+        with open(os.path.join(val("--elsewhere"), "k"), "wb") as f:
+            f.write(data)
+    if "touch-tree" in args:
+        with open(os.path.join("deploy", "baremetal", "kept.py"), "w") as f:
+            f.write("x = 1\n")
 print("tool stdout")
 print("tool stderr", file=sys.stderr)
 if "exit3" in args:
@@ -318,6 +324,11 @@ if "nooutput" not in args:
         self.digest = ok.tree_digest(self.tree)
         import sys
         patcher = unittest.mock.patch.object(ok, "PYTHON", sys.executable)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.elsewhere = os.path.join(self.d, "elsewhere")          # stands in for /tmp and /dev/shm
+        os.mkdir(self.elsewhere)
+        patcher = unittest.mock.patch.object(ok, "SCAN_DIRS", (self.elsewhere,))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -429,6 +440,18 @@ if "nooutput" not in args:
         with self.assertRaisesRegex(ok.Refused, "KEY MATERIAL LEFT IN .* kept.pem"):
             self.sign(self.command("uki", "leak"))
         self.assertEqual(self.records()[0]["key_material_found"], ["kept.pem"])
+
+    def test_a_key_left_in_tmp_or_dev_shm_is_found_too(self):
+        """regalia-kms-d9 on #115: the scan covers where else a tool could write, not only the session directory."""
+        with self.assertRaisesRegex(ok.Refused, "KEY MATERIAL LEFT"):
+            self.sign(self.command("manifest", "leak-elsewhere", "--elsewhere", self.elsewhere))
+        self.assertEqual(self.records()[0]["key_material_found"], [os.path.join(self.elsewhere, "k")])
+
+    def test_a_tree_the_command_changed_is_recorded_and_refused(self):
+        with self.assertRaisesRegex(ok.Refused, "the regalia-kms tree changed while the command ran"):
+            self.sign(self.command("manifest", "touch-tree"))
+        record = self.records()[0]
+        self.assertNotEqual(record["tool_digest_after"], record["tool_digest"])
 
     def test_an_output_the_command_did_not_write_is_recorded_and_refused(self):
         with self.assertRaisesRegex(ok.Refused, "the command did not write"):
