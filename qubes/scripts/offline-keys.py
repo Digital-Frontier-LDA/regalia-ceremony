@@ -748,6 +748,7 @@ def card_record_check(record):
     require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two developer cards' SIG keys (D30.3)")
     for i, k in enumerate(owners):
         _exact(k, ("role", "serial", "alg", "key", "attested"), "owner_keys[%d]" % i)
+        require(k["role"] in CARD_ROLES, "owner_keys[%d].role is dev-main or dev-backup" % i)
         require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
         require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
         require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
@@ -759,8 +760,8 @@ def card_record_check(record):
     require(rel["alg"] == "ed25519" and isinstance(rel["key"], str) and _HEX64.fullmatch(rel["key"]), "release_key is an Ed25519 key, 64 hex")
     require(isinstance(rel["fingerprint"], str) and _FPR.fullmatch(rel["fingerprint"]), "release_key.fingerprint is 40 upper-case hex")
     require(rel["imported"] is True and rel["attested"] is False, "the release key is imported, not attested (D29.2)")
-    require(isinstance(rel["cards"], list) and len(rel["cards"]) == 2 and len(set(rel["cards"])) == 2
-            and all(isinstance(c, str) and _SERIAL.fullmatch(c) for c in rel["cards"]), "release_key.cards are the two release cards' serials")
+    require(isinstance(rel["cards"], list) and len(rel["cards"]) == 2 and all(isinstance(c, str) and _SERIAL.fullmatch(c) for c in rel["cards"])
+            and len(set(rel["cards"])) == 2, "release_key.cards are the two release cards' serials")
     require(not set(rel["cards"]) & serials, "a release card is also a developer card: the developer cards never hold the release key (D30.3)")
     require(rel["key"] not in {k["key"] for k in owners}, "the release key is an owner key: the release cards hold no owner key (D30.3)")
     for name, fields in (("ownerauth_recipients", ("serial", "primary", "subkey")), ("ssh_signers", ("serial", "key"))):
@@ -768,6 +769,7 @@ def card_record_check(record):
         require(isinstance(items, list), "%s is a list" % name)
         for i, item in enumerate(items):
             _exact(item, fields, "%s[%d]" % (name, i))
+            require(isinstance(item["serial"], str) and _SERIAL.fullmatch(item["serial"]), "%s[%d].serial is a decimal YubiKey serial" % (name, i))
         require(sorted(item["serial"] for item in items) == sorted(serials), "%s has one entry for each developer card" % name)
     for i, r in enumerate(record["ownerauth_recipients"]):
         require(all(isinstance(r[f], str) and _FPR.fullmatch(r[f]) for f in ("primary", "subkey")) and r["primary"] != r["subkey"],

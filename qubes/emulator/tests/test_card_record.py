@@ -125,6 +125,33 @@ class Rules(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.refused(change, reason)
 
+    def test_a_value_of_the_wrong_type_anywhere_is_refused_never_a_crash(self):
+        """coderabbitai on #121: every field of the valid record, swapped for a list, an object, a number, null or a
+        boolean, gives Refused (not TypeError or another exception) from card_record_check."""
+        def paths(value, at=()):
+            yield at
+            if isinstance(value, dict):
+                for k, v in value.items():
+                    yield from paths(v, at + (k,))
+            elif isinstance(value, list):
+                for i, v in enumerate(value):
+                    yield from paths(v, at + (i,))
+        record = make.valid_record()
+        count = 0
+        for path in list(paths(record))[1:]:
+            for wrong in ([["x"]], {"x": 1}, 7, None, True):
+                broken = copy.deepcopy(record)
+                parent = broken
+                for step in path[:-1]:
+                    parent = parent[step]
+                if parent[path[-1]] == wrong or (isinstance(wrong, bool) and parent[path[-1]] is wrong):
+                    continue
+                parent[path[-1]] = copy.deepcopy(wrong)
+                with self.subTest(path=path, wrong=wrong), self.assertRaises(ok.Refused):
+                    ok.card_record_check(broken)
+                count += 1
+        self.assertGreater(count, 150)
+
     def test_the_verifier_takes_exactly_a_record_and_a_hex_signature(self):
         with open(os.path.join(VECTORS, "valid.json")) as f:
             document = json.load(f)
