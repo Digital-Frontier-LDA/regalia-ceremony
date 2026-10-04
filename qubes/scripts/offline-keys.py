@@ -1148,6 +1148,44 @@ def card_record_digest(record):
 
 
 SIGNING_RECORD = "signing-record.jsonl"     # regalia-kms manifest.py's RECORD, in the same --state-dir
+SIGNING_STATE = "regalia-signing-state.json"    # the state directory's marker, agreed with regalia-kms-1e (#403 point 7)
+SCHEMA_SIGNING_STATE = "regalia.signing-state/v1"
+
+
+def read_signing_state(state_dir, pinned_root):
+    """The card-record consumer's view of the laptop's state directory: its marker (O_NOFOLLOW, a regular file of the
+    directory's owner, 0600, exactly {schema, root}, root the PINNED one; a missing marker is refused, since an empty
+    or foreign directory cannot be judged) and then its signing record's lines. Returns the lines (dicts or
+    whatever JSON each line holds, for card_record_current to judge)."""
+    import stat as _stat
+    info = os.stat(state_dir)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_STATE), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s has no %s: not a signing state directory this root's records can be judged in" % (state_dir, SIGNING_STATE)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_STATE, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        marker_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(marker_info.st_mode) and marker_info.st_uid == info.st_uid and _stat.S_IMODE(marker_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_STATE)
+        try:
+            marker = json.loads(f.read(4096))
+        except ValueError:
+            raise Refused("%s is not JSON" % SIGNING_STATE) from None
+    _exact(marker, ("schema", "root"), SIGNING_STATE)
+    require(marker["schema"] == SCHEMA_SIGNING_STATE, "%s's schema is not %s" % (SIGNING_STATE, SCHEMA_SIGNING_STATE))
+    require(marker["root"] == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
+    path = os.path.join(state_dir, SIGNING_RECORD)
+    require(os.path.exists(path), "%s holds no %s" % (state_dir, SIGNING_RECORD))
+    lines = []
+    with open(path) as f:
+        for i, text in enumerate(f.read(1 << 22).splitlines()):
+            try:
+                lines.append(json.loads(text))
+            except ValueError:
+                raise Refused("line %d of the signing record is not JSON (a torn write?)" % (i + 1)) from None
+    return lines
 
 
 def append_card_record_line(state_dir, record, now=None):
@@ -1176,8 +1214,16 @@ def card_record_current(document, pinned_root, signing_lines):
     (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
     refused: after a rotation it would vouch for a retired key. Returns the record."""
     record = verify_card_record(document, pinned_root)
-    lines = [line for line in signing_lines if isinstance(line, dict) and line.get("kind") == "card-record"]
+    for i, line in enumerate(signing_lines):       # every line judged by name, never skipped (d9 on #126, #403 point 6)
+        require(isinstance(line, dict) and isinstance(line.get("kind"), str) and line["kind"],
+                "line %d of the signing record is not an object with a kind" % (i + 1))
+    lines = [line for line in signing_lines if line["kind"] == "card-record"]
     require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
+    for line in lines:
+        _exact(line, ("kind", "sequence", "digest", "key", "at"), "a card-record line of the signing record")
+        require(isinstance(line["sequence"], int) and not isinstance(line["sequence"], bool) and isinstance(line["digest"], str)
+                and _HEX64.fullmatch(line["digest"]) is not None and isinstance(line["key"], str),
+                "a card-record line of the signing record is malformed (sequence an integer, digest 64 hex)")
     require([line.get("sequence") for line in lines] == list(range(1, len(lines) + 1)),
             "the signing record's card-record lines are not 1..%d without a gap" % len(lines))
     require(all(line.get("key") == pinned_root for line in lines), "a card-record line names another root than the pinned one")

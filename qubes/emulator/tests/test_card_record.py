@@ -35,9 +35,11 @@ class Vectors(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         make.write(d)
         made = sorted(os.listdir(d))
-        committed = sorted(n for n in os.listdir(VECTORS) if os.path.isfile(os.path.join(VECTORS, n)) and n != "make.py")
-        self.assertEqual(made, committed)
-        for name in made:
+        def tree(top):
+            return sorted(os.path.relpath(os.path.join(dirpath, n), top) for dirpath, dirs, files in os.walk(top)
+                          for n in files if "__pycache__" not in dirpath and n != "make.py" and not n.endswith(".pyc"))
+        self.assertEqual(tree(d), tree(VECTORS))
+        for name in tree(d):
             with open(os.path.join(d, name), "rb") as a, open(os.path.join(VECTORS, name), "rb") as b:
                 self.assertEqual(a.read(), b.read(), name)
 
@@ -46,9 +48,9 @@ class Vectors(unittest.TestCase):
             expect = json.load(f)
         with open(os.path.join(VECTORS, "root.hex")) as f:
             root = f.read().strip()
-        self.assertEqual(sorted(expect), sorted(n for n in os.listdir(VECTORS) if n.endswith(".json") and n != "expect.json"))
-        self.assertEqual(sorted(expect), ["bad-signature.json", "missing-dev-backup.json", "other-root.json", "release-is-owner.json",
-                                          "sequence-2.json", "unknown-field.json", "valid.json", "wrong-domain.json"])
+        self.assertEqual(sorted(expect), sorted(n for n in os.listdir(VECTORS) if n.endswith(".json") and n not in ("expect.json", "freshness-expect.json")))
+        self.assertEqual(sorted(expect), ["bad-signature.json", "first-supersedes.json", "missing-dev-backup.json", "other-root.json",
+                                          "release-is-owner.json", "sequence-2.json", "unknown-field.json", "valid.json", "wrong-domain.json"])
         for name, expected in sorted(expect.items()):
             with self.subTest(vector=name), open(os.path.join(VECTORS, name)) as f:
                 document = json.load(f)
@@ -82,6 +84,55 @@ class Vectors(unittest.TestCase):
         self.assertEqual([(l["kind"], l["sequence"], l["digest"], l["key"]) for l in lines],
                          [("card-record", 1, ok.card_record_digest(first), first["root_entry"]["key"]),
                           ("card-record", 2, ok.card_record_digest(second), first["root_entry"]["key"])])
+
+    def test_the_freshness_vectors_judge_as_freshness_expect_says(self):
+        """The cases shared with regalia-kms's #403 consumer: each state directory copied, made 0700 with its marker
+        0600, then read_signing_state and card_record_current; ok, or exactly the expected reason (contained)."""
+        root = open(os.path.join(VECTORS, "root.hex")).read().strip()
+        with open(os.path.join(VECTORS, "freshness-expect.json")) as f:
+            expect = json.load(f)
+        self.assertEqual(sorted(expect), sorted(os.listdir(os.path.join(VECTORS, "freshness"))))
+        for case, want in sorted(expect.items()):
+            d = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, d, True)
+            for name in os.listdir(os.path.join(VECTORS, "freshness", case)):
+                shutil.copy(os.path.join(VECTORS, "freshness", case, name), d)
+            os.chmod(d, 0o700)
+            if os.path.exists(os.path.join(d, ok.SIGNING_STATE)):
+                os.chmod(os.path.join(d, ok.SIGNING_STATE), 0o600)
+            with open(os.path.join(VECTORS, want["record"])) as f:
+                document = json.load(f)
+            with self.subTest(case=case):
+                if want["expect"] == "ok":
+                    ok.card_record_current(document, root, ok.read_signing_state(d, root))
+                else:
+                    with self.assertRaises(ok.Refused) as caught:
+                        ok.card_record_current(document, root, ok.read_signing_state(d, root))
+                    self.assertIn(want["expect"], str(caught.exception))
+
+    def test_the_marker_must_be_the_owners_0600_regular_file(self):
+        root = make.raw(make.ROOT)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        marker = os.path.join(d, ok.SIGNING_STATE)
+        with open(marker, "w") as f:
+            json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root}, f)
+        with open(os.path.join(d, ok.SIGNING_RECORD), "w") as f:
+            f.write("")
+        os.chmod(marker, 0o644)
+        with self.assertRaisesRegex(ok.Refused, "must be a regular file of the directory's owner, mode 0600"):
+            ok.read_signing_state(d, root)
+        os.unlink(marker)
+        os.symlink(os.path.join(d, ok.SIGNING_RECORD), marker)
+        with self.assertRaisesRegex(ok.Refused, "cannot be opened as a regular file"):
+            ok.read_signing_state(d, root)
+        os.unlink(marker)
+        with open(marker, "w") as f:
+            json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root, "extra": 1}, f)
+        os.chmod(marker, 0o600)
+        with self.assertRaisesRegex(ok.Refused, "has an unknown field: extra"):
+            ok.read_signing_state(d, root)
 
     def test_only_the_newest_card_record_is_current(self):
         """regalia-kms#403: valid.json still verifies, but after sequence-2 it is superseded and refused as current."""
