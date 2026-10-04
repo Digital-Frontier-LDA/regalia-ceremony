@@ -7,7 +7,7 @@ release key (Ed25519), which is imported onto the SIG slot of the two release-sp
     python3 -Es developer-keys.py verify-forms --sealed FILE --shares-file FILE        (the forms typed back on stdin)
     python3 -Es developer-keys.py release-import --sealed FILE --yubikey-serial N --out DIR [--replace]
                                           (the k shares on stdin; the card's PINs, and any confirmation, from the terminal)
-    python3 -Es developer-keys.py vouched --record FILE --card-record FILE --root-key HEX
+    python3 -Es developer-keys.py vouched --record FILE --card-record FILE --root-key HEX --signing-record FILE
 
 CURRENT LIMITATIONS (2026-10-04; each removed here when it is lifted):
   * MODELLED ONLY. No key has been imported onto a real card: release-import's yubikit calls run against a stand-in
@@ -25,7 +25,9 @@ CURRENT LIMITATIONS (2026-10-04; each removed here when it is lifted):
 TRUST (regalia-kms-d9 on #124). The release key signs its own generation record: a proof of possession, nothing more,
 so the record says status "pending". Anyone with the laptop could make such a set. The key is trusted only once a
 ROOT-SIGNED card-ceremony record (offline-keys.py card_record_check, rc#121) names its public key and fingerprint and
-binds the release cards' serials; `vouched` is that check, and every later reader must make it. Per-card import results
+binds the release cards' serials, and that record is the NEWEST the root signed, by the laptop's signing record
+(card_record_current, regalia-kms#403): after a rotation an older record still verifies, and must not vouch for the
+retired key. `vouched` is that check, and every later reader must make it. Per-card import results
 are unsigned facts the card record is written from: a release key never vouches for a card. Recovery onto a replacement
 card (D30.5) therefore needs this set's k shares AND the root's, for the new card's entry in a new card record.
 
@@ -414,12 +416,12 @@ def verify_possession(document):
     return record
 
 
-def vouched(developers_document, card_document, pinned_root):
-    """The release key, trusted: possession (the developers' record, signed by it) AND authority (a card record signed
-    by the PINNED root names the same key and fingerprint, and binds the release cards). Returns the card record's
-    release_key entry (with its card serials)."""
+def vouched(developers_document, card_document, pinned_root, signing_lines):
+    """The release key, trusted: possession (the developers' record, signed by it) AND authority (the NEWEST card
+    record signed by the PINNED root, by the signing record's lines, names the same key and fingerprint and binds the
+    release cards). Returns the card record's release_key entry (with its card serials)."""
     record = verify_possession(developers_document)
-    cards = ok.verify_card_record(card_document, pinned_root)
+    cards = ok.card_record_current(card_document, pinned_root, signing_lines)
     release = record["publics"]["release"]
     require(cards["release_key"]["key"] == release["key"] and cards["release_key"]["fingerprint"] == release["fingerprint"],
             "the release key is not the one the root-signed card record names: it is pending, and nothing trusts it")
@@ -448,6 +450,7 @@ def main(argv=None):
     t.add_argument("--record", required=True, help="developers.record.json")
     t.add_argument("--card-record", required=True, help="the root-signed card-ceremony record")
     t.add_argument("--root-key", required=True, help="the pinned root, 64 hex")
+    t.add_argument("--signing-record", required=True, help="the laptop's signing-record.jsonl (only the newest card record counts)")
     args = parser.parse_args(argv)
     try:
         if args.command == "generate":
@@ -468,7 +471,9 @@ def main(argv=None):
                 developers = json.loads(f.read(1 << 20))
             with open(args.card_record, "rb") as f:
                 cards = json.loads(f.read(1 << 20))
-            entry = vouched(developers, cards, args.root_key)
+            with open(args.signing_record) as f:
+                lines = [json.loads(line) for line in f if line.strip()]
+            entry = vouched(developers, cards, args.root_key, lines)
             print("VOUCHED: release key %s, on cards %s" % (entry["fingerprint"], ", ".join(entry["cards"])))
     except (Refused, OSError, ValueError, KeyError) as error:
         print("developer-keys: REFUSED: %s" % error, file=sys.stderr)

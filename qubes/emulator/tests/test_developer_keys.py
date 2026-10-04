@@ -353,26 +353,45 @@ class Trust(Case):
         self.release = self.developers["record"]["publics"]["release"]
         self.root = cards.raw(cards.ROOT)
 
-    def card_record(self, key=None, fingerprint=None):
-        record = cards.valid_record()
+    def card_record(self, key=None, fingerprint=None, base=None):
+        record = base or cards.valid_record()
         record["release_key"].update(key=key or self.release["key"], fingerprint=fingerprint or self.release["fingerprint"])
         return cards.signed(record)
 
+    @staticmethod
+    def lines(*documents):
+        return [{"kind": "card-record", "sequence": d["record"]["sequence"], "digest": ok.card_record_digest(d["record"]),
+                 "key": d["record"]["root_entry"]["key"], "at": "2026-10-04T12:00:00Z"} for d in documents]
+
     def test_vouched_by_the_root_signed_card_record(self):
-        entry = dk.vouched(self.developers, self.card_record(), self.root)
+        document = self.card_record()
+        entry = dk.vouched(self.developers, document, self.root, self.lines(document))
         self.assertEqual((entry["fingerprint"], entry["cards"]), (self.release["fingerprint"], ["40000003", "40000004"]))
 
     def test_a_self_signed_record_alone_is_trusted_by_nothing(self):
         with open(os.path.join(HERE, "vectors", "card-ceremony-record", "valid.json")) as f:
             another = json.load(f)                           # root-signed, but for another release key
         with self.assertRaises(dk.Refused) as caught:
-            dk.vouched(self.developers, another, self.root)
+            dk.vouched(self.developers, another, self.root, self.lines(another))
         self.assertEqual(str(caught.exception), "the release key is not the one the root-signed card record names: it is pending, and "
                          "nothing trusts it")
         with self.assertRaisesRegex(dk.Refused, "the record names another root than the pinned one"):
-            dk.vouched(self.developers, self.card_record(), cards.raw(cards.OTHER_ROOT))
+            dk.vouched(self.developers, self.card_record(), cards.raw(cards.OTHER_ROOT), self.lines(self.card_record()))
+        wrong = self.card_record(fingerprint="AB" * 20)
         with self.assertRaisesRegex(dk.Refused, "the release key is not the one"):
-            dk.vouched(self.developers, self.card_record(fingerprint="AB" * 20), self.root)
+            dk.vouched(self.developers, wrong, self.root, self.lines(wrong))
+
+    def test_an_older_card_record_does_not_vouch_after_a_rotation(self):
+        """regalia-kms#403 (d9, 1e on #126): the record that named this release key is superseded by sequence 2,
+        which names another (a rotation): it still verifies, and no longer vouches."""
+        first = self.card_record()
+        rotated = cards.sequence_two()
+        rotated["supersedes"] = ok.card_record_digest(first["record"])
+        second = cards.signed(rotated)                      # names the vectors' release key, not this set's
+        with self.assertRaisesRegex(dk.Refused, "this card record is not the newest the root signed \\(sequence 1 of 2\\)"):
+            dk.vouched(self.developers, first, self.root, self.lines(first, second))
+        with self.assertRaisesRegex(dk.Refused, "the release key is not the one"):
+            dk.vouched(self.developers, second, self.root, self.lines(first, second))
 
     def test_the_possession_record_is_checked(self):
         forged = copy.deepcopy(self.developers)
