@@ -742,8 +742,7 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
             "--nodes names each node once, by its node ID")
     require(os.path.isdir(out), "--out %s is not a directory" % out)
     check_place(out)
-    names = (["ownerauth-%s.yk.gpg" % n for n in nodes] + ["ownerauth-%s.bg.age" % n for n in nodes]
-             + [VERIFY_KEY_FILE, "ownerauth.record.json"])
+    names = ["ownerauth-%s.yk.gpg" % n for n in nodes] + ["ownerauth-%s.bg.age" % n for n in nodes] + ["ownerauth.record.json"]
     for name in names:
         require(not os.path.lexists(os.path.join(out, name)), "%s already exists: nothing is overwritten" % os.path.join(out, name))
     bg = _age_recipient(breakglass_recipient)
@@ -752,6 +751,9 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
     os.mkdir(home, 0o700)
     try:
         yk = yubikey_recipients(yk_keys, home, run)
+        for k in yk:
+            path = os.path.join(out, verify_key_file(k["subkey"]))
+            require(not os.path.lexists(path), "%s already exists: nothing is overwritten" % path)
         with open(sealed_path, "rb") as f:
             sealed = json.loads(f.read(1 << 20))
         require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
@@ -759,7 +761,7 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
         master, indices, identifier = combine(read_shares(stream), sealed)
         try:
             bundle = unseal(master, sealed)
-            verify_key = bytearray(verify_key_of(master, session))
+            verify_keys = {k["subkey"]: bytearray(verify_key_of(master, session, k["subkey"])) for k in yk}
         finally:
             zero(master)
         root = _private_key(bundle["keys"]["root"])
@@ -768,16 +770,17 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
         entry = {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()}
         written, record_nodes = [], {}
 
-        def envelope(kind, path, value):
-            """`value` (bytes, 32) as 64 hex and a newline, encrypted to path; returns the file's SHA-256."""
+        def envelope(kind, path, value, to=None):
+            """`value` (bytes, 32) as 64 hex and a newline, encrypted to path (a .yk.gpg to every approval card, or only to
+            the subkeys in `to`); returns the file's SHA-256."""
             plain = bytearray(bytes(value).hex().encode() + b"\n")
             try:
                 written.append(path)
                 if kind == "yk":
                     argv = ["gpg", "--homedir", home, "--batch", "--no-tty", "--no-options", "--quiet", "--trust-model", "always",
                             "--no-auto-key-locate", "--output", path]
-                    for k in yk:
-                        argv += ["--recipient", k["subkey"] + "!"]
+                    for subkey in to or [k["subkey"] for k in yk]:
+                        argv += ["--recipient", subkey + "!"]
                     argv.append("--encrypt")
                 else:
                     argv = ["age", "-r", bg, "-o", path]
@@ -800,9 +803,10 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
                                           "check": ownerauth_check(value, node)}
                 finally:
                     zero(value)
-            verify_key_sha256 = envelope("yk", os.path.join(out, VERIFY_KEY_FILE), verify_key)
+            verify_sha = {subkey: envelope("yk", os.path.join(out, verify_key_file(subkey)), key, to=[subkey])
+                          for subkey, key in verify_keys.items()}
             record = {"schema": SCHEMA_OWNERAUTH, "event": "ownerauth", "nodes": record_nodes, "yk_recipients": yk, "root_entry": entry,
-                      "root_fingerprint": root_fingerprint(entry), "session": session, "verify_key_sha256": verify_key_sha256,
+                      "root_fingerprint": root_fingerprint(entry), "session": session, "verify_keys": verify_sha,
                       "share_indices": indices, "slip39_identifier": identifier, "master_id": sealed["master_id"], "tool": TOOL,
                       "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
             write_record(out, "ownerauth", root, record)     # inside the cleanup: a failed record leaves no envelope behind
@@ -812,7 +816,8 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
                     os.unlink(path)
             raise
         finally:
-            zero(verify_key)
+            for key in verify_keys.values():
+                zero(key)
     finally:
         shutil.rmtree(home, ignore_errors=True)      # the throwaway GnuPG home: public keys only, by its exact path
     del root
@@ -820,16 +825,20 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
 
 
 VERIFY_LOG = "ownerauth-verify.jsonl"
-# The verify key (coderabbitai on #120): derived from the master for one ownerauth session, encrypted to the approval
-# YubiKeys only, and never written in the clear. ownerauth-verify can MAC its log entry only after a card opened this
-# envelope; the summary re-derives the key from the k shares and counts only entries whose MAC holds. A process that
-# can write the directory but holds neither a card nor the shares cannot add an entry the summary counts.
-VERIFY_KEY_FILE = "ownerauth-verify-key.yk.gpg"
+# The verify keys (coderabbitai on #120): one per approval card, derived from the master for one ownerauth session and
+# that card's encryption subkey, encrypted to THAT subkey only, and never written in the clear (regalia-kms-d9 on #120:
+# a key shared by every card let one card vouch for another). ownerauth-verify can MAC its log entry only after its card
+# opened its own envelope; the summary re-derives each card's key from the k shares and counts an entry only under the
+# key of the subkey it names. Neither a writer of the directory nor another card can add an entry the summary counts.
 VERIFY_ENTRY_DOMAIN = b"regalia-ownerauth-verify-entry/v1\0"
 
 
-def verify_key_of(master, session):
-    return hkdf(master, b"regalia-ownerauth-verify/v1\0" + session.encode())
+def verify_key_file(subkey):
+    return "ownerauth-verify-key.%s.yk.gpg" % subkey
+
+
+def verify_key_of(master, session, subkey):
+    return hkdf(master, b"regalia-ownerauth-verify/v1\0" + session.encode() + b"\0" + subkey.encode())
 
 
 def entry_mac(key, entry):
@@ -883,10 +892,6 @@ def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, r
             zero(plain)
     verify_key = None
     try:
-        verify_key = open_envelope(os.path.join(directory, VERIFY_KEY_FILE), record["verify_key_sha256"])
-    except (Refused, OSError) as error:
-        failed["verify-key"] = str(error)
-    try:
         for node, facts in sorted(record["nodes"].items()):
             try:
                 value = open_envelope(os.path.join(directory, "ownerauth-%s.yk.gpg" % node), facts["yk_sha256"])
@@ -898,6 +903,15 @@ def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, r
             except (Refused, OSError) as error:
                 failed[node] = str(error)
         require(len(used) <= 1, "this run used more than one key (%s): insert ONE YubiKey at a time" % ", ".join(sorted(used)))
+        if used:                                       # this card's own verify key, which no other card opens
+            mine = next(iter(used))
+            try:
+                verify_key = open_envelope(os.path.join(directory, verify_key_file(mine)), record["verify_keys"][mine])
+            except (Refused, OSError) as error:
+                failed["verify-key"] = str(error)
+            require(used == {mine}, "this run used more than one key (%s): insert ONE YubiKey at a time" % ", ".join(sorted(used)))
+        else:
+            failed["verify-key"] = "no envelope opened, so no card is known to open its verify key"
         with open(record_path, "rb") as f:
             record_sha = hashlib.sha256(f.read()).hexdigest()
         entry = {"serial": str(serial), "subkey": used.pop() if used else None, "proven": proven, "failed": failed,
@@ -936,7 +950,7 @@ def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
     master, indices, identifier = combine(read_shares(stream), sealed)
     try:
         bundle = unseal(master, sealed)
-        verify_key = bytearray(verify_key_of(master, record["session"]))
+        verify_keys = {k["subkey"]: bytearray(verify_key_of(master, record["session"], k["subkey"])) for k in record["yk_recipients"]}
     finally:
         zero(master)
     root = _private_key(bundle["keys"]["root"])
@@ -950,11 +964,12 @@ def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
                 for line in f:
                     e = json.loads(line)
                     if (e.get("session") == record["session"] and e.get("record_sha256") == record_sha and sorted(e.get("proven", [])) == nodes
-                            and not e.get("failed") and e.get("subkey") and isinstance(e.get("mac"), str)
-                            and hmac.compare_digest(e["mac"], entry_mac(verify_key, e))):
+                            and not e.get("failed") and e.get("subkey") in verify_keys and isinstance(e.get("mac"), str)
+                            and hmac.compare_digest(e["mac"], entry_mac(verify_keys[e["subkey"]], e))):
                         seen[e["subkey"]] = e["serial"]
     finally:
-        zero(verify_key)
+        for key in verify_keys.values():
+            zero(key)
     missing = [k["subkey"] for k in record["yk_recipients"] if k["subkey"] not in seen]
     require(not missing, "not yet proven to open every envelope: the YubiKeys with subkeys %s" % ", ".join(m[-16:] for m in missing))
     with open(log, "rb") as f:

@@ -740,7 +740,7 @@ class OwnerAuth(Case):
     def test_the_record_carries_what_the_reader_and_the_proof_need(self):
         record = self.run_oa(nodes=("a",))
         self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "yk_recipients", "root_entry", "root_fingerprint", "session",
-                                                 "verify_key_sha256", "share_indices", "slip39_identifier", "master_id", "tool", "at"]))
+                                                 "verify_keys", "share_indices", "slip39_identifier", "master_id", "tool", "at"]))
         self.assertEqual(sorted(record["nodes"]["a"]), ["bg_sha256", "check", "yk_sha256"])
         for k in record["yk_recipients"]:
             self.assertRegex(k["primary"], r"^[0-9A-F]{40}$")
@@ -753,8 +753,10 @@ class OwnerAuth(Case):
         rec = os.path.join(self.oa, "ownerauth.record.json")
         with open(rec) as f:
             record = json.load(f)["record"]
-        with open(os.path.join(self.oa, ok.VERIFY_KEY_FILE), "rb") as f:
-            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), record["verify_key_sha256"])
+        self.assertEqual(sorted(record["verify_keys"]), sorted(k["subkey"] for k in record["yk_recipients"]))
+        for subkey, sha in record["verify_keys"].items():
+            with open(os.path.join(self.oa, ok.verify_key_file(subkey)), "rb") as f:
+                self.assertEqual(hashlib.sha256(f.read()).hexdigest(), sha)
         log = os.path.join(self.oa, ok.VERIFY_LOG)
         with open(rec, "rb") as f:
             record_sha = hashlib.sha256(f.read()).hexdigest()
@@ -770,11 +772,10 @@ class OwnerAuth(Case):
         # a MAC under the real verify key, but over another record's file: it proves nothing about this one
         with open(self.sealed) as f:
             master = ok.combine(self.all[1:3], json.load(f))[0]
-        key = ok.verify_key_of(master, record["session"])
         for n, k in enumerate(record["yk_recipients"]):
             other = {"serial": str(1000 + n), "subkey": k["subkey"], "proven": ["a"], "failed": {}, "session": record["session"],
                      "record_sha256": "0" * 64, "at": "2026-10-04T00:00:00Z"}
-            other["mac"] = ok.entry_mac(key, other)
+            other["mac"] = ok.entry_mac(ok.verify_key_of(master, record["session"], k["subkey"]), other)
             with open(log, "a") as f:
                 f.write(json.dumps(other) + "\n")
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
@@ -794,6 +795,35 @@ class OwnerAuth(Case):
         with open(log, "w") as f:
             for e in real:
                 f.write(json.dumps(e) + "\n")
+        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
+
+    def test_one_card_cannot_vouch_for_another(self):
+        """regalia-kms-d9 on #120: each card opens only its own verify key, so the holder of ONE card cannot MAC an entry
+        that claims another card's subkey proved the envelopes."""
+        self.run_oa(nodes=("a",))
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        with open(rec) as f:
+            record = json.load(f)["record"]
+        subkeys = [k["subkey"] for k in record["yk_recipients"]]
+        # card 0 cannot open card 1's verify key envelope
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.gpg_decrypt(os.path.join(self.oa, ok.verify_key_file(subkeys[1])), self.homes[0])
+        own = self.gpg_decrypt(os.path.join(self.oa, ok.verify_key_file(subkeys[0])), self.homes[0])
+        key0 = bytes.fromhex(own.decode().strip())
+        with open(rec, "rb") as f:
+            record_sha = hashlib.sha256(f.read()).hexdigest()
+        log = os.path.join(self.oa, ok.VERIFY_LOG)
+        for n, home in enumerate(self.homes):
+            if n != 1:
+                ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n))
+        claim = {"serial": "1001", "subkey": subkeys[1], "proven": ["a"], "failed": {}, "session": record["session"],
+                 "record_sha256": record_sha, "at": "2026-10-04T00:00:00Z"}
+        claim["mac"] = ok.entry_mac(key0, claim)                         # card 0's own key, claiming card 1
+        with open(log, "a") as f:
+            f.write(json.dumps(claim) + "\n")
+        with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope: the YubiKeys with subkeys %s" % subkeys[1][-16:]):
+            self.summary(rec)
+        ok.ownerauth_verify(rec, self.oa, 1001, gnupghome=self.homes[1], run=self.card(1001))
         self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
 
     def test_the_summary_takes_the_shares(self):
