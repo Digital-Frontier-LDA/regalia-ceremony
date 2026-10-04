@@ -12,7 +12,8 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
     python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-keys FILE --breakglass-recipient FILE --out DIR
                                           (the k shares on standard input: the root signs the record)
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
-    python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary
+    python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary [--sealed FILE]   (with --sealed: the k shares on
+                                          standard input, and the root signs ownerauth-verified.record.json)
     python3 -Es offline-keys.py verify-record --record FILE
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
@@ -795,6 +796,17 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
 VERIFY_LOG = "ownerauth-verify.jsonl"
 
 
+def card_serial(gnupghome=None, run=subprocess.run):
+    """The serial of the card gpg reaches (`gpg --card-status`'s "Serial number" line, in the C locale): the proof names
+    the card that actually opened the envelopes, not a number typed (regalia-kms-d9 on #120)."""
+    argv = ["gpg"] + (["--homedir", gnupghome] if gnupghome else []) + ["--batch", "--card-status"]
+    done = run(argv, capture_output=True, env=dict(os.environ, LC_ALL="C"))
+    require(done.returncode == 0, "gpg reaches no card (insert ONE approval YubiKey)")
+    found = re.findall(rb"^Serial number[ .]*:\s*([0-9]+)\s*$", done.stdout, re.M)
+    require(len(found) == 1, "gpg --card-status shows no single serial number")
+    return found[0].decode()
+
+
 def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, run=subprocess.run):
     """With ONE approval YubiKey inserted (gpg reaching it through scdaemon, in the operator's GnuPG home or
     `gnupghome`): every node's .yk.gpg is decrypted to a pipe, never shown, and must be 64 hex and a newline whose check
@@ -806,6 +818,8 @@ def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, r
         record = verify_record(json.loads(f.read(1 << 20)))
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
     require(re.fullmatch(r"[0-9]{1,12}", str(serial)) is not None, "--yubikey-serial is the inserted YubiKey's serial")
+    card = card_serial(gnupghome, run)
+    require(str(int(card)) == str(int(serial)), "the card inserted is %s, not the %s typed" % (card, serial))
     subkeys = {k["subkey"]: k["primary"] for k in record["yk_recipients"]}
     proven, failed, used = [], {}, set()
     for node, facts in sorted(record["nodes"].items()):
@@ -844,10 +858,12 @@ def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, r
     return proven
 
 
-def ownerauth_summary(record_path, directory):
+def ownerauth_summary(record_path, directory, sealed_path=None, stream=None, now=None):
     """Whether every approval YubiKey (each encryption subkey the record names) has opened every node's envelope, by
     ownerauth-verify's log. Returns {subkey: serial}; refused, naming what is missing, otherwise. The ceremony does not
-    finish without it."""
+    finish without it. With the sealed file and the k shares on `stream`, the result is also written as
+    ownerauth-verified.record.json, signed by the root: the disc carries a signed "every card opened every node's
+    envelope", not only an appended log (regalia-kms-d9 on #120)."""
     with open(record_path, "rb") as f:
         record = verify_record(json.loads(f.read(1 << 20)))
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
@@ -862,6 +878,28 @@ def ownerauth_summary(record_path, directory):
                     seen[e["subkey"]] = e["serial"]
     missing = [k["subkey"] for k in record["yk_recipients"] if k["subkey"] not in seen]
     require(not missing, "not yet proven to open every envelope: the YubiKeys with subkeys %s" % ", ".join(m[-16:] for m in missing))
+    if sealed_path is not None:
+        with open(sealed_path, "rb") as f:
+            sealed = json.loads(f.read(1 << 20))
+        require(sealed.get("schema") == SCHEMA_SEALED and sealed["master_id"] == record["master_id"], "not the sealed file of this record's set")
+        master, indices, identifier = combine(read_shares(stream), sealed)
+        try:
+            bundle = unseal(master, sealed)
+        finally:
+            zero(master)
+        root = _private_key(bundle["keys"]["root"])
+        del bundle
+        with open(log, "rb") as f:
+            log_sha = hashlib.sha256(f.read()).hexdigest()
+        with open(record_path, "rb") as f:
+            record_sha = hashlib.sha256(f.read()).hexdigest()
+        verified = {"schema": SCHEMA_RECORD, "event": "ownerauth-verified", "session": record["session"], "nodes": nodes,
+                    "cards": [{"subkey": k, "serial": seen[k]} for k in sorted(seen)], "ownerauth_record_sha256": record_sha,
+                    "verify_log_sha256": log_sha, "share_indices": indices, "slip39_identifier": identifier, "master_id": record["master_id"],
+                    "root_entry": record["root_entry"], "tool": TOOL,
+                    "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+        write_record(directory, "ownerauth-verified", root, verified)
+        del root
     return seen
 
 
@@ -929,6 +967,7 @@ def main(argv=None):
     ov.add_argument("--gnupghome", help="the GnuPG home that reaches the inserted card (default: the operator's)")
     ov.add_argument("--yubikey-serial", help="the inserted YubiKey's serial, as ykman reports it")
     ov.add_argument("--summary", action="store_true", help="refuse unless every YubiKey has opened every envelope")
+    ov.add_argument("--sealed", help="with --summary: the sealed file; the k shares on stdin, and the root signs the result")
     v = sub.add_parser("verify-record")
     v.add_argument("--record", required=True)
     args = ap.parse_args(argv)
@@ -961,7 +1000,7 @@ def main(argv=None):
             print("RECORD %s (root %s)" % (os.path.join(args.out, "ownerauth.record.json"), record["root_fingerprint"]))
         elif args.command == "ownerauth-verify":
             if args.summary:
-                for subkey, serial in sorted(ownerauth_summary(args.record, args.dir).items()):
+                for subkey, serial in sorted(ownerauth_summary(args.record, args.dir, args.sealed, sys.stdin if args.sealed else None).items()):
                     print("PROVEN YubiKey %s (subkey …%s) opens every node's envelope" % (serial, subkey[-16:]))
                 print("OWNERAUTH ENVELOPES PROVEN for every approval YubiKey")
             else:

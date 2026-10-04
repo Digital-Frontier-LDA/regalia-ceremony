@@ -577,6 +577,17 @@ class OwnerAuth(Case):
         return ok.ownerauth(self.sealed, list(nodes), yk or self.yk, self.recipient, self.oa,
                             io.StringIO("\n".join(shares or self.all[:2]) + "\n"), run=run)
 
+    @staticmethod
+    def card(serial, inner=None):
+        """`run` as gpg sees ONE card with this serial (`--card-status`); everything else as `inner` (the real run)."""
+        inner = inner or subprocess.run
+
+        def run(argv, *a, **k):
+            if "--card-status" in argv:
+                return subprocess.CompletedProcess(argv, 0, ("Reader ...........: Yubico YubiKey\nSerial number ....: %s\n" % serial).encode(), b"")
+            return inner(argv, *a, **k)
+        return run
+
     def gpg_decrypt(self, path, home):
         return subprocess.run(["gpg", "--homedir", home, "--batch", "--decrypt", path], check=True, capture_output=True).stdout
 
@@ -618,11 +629,21 @@ class OwnerAuth(Case):
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
             ok.ownerauth_summary(rec, self.oa)
         for n, home in enumerate(self.homes[:2]):
-            self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home), ["a", "b", "c"])
+            self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n)), ["a", "b", "c"])
         with self.assertRaisesRegex(ok.Refused, "not yet proven"):
             ok.ownerauth_summary(rec, self.oa)          # the third YubiKey has not opened them yet
-        ok.ownerauth_verify(rec, self.oa, 1002, gnupghome=self.homes[2])
+        ok.ownerauth_verify(rec, self.oa, 1002, gnupghome=self.homes[2], run=self.card(1002))
         self.assertEqual(sorted(ok.ownerauth_summary(rec, self.oa).values()), ["1000", "1001", "1002"])
+        # the result signed by the root (regalia-kms-d9 on #120), opened from the k shares
+        import io
+        ok.ownerauth_summary(rec, self.oa, self.sealed, io.StringIO("\n".join(self.all[1:3]) + "\n"))
+        with open(os.path.join(self.oa, "ownerauth-verified.record.json")) as f:
+            signed = ok.verify_record(json.load(f))
+        self.assertEqual((signed["event"], signed["nodes"], sorted(c["serial"] for c in signed["cards"])),
+                         ("ownerauth-verified", ["a", "b", "c"], ["1000", "1001", "1002"]))
+        self.assertEqual(signed["root_entry"], self.record["root_entry"])
+        with open(os.path.join(self.oa, ok.VERIFY_LOG), "rb") as f:
+            self.assertEqual(signed["verify_log_sha256"], hashlib.sha256(f.read()).hexdigest())
         with open(os.path.join(self.oa, ok.VERIFY_LOG)) as f:
             text = f.read()
         for node in ("a", "b", "c"):
@@ -635,8 +656,10 @@ class OwnerAuth(Case):
         stranger = tempfile.mkdtemp(prefix="gs")
         self.addCleanup(shutil.rmtree, stranger, True)
         self.addCleanup(subprocess.run, ["gpgconf", "--homedir", stranger, "--kill", "all"], capture_output=True)
+        with self.assertRaisesRegex(ok.Refused, "the card inserted is 7, not the 9 typed"):
+            ok.ownerauth_verify(rec, self.oa, 9, gnupghome=stranger, run=self.card(7))
         with self.assertRaisesRegex(ok.Refused, "YubiKey 9 did NOT open: a"):
-            ok.ownerauth_verify(rec, self.oa, 9, gnupghome=stranger)
+            ok.ownerauth_verify(rec, self.oa, 9, gnupghome=stranger, run=self.card(9))
         env = os.path.join(self.oa, "ownerauth-a.yk.gpg")
         value = self.gpg_decrypt(env, self.homes[0])
         argv = ["gpg", "--homedir", self.homes[0], "--batch", "--trust-model", "always", "--output", env + ".new", "--encrypt"]
@@ -648,7 +671,7 @@ class OwnerAuth(Case):
         subprocess.run(argv, input=value, check=True, capture_output=True)
         os.replace(env + ".new", env)
         with self.assertRaisesRegex(ok.Refused, "is not the file the record names"):
-            ok.ownerauth_verify(rec, self.oa, 1, gnupghome=self.homes[0])
+            ok.ownerauth_verify(rec, self.oa, 1, gnupghome=self.homes[0], run=self.card(1))
         shutil.rmtree(self.oa)
         os.mkdir(self.oa)
         self.run_oa(nodes=("a",))
@@ -661,14 +684,14 @@ class OwnerAuth(Case):
                 return subprocess.CompletedProcess(argv, 0, ("ab" * 32 + "\n").encode(), ("[GNUPG:] DECRYPTION_KEY %s X u\n" % subkey).encode())
             return real(argv, *a, **k)
         with self.assertRaisesRegex(ok.Refused, "its value is not the one the record checks"):
-            ok.ownerauth_verify(rec, self.oa, 1, run=other_value)
+            ok.ownerauth_verify(rec, self.oa, 1, run=self.card(1, other_value))
 
         def other_key(argv, *a, **k):
             if "--decrypt" in argv:
                 return subprocess.CompletedProcess(argv, 0, b"", ("[GNUPG:] DECRYPTION_KEY %s X u\n" % ("F" * 40)).encode())
             return real(argv, *a, **k)
         with self.assertRaisesRegex(ok.Refused, "opened by a key the record does not name"):
-            ok.ownerauth_verify(rec, self.oa, 1, run=other_key)
+            ok.ownerauth_verify(rec, self.oa, 1, run=self.card(1, other_key))
 
     def test_refusals_leave_nothing_half_made(self):
         from shamir_mnemonic import generate_mnemonics
