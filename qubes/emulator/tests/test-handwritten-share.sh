@@ -63,6 +63,21 @@ LOOP
 out="$(printf 'y\n\n\nacademic acid acrobat romp beam husband pharmacy\ny\n\n\nzero zoo zone zinc zeal zest zeta\ny\n\n\nsock sofa soft soil solo some song\n' | timeout 60 script -qec "bash $T/loop.sh" /dev/null 2>&1 | tr -d '\r')"
 grep -q "PROCESSED 3" <<< "$out" && grep -c "^OK " <<< "$out" | grep -qx 3 && P "all three shares processed and verified in the loop" || F "a share was swallowed or unverified: $(grep -E 'PROCESSED|^OK' <<< "$out" | tr '\n' ' ')"
 
+hdr "with a sink (step o): the copy typed back is appended only once it matches, normalised"
+cat > "$T/sink.sh" <<SINK
+export PATH="$T/bin:\$PATH" SPOOL="$T/spool"
+source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1
+W=\$(mktemp -d); HERE="$SCRIPTS"; WORK=\$W; PRINTER=fakeq; rm -f "$T/sink"
+record_share "Offline keys — share 1" "$T/share" "$T/sink"; echo "RC=\$?"
+SINK
+sinkdrive(){ printf "$1" | timeout 60 script -qec "bash $T/sink.sh" /dev/null 2>&1 | tr -d '\r'; }
+out="$(sinkdrive "y\n\n\nacademic acid acrobat romp beam husband\n\n\nACADEMIC  acid acrobat romp beam husband pharmacy\n")"
+grep -q "RC=0" <<< "$out" && [ "$(cat "$T/sink" 2>/dev/null)" = "$SHARE" ] && [ "$(wc -l < "$T/sink")" = 1 ] \
+  && P "one line, the matched copy (normalised), not the mismatch before it" || F "sink: $(cat "$T/sink" 2>/dev/null | head -3)"
+[ "$(stat -c %a "$T/sink")" = 600 ] && P "the sink is 0600" || F "sink mode $(stat -c %a "$T/sink")"
+out="$(sinkdrive "y\n\n\nx\n\n\ny\n\n\nz\n")"
+grep -q "RC=1" <<< "$out" && [ ! -e "$T/sink" ] && P "three mismatches: nothing reaches the sink" || F "sink after refusal: $(cat "$T/sink" 2>/dev/null)"
+
 hdr "the blank form was not printed, and not confirmed printed another way: the share is NOT shown"
 out="$(drive "n\nn\n")"
 grep -q "no blank form" <<< "$out" && grep -q "RC=1" <<< "$out" && ! grep -q "academic" <<< "$(grep -v '^   run' <<< "$out")" && P "stopped without showing the share" || F "went on without a form"

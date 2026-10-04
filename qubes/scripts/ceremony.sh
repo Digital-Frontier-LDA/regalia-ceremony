@@ -434,7 +434,9 @@ scan_back_share() {
 # are cleared; the operator types the share back from the paper, which must match exactly.
 # Returns 1 if the copy could not be verified — the share must not be sealed then.
 record_share() {
-  local label="$1" secret_file="$2" share kind count form typed want
+  # $3 (optional): a file in the RAM workdir that each copy typed back and MATCHED is appended to, one per line,
+  # so a later step can prove the paper copies themselves (offline-keys.py verify-forms) without a second typing
+  local label="$1" secret_file="$2" sink="${3:-}" share kind count form typed want
   share="$(cat "$secret_file")"
   if [[ "$share" =~ ^[a-z]+([[:space:]]+[a-z]+)+$ ]]; then
     kind=words; count="$(wc -w <<< "$share")"
@@ -489,6 +491,7 @@ record_share() {
       want="$share"; typed="$(tr -d '[:space:]' <<< "$typed")"
     fi
     if [ "$typed" = "$want" ]; then
+      [ -z "$sink" ] || ( umask 077; printf '%s\n' "$typed" >> "$sink" )
       typed=""; want=""; info "   '$label': your copy MATCHES. Tick 'Checked' on the form."; return 0
     fi
     typed=""; want=""; tries=$((tries+1))
@@ -2539,6 +2542,63 @@ step_chipcard() {
   warn "prints the share to the terminal. The store already proved the bytes are on the card."
 }
 
+# ---- Offline keys (ADR-0002 D28, regalia-ceremony#111) ---------------------------------------------------------
+# The membership root and the three boot-image keys, generated here as software keys (offline-keys.py generate): one
+# master secret split $(K)-of-$(N) with SLIP-39, a set of its own beside break-glass; the keys sealed under it; a copy
+# encrypted to the break-glass recipient (made by step 3, option g, in this session). Each share is copied BY HAND
+# and typed back (record_share); the copies typed back are then proven together against the sealed file
+# (offline-keys.py verify-forms), which writes a root-signed record and shreds the shares file. Re-running this step
+# resumes at the shares when the keys were already generated in this session.
+# D19: a backup that is ciphertext is stored openly and redundantly, never on one medium (regalia-kms-d9 on #117).
+offline_commit_list() {
+  local f
+  warn "COMMIT after the ceremony, beside the DKEK blobs (the private repo's hsm-backups/offline/, with MANIFEST.yaml),"
+  warn "and keep a copy at each datacenter, so the offline keys never depend on the archive disc alone:"
+  for f in "$WORK"/offline/offline-keys.sealed.json "$WORK"/offline/offline-keys.breakglass.age "$WORK"/offline/*.record.json; do
+    [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
+  done
+  return 0
+}
+
+step_offline_keys() {
+  check_scheme || return 1
+  b "Offline keys — the membership root and the 3 boot-image keys, Shamir $(K)-of-$(N) (ADR-0002 D28)"
+  local dir="$WORK/offline" rcp="$WORK/breakglass.recipient" typed="$WORK/offline-typed.txt" unverified="" i line
+  if [ ! -e "$dir/offline-keys.sealed.json" ]; then
+    [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
+    [ ! -e "$dir" ] || { err "$dir holds a partial generation: remove it (rm -r -- '$dir') and run this step again."; return 1; }
+    ( umask 077; mkdir "$dir" ) || return 1
+    python3 -Es "$HERE/offline-keys.py" generate --threshold "$(K)" --shares "$(N)" --out "$dir" --breakglass-recipient "$rcp" \
+      || { err "the offline keys were NOT generated (reason above)."; return 1; }
+    warn "ROOT-ENTRY above is the membership root's pin for regalia-kms root-key.json; it goes on the disc in the record."
+    warn "WRITE ROOT-FINGERPRINT (above, 64 hex) BY HAND on the ceremony sheet: the first manifest's signing"
+    warn "(manifest sign --genesis) and every host's enrol check ask for it typed, from that sheet, never from a screen."
+  fi
+  [ -s "$dir/offline-shares.txt" ] || { info "the offline keys' forms were already proven in this session."; return 0; }
+  rm -f "$typed"
+  i=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    i=$((i+1)); ( umask 077; printf '%s' "$line" > "$WORK/osh$i" )
+    record_share "Offline keys — SLIP-39 share $i of $(N) (need $(K))" "$WORK/osh$i" "$typed" || unverified="$unverified $i"
+    shred -u "$WORK/osh$i" 2>/dev/null || rm -f "$WORK/osh$i"
+  done < "$dir/offline-shares.txt"
+  if [ -n "$unverified" ]; then
+    rm -f "$typed"
+    err "forms$unverified were not verified: run this step again (the keys are kept; only the forms are redone)."
+    return 1
+  fi
+  if ! python3 -Es "$HERE/offline-keys.py" verify-forms --sealed "$dir/offline-keys.sealed.json" --shares-file "$dir/offline-shares.txt" < "$typed"; then
+    shred -u "$typed" 2>/dev/null || rm -f "$typed"
+    err "the copies typed back do NOT open the sealed keys (reason above): the forms are not proven. Run this step again."
+    return 1
+  fi
+  shred -u "$typed" 2>/dev/null || rm -f "$typed"
+  info "offline keys done: the forms are proven and the shares file is shredded. The disc (step 4) carries $dir's"
+  info "sealed file, break-glass copy and records; the shares exist only on the holders' forms."
+  offline_commit_list
+}
+
 step_archive() {
   b "Archive disc (burn, then read every file back and checksum it)"
   info "One writer is enough (ADR-0002 D9): burn, push the tray shut, read the disc back and"
@@ -2587,6 +2647,16 @@ step_archive() {
     else
       err "dkek.kcv (the DKEK step) is missing or malformed: this ceremony's DKEK domain would have no recorded identity."
       err "Read the card's key check value (sc-hsm-tool) and re-run the DKEK step's import; nothing was burned."
+      return 1
+    fi
+  fi
+  # The offline keys' shares are on paper only: a shares file still in the workdir means step o never proved the
+  # forms, and the disc waits for that (ADR-0002 D28).
+  if [ -e "$WORK/offline/offline-shares.txt" ]; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the offline keys' forms were not proven (offline-shares.txt is still here); the real ceremony refuses this disc."
+    else
+      err "the offline keys' forms were not proven: $WORK/offline/offline-shares.txt is still here. Finish step o; nothing was burned."
       return 1
     fi
   fi
@@ -2662,6 +2732,15 @@ step_archive() {
   local art; for art in dkek.pbe dkek.kcv funding-wrapped.bin funding-pub.der payload.age breakglass.recipient escrow-mac.kcv; do
     [ -e "$WORK/$art" ] && cp "$WORK/$art" "$burn/" 2>/dev/null || true
   done
+  # The offline keys (step o, ADR-0002 D28): their sealed file and break-glass copy are ciphertext, their records
+  # public; all four go on the disc, in offline/ (their shares are on paper only, checked above).
+  if [ -d "$WORK/offline" ]; then
+    mkdir -p "$burn/offline"
+    for art in "$WORK"/offline/offline-keys.sealed.json "$WORK"/offline/offline-keys.breakglass.age "$WORK"/offline/*.record.json; do
+      [ -f "$art" ] && cp "$art" "$burn/offline/"
+    done
+  fi
+  [ -d "$WORK/offline" ] && offline_commit_list
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then
     info "Staged recovery kit for the archive disc (RECOVERY-START-HERE.txt + RECOVERY-TECHNICAL.md + toolkit): $kit"
   else
@@ -2848,6 +2927,7 @@ main() {
    9) Import the seed-derived funding key into the HSM (supported custody path)
    5) Recovery drill
    6) Print break-glass recovery instruction card (DVD-case sized)
+   o) Offline keys: the membership root + the 3 boot-image keys, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
     printf '   q) quit (workdir is shredded)\n'
@@ -2866,6 +2946,7 @@ MENU
       7) step_payload;;
       8) step_chipcard;;
       9) step_hsm_import;;
+      o|O) step_offline_keys;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
       q|Q) break;;
       *) warn "pick 1-9 or q";;
