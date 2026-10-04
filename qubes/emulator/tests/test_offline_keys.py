@@ -588,6 +588,10 @@ class OwnerAuth(Case):
         return ok.ownerauth(self.sealed, list(nodes), yk or self.yk, self.recipient, self.oa,
                             io.StringIO("\n".join(shares or self.all[:2]) + "\n"), run=run)
 
+    def summary(self, rec, shares=None):
+        import io
+        return ok.ownerauth_summary(rec, self.oa, self.sealed, io.StringIO("\n".join(shares or self.all[1:3]) + "\n"))
+
     @staticmethod
     def card(serial, inner=None):
         """`run` as gpg sees ONE card with this serial (`--card-status`); everything else as `inner` (the real run)."""
@@ -638,16 +642,14 @@ class OwnerAuth(Case):
         self.run_oa()
         rec = os.path.join(self.oa, "ownerauth.record.json")
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
-            ok.ownerauth_summary(rec, self.oa)
+            self.summary(rec)
         for n, home in enumerate(self.homes[:2]):
             self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n)), ["a", "b", "c"])
         with self.assertRaisesRegex(ok.Refused, "not yet proven"):
-            ok.ownerauth_summary(rec, self.oa)          # the third YubiKey has not opened them yet
+            self.summary(rec)          # the third YubiKey has not opened them yet
         ok.ownerauth_verify(rec, self.oa, 1002, gnupghome=self.homes[2], run=self.card(1002))
-        self.assertEqual(sorted(ok.ownerauth_summary(rec, self.oa).values()), ["1000", "1001", "1002"])
         # the result signed by the root (regalia-kms-d9 on #120), opened from the k shares
-        import io
-        ok.ownerauth_summary(rec, self.oa, self.sealed, io.StringIO("\n".join(self.all[1:3]) + "\n"))
+        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
         with open(os.path.join(self.oa, "ownerauth-verified.record.json")) as f:
             signed = ok.verify_record(json.load(f))
         self.assertEqual((signed["event"], signed["nodes"], sorted(c["serial"] for c in signed["cards"])),
@@ -738,11 +740,80 @@ class OwnerAuth(Case):
     def test_the_record_carries_what_the_reader_and_the_proof_need(self):
         record = self.run_oa(nodes=("a",))
         self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "yk_recipients", "root_entry", "root_fingerprint", "session",
-                                                 "share_indices", "slip39_identifier", "master_id", "tool", "at"]))
+                                                 "verify_key_sha256", "share_indices", "slip39_identifier", "master_id", "tool", "at"]))
         self.assertEqual(sorted(record["nodes"]["a"]), ["bg_sha256", "check", "yk_sha256"])
         for k in record["yk_recipients"]:
             self.assertRegex(k["primary"], r"^[0-9A-F]{40}$")
             self.assertRegex(k["subkey"], r"^[0-9A-F]{40}$")
+
+    def test_a_log_entry_counts_only_with_the_mac_a_card_made_for_this_record(self):
+        """coderabbitai on #120: a process that can write the directory, with no card and no shares, cannot add an entry
+        the summary counts (and the root then signs)."""
+        self.run_oa(nodes=("a",))
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        with open(rec) as f:
+            record = json.load(f)["record"]
+        with open(os.path.join(self.oa, ok.VERIFY_KEY_FILE), "rb") as f:
+            self.assertEqual(hashlib.sha256(f.read()).hexdigest(), record["verify_key_sha256"])
+        log = os.path.join(self.oa, ok.VERIFY_LOG)
+        with open(rec, "rb") as f:
+            record_sha = hashlib.sha256(f.read()).hexdigest()
+        for n, k in enumerate(record["yk_recipients"]):
+            forged = {"serial": str(1000 + n), "subkey": k["subkey"], "proven": ["a"], "failed": {}, "session": record["session"],
+                      "record_sha256": record_sha, "at": "2026-10-04T00:00:00Z"}
+            forged["mac"] = ok.entry_mac(b"\0" * 32, forged)            # a key guessed, not opened from a card
+            with open(log, "a") as f:
+                f.write(json.dumps(forged) + "\n")
+            del forged["mac"]                                            # and one with no MAC at all
+            with open(log, "a") as f:
+                f.write(json.dumps(forged) + "\n")
+        # a MAC under the real verify key, but over another record's file: it proves nothing about this one
+        with open(self.sealed) as f:
+            master = ok.combine(self.all[1:3], json.load(f))[0]
+        key = ok.verify_key_of(master, record["session"])
+        for n, k in enumerate(record["yk_recipients"]):
+            other = {"serial": str(1000 + n), "subkey": k["subkey"], "proven": ["a"], "failed": {}, "session": record["session"],
+                     "record_sha256": "0" * 64, "at": "2026-10-04T00:00:00Z"}
+            other["mac"] = ok.entry_mac(key, other)
+            with open(log, "a") as f:
+                f.write(json.dumps(other) + "\n")
+        with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
+            self.summary(rec)
+        self.assertFalse(os.path.exists(os.path.join(self.oa, "ownerauth-verified.record.json")), "nothing signed")
+        for n, home in enumerate(self.homes):
+            ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n))
+        with open(log) as f:
+            real = [json.loads(line) for line in f][-3:]
+        self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", e["mac"]) for e in real))
+        # a real entry edited after the card made it no longer counts
+        with open(log, "w") as f:
+            for e in real[:2] + [dict(real[2], serial="9999")]:
+                f.write(json.dumps(e) + "\n")
+        with self.assertRaisesRegex(ok.Refused, "not yet proven"):
+            self.summary(rec)
+        with open(log, "w") as f:
+            for e in real:
+                f.write(json.dumps(e) + "\n")
+        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
+
+    def test_the_summary_takes_the_shares(self):
+        self.run_oa(nodes=("a",))
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        import contextlib
+        import io
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertEqual(ok.main(["ownerauth-verify", "--record", rec, "--dir", self.oa, "--summary"]), 1)
+        self.assertIn("--summary takes --sealed and the k shares", err.getvalue())
+
+    def test_a_record_that_fails_to_write_leaves_no_envelope(self):
+        """coderabbitai on #120: the record is written inside the cleanup scope, and a partial record is removed."""
+        with unittest.mock.patch.object(ok.os, "fsync", side_effect=OSError("the disc is full")):
+            with self.assertRaisesRegex(OSError, "the disc is full"):
+                self.run_oa(nodes=("a",))
+        self.assertEqual(os.listdir(self.oa), [], "no envelope, no partial record and no GnuPG home")
+        self.run_oa(nodes=("a",))                                       # and a rerun is not blocked by leftovers
+
 
 if __name__ == "__main__":
     unittest.main()
