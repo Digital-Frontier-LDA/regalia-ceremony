@@ -5,6 +5,8 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
 
     python3 -Es offline-keys.py generate --threshold K --shares N --out DIR --breakglass-recipient FILE
     python3 -Es offline-keys.py verify-forms --sealed FILE --shares-file FILE [--partial]   (the forms typed back on stdin)
+    python3 -Es offline-keys.py sign --sealed FILE --key NAME --input FILE --who NAME --out DIR [--exec CMD ARG…]
+                                          (the k shares on standard input, one per line)
     python3 -Es offline-keys.py verify-record --record FILE
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
@@ -32,6 +34,20 @@ k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the four keys are sealed unde
 
 THE KEYS. root: Ed25519 (regalia-kms root-key.json takes {"alg": "ed25519", "key": "<hex>"}); pcr-initrd, pcr-system,
 secure-boot: RSA-2048, the boot image's keys of regalia#554 under the labels hsm-signing-key.sh gave them.
+
+A SIGNING SESSION (sign). The shares come on standard input, one per line, never on the command line: exactly the
+set's threshold of them, each once, of the set the sealed file names (its master id), or nothing is opened. The
+keys are opened in RAM, the named key signs, and the session is recorded:
+  * by default, --input's bytes are signed (the root: Ed25519 over them as given, the membership manifest's signing
+    input; the boot keys: RSA PKCS#1 v1.5 with SHA-256). The signature is verified under the key the sealed header
+    names before it is written to OUT/<input name>.<key>.sig;
+  * with --exec (last on the line), for a tool that takes a key file (systemd-measure sign --private-key={key},
+    sbsign --key {key}): the key goes to a 0600 PEM in OUT for the length of that one command, wherever its arguments
+    say {key}; the file is then
+    overwritten with zeros and unlinked, whatever the command did. --input is then the file being signed, recorded
+    by its digest.
+  * OUT/session-<time>.record.json: who, the key, the input's SHA-256, the signature's (or the command), the share
+    indices used, the SLIP-39 identifier and the master id, signed by the root over RECORD_DOMAIN, as at generation.
 
 WHERE IT RUNS. DIR must be a RAM file system (tmpfs or ramfs) and swap must be off: the keys and the master secret
 must never reach a disk. CEREMONY_ALLOW_NONTMPFS=1 and CEREMONY_ALLOW_SWAP=1 are for tests. Key material and the
@@ -302,7 +318,7 @@ def normalise(mnemonic):
     return " ".join(mnemonic.lower().split())
 
 
-def verify_forms(sealed_path, shares_path, stream, partial=False):
+def verify_forms(sealed_path, shares_path, stream, partial=False, now=None):
     """The forms as the holders will keep them, typed back before the shares are gone: each must be a valid SLIP-39
     share (its checksum) equal to one of the shares made, a k-subset of the typed forms must rebuild the master the
     sealed file was made under, and every form must be typed back unless `partial` (then at least k, and the record
@@ -310,6 +326,8 @@ def verify_forms(sealed_path, shares_path, stream, partial=False):
     path. Returns (the indices checked, the indices not checked)."""
     from shamir_mnemonic import combine_mnemonics
     from shamir_mnemonic.share import Share
+    out = os.path.dirname(os.path.abspath(shares_path))
+    check_place(out)                    # the keys are opened below, to sign the record of this check
     with open(sealed_path, "rb") as f:
         sealed = json.loads(f.read(1 << 20))
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
@@ -336,8 +354,21 @@ def verify_forms(sealed_path, shares_path, stream, partial=False):
         raise Refused("the forms typed back do not combine: %s" % error) from None
     try:
         require(master_id(master) == sealed["master_id"], "the forms typed back rebuild another master secret than the sealed file's")
+        bundle = unseal(master, sealed)
     finally:
         zero(master)
+    # the evidence keeps which forms were proven, not only the screen (regalia-kms-d9 on #114): a forms-verified
+    # record, signed by the root the forms just opened
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    from cryptography.hazmat.primitives import serialization
+    at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = {"schema": SCHEMA_RECORD, "event": "forms-verified", "checked": [i + 1 for i in sorted(typed)],
+              "not_checked": [i + 1 for i in missing], "slip39_identifier": sealed["slip39_identifier"], "master_id": sealed["master_id"],
+              "root_entry": {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()},
+              "tool": TOOL, "at": at}
+    write_record(out, "forms-verified-%s" % at.replace(":", ""), root, record)
+    del root
     size = os.path.getsize(shares_path)
     with open(shares_path, "r+b") as f:
         f.write(bytes(size))
@@ -351,6 +382,145 @@ def read_forms(stream, limit=64):
     lines = [line.strip() for line in stream.read(1 << 16).splitlines() if line.strip()]
     require(0 < len(lines) <= limit, "no forms were typed back on standard input")
     return lines
+# ---- a signing session ------------------------------------------------------------------------------
+
+def read_shares(stream, limit=64):
+    lines = [line.strip() for line in stream.read(1 << 16).splitlines()]
+    shares = [line for line in lines if line]
+    require(0 < len(shares) <= limit, "no shares were given on standard input")
+    return shares
+
+
+def combine(shares, sealed):
+    """The master secret, as a bytearray, from exactly the set's threshold of distinct shares of the set the sealed
+    file was made under. Returns (master, the share indices used, the SLIP-39 identifier)."""
+    from shamir_mnemonic import combine_mnemonics
+    from shamir_mnemonic.share import Share
+    try:
+        parsed = [Share.from_mnemonic(m) for m in shares]
+    except Exception as error:           # noqa: BLE001 - a mistyped word is a refusal, said by the library
+        raise Refused("a share is not a valid SLIP-39 share: %s" % error) from None
+    identifiers = {p.identifier for p in parsed}
+    require(len(identifiers) == 1, "the shares come from %d different sets" % len(identifiers))
+    require(parsed[0].identifier == sealed["slip39_identifier"], "these shares are of set %d, not of the set this file was sealed under (%d)"
+            % (parsed[0].identifier, sealed["slip39_identifier"]))
+    indices = [p.index for p in parsed]
+    twice = sorted({i + 1 for i in indices if indices.count(i) > 1})
+    require(not twice, "a share was given twice (share %s)" % ",".join(str(i) for i in twice))
+    threshold = parsed[0].member_threshold
+    require(len(parsed) == threshold, "%d shares given; this set needs exactly %d: no more are taken than open it" % (len(parsed), threshold))
+    try:
+        master = bytearray(combine_mnemonics(shares))
+    except Exception as error:           # noqa: BLE001
+        raise Refused("the shares do not combine: %s" % error) from None
+    if master_id(master) != sealed["master_id"]:
+        zero(master)
+        raise Refused("these shares rebuild another master secret than the one this file was sealed under")
+    return master, sorted(i + 1 for i in indices), parsed[0].identifier     # numbered as the forms are, from 1
+
+
+def _private_key(entry):
+    from cryptography.hazmat.primitives import serialization
+    return serialization.load_der_private_key(base64.b64decode(entry["pkcs8"]), None)
+
+
+def _sign_bytes(key, alg, data):
+    if alg == "ed25519":
+        return key.sign(data)
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import padding
+    return key.sign(data, padding.PKCS1v15(), hashes.SHA256())
+
+
+def _verify_bytes(spki_b64, alg, signature, data):
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import serialization
+    public = serialization.load_der_public_key(base64.b64decode(spki_b64))
+    try:
+        if alg == "ed25519":
+            public.verify(signature, data)
+        else:
+            from cryptography.hazmat.primitives import hashes
+            from cryptography.hazmat.primitives.asymmetric import padding
+            public.verify(signature, data, padding.PKCS1v15(), hashes.SHA256())
+    except InvalidSignature:
+        raise Refused("the signature made does not verify under the key the sealed file names") from None
+
+
+def sign(sealed_path, key_name, input_path, who, out, stream, command=None, now=None, run=subprocess.run):
+    require(re.fullmatch(r"[A-Za-z][A-Za-z0-9 ._-]{0,63}", who or "") is not None, "--who names the person signing (letters, digits, . _ - and spaces)")
+    require(os.path.isdir(out), "--out %s is not a directory" % out)
+    check_place(out)
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    require(key_name in sealed["publics"], "no key %r in the sealed file (it holds %s)" % (key_name, ", ".join(sorted(sealed["publics"]))))
+    with open(input_path, "rb") as f:
+        data = f.read()
+    sig_path = os.path.join(out, "%s.%s.sig" % (os.path.basename(input_path), key_name))
+    require(command is not None or not os.path.lexists(sig_path), "%s already exists: nothing is overwritten" % sig_path)
+    if command is not None:
+        require(command and any("{key}" in a for a in command), "--exec needs a command whose arguments name the key file as {key}")
+    master, indices, identifier = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    alg = sealed["publics"][key_name]["alg"]
+    key = _private_key(bundle["keys"][key_name])
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    session = {"schema": SCHEMA_RECORD, "event": "sign", "key": key_name, "who": who, "input": os.path.basename(input_path),
+               "input_sha256": hashlib.sha256(data).hexdigest(), "share_indices": indices, "slip39_identifier": identifier,
+               "master_id": sealed["master_id"], "root_entry": None, "tool": TOOL,
+               "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    from cryptography.hazmat.primitives import serialization
+    session["root_entry"] = {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()}
+    if command is None:
+        signature = _sign_bytes(key, alg, data)
+        _verify_bytes(sealed["publics"][key_name]["spki"], alg, signature, data)
+        fd = os.open(sig_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+        with os.fdopen(fd, "wb") as f:
+            f.write(signature)
+        session["signature_sha256"] = hashlib.sha256(signature).hexdigest()
+    else:
+        done = None
+        pem = bytearray(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        key_path = os.path.join(out, ".offline-key-%s.pem" % secrets.token_hex(8))
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(pem)
+            argv = [a.replace("{key}", key_path) for a in command]      # also --private-key={key}
+            done = run(argv, stdin=subprocess.DEVNULL)
+            session["command"] = list(command)
+            session["command_exit"] = done.returncode
+        finally:
+            size = os.path.getsize(key_path) if os.path.exists(key_path) else 0
+            if size:
+                with open(key_path, "r+b") as f:
+                    f.write(bytes(size))
+                    f.flush()
+                    os.fsync(f.fileno())
+            if os.path.lexists(key_path):
+                os.unlink(key_path)
+            zero(pem)
+        require(done.returncode == 0, "the command exited %d: the session is recorded, nothing it wrote is vouched for" % done.returncode)
+    record_path = write_record(out, "session-%s-%s" % (session["at"].replace(":", ""), key_name), root, session)
+    del key, root
+    return session, record_path
+
+
+def write_record(out, stem, root, record):
+    """OUT/<stem>.record.json: `record` signed by the root over RECORD_DOMAIN, never overwriting. Returns the path."""
+    path = os.path.join(out, stem + ".record.json")
+    signature = root.sign(RECORD_DOMAIN + canonical(record))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(canonical({"record": record, "signature": signature.hex()}) + b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+    return path
 
 
 def verify_record(document):
@@ -382,6 +552,13 @@ def main(argv=None):
     w.add_argument("--sealed", required=True)
     w.add_argument("--shares-file", required=True)
     w.add_argument("--partial", action="store_true", help="at least k forms, the rest named as not checked")
+    s = sub.add_parser("sign", help="a signing session: the k shares on standard input, one per line")
+    s.add_argument("--sealed", required=True)
+    s.add_argument("--key", required=True, help="root, pcr-initrd, pcr-system or secure-boot")
+    s.add_argument("--input", required=True, help="the file signed (its bytes, or the file --exec's tool signs)")
+    s.add_argument("--who", required=True, help="the person signing, as recorded")
+    s.add_argument("--out", required=True)
+    s.add_argument("--exec", nargs=argparse.REMAINDER, dest="command", help="CMD ARG…: run with the key as a file, named {key}")
     v = sub.add_parser("verify-record")
     v.add_argument("--record", required=True)
     args = ap.parse_args(argv)
@@ -401,6 +578,11 @@ def main(argv=None):
                   % ",".join(str(i + 1) for i in checked))
             if missing:
                 print("FORMS NOT CHECKED %s (--partial)" % ",".join(str(i + 1) for i in missing))
+        elif args.command == "sign":
+            session, path = sign(args.sealed, args.key, args.input, args.who, args.out, sys.stdin, args.command)
+            print("SIGNED %s with %s (shares %s), %s; record %s" % (session["input"], session["key"],
+                  ",".join(str(i) for i in session["share_indices"]), session.get("signature_sha256") and "signature sha256 "
+                  + session["signature_sha256"] or "by the command", path))
         else:
             with open(args.record, "rb") as f:
                 record = verify_record(json.loads(f.read(1 << 20)))
