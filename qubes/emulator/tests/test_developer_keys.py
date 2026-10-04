@@ -176,10 +176,10 @@ class Generate(Case):
 class FakeCard:
     """yubikit's OpenPgpSession as the import uses it, recording each call; `fail` names a step that misbehaves."""
 
-    def __init__(self, admin="87654321", user="654321", occupied=False, fail=None):
-        self.admin, self.user, self.fail, self.calls = admin, user, fail, []
+    def __init__(self, admin="87654321", user="654321", occupied=False, fail=None, uif=None, firmware="5.7.4"):
+        self.admin, self.user, self.fail, self.calls, self.firmware = admin, user, fail, [], firmware
         self.status = KEY_STATUS.IMPORTED if occupied else KEY_STATUS.NONE
-        self.uif, self.key, self.created, self.fpr = UIF.OFF, None, None, b""
+        self.uif, self.key, self.created, self.fpr = uif or UIF.OFF, None, None, b""
 
     def verify_pin(self, pin):
         self.calls.append("verify_pin")
@@ -196,6 +196,8 @@ class FakeCard:
 
     def set_uif(self, ref, uif):
         self.calls.append("set_uif")
+        if self.uif in (UIF.FIXED, UIF.CACHED_FIXED):         # as a YubiKey: a fixed touch policy refuses every write
+            raise Exception("security status not satisfied")
         if self.fail == "uif-before":
             return
         self.uif = uif
@@ -206,6 +208,9 @@ class FakeCard:
     def put_key(self, ref, key):
         self.calls.append("put_key")
         self.key, self.status = key, KEY_STATUS.GENERATED if self.fail == "status" else KEY_STATUS.IMPORTED
+        if self.fail == "put-raises":                       # the key written, then the connection lost
+            self.fail = None
+            raise Exception("the card stopped answering")
 
     def set_generation_time(self, ref, t):
         self.calls.append("set_generation_time")
@@ -246,7 +251,7 @@ class ReleaseImport(Case):
         @contextlib.contextmanager
         def card(serial_typed):
             self.assertEqual(serial_typed, serial or self.SERIAL)
-            yield fake, "5.7.4"
+            yield fake, fake.firmware
         return card
 
     def run_import(self, fake=None, serial=None, replace=False, pins=("87654321", "654321"), typed=None):
@@ -278,6 +283,10 @@ class ReleaseImport(Case):
             (dict(fake=FakeCard(occupied=True)), "already holds a SIG key (IMPORTED): refused; replacing it takes --replace"),
             (dict(fake=FakeCard(occupied=True), replace=True, typed="40000004"), "the serial typed is not 40000003: nothing was changed"),
             (dict(fake=FakeCard(fail="uif-before")), "did not take a FIXED touch policy on SIG: nothing was imported"),
+            (dict(fake=FakeCard(firmware="5.1.2")), "release card 40000003 runs firmware 5.1.2; the release key needs 5.2.3 or later: "
+                                                    "nothing was changed"),
+            (dict(fake=FakeCard(uif=UIF.CACHED_FIXED)), "has a CACHED_FIXED touch policy on SIG, which only a reset undoes: reset the "
+                                                        "OpenPGP applet (ykman openpgp reset)"),
         ]
         for kw, reason in cases:
             fake = kw.get("fake") or FakeCard(fail=None)
@@ -285,9 +294,35 @@ class ReleaseImport(Case):
             with self.subTest(reason=reason), self.assertRaisesRegex(dk.Refused, re.escape(reason)):
                 self.run_import(**kw)
             self.assertNotIn("put_key", fake.calls, reason)
+            if "firmware" in reason:
+                self.assertEqual(fake.calls, [], "the firmware is checked before anything is written, PINs included")
         self.assertFalse(any(n.startswith("release-import-") for n in os.listdir(self.out)))
         facts, fake = self.run_import(fake=FakeCard(occupied=True), replace=True, typed=self.SERIAL)
         self.assertIn("put_key", fake.calls)
+
+    def test_a_rerun_and_replace_meet_the_fixed_touch_policy_already_set(self):
+        """regalia-kms-d9 on #126: a FIXED touch policy refuses every write, so a rerun after a failed import and a
+        --replace over the previous import must find it set, and not try to set it again."""
+        fake = FakeCard(fail="fingerprint")
+        with self.assertRaisesRegex(dk.Refused, "the key was deleted from it"):
+            self.run_import(fake=fake)
+        self.assertEqual((fake.uif, fake.status), (UIF.FIXED, KEY_STATUS.NONE))
+        fake.fail, fake.calls = None, []
+        facts, _ = self.run_import(fake=fake)
+        self.assertNotIn("set_uif", fake.calls)
+        self.assertEqual(facts["touch"], "fixed")
+        os.unlink(self.path("release-import-%s.json" % self.SERIAL))
+        replaced = FakeCard(occupied=True, uif=UIF.FIXED)
+        facts, _ = self.run_import(fake=replaced, replace=True, typed=self.SERIAL)
+        self.assertEqual((replaced.status, "set_uif" in replaced.calls), (KEY_STATUS.IMPORTED, False))
+
+    def test_a_put_that_fails_part_way_is_cleaned_up(self):
+        """regalia-kms-d9 on #126: put_key inside the scope that deletes: the card may hold the key after an error."""
+        fake = FakeCard(fail="put-raises")
+        with self.assertRaisesRegex(dk.Refused, "release card 40000003 is unusable for release \\(the card stopped answering\\): the key "
+                                    "was deleted from it"):
+            self.run_import(fake=fake)
+        self.assertEqual((fake.calls[-1], fake.key, fake.status), ("delete_key", None, KEY_STATUS.NONE))
 
     def test_a_card_that_fails_the_read_back_has_the_key_taken_off(self):
         """regalia-kms-d9 on #124: never a release key on a card without FIXED touch, and no footgun left for a hand."""

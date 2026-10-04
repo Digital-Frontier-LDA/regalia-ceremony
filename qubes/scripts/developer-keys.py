@@ -11,14 +11,16 @@ release key (Ed25519), which is imported onto the SIG slot of the two release-sp
 
 CURRENT LIMITATIONS (2026-10-04; each removed here when it is lifted):
   * MODELLED ONLY. No key has been imported onto a real card: release-import's yubikit calls run against a stand-in
-    in the tests. Whether put_key leaves a FIXED touch policy that was set before it is unmeasured (it is read back
-    either way, below), and a signature from the imported key, which needs a touch, has never been made
-    (regalia-ceremony#123, the D30.6 bench, the owner present).
+    in the tests. Unmeasured on a card (regalia-ceremony#123, the D30.6 bench, the owner present): whether put_key
+    keeps a FIXED touch policy set before it (read back either way, below); whether delete_key, which yubikit does by
+    rewriting the algorithm attributes, then reads back NONE, and leaves SIG on RSA for the next put_key to set to
+    EdDSA again; and a signature from the imported key, which needs a touch.
   * No ceremony.sh step runs this; it is typed by hand (#124).
   * The developers' set seals the release key only. The other developer secrets (staging, dev/CI) are not sealed yet.
   * Rotation after a stolen release card (D30.4: a new key, a published rotation) is not here.
-  * The key is in clear in the laptop's RAM during generate and each import, as the offline keys are; the directory
-    must be a RAM file system and swap must be off, and that is the bound.
+  * The key is in clear in the laptop's RAM during generate and each import, as the offline keys are. The `del` of a
+    key object does not zero it (the cryptography library's key objects cannot be zeroed from Python): the RAM
+    file system, swap off and the process's end are the bound, nothing else.
 
 TRUST (regalia-kms-d9 on #124). The release key signs its own generation record: a proof of possession, nothing more,
 so the record says status "pending". Anyone with the laptop could make such a set. The key is trusted only once a
@@ -33,8 +35,11 @@ RELEASE-IMPORT, in this order, failing closed:
   3. the admin and user PINs are typed at the terminal, never argv: either equal to its factory default (12345678,
      123456) is refused, and both must verify, so the card's own PINs are not the defaults (a typed non-default PIN
      that verifies proves it, and no retry is spent trying the default);
-  4. an occupied SIG slot is refused, unless --replace and the serial typed again;
-  5. the touch policy is set to FIXED on SIG BEFORE the key goes in, and read back FIXED;
+  4. a card below firmware 5.2.3 (Ed25519 on OpenPGP; the key status needs 5.2) is refused before anything is written;
+     an occupied SIG slot is refused, unless --replace and the serial typed again;
+  5. the touch policy on SIG is FIXED BEFORE the key goes in: set if it is not, left alone if it is (a YubiKey refuses
+     any write to a FIXED touch policy, so a rerun and --replace meet it already set), and refused with "reset the
+     applet" if it is fixed in another way (CACHED_FIXED), which only a reset undoes;
   6. put_key, then the generation time and the fingerprint data objects, from the sealed header, so both cards show
      one OpenPGP v4 fingerprint, computed here from the public key and that time;
   7. read back: SIG IMPORTED, its public key the sealed one, the touch policy FIXED (not CACHED_FIXED), the fingerprint
@@ -76,6 +81,7 @@ SEAL_INFO = b"regalia-developer-keys/v1 seal"
 KEYS = (("release", "ed25519"),)       # the key map: the release key for now; other developer secrets later
 FILES = ("developers.sealed.json", "developers-shares.txt", "developers.breakglass.age", "developers.record.json")
 DEFAULT_ADMIN_PIN, DEFAULT_USER_PIN = "12345678", "123456"
+MIN_FIRMWARE = (5, 2, 3)               # Ed25519 on the OpenPGP applet; get_key_information needs 5.2
 TOOL = "developer-keys.py/1"
 ED25519_OID = bytes.fromhex("2B06010401DA470F01")      # 1.3.6.1.4.1.11591.15.1, OpenPGP's legacy EdDSA curve
 
@@ -283,7 +289,7 @@ def open_card(serial):
     device, info = devices[0]
     require(str(info.serial) == serial, "the YubiKey attached is %s, not the %s typed" % (info.serial, serial))
     with device.open_connection(SmartCardConnection) as connection:
-        yield OpenPgpSession(connection), "%d.%d.%d" % tuple(info.version)
+        yield OpenPgpSession(connection), "%d.%d.%d" % tuple(info.version)[:3]
 
 
 def _ask(prompt):
@@ -316,6 +322,9 @@ def release_import(sealed_path, serial, out, stream, replace=False, ask=_ask, as
                 "a PIN typed is the factory default: set the card's admin and user PINs first (ykman openpgp access), "
                 "or anyone holding it could re-key it")
         with card(serial) as (session, firmware):
+            version = tuple(int(x) for x in str(firmware).split(".")[:3])
+            require(version >= MIN_FIRMWARE, "release card %s runs firmware %s; the release key needs %s or later: nothing was changed"
+                    % (serial, firmware, ".".join(str(x) for x in MIN_FIRMWARE)))
             try:
                 session.verify_pin(user)
                 session.verify_admin(admin)
@@ -327,11 +336,16 @@ def release_import(sealed_path, serial, out, stream, replace=False, ask=_ask, as
                 require(replace, "release card %s already holds a SIG key (%s): refused; replacing it takes --replace" % (serial, status.name))
                 require(ask("Release card %s already holds a SIG key. Type its serial to replace it: " % serial) == serial,
                         "the serial typed is not %s: nothing was changed" % serial)
-            # the touch policy before the key: a release key is never on a card without it (regalia-kms-d9 on #124)
-            session.set_uif(KEY_REF.SIG, UIF.FIXED)
+            # the touch policy before the key: a release key is never on a card without it (regalia-kms-d9 on #124). A FIXED
+            # policy refuses every write, so it is set only when it is not already FIXED (a rerun, --replace: d9 on #126)
+            current = session.get_uif(KEY_REF.SIG)
+            require(current != UIF.CACHED_FIXED, "release card %s has a CACHED_FIXED touch policy on SIG, which only a reset undoes: "
+                    "reset the OpenPGP applet (ykman openpgp reset), set its PINs, then retry. Nothing was imported" % serial)
+            if current != UIF.FIXED:
+                session.set_uif(KEY_REF.SIG, UIF.FIXED)
             require(session.get_uif(KEY_REF.SIG) == UIF.FIXED, "release card %s did not take a FIXED touch policy on SIG: nothing was imported" % serial)
-            session.put_key(KEY_REF.SIG, key)
             try:
+                session.put_key(KEY_REF.SIG, key)        # inside: a put that fails part-way may still have left the key
                 session.set_generation_time(KEY_REF.SIG, public["created"])
                 session.set_fingerprint(KEY_REF.SIG, bytes.fromhex(public["fingerprint"]))
                 problems = []
