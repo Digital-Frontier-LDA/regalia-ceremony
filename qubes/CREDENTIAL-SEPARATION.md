@@ -139,15 +139,19 @@ correctly, about 1 time in 256, so the key check value is compared. Test: `test-
 **10. YubiKeys have no DKEK.** A PIV key cannot be exported or imported under a key-encryption key.
 Continuity is multi-enrollment (rule 5, ADR-0002 D5). Nothing in this ceremony wraps a YubiKey key.
 
-**10a. The offline signing HSM and its spare are a DKEK domain of their own** (regalia#554). The keys
-that sign the KMS hosts' boot image are generated on an offline Nitrokey HSM 2 and backed up as
-DKEK-wrapped blobs (ADR-0002 D19). That card and its spare share a DKEK that no KMS host's card holds,
-so an image-signing key cannot be unwrapped onto an online host. That DKEK's share is not split again:
-it is a software secret under the break-glass key.
-*Verified by:* `hsm-signing-key.sh restore`, which proves a blob restores and signs on the spare.
-Test: `test-hsm-signing-key.sh` (a card of the KMS hosts' domain refuses the blob). *Prose only:* that
-the two cards were initialised with their own DKEK, and where its share is kept; the script has not
-run on a card.
+**10a. The offline keys are Shamir-held software keys, in a share set of their own** (ADR-0002 D28,
+regalia#559; superseding regalia#554's signing HSM and regalia-kms#156's root HSM, 2026-10-04). The
+membership root (Ed25519) and the three keys that sign the KMS hosts' boot image are generated on the
+offline signing laptop, in RAM with swap off. They are sealed under a 256-bit master secret split k-of-n
+with SLIP-39: a new set, separate from break-glass, so a routine signing session never reconstructs the key
+that opens the vault. They are also encrypted to the break-glass key, so a lost offline set never strands
+the fleet. A signing session takes exactly k shares and hands each key only to the regalia-kms tool that
+checks what it signs: the root to `manifest sign`, the boot keys to `uki.py sign`, each as a sealed memfd.
+Every session is recorded and signed by the root.
+*Verified by:* `offline-keys.py` (`generate`, `verify-forms`, `sign`). Test: `test_offline_keys.py`
+(k shares open the keys and k-1 don't; another set is refused; the hand-copied forms are proven before
+the shares are shredded; no raw signing; the key is never a file; a key left behind is found).
+*Prose only:* no ceremony has run it yet.
 
 ## Transport artifacts
 

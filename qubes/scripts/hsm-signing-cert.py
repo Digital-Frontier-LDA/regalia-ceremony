@@ -17,11 +17,14 @@ host enrols. The key never leaves the card, so the certificate is built here as 
 put in place (`assemble`). A certificate that verifies under its own public key is then also a
 signature the card made: `check` is the proof that the key at that object signs.
 
-TWO KEY TYPES. RSA-2048 (sha256WithRSAEncryption; the card signs with SHA256-RSA-PKCS), for the boot
-image's keys (regalia#554); and ECDSA P-256 (ecdsa-with-SHA256; the card signs with ECDSA-SHA256 and
-pkcs11-tool --signature-format openssl gives the DER ECDSA-Sig-Value X.509 carries), for the membership
-root (regalia-kms#156, option C). The type is read from the public key, and the signature algorithm is
-the one that type implies, never chosen separately.
+TWO KEY TYPES. RSA-2048 (sha256WithRSAEncryption; the card signs with SHA256-RSA-PKCS), the boot
+image's key type (regalia#554); and ECDSA P-256 (ecdsa-with-SHA256; the card signs with ECDSA-SHA256 and
+pkcs11-tool --signature-format openssl gives the DER ECDSA-Sig-Value X.509 carries). The type is read from
+the public key, and the signature algorithm is the one that type implies, never chosen separately.
+
+SUPERSEDED FOR THE CEREMONY'S OWN KEYS (ADR-0002 D28, regalia#559): the membership root and the three
+boot-image keys are Shamir-held software keys (offline-keys.py), not HSM keys. This tool stays as the
+certificate and record of a signing key that is to live on an HSM.
 
 The certificate is self-signed, version 3, with basicConstraints
 CA:FALSE (critical) and keyUsage digitalSignature (critical). Nothing in it is a trust decision: the

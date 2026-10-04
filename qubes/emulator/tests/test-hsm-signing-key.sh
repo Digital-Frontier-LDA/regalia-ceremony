@@ -608,7 +608,7 @@ EOF
 imports="$(grep -oE '^[[:space:]]*(import|from)[[:space:]]+[A-Za-z0-9_.]+' "$SCRIPTS/hsm-signing-cert.py" | awk '{print $2}' | sort -u | tr '\n' ' ')"
 [ "$imports" = "argparse base64 datetime hashlib json os re subprocess sys tempfile " ] && ! grep -qE '__import__|importlib|-engine|-provider|python3 -I -c|python3 -c' "$KEYTOOL" "$SCRIPTS/hsm-signing-cert.py" \
   && P "the Python imports exactly ten standard modules and nothing is loaded by name; no openssl engine or provider" || F "imports: $imports"
-hdr "6  the membership root: ECDSA P-256, the card's own attestation, and the separate DKEK domain (regalia-kms#156)"
+hdr "6  an ECDSA P-256 key (the root's type under regalia-kms#156, before D28): the card's own attestation, and a separate DKEK domain"
 card DENK0600001 "$PIN_SIGNING" root-domain
 card DENK0600002 "$PIN_SPARE" root-domain
 attach DENK0600001
