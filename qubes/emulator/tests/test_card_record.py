@@ -47,7 +47,7 @@ class Vectors(unittest.TestCase):
             root = f.read().strip()
         self.assertEqual(sorted(expect), sorted(n for n in os.listdir(VECTORS) if n.endswith(".json") and n != "expect.json"))
         self.assertEqual(sorted(expect), ["bad-signature.json", "missing-dev-backup.json", "other-root.json", "release-is-owner.json",
-                                          "unknown-field.json", "valid.json", "wrong-domain.json"])
+                                          "sequence-2.json", "unknown-field.json", "valid.json", "wrong-domain.json"])
         for name, expected in sorted(expect.items()):
             with self.subTest(vector=name), open(os.path.join(VECTORS, name)) as f:
                 document = json.load(f)
@@ -66,6 +66,21 @@ class Vectors(unittest.TestCase):
                 document = json.load(f)
             key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(document["record"]["root_entry"]["key"]))
             key.verify(bytes.fromhex(document["signature"]), ok.RECORD_DOMAIN + ok.canonical(document["record"]))
+
+    def test_the_signing_record_chains_the_two_card_records(self):
+        """regalia-kms#403: sequence-2 supersedes valid.json by digest, and the signing record holds both, in order."""
+        with open(os.path.join(VECTORS, "valid.json")) as f:
+            first = json.load(f)["record"]
+        with open(os.path.join(VECTORS, "sequence-2.json")) as f:
+            second = json.load(f)["record"]
+        self.assertEqual((first["sequence"], first["supersedes"]), (1, ""))
+        self.assertEqual((second["sequence"], second["supersedes"]), (2, ok.card_record_digest(first)))
+        self.assertEqual(ok.card_record_digest(first), __import__("hashlib").sha256(ok.canonical(first)).hexdigest())
+        with open(os.path.join(VECTORS, "signing-record.jsonl")) as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual([(l["kind"], l["sequence"], l["digest"], l["key"]) for l in lines],
+                         [("card-record", 1, ok.card_record_digest(first), first["root_entry"]["key"]),
+                          ("card-record", 2, ok.card_record_digest(second), first["root_entry"]["key"])])
 
     def test_the_signed_bytes_are_regalia_kms_membership_canonical_form(self):
         """regalia-kms's verifier canonicalises with ensure_ascii=True; an ASCII record makes the same bytes."""
@@ -96,6 +111,11 @@ class Rules(unittest.TestCase):
             (lambda r: r.update(schema="regalia.card-ceremony-record/v0"),
              "schema must be regalia.card-ceremony-record/v1, event card-ceremony"),
             (lambda r: r.update(session="0" * 31), "session is 32 hex"),
+            (lambda r: r.update(sequence=0), "sequence is an integer from 1"),
+            (lambda r: r.update(sequence=True), "sequence is an integer from 1"),
+            (lambda r: r.update(supersedes="ab" * 32), "the first card record (sequence 1) supersedes nothing: supersedes is \"\""),
+            (lambda r: r.update(sequence=2), "a card record after the first names the one it supersedes: the SHA-256 of its canonical "
+                                             "bytes, 64 hex"),
             (lambda r: r.update(at="2026-10-04 12:00:00"), "at is YYYY-MM-DDTHH:MM:SSZ"),
             (lambda r: r.update(root_fingerprint="0" * 64), "root_fingerprint is not the SHA-256 of the root key"),
             (lambda r: r["owner_keys"].append(dict(r["owner_keys"][0])), "owner_keys holds exactly the two developer cards' SIG keys (D30.3)"),
@@ -174,6 +194,24 @@ class Rules(unittest.TestCase):
                     ok.card_record_check(broken)
                 count += 1
         self.assertGreater(count, 150)
+
+    def test_the_signing_record_line(self):
+        """append_card_record_line: one line per card record the root signs, in a 0700 directory of this user's, the
+        file 0600, appended (never rewritten)."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        first, second = make.valid_record(), make.sequence_two()
+        ok.append_card_record_line(d, first)
+        ok.append_card_record_line(d, second)
+        with open(os.path.join(d, ok.SIGNING_RECORD)) as f:
+            lines = [json.loads(line) for line in f]
+        self.assertEqual([(l["kind"], l["sequence"], l["digest"]) for l in lines],
+                         [("card-record", 1, ok.card_record_digest(first)), ("card-record", 2, ok.card_record_digest(second))])
+        self.assertEqual(oct(os.stat(os.path.join(d, ok.SIGNING_RECORD)).st_mode & 0o777), "0o600")
+        os.chmod(d, 0o755)
+        with self.assertRaisesRegex(ok.Refused, "must be a directory of this user's, mode 0700"):
+            ok.append_card_record_line(d, first)
 
     def test_the_verifier_takes_exactly_a_record_and_a_hex_signature(self):
         with open(os.path.join(VECTORS, "valid.json")) as f:

@@ -47,7 +47,7 @@ MAIN, BACKUP, RELEASE, MAIN_SSH, BACKUP_SSH = key(11), key(12), key(13), key(21)
 def valid_record():
     entry = {"alg": "ed25519", "key": raw(ROOT)}
     return {
-        "schema": ok.SCHEMA_CARDS, "event": "card-ceremony",
+        "schema": ok.SCHEMA_CARDS, "event": "card-ceremony", "sequence": 1, "supersedes": "",
         "owner_keys": [{"role": "dev-main", "serial": "40000001", "alg": "ed25519", "key": raw(MAIN), "attested": True,
                         "attestation_sha256": {"sig": "d1" * 32, "dec": "d2" * 32}},
                        {"role": "dev-backup", "serial": "40000002", "alg": "ed25519", "key": raw(BACKUP), "attested": True,
@@ -59,6 +59,14 @@ def valid_record():
                         "imported": True, "attested": False},
         "session": "0123456789abcdef0123456789abcdef", "root_entry": entry, "root_fingerprint": ok.root_fingerprint(entry),
         "tool": "card-ceremony-vectors/1", "at": "2026-10-04T12:00:00Z"}
+
+
+def sequence_two():
+    """The card record after valid.json's: sequence 2, superseding it (a rotation, a replacement card)."""
+    second = valid_record()
+    second.update(sequence=2, supersedes=ok.card_record_digest(valid_record()), session="fedcba9876543210fedcba9876543210",
+                  at="2026-10-05T12:00:00Z")
+    return second
 
 
 def signed(record, private=ROOT, domain=ok.RECORD_DOMAIN):
@@ -82,6 +90,7 @@ def vectors():
     r = valid_record()
     r["owner_keys"][0]["comment"] = "an extra field"
     out.append(("unknown-field.json", signed(r), "owner_keys[0] has an unknown field: comment"))
+    out.append(("sequence-2.json", signed(sequence_two()), "ok"))
     r = valid_record()
     r["root_entry"] = {"alg": "ed25519", "key": raw(OTHER_ROOT)}
     r["root_fingerprint"] = ok.root_fingerprint(r["root_entry"])
@@ -97,6 +106,12 @@ def write(directory):
         f.write(json.dumps({name: expected for name, _, expected in vectors()}, sort_keys=True, indent=1) + "\n")
     with open(os.path.join(directory, "root.hex"), "w") as f:
         f.write(raw(ROOT) + "\n")
+    # the laptop's root signing record after both card records (regalia-kms#403): one line each, in order
+    with open(os.path.join(directory, "signing-record.jsonl"), "w") as f:
+        for record, at in ((valid_record(), "2026-10-04T12:00:01Z"), (sequence_two(), "2026-10-05T12:00:01Z")):
+            line = {"kind": "card-record", "sequence": record["sequence"], "digest": ok.card_record_digest(record),
+                    "key": record["root_entry"]["key"], "at": at}
+            f.write(json.dumps(line, sort_keys=True) + "\n")
 
 
 if __name__ == "__main__":
