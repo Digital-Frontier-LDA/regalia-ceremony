@@ -553,8 +553,8 @@ HAVE_GPG = shutil.which("gpg") is not None and shutil.which("gpgconf") is not No
 @unittest.skipUnless(HAVE_AGE and HAVE_GPG, "age or gpg is not installed here (the emulator job has both)")
 class OwnerAuth(Case):
     """regalia-kms#242's owner authorizations, in the format #242's reader takes (agreed with regalia-kms-95): per node,
-    64 hex and a newline, with gpg to the approval YubiKeys' OpenPGP decryption subkeys (regalia-kms-24's choice) and
-    with age to break-glass, a check value, a record the root signs, and each YubiKey's proof that it opens them. Three
+    64 hex and a newline, with gpg to the two developer cards' OpenPGP decryption subkeys (D30.3) and
+    with age to break-glass, a check value, a record the root signs, and each YubiKey's proof that it opens them. Two
     GnuPG homes, each holding one software key (Ed25519 primary, cv25519 encryption subkey), stand in for the cards."""
 
     def setUp(self):
@@ -566,20 +566,20 @@ class OwnerAuth(Case):
         os.mkdir(self.oa)
         self.homes = []
         exported = b""
-        for i in range(3):
+        for i in range(2):
             home = tempfile.mkdtemp(prefix="g%d" % i)            # short: the agent's socket path has a length limit
             os.chmod(home, 0o700)
             self.addCleanup(shutil.rmtree, home, True)
             self.addCleanup(subprocess.run, ["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
             gpg = ["gpg", "--homedir", home, "--batch", "--pinentry-mode", "loopback", "--passphrase", ""]
-            subprocess.run(gpg + ["--quick-gen-key", "Approval %d <approval%d@example.invalid>" % (i, i), "ed25519", "sign", "never"],
+            subprocess.run(gpg + ["--quick-gen-key", "Developer card %d <dev%d@example.invalid>" % (i, i), "ed25519", "sign", "never"],
                            check=True, capture_output=True)
             fpr = subprocess.run(["gpg", "--homedir", home, "--with-colons", "--list-keys"], check=True, capture_output=True,
                                  text=True).stdout.split("fpr:::::::::")[1].split(":")[0]
             subprocess.run(gpg + ["--quick-add-key", fpr, "cv25519", "encr", "never"], check=True, capture_output=True)
             exported += subprocess.run(["gpg", "--homedir", home, "--export", fpr], check=True, capture_output=True).stdout
             self.homes.append(home)
-        self.yk = os.path.join(self.d, "approval-keys.gpg")
+        self.yk = os.path.join(self.d, "developer-cards.gpg")
         with open(self.yk, "wb") as f:
             f.write(exported)
 
@@ -616,7 +616,7 @@ class OwnerAuth(Case):
             verified = ok.verify_record(json.load(f))
         self.assertEqual(verified["schema"], "regalia.ownerauth-record/v1")
         self.assertEqual(verified["root_entry"], self.record["root_entry"], "signed by the ceremony's root")
-        self.assertEqual(len(record["yk_recipients"]), 3)
+        self.assertEqual(len(record["yk_recipients"]), 2)
         self.assertFalse(os.path.exists(os.path.join(self.oa, ".gnupg-ownerauth")), "the throwaway GnuPG home is gone")
         values = set()
         for node in ("a", "b", "c"):
@@ -643,17 +643,16 @@ class OwnerAuth(Case):
         rec = os.path.join(self.oa, "ownerauth.record.json")
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
             self.summary(rec)
-        for n, home in enumerate(self.homes[:2]):
-            self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n)), ["a", "b", "c"])
+        self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000, gnupghome=self.homes[0], run=self.card(1000)), ["a", "b", "c"])
         with self.assertRaisesRegex(ok.Refused, "not yet proven"):
-            self.summary(rec)          # the third YubiKey has not opened them yet
-        ok.ownerauth_verify(rec, self.oa, 1002, gnupghome=self.homes[2], run=self.card(1002))
+            self.summary(rec)          # the backup card has not opened them yet
+        ok.ownerauth_verify(rec, self.oa, 1001, gnupghome=self.homes[1], run=self.card(1001))
         # the result signed by the root (regalia-kms-d9 on #120), opened from the k shares
-        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
+        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
         with open(os.path.join(self.oa, "ownerauth-verified.record.json")) as f:
             signed = ok.verify_record(json.load(f))
         self.assertEqual((signed["event"], signed["nodes"], sorted(c["serial"] for c in signed["cards"])),
-                         ("ownerauth-verified", ["a", "b", "c"], ["1000", "1001", "1002"]))
+                         ("ownerauth-verified", ["a", "b", "c"], ["1000", "1001"]))
         self.assertEqual(signed["root_entry"], self.record["root_entry"])
         with open(os.path.join(self.oa, ok.VERIFY_LOG), "rb") as f:
             self.assertEqual(signed["verify_log_sha256"], hashlib.sha256(f.read()).hexdigest())
@@ -795,7 +794,29 @@ class OwnerAuth(Case):
         with open(log, "w") as f:
             for e in real:
                 f.write(json.dumps(e) + "\n")
-        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
+        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
+
+    def test_exactly_the_two_developer_cards(self):
+        """ADR-0002 D30.3: the owner authorizations go to dev-main's and dev-backup's DEC keys, no more and no fewer."""
+        home = tempfile.mkdtemp(prefix="g3")
+        self.addCleanup(shutil.rmtree, home, True)
+        self.addCleanup(subprocess.run, ["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
+        gpg = ["gpg", "--homedir", home, "--batch", "--pinentry-mode", "loopback", "--passphrase", ""]
+        subprocess.run(gpg + ["--quick-gen-key", "A third card <third@example.invalid>", "ed25519", "sign", "never"], check=True, capture_output=True)
+        fpr = subprocess.run(["gpg", "--homedir", home, "--with-colons", "--list-keys"], check=True, capture_output=True,
+                             text=True).stdout.split("fpr:::::::::")[1].split(":")[0]
+        subprocess.run(gpg + ["--quick-add-key", fpr, "cv25519", "encr", "never"], check=True, capture_output=True)
+        three = os.path.join(self.d, "three.gpg")
+        with open(self.yk, "rb") as f, open(three, "wb") as g:
+            g.write(f.read() + subprocess.run(["gpg", "--homedir", home, "--export", fpr], check=True, capture_output=True).stdout)
+        one = os.path.join(self.d, "one.gpg")
+        with open(one, "wb") as g:
+            g.write(subprocess.run(["gpg", "--homedir", self.homes[0], "--export"], check=True, capture_output=True).stdout)
+        for keys, n in ((three, 3), (one, 1)):
+            with self.subTest(keys=n), self.assertRaisesRegex(ok.Refused, "--yk-keys holds %d keys: the owner authorizations go to "
+                                                              "exactly the two developer cards" % n):
+                self.run_oa(yk=keys)
+        self.assertEqual(os.listdir(self.oa), [], "nothing written")
 
     def test_one_card_cannot_vouch_for_another(self):
         """regalia-kms-d9 on #120: each card opens only its own verify key, so the holder of ONE card cannot MAC an entry
@@ -824,7 +845,7 @@ class OwnerAuth(Case):
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope: the YubiKeys with subkeys %s" % subkeys[1][-16:]):
             self.summary(rec)
         ok.ownerauth_verify(rec, self.oa, 1001, gnupghome=self.homes[1], run=self.card(1001))
-        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001", "1002"])
+        self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
 
     def test_the_summary_takes_the_shares(self):
         self.run_oa(nodes=("a",))

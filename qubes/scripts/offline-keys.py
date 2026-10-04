@@ -698,7 +698,7 @@ def _gpg(home, *args, run=subprocess.run, **kw):
 
 
 def yubikey_recipients(keys_path, home, run=subprocess.run):
-    """The approval YubiKeys' OpenPGP public keys (exported from the cards, armoured or binary), imported into `home`, a
+    """The developer cards' OpenPGP public keys (ADR-0002 D30: dev-main and dev-backup) (exported from the cards, armoured or binary), imported into `home`, a
     throwaway GnuPG home in the RAM directory: for each key its primary fingerprint and its ONE usable encryption subkey
     (cv25519 on the card's decryption slot; regalia-kms-24's choice after the 2026-10-04 bench). A key with none, or more
     than one, or expired or revoked, is refused. Returns [{"primary", "subkey"}] in the file's order."""
@@ -732,7 +732,7 @@ def yubikey_recipients(keys_path, home, run=subprocess.run):
 
 def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, now=None, run=subprocess.run):
     """Each KMS host's TPM owner authorization (regalia-kms#242: set at enrolment, kept off the host): 32 random bytes per
-    node, as 64 lowercase hex and a newline, encrypted with gpg to every approval YubiKey's OpenPGP decryption subkey
+    node, as 64 lowercase hex and a newline, encrypted with gpg to both developer cards' OpenPGP decryption subkeys (D30.3: their DEC keys, the card record's ownerauth_recipients)
     (any one card decrypts) in ownerauth-<node>.yk.gpg, and with age to the break-glass key in ownerauth-<node>.bg.age.
     The plaintext reaches gpg and age on stdin only, and neither file may hold it in the clear. Both files' SHA-256 and
     the check value go into ownerauth.record.json, signed by the root, which this session opens from the k shares on
@@ -751,6 +751,8 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
     os.mkdir(home, 0o700)
     try:
         yk = yubikey_recipients(yk_keys, home, run)
+        require(len(yk) == 2, "--yk-keys holds %d keys: the owner authorizations go to exactly the two developer cards' decryption "
+                "subkeys, dev-main and dev-backup (ADR-0002 D30.3)" % len(yk))
         for k in yk:
             path = os.path.join(out, verify_key_file(k["subkey"]))
             require(not os.path.lexists(path), "%s already exists: nothing is overwritten" % path)
@@ -771,7 +773,7 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
         written, record_nodes = [], {}
 
         def envelope(kind, path, value, to=None):
-            """`value` (bytes, 32) as 64 hex and a newline, encrypted to path (a .yk.gpg to every approval card, or only to
+            """`value` (bytes, 32) as 64 hex and a newline, encrypted to path (a .yk.gpg to both developer cards, or only to
             the subkeys in `to`); returns the file's SHA-256."""
             plain = bytearray(bytes(value).hex().encode() + b"\n")
             try:
@@ -825,7 +827,7 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
 
 
 VERIFY_LOG = "ownerauth-verify.jsonl"
-# The verify keys (coderabbitai on #120): one per approval card, derived from the master for one ownerauth session and
+# The verify keys (coderabbitai on #120): one per developer card, derived from the master for one ownerauth session and
 # that card's encryption subkey, encrypted to THAT subkey only, and never written in the clear (regalia-kms-d9 on #120:
 # a key shared by every card let one card vouch for another). ownerauth-verify can MAC its log entry only after its card
 # opened its own envelope; the summary re-derives each card's key from the k shares and counts an entry only under the
@@ -851,14 +853,14 @@ def card_serial(gnupghome=None, run=subprocess.run):
     the card that actually opened the envelopes, not a number typed (regalia-kms-d9 on #120)."""
     argv = ["gpg"] + (["--homedir", gnupghome] if gnupghome else []) + ["--batch", "--card-status"]
     done = run(argv, capture_output=True, env=dict(os.environ, LC_ALL="C"))
-    require(done.returncode == 0, "gpg reaches no card (insert ONE approval YubiKey)")
+    require(done.returncode == 0, "gpg reaches no card (insert ONE developer card)")
     found = re.findall(rb"^Serial number[ .]*:\s*([0-9]+)\s*$", done.stdout, re.M)
     require(len(found) == 1, "gpg --card-status shows no single serial number")
     return found[0].decode()
 
 
 def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, run=subprocess.run):
-    """With ONE approval YubiKey inserted (gpg reaching it through scdaemon, in the operator's GnuPG home or
+    """With ONE developer card inserted (gpg reaching it through scdaemon, in the operator's GnuPG home or
     `gnupghome`): every node's .yk.gpg is decrypted to a pipe, never shown, and must be 64 hex and a newline whose check
     value is the record's, from a file whose SHA-256 is the record's, decrypted by a subkey the record names (gpg's
     DECRYPTION_KEY status line) (regalia-kms-d9 on #120: the envelopes are proven to open, not assumed to). The result,
@@ -931,7 +933,7 @@ def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, r
 
 
 def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
-    """Whether every approval YubiKey (each encryption subkey the record names) has opened every node's envelope, by
+    """Whether both developer cards (each encryption subkey the record names) has opened every node's envelope, by
     ownerauth-verify's log. Returns {subkey: serial}; refused, naming what is missing, otherwise. The ceremony does not
     finish without it. It takes the sealed file and the k shares on `stream`: an entry counts only if its MAC holds
     under the verify key, re-derived here from the master, which ownerauth-verify had only from a card (coderabbitai on
@@ -1043,10 +1045,10 @@ def main(argv=None):
     o = sub.add_parser("ownerauth", help="each KMS host's TPM owner authorization, for regalia-kms#242: the k shares on standard input")
     o.add_argument("--sealed", required=True)
     o.add_argument("--nodes", required=True, help="the node IDs, comma-separated (a,b,c)")
-    o.add_argument("--yk-keys", required=True, help="the approval YubiKeys' OpenPGP public keys, exported from the cards")
+    o.add_argument("--yk-keys", required=True, help="the two developer cards' OpenPGP public keys (D30), exported from the cards")
     o.add_argument("--breakglass-recipient", required=True)
     o.add_argument("--out", required=True, help="a RAM directory for the files and the record")
-    ov = sub.add_parser("ownerauth-verify", help="with one approval YubiKey inserted: prove it opens every node's envelope")
+    ov = sub.add_parser("ownerauth-verify", help="with one developer card inserted: prove it opens every node's envelope")
     ov.add_argument("--record", required=True)
     ov.add_argument("--dir", required=True, help="where the envelopes are; the log is appended there")
     ov.add_argument("--gnupghome", help="the GnuPG home that reaches the inserted card (default: the operator's)")
@@ -1088,7 +1090,7 @@ def main(argv=None):
                 require(args.sealed, "--summary takes --sealed and the k shares: the log's entries are authenticated with them")
                 for subkey, serial in sorted(ownerauth_summary(args.record, args.dir, args.sealed, sys.stdin).items()):
                     print("PROVEN YubiKey %s (subkey …%s) opens every node's envelope" % (serial, subkey[-16:]))
-                print("OWNERAUTH ENVELOPES PROVEN for every approval YubiKey")
+                print("OWNERAUTH ENVELOPES PROVEN for both developer cards")
             else:
                 require(args.yubikey_serial, "--yubikey-serial names the inserted YubiKey")
                 proven = ownerauth_verify(args.record, args.dir, args.yubikey_serial, args.gnupghome)
