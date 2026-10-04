@@ -281,8 +281,7 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
         require(not os.path.lexists(os.path.join(out, name)), "%s already exists: nothing is overwritten" % os.path.join(out, name))
     check_place(out)
     with open(recipient_file) as f:
-        recipient = f.readline().strip()
-    require(re.fullmatch(r"age1[0-9a-z]+", recipient) is not None, "%s does not hold an age recipient" % recipient_file)
+        recipient = breakglass_recipient(f.readline().strip(), recipient_file)
 
     keys = new_keys()
     proofs = operation_proofs(keys)
@@ -674,8 +673,18 @@ def ownerauth_check(value, node_id):
 def _age_recipient(path):
     with open(path) as f:
         found = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-    require(len(found) == 1 and re.fullmatch(r"age1[0-9a-z]+", found[0]) is not None, "%s holds one break-glass age recipient" % path)
-    return found[0]
+    require(len(found) == 1, "%s holds one break-glass age recipient" % path)
+    return breakglass_recipient(found[0], path)
+
+
+def breakglass_recipient(recipient, where):
+    """The break-glass recipient: post-quantum (age1pq1…, ML-KEM-768 + X25519, as ceremony.sh makes it with age-keygen
+    -pq), never a classical one, which a later quantum computer could open (coderabbitai on #120).
+    CEREMONY_ALLOW_CLASSICAL_BREAKGLASS=1 is for tests on a machine whose age predates 1.3."""
+    require(re.fullmatch(r"age1[0-9a-z]+", recipient) is not None, "%s does not hold an age recipient" % where)
+    require(recipient.startswith("age1pq1") or os.environ.get("CEREMONY_ALLOW_CLASSICAL_BREAKGLASS") == "1",
+            "%s holds a classical age recipient: the break-glass key is post-quantum (age1pq1…)" % where)
+    return recipient
 
 
 def _gpg(home, *args, run=subprocess.run, **kw):

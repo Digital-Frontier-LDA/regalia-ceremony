@@ -51,6 +51,9 @@ class Case(unittest.TestCase):
         if HAVE_AGE:
             if subprocess.run(["age-keygen", "-pq", "-o", self.identity], capture_output=True).returncode != 0:
                 subprocess.run(["age-keygen", "-o", self.identity], check=True, capture_output=True)
+                patcher = unittest.mock.patch.dict(os.environ, {"CEREMONY_ALLOW_CLASSICAL_BREAKGLASS": "1"})   # age before 1.3
+                patcher.start()
+                self.addCleanup(patcher.stop)
             with open(self.recipient, "w") as f:
                 f.write(subprocess.run(["age-keygen", "-y", self.identity], check=True, capture_output=True, text=True).stdout)
         else:
@@ -185,6 +188,11 @@ class Generate(Case):
                 self.generate()
         with unittest.mock.patch.dict(os.environ, {"CEREMONY_ALLOW_SWAP": "0"}), unittest.mock.patch.object(ok, "swap_in_use", lambda: ["/dev/zram0"]):
             with self.assertRaisesRegex(ok.Refused, "swap is on"):
+                self.generate()
+        with open(self.recipient, "w") as f:
+            f.write("age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n")
+        with unittest.mock.patch.dict(os.environ, {"CEREMONY_ALLOW_CLASSICAL_BREAKGLASS": "0"}):
+            with self.assertRaisesRegex(ok.Refused, "holds a classical age recipient: the break-glass key is post-quantum"):
                 self.generate()
         with open(self.recipient, "w") as f:
             f.write("not a recipient\n")
