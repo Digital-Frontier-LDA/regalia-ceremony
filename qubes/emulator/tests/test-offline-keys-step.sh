@@ -54,6 +54,10 @@ for f in offline-keys.sealed.json offline-keys.breakglass.age offline-keys.recor
   [ -s "$W/offline/$f" ] && P "$f is in the workdir" || F "$f is missing"
 done
 ls "$W"/offline/forms-verified-*.record.json >/dev/null 2>&1 && P "the forms-verified record is written" || F "no forms-verified record"
+sealed_sum="$(sha256sum < "$W/offline/offline-keys.sealed.json" | cut -c1-64)"
+grep -q "hsm-backups/offline/" <<< "$out" && grep -q "offline-keys.sealed.json  sha256 $sealed_sum" <<< "$out" \
+  && grep -q "offline-keys.breakglass.age  sha256" <<< "$out" && grep -q "forms-verified-.*record.json  sha256" <<< "$out" \
+  && P "the operator is told to commit the ciphertexts and records openly too, each by its SHA-256 (D19)" || F "no commit list: $(grep -i commit <<< "$out")"
 [ ! -e "$W/offline/offline-shares.txt" ] && [ ! -e "$W/offline-typed.txt" ] && ! ls "$W"/osh* >/dev/null 2>&1 \
   && P "the shares file, the copies typed back and each share's file are gone" || F "left behind: $(ls "$W" "$W/offline")"
 out="$(run_step "$W" copy)"
@@ -97,6 +101,7 @@ for f in offline-keys.sealed.json offline-keys.breakglass.age offline-keys.recor
   grep -q "$f" <<< "$burned" || F "$f is not staged for the disc (staged: $burned)"
 done
 grep -q "forms-verified-" <<< "$burned" && P "the sealed file, the break-glass copy and both records are staged in offline/" || F "staged: $burned"
+grep -q "hsm-backups/offline/" <<< "$out" && P "the archive step repeats the commit list" || F "archive: no commit list"
 [ -z "$(find "$W/mdisc" -name '*shares*' -o -name 'osh*' 2>/dev/null)" ] && P "no share is staged" || F "a share is staged"
 W2="$(new_work)"; run_step "$W2" refuse:1 >/dev/null
 out="$(arch "$W2" 0)"

@@ -2549,6 +2549,17 @@ step_chipcard() {
 # and typed back (record_share); the copies typed back are then proven together against the sealed file
 # (offline-keys.py verify-forms), which writes a root-signed record and shreds the shares file. Re-running this step
 # resumes at the shares when the keys were already generated in this session.
+# D19: a backup that is ciphertext is stored openly and redundantly, never on one medium (regalia-kms-d9 on #117).
+offline_commit_list() {
+  local f
+  warn "COMMIT after the ceremony, beside the DKEK blobs (the private repo's hsm-backups/offline/, with MANIFEST.yaml),"
+  warn "and keep a copy at each datacenter, so the offline keys never depend on the archive disc alone:"
+  for f in "$WORK"/offline/offline-keys.sealed.json "$WORK"/offline/offline-keys.breakglass.age "$WORK"/offline/*.record.json; do
+    [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
+  done
+  return 0
+}
+
 step_offline_keys() {
   check_scheme || return 1
   b "Offline keys — the membership root and the 3 boot-image keys, Shamir $(K)-of-$(N) (ADR-0002 D28)"
@@ -2583,6 +2594,7 @@ step_offline_keys() {
   shred -u "$typed" 2>/dev/null || rm -f "$typed"
   info "offline keys done: the forms are proven and the shares file is shredded. The disc (step 4) carries $dir's"
   info "sealed file, break-glass copy and records; the shares exist only on the holders' forms."
+  offline_commit_list
 }
 
 step_archive() {
@@ -2726,6 +2738,7 @@ step_archive() {
       [ -f "$art" ] && cp "$art" "$burn/offline/"
     done
   fi
+  [ -d "$WORK/offline" ] && offline_commit_list
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then
     info "Staged recovery kit for the archive disc (RECOVERY-START-HERE.txt + RECOVERY-TECHNICAL.md + toolkit): $kit"
   else
