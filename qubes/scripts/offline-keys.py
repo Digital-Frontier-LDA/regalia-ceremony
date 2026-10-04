@@ -685,6 +685,9 @@ def verify_record(document):
 
 SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
 CARD_ROLES = ("dev-main", "dev-backup")
+# The bench's staging YubiKeys (the memory of 2026-10-01; D28.5/D30: never a bench serial in the ceremony). One list,
+# checked once in the record, so neither reader has to keep its own (regalia-kms-d9 on #121).
+BENCH_YUBIKEYS = ("36345471", "36344616", "35718625")
 _SERIAL = re.compile(r"[1-9][0-9]{0,9}")
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 _FPR = re.compile(r"[0-9A-F]{40}")
@@ -747,11 +750,16 @@ def card_record_check(record):
     owners = record["owner_keys"]
     require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two developer cards' SIG keys (D30.3)")
     for i, k in enumerate(owners):
-        _exact(k, ("role", "serial", "alg", "key", "attested"), "owner_keys[%d]" % i)
+        _exact(k, ("role", "serial", "alg", "key", "attested", "attestation_sha256"), "owner_keys[%d]" % i)
         require(k["role"] in CARD_ROLES, "owner_keys[%d].role is dev-main or dev-backup" % i)
         require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
         require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
         require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
+        # the evidence behind "attested" (d9 on #121): the SHA-256 of the SIG and DEC keys' attestation certificates,
+        # whose files go on the disc beside the record, so an auditor re-checks the claim and not only the root's word
+        _exact(k["attestation_sha256"], ("sig", "dec"), "owner_keys[%d].attestation_sha256" % i)
+        require(all(isinstance(v, str) and _HEX64.fullmatch(v) for v in k["attestation_sha256"].values()),
+                "owner_keys[%d].attestation_sha256 gives each certificate's SHA-256, 64 hex" % i)
     require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles dev-main and dev-backup, once each")
     serials = {k["serial"] for k in owners}
     require(len(serials) == 2, "the two developer cards have distinct serials")
@@ -774,6 +782,14 @@ def card_record_check(record):
     for i, r in enumerate(record["ownerauth_recipients"]):
         require(all(isinstance(r[f], str) and _FPR.fullmatch(r[f]) for f in ("primary", "subkey")) and r["primary"] != r["subkey"],
                 "ownerauth_recipients[%d] names a primary and a different encryption subkey, 40 upper-case hex" % i)
+    fprs = [r[f] for r in record["ownerauth_recipients"] for f in ("primary", "subkey")]
+    require(len(set(fprs)) == len(fprs), "an ownerauth fingerprint is used twice: each developer card has its own primary and its own "
+            "decryption subkey, or one card would count twice in the proof (d9 on #121)")
+    certs = [v for k in owners for v in k["attestation_sha256"].values()]
+    require(len(set(certs)) == len(certs), "an attestation certificate is named twice: each key has its own")
+    every_serial = sorted(serials | set(rel["cards"]))
+    bench = [x for x in every_serial if x in BENCH_YUBIKEYS]
+    require(not bench, "a bench YubiKey is named (%s): the ceremony never uses a bench serial (D28.5, D30)" % ", ".join(bench))
     ssh = [ssh_ed25519_raw(s["key"], "ssh_signers[%d].key" % i) for i, s in enumerate(record["ssh_signers"])]
     every = [record["root_entry"]["key"], rel["key"]] + [k["key"] for k in owners] + ssh
     require(len(set(every)) == len(every), "a key is used twice among the root, the release key, the owner keys and the SSH keys")

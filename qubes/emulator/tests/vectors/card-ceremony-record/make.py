@@ -48,8 +48,10 @@ def valid_record():
     entry = {"alg": "ed25519", "key": raw(ROOT)}
     return {
         "schema": ok.SCHEMA_CARDS, "event": "card-ceremony",
-        "owner_keys": [{"role": "dev-main", "serial": "40000001", "alg": "ed25519", "key": raw(MAIN), "attested": True},
-                       {"role": "dev-backup", "serial": "40000002", "alg": "ed25519", "key": raw(BACKUP), "attested": True}],
+        "owner_keys": [{"role": "dev-main", "serial": "40000001", "alg": "ed25519", "key": raw(MAIN), "attested": True,
+                        "attestation_sha256": {"sig": "d1" * 32, "dec": "d2" * 32}},
+                       {"role": "dev-backup", "serial": "40000002", "alg": "ed25519", "key": raw(BACKUP), "attested": True,
+                        "attestation_sha256": {"sig": "e1" * 32, "dec": "e2" * 32}}],
         "ownerauth_recipients": [{"serial": "40000001", "primary": "A1" * 20, "subkey": "B1" * 20},
                                  {"serial": "40000002", "primary": "A2" * 20, "subkey": "B2" * 20}],
         "ssh_signers": [{"serial": "40000001", "key": ssh_line(MAIN_SSH)}, {"serial": "40000002", "key": ssh_line(BACKUP_SSH)}],

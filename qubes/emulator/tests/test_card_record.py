@@ -120,7 +120,30 @@ class Rules(unittest.TestCase):
              "a key is used twice among the root, the release key, the owner keys and the SSH keys"),
             (lambda r: r["release_key"].update(key=r["root_entry"]["key"]),
              "a key is used twice among the root, the release key, the owner keys and the SSH keys"),
+            (lambda r: r["owner_keys"][0].pop("attestation_sha256"), "owner_keys[0] is missing: attestation_sha256"),
+            (lambda r: r["owner_keys"][0]["attestation_sha256"].pop("dec"), "owner_keys[0].attestation_sha256 is missing: dec"),
+            (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="D1" * 32),
+             "owner_keys[1].attestation_sha256 gives each certificate's SHA-256, 64 hex"),
+            (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="d1" * 32), "an attestation certificate is named twice: each key has its own"),
+            (lambda r: r["ownerauth_recipients"][1].update(subkey=r["ownerauth_recipients"][0]["subkey"]),
+             "an ownerauth fingerprint is used twice: each developer card has its own primary and its own decryption subkey, or one "
+             "card would count twice in the proof (d9 on #121)"),
+            (lambda r: r["ownerauth_recipients"][1].update(primary=r["ownerauth_recipients"][0]["primary"]),
+             "an ownerauth fingerprint is used twice: each developer card has its own primary and its own decryption subkey, or one "
+             "card would count twice in the proof (d9 on #121)"),
         ]
+        for bench in ok.BENCH_YUBIKEYS:
+            for where in ("owner", "release"):
+                def change(r, bench=bench, where=where):
+                    if where == "owner":
+                        old = r["owner_keys"][1]["serial"]
+                        r["owner_keys"][1]["serial"] = bench
+                        for item in r["ownerauth_recipients"] + r["ssh_signers"]:
+                            if item["serial"] == old:
+                                item["serial"] = bench
+                    else:
+                        r["release_key"]["cards"][0] = bench
+                cases.append((change, "a bench YubiKey is named (%s): the ceremony never uses a bench serial (D28.5, D30)" % bench))
         for change, reason in cases:
             with self.subTest(reason=reason):
                 self.refused(change, reason)
