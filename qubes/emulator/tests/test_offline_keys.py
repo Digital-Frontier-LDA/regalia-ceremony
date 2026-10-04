@@ -536,10 +536,15 @@ if "nooutput" not in args:
         self.assertEqual((record["event"], record["checked"], record["not_checked"]), ("forms-verified", [1, 2, 3, 4], [5]))
         self.assertEqual(record["root_entry"], self.record["root_entry"])
 
-@unittest.skipUnless(HAVE_AGE, "age is not installed here (the emulator job installs it)")
+HAVE_GPG = shutil.which("gpg") is not None and shutil.which("gpgconf") is not None
+
+
+@unittest.skipUnless(HAVE_AGE and HAVE_GPG, "age or gpg is not installed here (the emulator job has both)")
 class OwnerAuth(Case):
     """regalia-kms#242's owner authorizations, in the format #242's reader takes (agreed with regalia-kms-95): per node,
-    64 hex and a newline, to the approval YubiKeys and to break-glass, a check value, and a record the root signs."""
+    64 hex and a newline, with gpg to the approval YubiKeys' OpenPGP decryption subkeys (regalia-kms-24's choice) and
+    with age to break-glass, a check value, a record the root signs, and each YubiKey's proof that it opens them. Three
+    GnuPG homes, each holding one software key (Ed25519 primary, cv25519 encryption subkey), stand in for the cards."""
 
     def setUp(self):
         super().setUp()
@@ -548,23 +553,35 @@ class OwnerAuth(Case):
         self.sealed = self.path("offline-keys.sealed.json")
         self.oa = os.path.join(self.d, "ownerauth")
         os.mkdir(self.oa)
-        self.yk_ids = []
-        for i in range(3):                               # stand-ins for the approval YubiKeys' age-plugin-yubikey identities
-            ident = os.path.join(self.d, "yk%d.key" % i)
-            subprocess.run(["age-keygen", "-o", ident], check=True, capture_output=True)
-            self.yk_ids.append(ident)
-        self.yk = os.path.join(self.d, "yk.recipients")
-        with open(self.yk, "w") as f:
-            for ident in self.yk_ids:
-                f.write(subprocess.run(["age-keygen", "-y", ident], check=True, capture_output=True, text=True).stdout)
+        self.homes = []
+        exported = b""
+        for i in range(3):
+            home = tempfile.mkdtemp(prefix="g%d" % i)            # short: the agent's socket path has a length limit
+            os.chmod(home, 0o700)
+            self.addCleanup(shutil.rmtree, home, True)
+            self.addCleanup(subprocess.run, ["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
+            gpg = ["gpg", "--homedir", home, "--batch", "--pinentry-mode", "loopback", "--passphrase", ""]
+            subprocess.run(gpg + ["--quick-gen-key", "Approval %d <approval%d@example.invalid>" % (i, i), "ed25519", "sign", "never"],
+                           check=True, capture_output=True)
+            fpr = subprocess.run(["gpg", "--homedir", home, "--with-colons", "--list-keys"], check=True, capture_output=True,
+                                 text=True).stdout.split("fpr:::::::::")[1].split(":")[0]
+            subprocess.run(gpg + ["--quick-add-key", fpr, "cv25519", "encr", "never"], check=True, capture_output=True)
+            exported += subprocess.run(["gpg", "--homedir", home, "--export", fpr], check=True, capture_output=True).stdout
+            self.homes.append(home)
+        self.yk = os.path.join(self.d, "approval-keys.gpg")
+        with open(self.yk, "wb") as f:
+            f.write(exported)
 
     def run_oa(self, nodes=("a", "b", "c"), shares=None, run=subprocess.run, yk=None):
         import io
         return ok.ownerauth(self.sealed, list(nodes), yk or self.yk, self.recipient, self.oa,
                             io.StringIO("\n".join(shares or self.all[:2]) + "\n"), run=run)
 
-    def decrypt(self, path, identity):
-        return subprocess.run(["age", "-d", "-i", identity, path], check=True, capture_output=True).stdout
+    def gpg_decrypt(self, path, home):
+        return subprocess.run(["gpg", "--homedir", home, "--batch", "--decrypt", path], check=True, capture_output=True).stdout
+
+    def age_decrypt(self, path):
+        return subprocess.run(["age", "-d", "-i", self.identity, path], check=True, capture_output=True).stdout
 
     def test_each_node_gets_a_value_any_yubikey_or_break_glass_opens_and_the_record_checks_it(self):
         import hmac
@@ -573,19 +590,20 @@ class OwnerAuth(Case):
             verified = ok.verify_record(json.load(f))
         self.assertEqual(verified["schema"], "regalia.ownerauth-record/v1")
         self.assertEqual(verified["root_entry"], self.record["root_entry"], "signed by the ceremony's root")
+        self.assertEqual(len(record["yk_recipients"]), 3)
+        self.assertFalse(os.path.exists(os.path.join(self.oa, ".gnupg-ownerauth")), "the throwaway GnuPG home is gone")
         values = set()
         for node in ("a", "b", "c"):
-            yk = os.path.join(self.oa, "ownerauth-%s.yk.age" % node)
+            yk = os.path.join(self.oa, "ownerauth-%s.yk.gpg" % node)
             bg = os.path.join(self.oa, "ownerauth-%s.bg.age" % node)
-            plains = {self.decrypt(yk, ident) for ident in self.yk_ids} | {self.decrypt(bg, self.identity)}
+            plains = {self.gpg_decrypt(yk, home) for home in self.homes} | {self.age_decrypt(bg)}
             self.assertEqual(len(plains), 1, "every YubiKey and break-glass open the same value")
             plain = plains.pop()
             self.assertRegex(plain.decode(), r"^[0-9a-f]{64}\n$")
             raw = bytes.fromhex(plain.decode().strip())
             values.add(raw)
-            want = hmac.new(raw, b"regalia-ownerauth/v1\0" + node.encode(), hashlib.sha256).hexdigest()
             facts = record["nodes"][node]
-            self.assertEqual(facts["check"], want, "the check regalia-kms-95's reader computes")
+            self.assertEqual(facts["check"], hmac.new(raw, b"regalia-ownerauth/v1\0" + node.encode(), hashlib.sha256).hexdigest())
             for kind, path in (("yk", yk), ("bg", bg)):
                 with open(path, "rb") as f:
                     data = f.read()
@@ -593,101 +611,104 @@ class OwnerAuth(Case):
                 self.assertNotIn(plain.strip(), data)
         self.assertEqual(len(values), 3, "each node its own value")
 
-    def test_refusals_leave_nothing_half_made(self):
-        from shamir_mnemonic import generate_mnemonics
-        with self.assertRaisesRegex(ok.Refused, "not of the set this file was sealed under"):
-            self.run_oa(shares=generate_mnemonics(1, [(2, 3)], b"\x09" * 32)[0][:2])
-        pq = os.path.join(self.d, "pq.recipients")
-        with open(pq, "w") as f:
-            f.write("age1pq1qqqq\n")
-        with self.assertRaisesRegex(ok.Refused, "post-quantum recipient"):
-            self.run_oa(yk=pq)
-        for nodes in ((), ("a", "a"), ("A",)):
-            with self.assertRaisesRegex(ok.Refused, "names each node once"):
-                self.run_oa(nodes=nodes)
-
-        def leaky(argv, input=None, capture_output=True):
-            with open(argv[argv.index("-o") + 1], "wb") as f:
-                f.write(b"age-encryption.org/v1\n" + input)
-            return subprocess.CompletedProcess(argv, 0, b"", b"")
-        with self.assertRaisesRegex(ok.Refused, "holds the owner authorization in the clear"):
-            self.run_oa(run=leaky)
-        self.assertEqual(os.listdir(self.oa), [], "no envelope and no record after a refusal")
-        self.run_oa()
-        with self.assertRaisesRegex(ok.Refused, "already exists"):
-            self.run_oa(nodes=("a",))
-
     def test_each_yubikey_must_prove_it_opens_every_envelope_before_the_ceremony_ends(self):
         """regalia-kms-d9 on #120: the envelopes are proven to open, per YubiKey, not assumed to."""
-        record = self.run_oa()
-        self.assertEqual(record["yk_recipients"], [subprocess.run(["age-keygen", "-y", i], check=True, capture_output=True, text=True).stdout.strip()
-                                                   for i in self.yk_ids])
+        self.run_oa()
         rec = os.path.join(self.oa, "ownerauth.record.json")
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
             ok.ownerauth_summary(rec, self.oa)
-        for n, ident in enumerate(self.yk_ids[:2]):
-            self.assertEqual(ok.ownerauth_verify(rec, self.oa, ident, 1000 + n), ["a", "b", "c"])
+        for n, home in enumerate(self.homes[:2]):
+            self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home), ["a", "b", "c"])
         with self.assertRaisesRegex(ok.Refused, "not yet proven"):
             ok.ownerauth_summary(rec, self.oa)          # the third YubiKey has not opened them yet
-        ok.ownerauth_verify(rec, self.oa, self.yk_ids[2], 1002)
+        ok.ownerauth_verify(rec, self.oa, 1002, gnupghome=self.homes[2])
         self.assertEqual(sorted(ok.ownerauth_summary(rec, self.oa).values()), ["1000", "1001", "1002"])
         with open(os.path.join(self.oa, ok.VERIFY_LOG)) as f:
             text = f.read()
         for node in ("a", "b", "c"):
-            self.assertNotIn(self.decrypt(os.path.join(self.oa, "ownerauth-%s.yk.age" % node), self.yk_ids[0]).decode().strip(), text,
+            self.assertNotIn(self.gpg_decrypt(os.path.join(self.oa, "ownerauth-%s.yk.gpg" % node), self.homes[0]).decode().strip(), text,
                              "no value reaches the log")
 
-    def test_a_yubikey_that_cannot_open_an_envelope_is_logged_and_refused(self):
-        rec_ = self.run_oa(nodes=("a", "b"))
-        rec = os.path.join(self.oa, "ownerauth.record.json")
-        stranger = os.path.join(self.d, "stranger.key")
-        subprocess.run(["age-keygen", "-o", stranger], check=True, capture_output=True)
-        with self.assertRaisesRegex(ok.Refused, "not one the envelopes were made to"):
-            ok.ownerauth_verify(rec, self.oa, stranger, 9)
-        with open(os.path.join(self.oa, "ownerauth-b.yk.age"), "ab") as f:
-            f.write(b"x")                                       # b's envelope is no longer the one recorded
-        with self.assertRaisesRegex(ok.Refused, "YubiKey 7 did NOT open: b"):
-            ok.ownerauth_verify(rec, self.oa, self.yk_ids[0], 7)
-        with open(os.path.join(self.oa, ok.VERIFY_LOG)) as f:
-            entry = json.loads(f.read().splitlines()[-1])
-        self.assertEqual((entry["proven"], sorted(entry["failed"])), (["a"], ["b"]))
-        with self.assertRaisesRegex(ok.Refused, "not yet proven"):
-            ok.ownerauth_summary(rec, self.oa)
-        self.assertTrue(rec_["nodes"])
-
-    def test_a_swapped_envelope_or_a_wrong_value_is_caught_by_its_own_check(self):
+    def test_a_key_the_record_does_not_name_a_swapped_envelope_or_a_wrong_value_is_refused(self):
         self.run_oa(nodes=("a",))
         rec = os.path.join(self.oa, "ownerauth.record.json")
-        env = os.path.join(self.oa, "ownerauth-a.yk.age")
-        value = self.decrypt(env, self.yk_ids[0])
-        # the same value, encrypted again to the same YubiKeys: it opens and checks, but it is not the recorded file
-        argv = ["age", "-o", env + ".new"]
-        for ident in self.yk_ids:
-            argv += ["-r", subprocess.run(["age-keygen", "-y", ident], check=True, capture_output=True, text=True).stdout.strip()]
-        subprocess.run(argv, input=value, check=True)
+        stranger = tempfile.mkdtemp(prefix="gs")
+        self.addCleanup(shutil.rmtree, stranger, True)
+        self.addCleanup(subprocess.run, ["gpgconf", "--homedir", stranger, "--kill", "all"], capture_output=True)
+        with self.assertRaisesRegex(ok.Refused, "YubiKey 9 did NOT open: a"):
+            ok.ownerauth_verify(rec, self.oa, 9, gnupghome=stranger)
+        env = os.path.join(self.oa, "ownerauth-a.yk.gpg")
+        value = self.gpg_decrypt(env, self.homes[0])
+        argv = ["gpg", "--homedir", self.homes[0], "--batch", "--trust-model", "always", "--output", env + ".new", "--encrypt"]
+        subprocess.run(["gpg", "--homedir", self.homes[0], "--batch", "--import", self.yk], check=True, capture_output=True)
+        for home in self.homes:
+            fpr = subprocess.run(["gpg", "--homedir", home, "--with-colons", "--list-keys"], check=True, capture_output=True,
+                                 text=True).stdout.split("fpr:::::::::")[1].split(":")[0]
+            argv[-1:-1] = ["--recipient", fpr]
+        subprocess.run(argv, input=value, check=True, capture_output=True)
         os.replace(env + ".new", env)
         with self.assertRaisesRegex(ok.Refused, "is not the file the record names"):
-            ok.ownerauth_verify(rec, self.oa, self.yk_ids[0], 1)
-        # the recorded file, but a YubiKey (or a tool) that hands back another value
+            ok.ownerauth_verify(rec, self.oa, 1, gnupghome=self.homes[0])
         shutil.rmtree(self.oa)
         os.mkdir(self.oa)
         self.run_oa(nodes=("a",))
         real = subprocess.run
+        with open(rec) as f:
+            subkey = json.load(f)["record"]["yk_recipients"][0]["subkey"]
 
         def other_value(argv, *a, **k):
-            if argv[:2] == ["age", "-d"]:
-                return subprocess.CompletedProcess(argv, 0, ("ab" * 32 + "\n").encode(), b"")
+            if "--decrypt" in argv:
+                return subprocess.CompletedProcess(argv, 0, ("ab" * 32 + "\n").encode(), ("[GNUPG:] DECRYPTION_KEY %s X u\n" % subkey).encode())
             return real(argv, *a, **k)
         with self.assertRaisesRegex(ok.Refused, "its value is not the one the record checks"):
-            ok.ownerauth_verify(rec, self.oa, self.yk_ids[0], 1, run=other_value)
+            ok.ownerauth_verify(rec, self.oa, 1, run=other_value)
 
-    def test_a_test_vector_for_regalia_kms_95(self):
-        """The record and checks #242's reader verifies: a throwaway set, here so its format is pinned."""
+        def other_key(argv, *a, **k):
+            if "--decrypt" in argv:
+                return subprocess.CompletedProcess(argv, 0, b"", ("[GNUPG:] DECRYPTION_KEY %s X u\n" % ("F" * 40)).encode())
+            return real(argv, *a, **k)
+        with self.assertRaisesRegex(ok.Refused, "opened by a key the record does not name"):
+            ok.ownerauth_verify(rec, self.oa, 1, run=other_key)
+
+    def test_refusals_leave_nothing_half_made(self):
+        from shamir_mnemonic import generate_mnemonics
+        with self.assertRaisesRegex(ok.Refused, "not of the set this file was sealed under"):
+            self.run_oa(shares=generate_mnemonics(1, [(2, 3)], b"\x09" * 32)[0][:2])
+        for nodes in ((), ("a", "a"), ("A",)):
+            with self.assertRaisesRegex(ok.Refused, "names each node once"):
+                self.run_oa(nodes=nodes)
+        signing_only = os.path.join(self.d, "signing-only.gpg")
+        home = tempfile.mkdtemp(prefix="gn")
+        self.addCleanup(shutil.rmtree, home, True)
+        self.addCleanup(subprocess.run, ["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
+        subprocess.run(["gpg", "--homedir", home, "--batch", "--pinentry-mode", "loopback", "--passphrase", "", "--quick-gen-key",
+                        "No encryption <none@example.invalid>", "ed25519", "sign", "never"], check=True, capture_output=True)
+        with open(signing_only, "wb") as f:
+            f.write(subprocess.run(["gpg", "--homedir", home, "--export"], check=True, capture_output=True).stdout)
+        with self.assertRaisesRegex(ok.Refused, "has 0 usable encryption subkeys"):
+            self.run_oa(yk=signing_only)
+
+        def leaky(argv, input=None, capture_output=True):
+            if argv[0] == "gpg" and "--encrypt" in argv:
+                with open(argv[argv.index("--output") + 1], "wb") as f:
+                    f.write(b"\x85" + input)
+                return subprocess.CompletedProcess(argv, 0, b"", b"")
+            return subprocess.run(argv, input=input, capture_output=capture_output)
+        with self.assertRaisesRegex(ok.Refused, "holds the owner authorization in the clear"):
+            self.run_oa(run=leaky)
+        self.assertEqual(os.listdir(self.oa), [], "no envelope, no record and no GnuPG home after a refusal")
+        self.run_oa()
+        with self.assertRaisesRegex(ok.Refused, "already exists"):
+            self.run_oa(nodes=("a",))
+
+    def test_the_record_carries_what_the_reader_and_the_proof_need(self):
         record = self.run_oa(nodes=("a",))
         self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "yk_recipients", "root_entry", "root_fingerprint", "session",
                                                  "share_indices", "slip39_identifier", "master_id", "tool", "at"]))
         self.assertEqual(sorted(record["nodes"]["a"]), ["bg_sha256", "check", "yk_sha256"])
-
+        for k in record["yk_recipients"]:
+            self.assertRegex(k["primary"], r"^[0-9A-F]{40}$")
+            self.assertRegex(k["subkey"], r"^[0-9A-F]{40}$")
 
 if __name__ == "__main__":
     unittest.main()
