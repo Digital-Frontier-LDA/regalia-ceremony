@@ -9,6 +9,8 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
                                      --exec /usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …
                                           (the k shares on standard input, one per line)
     python3 -Es offline-keys.py tree-digest --root DIR
+    python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-recipients FILE --breakglass-recipient FILE --out DIR
+                                          (the k shares on standard input: the root signs the record)
     python3 -Es offline-keys.py verify-record --record FILE
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
@@ -653,6 +655,93 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
     return session, record_path
 
 
+# ---- the TPM owner authorizations (regalia-kms#242) -------------------------------------------------------
+
+SCHEMA_OWNERAUTH = "regalia.ownerauth-record/v1"
+OWNERAUTH_LABEL = b"regalia-ownerauth/v1\0"
+
+
+def ownerauth_check(value, node_id):
+    """The check value regalia-kms's owner-auth reader compares (regalia-kms-95, #242 PR C): HMAC-SHA256 keyed by the 32
+    raw bytes, over the label and the node ID."""
+    import hmac
+    return hmac.new(bytes(value), OWNERAUTH_LABEL + node_id.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def _recipients(path, pq_ok):
+    with open(path) as f:
+        found = [line.strip() for line in f if line.strip() and not line.startswith("#")]
+    require(found and all(re.fullmatch(r"age1[0-9a-z]+", r) for r in found), "%s does not hold age recipients, one per line" % path)
+    require(pq_ok or not any(r.startswith("age1pq1") for r in found), "%s holds a post-quantum recipient: the YubiKeys' file is classical" % path)
+    return found
+
+
+def ownerauth(sealed_path, nodes, yk_recipients, breakglass_recipient, out, stream, now=None, run=subprocess.run):
+    """Each KMS host's TPM owner authorization (regalia-kms#242: set at enrolment, kept off the host): 32 random bytes per
+    node, as 64 lowercase hex and a newline, encrypted to the owner's approval YubiKeys (age-plugin-yubikey identities,
+    any one decrypts) in ownerauth-<node>.yk.age, and to the break-glass key in ownerauth-<node>.bg.age (post-quantum,
+    so a file of its own). The plaintext reaches age on stdin only, and neither file may hold it in the clear. Both
+    files' SHA-256 and the check value go into ownerauth.record.json, signed by the root, which this session opens
+    from the k shares on `stream` for that alone. Returns the record."""
+    require(nodes and len(set(nodes)) == len(nodes) and all(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,31}", n) for n in nodes),
+            "--nodes names each node once, by its node ID")
+    require(os.path.isdir(out), "--out %s is not a directory" % out)
+    check_place(out)
+    names = ["ownerauth-%s.%s.age" % (n, kind) for n in nodes for kind in ("yk", "bg")] + ["ownerauth.record.json"]
+    for name in names:
+        require(not os.path.lexists(os.path.join(out, name)), "%s already exists: nothing is overwritten" % os.path.join(out, name))
+    yk = _recipients(yk_recipients, pq_ok=False)
+    bg = _recipients(breakglass_recipient, pq_ok=True)
+    require(len(bg) == 1, "%s holds one break-glass recipient" % breakglass_recipient)
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    master, indices, identifier = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    from cryptography.hazmat.primitives import serialization
+    entry = {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()}
+    written, record_nodes = [], {}
+    try:
+        for node in nodes:
+            value = bytearray(secrets.token_bytes(32))
+            plain = bytearray(value.hex().encode() + b"\n")
+            try:
+                digests = {}
+                for kind, recipients in (("yk", yk), ("bg", bg)):
+                    path = os.path.join(out, "ownerauth-%s.%s.age" % (node, kind))
+                    argv = ["age", "-o", path]
+                    for r in recipients:
+                        argv += ["-r", r]
+                    written.append(path)
+                    done = run(argv, input=bytes(plain), capture_output=True)
+                    require(done.returncode == 0, "age could not encrypt %s: %s" % (path, done.stderr.decode(errors="replace").strip()[-200:]))
+                    with open(path, "rb") as f:
+                        data = f.read()
+                    require(data.startswith(b"age-encryption.org/v1"), "age wrote no age file at %s" % path)
+                    require(bytes(plain).strip() not in data and bytes(value) not in data, "%s holds the owner authorization in the clear" % path)
+                    digests[kind + "_sha256"] = hashlib.sha256(data).hexdigest()
+                record_nodes[node] = dict(digests, check=ownerauth_check(value, node))
+            finally:
+                zero(value)
+                zero(plain)
+    except BaseException:
+        for path in written:              # nothing half-made is left: every file this run wrote, by its exact name
+            if os.path.lexists(path):
+                os.unlink(path)
+        raise
+    record = {"schema": SCHEMA_OWNERAUTH, "event": "ownerauth", "nodes": record_nodes, "root_entry": entry, "root_fingerprint": root_fingerprint(entry),
+              "session": secrets.token_hex(16), "share_indices": indices, "slip39_identifier": identifier, "master_id": sealed["master_id"],
+              "tool": TOOL, "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    write_record(out, "ownerauth", root, record)
+    del root
+    return record
+
+
 def write_record(out, stem, root, record):
     """OUT/<stem>.record.json: `record` signed by the root over RECORD_DOMAIN, never overwriting. Returns the path."""
     path = os.path.join(out, stem + ".record.json")
@@ -671,7 +760,7 @@ def verify_record(document):
     from cryptography.hazmat.primitives.asymmetric import ed25519
     require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not an offline-key record")
     record = document["record"]
-    require(record.get("schema") == SCHEMA_RECORD, "schema must be %s" % SCHEMA_RECORD)
+    require(record.get("schema") in (SCHEMA_RECORD, SCHEMA_OWNERAUTH), "schema must be %s or %s" % (SCHEMA_RECORD, SCHEMA_OWNERAUTH))
     entry = record["root_entry"]
     require(entry.get("alg") == "ed25519" and re.fullmatch(r"[0-9a-f]{64}", entry.get("key", "")) is not None, "the root entry is not an Ed25519 key")
     try:
@@ -705,6 +794,12 @@ def main(argv=None):
                    help="/usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …, last on the line")
     t = sub.add_parser("tree-digest", help="the digest of a regalia-kms tree, as --tool-digest takes it")
     t.add_argument("--root", required=True)
+    o = sub.add_parser("ownerauth", help="each KMS host's TPM owner authorization, for regalia-kms#242: the k shares on standard input")
+    o.add_argument("--sealed", required=True)
+    o.add_argument("--nodes", required=True, help="the node IDs, comma-separated (a,b,c)")
+    o.add_argument("--yk-recipients", required=True, help="the approval YubiKeys' age-plugin-yubikey recipients, one per line")
+    o.add_argument("--breakglass-recipient", required=True)
+    o.add_argument("--out", required=True, help="a RAM directory for the files and the record")
     v = sub.add_parser("verify-record")
     v.add_argument("--record", required=True)
     args = ap.parse_args(argv)
@@ -730,6 +825,11 @@ def main(argv=None):
             session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.exec_argv, args.tool_root, args.tool_digest, args.output)
             print("SIGNED by %s with %s (shares %s), session %s; record %s" % (session["tool"], ", ".join(session["keys"]),
                   ",".join(str(i) for i in session["share_indices"]), session["session"], path))
+        elif args.command == "ownerauth":
+            record = ownerauth(args.sealed, args.nodes.split(","), args.yk_recipients, args.breakglass_recipient, args.out, sys.stdin)
+            for node, facts in sorted(record["nodes"].items()):
+                print("OWNERAUTH %s yk %s bg %s check %s" % (node, facts["yk_sha256"][:16], facts["bg_sha256"][:16], facts["check"][:16]))
+            print("RECORD %s (root %s)" % (os.path.join(args.out, "ownerauth.record.json"), record["root_fingerprint"]))
         elif args.command == "tree-digest":
             print(tree_digest(args.root))
         else:

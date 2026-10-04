@@ -536,5 +536,94 @@ if "nooutput" not in args:
         self.assertEqual((record["event"], record["checked"], record["not_checked"]), ("forms-verified", [1, 2, 3, 4], [5]))
         self.assertEqual(record["root_entry"], self.record["root_entry"])
 
+@unittest.skipUnless(HAVE_AGE, "age is not installed here (the emulator job installs it)")
+class OwnerAuth(Case):
+    """regalia-kms#242's owner authorizations, in the format #242's reader takes (agreed with regalia-kms-95): per node,
+    64 hex and a newline, to the approval YubiKeys and to break-glass, a check value, and a record the root signs."""
+
+    def setUp(self):
+        super().setUp()
+        self.record = self.generate(k=2, n=3)
+        self.all = self.shares()
+        self.sealed = self.path("offline-keys.sealed.json")
+        self.oa = os.path.join(self.d, "ownerauth")
+        os.mkdir(self.oa)
+        self.yk_ids = []
+        for i in range(3):                               # stand-ins for the approval YubiKeys' age-plugin-yubikey identities
+            ident = os.path.join(self.d, "yk%d.key" % i)
+            subprocess.run(["age-keygen", "-o", ident], check=True, capture_output=True)
+            self.yk_ids.append(ident)
+        self.yk = os.path.join(self.d, "yk.recipients")
+        with open(self.yk, "w") as f:
+            for ident in self.yk_ids:
+                f.write(subprocess.run(["age-keygen", "-y", ident], check=True, capture_output=True, text=True).stdout)
+
+    def run_oa(self, nodes=("a", "b", "c"), shares=None, run=subprocess.run, yk=None):
+        import io
+        return ok.ownerauth(self.sealed, list(nodes), yk or self.yk, self.recipient, self.oa,
+                            io.StringIO("\n".join(shares or self.all[:2]) + "\n"), run=run)
+
+    def decrypt(self, path, identity):
+        return subprocess.run(["age", "-d", "-i", identity, path], check=True, capture_output=True).stdout
+
+    def test_each_node_gets_a_value_any_yubikey_or_break_glass_opens_and_the_record_checks_it(self):
+        import hmac
+        record = self.run_oa()
+        with open(os.path.join(self.oa, "ownerauth.record.json")) as f:
+            verified = ok.verify_record(json.load(f))
+        self.assertEqual(verified["schema"], "regalia.ownerauth-record/v1")
+        self.assertEqual(verified["root_entry"], self.record["root_entry"], "signed by the ceremony's root")
+        values = set()
+        for node in ("a", "b", "c"):
+            yk = os.path.join(self.oa, "ownerauth-%s.yk.age" % node)
+            bg = os.path.join(self.oa, "ownerauth-%s.bg.age" % node)
+            plains = {self.decrypt(yk, ident) for ident in self.yk_ids} | {self.decrypt(bg, self.identity)}
+            self.assertEqual(len(plains), 1, "every YubiKey and break-glass open the same value")
+            plain = plains.pop()
+            self.assertRegex(plain.decode(), r"^[0-9a-f]{64}\n$")
+            raw = bytes.fromhex(plain.decode().strip())
+            values.add(raw)
+            want = hmac.new(raw, b"regalia-ownerauth/v1\0" + node.encode(), hashlib.sha256).hexdigest()
+            facts = record["nodes"][node]
+            self.assertEqual(facts["check"], want, "the check regalia-kms-95's reader computes")
+            for kind, path in (("yk", yk), ("bg", bg)):
+                with open(path, "rb") as f:
+                    data = f.read()
+                self.assertEqual(facts[kind + "_sha256"], hashlib.sha256(data).hexdigest())
+                self.assertNotIn(plain.strip(), data)
+        self.assertEqual(len(values), 3, "each node its own value")
+
+    def test_refusals_leave_nothing_half_made(self):
+        from shamir_mnemonic import generate_mnemonics
+        with self.assertRaisesRegex(ok.Refused, "not of the set this file was sealed under"):
+            self.run_oa(shares=generate_mnemonics(1, [(2, 3)], b"\x09" * 32)[0][:2])
+        pq = os.path.join(self.d, "pq.recipients")
+        with open(pq, "w") as f:
+            f.write("age1pq1qqqq\n")
+        with self.assertRaisesRegex(ok.Refused, "post-quantum recipient"):
+            self.run_oa(yk=pq)
+        for nodes in ((), ("a", "a"), ("A",)):
+            with self.assertRaisesRegex(ok.Refused, "names each node once"):
+                self.run_oa(nodes=nodes)
+
+        def leaky(argv, input=None, capture_output=True):
+            with open(argv[argv.index("-o") + 1], "wb") as f:
+                f.write(b"age-encryption.org/v1\n" + input)
+            return subprocess.CompletedProcess(argv, 0, b"", b"")
+        with self.assertRaisesRegex(ok.Refused, "holds the owner authorization in the clear"):
+            self.run_oa(run=leaky)
+        self.assertEqual(os.listdir(self.oa), [], "no envelope and no record after a refusal")
+        self.run_oa()
+        with self.assertRaisesRegex(ok.Refused, "already exists"):
+            self.run_oa(nodes=("a",))
+
+    def test_a_test_vector_for_regalia_kms_95(self):
+        """The record and checks #242's reader verifies: a throwaway set, here so its format is pinned."""
+        record = self.run_oa(nodes=("a",))
+        self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "root_entry", "root_fingerprint", "session", "share_indices",
+                                                 "slip39_identifier", "master_id", "tool", "at"]))
+        self.assertEqual(sorted(record["nodes"]["a"]), ["bg_sha256", "check", "yk_sha256"])
+
+
 if __name__ == "__main__":
     unittest.main()
