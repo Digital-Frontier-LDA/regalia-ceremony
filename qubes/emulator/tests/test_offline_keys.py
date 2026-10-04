@@ -82,6 +82,8 @@ class Generate(Case):
         self.assertEqual(sorted(record["publics"]), ["pcr-initrd", "pcr-system", "root", "secure-boot"])
         self.assertEqual({p["alg"] for n, p in record["publics"].items() if n != "root"}, {"rsa-2048"})
         self.assertEqual(record["root_entry"]["alg"], "ed25519")
+        self.assertEqual(record["root_fingerprint"], hashlib.sha256(bytes.fromhex(record["root_entry"]["key"])).hexdigest(),
+                         "the fingerprint regalia-kms#360's --genesis and enrol check take")
         self.assertEqual(len(record["root_entry"]["key"]), 64)
         with open(self.path("offline-keys.sealed.json"), "rb") as f:
             sealed = json.loads(f.read())
