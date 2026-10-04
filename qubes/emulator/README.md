@@ -8,8 +8,8 @@ hardware routes that were once `❌ untested — need the physical tokens + Qube
 `✅ emulated + exercised`.
 
 These emulators are for **rehearsal and testing only**. They never hold a real key. The real
-ceremony still runs on the air-gapped Qubes vault qube with real hardware — see
-[`../README.md`](../README.md). The emulator image is deliberately **not** baked into the
+ceremony is intended to run on the air-gapped Qubes vault qube with real hardware; none has run yet
+(see the top-level README's Current limitations) — see [`../README.md`](../README.md). The emulator image is deliberately **not** baked into the
 vault template (the Salt formula excludes the test harnesses; the wizard's `guard_no_stubs`
 is the second line of defence).
 
