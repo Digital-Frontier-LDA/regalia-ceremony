@@ -75,6 +75,7 @@ import os
 import random
 import re
 import secrets
+import struct
 import subprocess
 import sys
 import time
@@ -680,6 +681,122 @@ def verify_record(document):
     except (InvalidSignature, ValueError):
         raise Refused("the record's signature does not verify under its root entry") from None
     return record
+
+
+SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
+CARD_ROLES = ("dev-main", "dev-backup")
+_SERIAL = re.compile(r"[1-9][0-9]{0,9}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_FPR = re.compile(r"[0-9A-F]{40}")
+
+
+def _exact(obj, keys, where):
+    require(isinstance(obj, dict), "%s is not an object" % where)
+    unknown, missing = sorted(set(obj) - set(keys)), sorted(set(keys) - set(obj))
+    require(not unknown, "%s has an unknown field: %s" % (where, ", ".join(unknown)))
+    require(not missing, "%s is missing: %s" % (where, ", ".join(missing)))
+
+
+def _ascii(value, where):
+    """Every string in the record is ASCII, so the bytes signed (ensure_ascii=False) are the bytes regalia-kms's
+    membership.canonical (ensure_ascii=True) makes of it: one canonical form on both sides."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _ascii(k, where)
+            _ascii(v, "%s.%s" % (where, k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _ascii(v, "%s[%d]" % (where, i))
+    elif isinstance(value, str):
+        require(value.isascii(), "%s is not ASCII" % where)
+
+
+def ssh_ed25519_raw(line, where):
+    """The raw 32-byte key of an `ssh-ed25519 <base64>` line, as 64 hex."""
+    fields = line.split(" ") if isinstance(line, str) else []
+    require(len(fields) == 2 and fields[0] == "ssh-ed25519", "%s is not an `ssh-ed25519 <base64>` line" % where)
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except ValueError:
+        raise Refused("%s is not base64" % where) from None
+    parts, at = [], 0
+    while at + 4 <= len(blob) and len(parts) < 3:
+        (size,) = struct.unpack(">I", blob[at:at + 4])
+        parts.append(blob[at + 4:at + 4 + size])
+        at += 4 + size
+    require(at == len(blob) and len(parts) == 2 and parts[0] == b"ssh-ed25519" and len(parts[1]) == 32,
+            "%s does not hold exactly one 32-byte Ed25519 key" % where)
+    return parts[1].hex()
+
+
+def card_record_check(record):
+    """The card-ceremony record's rules (ADR-0002 D30, regalia-ceremony#111 step 2), as the writer enforces them and
+    regalia-kms's verifier mirrors them (the vectors in qubes/emulator/tests/vectors/card-ceremony-record). Returns the
+    record, or Refused naming the first rule broken."""
+    _exact(record, ("schema", "event", "owner_keys", "ownerauth_recipients", "ssh_signers", "release_key", "session", "root_entry",
+                    "root_fingerprint", "tool", "at"), "the record")
+    _ascii(record, "the record")
+    require(record["schema"] == SCHEMA_CARDS and record["event"] == "card-ceremony", "schema must be %s, event card-ceremony" % SCHEMA_CARDS)
+    require(isinstance(record["session"], str) and re.fullmatch(r"[0-9a-f]{32}", record["session"]) is not None, "session is 32 hex")
+    require(isinstance(record["tool"], str) and record["tool"], "tool names the writer")
+    require(isinstance(record["at"], str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", record["at"]) is not None,
+            "at is YYYY-MM-DDTHH:MM:SSZ")
+    _exact(record["root_entry"], ("alg", "key"), "root_entry")
+    require(record["root_entry"]["alg"] == "ed25519" and _HEX64.fullmatch(str(record["root_entry"]["key"])), "root_entry is an Ed25519 key, 64 hex")
+    require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "root_fingerprint is not the SHA-256 of the root key")
+    owners = record["owner_keys"]
+    require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two developer cards' SIG keys (D30.3)")
+    for i, k in enumerate(owners):
+        _exact(k, ("role", "serial", "alg", "key", "attested"), "owner_keys[%d]" % i)
+        require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
+        require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
+        require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
+    require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles dev-main and dev-backup, once each")
+    serials = {k["serial"] for k in owners}
+    require(len(serials) == 2, "the two developer cards have distinct serials")
+    rel = record["release_key"]
+    _exact(rel, ("alg", "key", "fingerprint", "cards", "imported", "attested"), "release_key")
+    require(rel["alg"] == "ed25519" and isinstance(rel["key"], str) and _HEX64.fullmatch(rel["key"]), "release_key is an Ed25519 key, 64 hex")
+    require(isinstance(rel["fingerprint"], str) and _FPR.fullmatch(rel["fingerprint"]), "release_key.fingerprint is 40 upper-case hex")
+    require(rel["imported"] is True and rel["attested"] is False, "the release key is imported, not attested (D29.2)")
+    require(isinstance(rel["cards"], list) and len(rel["cards"]) == 2 and len(set(rel["cards"])) == 2
+            and all(isinstance(c, str) and _SERIAL.fullmatch(c) for c in rel["cards"]), "release_key.cards are the two release cards' serials")
+    require(not set(rel["cards"]) & serials, "a release card is also a developer card: the developer cards never hold the release key (D30.3)")
+    require(rel["key"] not in {k["key"] for k in owners}, "the release key is an owner key: the release cards hold no owner key (D30.3)")
+    for name, fields in (("ownerauth_recipients", ("serial", "primary", "subkey")), ("ssh_signers", ("serial", "key"))):
+        items = record[name]
+        require(isinstance(items, list), "%s is a list" % name)
+        for i, item in enumerate(items):
+            _exact(item, fields, "%s[%d]" % (name, i))
+        require(sorted(item["serial"] for item in items) == sorted(serials), "%s has one entry for each developer card" % name)
+    for i, r in enumerate(record["ownerauth_recipients"]):
+        require(all(isinstance(r[f], str) and _FPR.fullmatch(r[f]) for f in ("primary", "subkey")) and r["primary"] != r["subkey"],
+                "ownerauth_recipients[%d] names a primary and a different encryption subkey, 40 upper-case hex" % i)
+    ssh = [ssh_ed25519_raw(s["key"], "ssh_signers[%d].key" % i) for i, s in enumerate(record["ssh_signers"])]
+    every = [record["root_entry"]["key"], rel["key"]] + [k["key"] for k in owners] + ssh
+    require(len(set(every)) == len(every), "a key is used twice among the root, the release key, the owner keys and the SSH keys")
+    return record
+
+
+def verify_card_record(document, pinned_root):
+    """A card-ceremony record as regalia-kms reads it: exactly {record, signature}, signed under the PINNED root (the
+    record's root_entry must name it), over RECORD_DOMAIN and the canonical record, and every rule of
+    card_record_check. Returns the record, or Refused."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not a record: exactly record and signature")
+    require(isinstance(document["signature"], str) and re.fullmatch(r"[0-9a-f]{128}", document["signature"]) is not None,
+            "the signature is 128 hex")
+    record = document["record"]
+    require(isinstance(record, dict) and isinstance(record.get("root_entry"), dict) and record["root_entry"].get("key") == pinned_root,
+            "the record names another root than the pinned one")
+    _ascii(record, "the record")
+    try:
+        ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
+                                                                                      RECORD_DOMAIN + canonical(record))
+    except (InvalidSignature, ValueError):
+        raise Refused("the signature does not verify under the pinned root") from None
+    return card_record_check(record)
 
 
 def main(argv=None):

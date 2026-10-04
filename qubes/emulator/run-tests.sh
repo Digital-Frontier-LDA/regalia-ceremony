@@ -100,6 +100,7 @@ python3 "$HERE/tests/test_derive_address.py" || suite_failed "test_derive_addres
 python3 "$HERE/tests/test_yubikey_attestation_verify.py" || suite_failed "test_yubikey_attestation_verify.py"
 python3 "$HERE/tests/test_slip39_mint.py" || suite_failed "test_slip39_mint.py"
 python3 "$HERE/tests/test_offline_keys.py" || suite_failed "test_offline_keys.py"
+python3 "$HERE/tests/test_card_record.py" || suite_failed "test_card_record.py"
 "$HERE/tests/test-offline-keys-step.sh" || suite_failed "test-offline-keys-step.sh"
 python3 "$HERE/tests/test_metal_stamp.py" || suite_failed "test_metal_stamp.py"
 python3 "$HERE/tests/test_recovery_procedure.py" || suite_failed "test_recovery_procedure.py"
