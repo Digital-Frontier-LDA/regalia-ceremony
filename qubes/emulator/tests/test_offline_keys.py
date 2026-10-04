@@ -257,6 +257,37 @@ class Generate(Case):
                 self.generate(k=2, n=3)
         self.assertEqual(os.listdir(self.out), [])
 
+    def test_a_share_typed_at_a_terminal_is_not_echoed(self):
+        """The end-to-end run on #111 found the shares echoed: read from a terminal, echo is off for the read."""
+        import pty
+        import select
+        import termios
+        import threading
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        stream = os.fdopen(slave, "r")
+        self.addCleanup(stream.close)
+        secret = "furl lily academic agency angry elder"
+
+        def type_it():
+            import time
+            time.sleep(0.3)
+            os.write(master, (secret + "\n").encode() + b"\x04")
+        threading.Thread(target=type_it, daemon=True).start()
+        got = ok.read_hidden(stream, "shares")
+        self.assertEqual(got.strip(), secret)
+        echoed = b""
+        while select.select([master], [], [], 0.2)[0]:
+            try:
+                chunk = os.read(master, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            echoed += chunk
+        self.assertNotIn(b"furl", echoed, "the share was echoed to the terminal")
+        self.assertTrue(termios.tcgetattr(slave)[3] & termios.ECHO, "echo is restored after the read")
+
     def test_the_cli_takes_no_secret_on_argv(self):
         with open(SCRIPT) as f:
             text = f.read()
