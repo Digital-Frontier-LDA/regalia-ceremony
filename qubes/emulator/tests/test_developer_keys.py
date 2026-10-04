@@ -370,6 +370,7 @@ class Trust(Case):
             for doc in documents:
                 f.write(json.dumps({"kind": "card-record", "sequence": doc["record"]["sequence"], "digest": ok.card_record_digest(doc["record"]),
                                     "key": doc["record"]["root_entry"]["key"], "at": "2026-10-04T12:00:00Z"}) + "\n")
+        os.chmod(os.path.join(d, ok.SIGNING_RECORD), 0o600)
         return d
 
     def test_vouched_by_the_root_signed_card_record(self):
