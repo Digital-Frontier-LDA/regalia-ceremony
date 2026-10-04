@@ -687,7 +687,7 @@ def main(argv=None):
         if args.command == "generate":
             record = generate(args.threshold, args.shares, args.out, args.breakglass_recipient)
             print("ROOT-ENTRY %s" % json.dumps(record["root_entry"], sort_keys=True))
-            print("ROOT-FINGERPRINT %s (SHA-256 of the root's public key: typed at manifest sign --genesis and enrol check)"
+            print("ROOT-FINGERPRINT %s  (sha256 of the raw 32-byte Ed25519 key, as enrol check and manifest sign --genesis take it)"
                   % record["root_fingerprint"])
             for name, pub in sorted(record["publics"].items()):
                 print("KEY %s %s spki-sha256 %s" % (name, pub["alg"], hashlib.sha256(base64.b64decode(pub["spki"])).hexdigest()))
