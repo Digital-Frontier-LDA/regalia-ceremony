@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# test-hsm-domain.sh — hsm-domain.sh: the token ceremony's three DKEK domains (regalia-ceremony#111). A domain's
+# test-hsm-domain.sh — hsm-domain.sh: the revocation key's DKEK domain (regalia-ceremony#111). The domain's
 # share is made on its first card, loaded onto both cards (equal key check values), proven disjoint from the
 # other domains', and backed up to the break-glass recipient with age, the plaintext then removed.
 #
@@ -86,105 +86,106 @@ D="$ROOT/work"; mkdir -p "$D"
 hdr "1  create on the domain's first card, load both cards: equal key check values"
 card DENK0600001 pending; card DENK0600002 pending
 attach DENK0600001
-out="$(run create --domain root --serial DENK0600001 --dir "$D")"; rc=$?
-[ "$rc" = 0 ] && grep -q "^CREATED root share $D/root.pbe on card DENK0600001" <<< "$out" && [ -s "$D/root.pbe" ] && [ -s "$D/root.pw" ] \
+out="$(run create --domain revocation --serial DENK0600001 --dir "$D")"; rc=$?
+[ "$rc" = 0 ] && grep -q "^CREATED revocation share $D/revocation.pbe on card DENK0600001" <<< "$out" && [ -s "$D/revocation.pbe" ] && [ -s "$D/revocation.pw" ] \
   && P "the share and its password are made, on the card" || F "create (rc=$rc): $out"
-[ "$(stat -c %a "$D/root.pbe")" = 600 ] && [ "$(stat -c %a "$D/root.pw")" = 600 ] && P "both are 0600" || F "modes: $(stat -c %a "$D/root.pbe" "$D/root.pw")"
-grep -qF -- "$(cat "$D/root.pw")" "$ARGV_LOG" && F "the password was on a command line: $(grep -F -- "$(cat "$D/root.pw")" "$ARGV_LOG")" \
+[ "$(stat -c %a "$D/revocation.pbe")" = 600 ] && [ "$(stat -c %a "$D/revocation.pw")" = 600 ] && P "both are 0600" || F "modes: $(stat -c %a "$D/revocation.pbe" "$D/revocation.pw")"
+grep -qF -- "$(cat "$D/revocation.pw")" "$ARGV_LOG" && F "the password was on a command line: $(grep -F -- "$(cat "$D/revocation.pw")" "$ARGV_LOG")" \
   || P "the password never appears on any command line"
-[ "$(wc -c < "$D/root.pw")" = 64 ] && grep -qxE '[0-9a-f]{64}' "$D/root.pw" && P "the password is 64 hex digits (256 bits)" || F "password: $(wc -c < "$D/root.pw") bytes"
-out="$(run create --domain root --serial DENK0600001 --dir "$D")"
-[ $? = 1 ] && grep -q "root.pbe already exists: nothing is overwritten" <<< "$out" && P "a second create does not overwrite the share" || F "re-create: $out"
-out="$(run load --domain root --serial DENK0600001 --dir "$D" --first)"; rc=$?
-KCV_ROOT="$(sed -n 's/^DOMAIN root card DENK0600001 KCV \([0-9A-F]\{16\}\)$/\1/p' <<< "$out")"
-[ "$rc" = 0 ] && [ -n "$KCV_ROOT" ] && P "card A loaded: DOMAIN root card DENK0600001 KCV $KCV_ROOT" || F "load A (rc=$rc): $out"
+[ "$(wc -c < "$D/revocation.pw")" = 64 ] && grep -qxE '[0-9a-f]{64}' "$D/revocation.pw" && P "the password is 64 hex digits (256 bits)" || F "password: $(wc -c < "$D/revocation.pw") bytes"
+out="$(run create --domain revocation --serial DENK0600001 --dir "$D")"
+[ $? = 1 ] && grep -q "revocation.pbe already exists: nothing is overwritten" <<< "$out" && P "a second create does not overwrite the share" || F "re-create: $out"
+out="$(run load --domain revocation --serial DENK0600001 --dir "$D" --first)"; rc=$?
+KCV_ROOT="$(sed -n 's/^DOMAIN revocation card DENK0600001 KCV \([0-9A-F]\{16\}\)$/\1/p' <<< "$out")"
+[ "$rc" = 0 ] && [ -n "$KCV_ROOT" ] && P "card A loaded: DOMAIN revocation card DENK0600001 KCV $KCV_ROOT" || F "load A (rc=$rc): $out"
 attach DENK0600002
-out="$(run load --domain root --serial DENK0600002 --dir "$D")"
+out="$(run load --domain revocation --serial DENK0600002 --dir "$D")"
 [ $? = 1 ] && grep -q -- "--first (the domain's first card) or --expect-kcv KCV" <<< "$out" && [ "$(cat "$CARDS/DENK0600002/state")" = pending ] \
   && P "a card loaded with neither --first nor --expect-kcv: refused before the import" || F "neither: $out"
-out="$(run load --domain root --serial DENK0600002 --dir "$D" --first --expect-kcv "$KCV_ROOT")"
+out="$(run load --domain revocation --serial DENK0600002 --dir "$D" --first --expect-kcv "$KCV_ROOT")"
 [ $? = 1 ] && grep -q -- "--first and --expect-kcv" <<< "$out" && P "--first with --expect-kcv: refused" || F "both: $out"
-out="$(run load --domain root --serial DENK0600002 --dir "$D" --expect-kcv "$KCV_ROOT")"; rc=$?
-[ "$rc" = 0 ] && grep -q "^DOMAIN root card DENK0600002 KCV $KCV_ROOT$" <<< "$out" && P "card B loaded with the same key check value" || F "load B (rc=$rc): $out"
-out="$(run load --domain root --serial DENK0600002 --dir "$D" --expect-kcv "$KCV_ROOT")"; rc=$?
+out="$(run load --domain revocation --serial DENK0600002 --dir "$D" --expect-kcv "$KCV_ROOT")"; rc=$?
+[ "$rc" = 0 ] && grep -q "^DOMAIN revocation card DENK0600002 KCV $KCV_ROOT$" <<< "$out" && P "card B loaded with the same key check value" || F "load B (rc=$rc): $out"
+out="$(run load --domain revocation --serial DENK0600002 --dir "$D" --expect-kcv "$KCV_ROOT")"; rc=$?
 [ "$rc" = 0 ] && grep -q "KCV $KCV_ROOT (already loaded)" <<< "$out" && P "a re-run on a loaded card with its own KCV: reported, not imported again" || F "re-run (rc=$rc): $out"
-grep -qF -- "$(cat "$D/root.pw")" "$ARGV_LOG" && F "the password reached a command line during load" || P "load passes the password through the environment only"
+grep -qF -- "$(cat "$D/revocation.pw")" "$ARGV_LOG" && F "the password reached a command line during load" || P "load passes the password through the environment only"
 
 hdr "2  refusals"
-out="$(run load --domain root --serial DENK0600002 --dir "$D" --first)"
+out="$(run load --domain revocation --serial DENK0600002 --dir "$D" --first)"
 [ $? = 1 ] && grep -q "already holds DKEK $KCV_ROOT: nothing is imported over a complete DKEK" <<< "$out" \
   && P "a complete card without --expect-kcv: refused, not imported over" || F "complete, no expect: $out"
-out="$(run load --domain root --serial DENK0600002 --dir "$D" --expect-kcv 0011223344556677)"
+out="$(run load --domain revocation --serial DENK0600002 --dir "$D" --expect-kcv 0011223344556677)"
 [ $? = 1 ] && grep -q "already holds DKEK $KCV_ROOT, not 0011223344556677" <<< "$out" && P "a complete card of another domain: refused" || F "other domain: $out"
 card DENK0600003 none; attach DENK0600003
-out="$(run load --domain root --serial DENK0600003 --dir "$D" --expect-kcv "$KCV_ROOT")"
+out="$(run load --domain revocation --serial DENK0600003 --dir "$D" --expect-kcv "$KCV_ROOT")"
 [ $? = 1 ] && grep -q "no DKEK share configured: initialise it with hsm-init-hardened.sh --dkek-shares 1" <<< "$out" && P "a card with no DKEK share configured: refused" || F "none: $out"
 card DENK0600004 pending; attach DENK0600004
-out="$(STUB_DECRYPTS_WRONG=1 run load --domain root --serial DENK0600004 --dir "$D" --expect-kcv "$KCV_ROOT")"
-[ $? = 1 ] && grep -q "is NOT in domain root" <<< "$out" && P "an import that 'succeeds' with another key (#460): refused by the key check value" || F "#460: $out"
+out="$(STUB_DECRYPTS_WRONG=1 run load --domain revocation --serial DENK0600004 --dir "$D" --expect-kcv "$KCV_ROOT")"
+[ $? = 1 ] && grep -q "is NOT in domain revocation" <<< "$out" && P "an import that 'succeeds' with another key (#460): refused by the key check value" || F "#460: $out"
 card DENK0600005 pending; attach DENK0600005 DENK0600002
-out="$(run load --domain root --serial DENK0600005 --dir "$D" --expect-kcv "$KCV_ROOT")"
+out="$(run load --domain revocation --serial DENK0600005 --dir "$D" --expect-kcv "$KCV_ROOT")"
 [ $? = 1 ] && grep -q "2 tokens are attached; attach ONLY card DENK0600005" <<< "$out" && [ "$(cat "$CARDS/DENK0600005/state")" = pending ] \
   && P "two cards attached: refused, nothing imported" || F "two cards: $out"
 attach DENK0600002
-out="$(run load --domain root --serial DENK0600005 --dir "$D" --expect-kcv "$KCV_ROOT")"
+out="$(run load --domain revocation --serial DENK0600005 --dir "$D" --expect-kcv "$KCV_ROOT")"
 [ $? = 1 ] && grep -q "serial DENK0600005 matches 0 tokens" <<< "$out" && P "another card than --serial attached: refused" || F "wrong card: $out"
 attach DENK0600005
-out="$(STUB_CREATE_NOTHING=1 run create --domain signing --serial DENK0600005 --dir "$D")"
-[ $? = 1 ] && grep -q "wrote no DKEK share" <<< "$out" && [ ! -e "$D/signing.pw" ] && P "a create that writes no file: refused, and its password removed" || F "no file: $out"
-for bad in "--domain other" "--serial a/b" "--expect-kcv 12AB" "--password x" "--expect-kcv 0000000000000000"; do
+D2="$ROOT/work2"; mkdir -p "$D2"
+out="$(STUB_CREATE_NOTHING=1 run create --domain revocation --serial DENK0600005 --dir "$D2")"
+[ $? = 1 ] && grep -q "wrote no DKEK share" <<< "$out" && [ ! -e "$D2/revocation.pw" ] && P "a create that writes no file: refused, and its password removed" || F "no file: $out"
+for bad in "--domain other" "--domain root" "--domain signing" "--serial a/b" "--expect-kcv 12AB" "--password x" "--expect-kcv 0000000000000000"; do
   # shellcheck disable=SC2086  # two words on purpose
-  out="$(run load --domain root --serial DENK0600005 --dir "$D" $bad)"
+  out="$(run load --domain revocation --serial DENK0600005 --dir "$D" $bad)"
   [ $? = 1 ] && grep -q REFUSED <<< "$out" && P "bad argument $bad: refused" || F "$bad: $out"
 done
 if [ "$(stat -f -c %T "$D")" != tmpfs ] && [ "$(stat -f -c %T "$D")" != ramfs ]; then
-  out="$(CEREMONY_ALLOW_NONTMPFS=0 run create --domain signing --serial DENK0600005 --dir "$D")"
+  out="$(CEREMONY_ALLOW_NONTMPFS=0 run create --domain revocation --serial DENK0600005 --dir "$D2")"
   [ $? = 1 ] && grep -q "not a RAM file system" <<< "$out" && P "a work directory on a disk: refused" || F "non-tmpfs: $out"
 else echo "  SKIP the disk-directory refusal ($D is on $(stat -f -c %T "$D"))"; fi
 
 hdr "3  disjoint"
-K1=ABCDEF0123456789 K2=2222222222222222 K3=3333333333333333 K4=4444444444444444
-out="$(run disjoint --kcv root=$K1 --kcv signing=$K2 --kcv revocation=$K3 --kcv hosts-ceremony=$K4)"; rc=$?
-[ "$rc" = 0 ] && [ "$(grep -c '^DISJOINT ' <<< "$out")" = 4 ] && P "four different key check values: disjoint, each printed" || F "disjoint (rc=$rc): $out"
-out="$(run disjoint --kcv root=$K1 --kcv signing=$K2 --kcv revocation=$K1 --kcv hosts-ceremony=$K4)"
-[ $? = 1 ] && grep -q "DOMAINS NOT DISJOINT: revocation and root have the same DKEK key check value $K1" <<< "$out" && P "two equal values: refused, both named" || F "equal: $out"
-out="$(run disjoint --kcv root=${K1,,} --kcv signing=$K2 --kcv revocation=$K3 --kcv host-a=$K4)"
-[ $? = 0 ] && grep -q "^DISJOINT root $K1$" <<< "$out" && P "a lower-case value is read as the card prints it (upper case)" || F "lower case: $out"
-out="$(run disjoint --kcv root=$K1 --kcv signing=$K2 --kcv revocation=$K3 --kcv host-a=${K1,,})"
+K1=ABCDEF0123456789 K2=2222222222222222 K3=3333333333333333
+out="$(run disjoint --kcv revocation=$K1 --kcv hosts-ceremony=$K2 --kcv host-a=$K3)"; rc=$?
+[ "$rc" = 0 ] && [ "$(grep -c '^DISJOINT ' <<< "$out")" = 3 ] && P "three different key check values: disjoint, each printed" || F "disjoint (rc=$rc): $out"
+out="$(run disjoint --kcv revocation=$K1 --kcv hosts-ceremony=$K2 --kcv host-a=$K1)"
+[ $? = 1 ] && grep -q "DOMAINS NOT DISJOINT: host-a and revocation have the same DKEK key check value $K1" <<< "$out" && P "two equal values: refused, both named" || F "equal: $out"
+out="$(run disjoint --kcv revocation=${K1,,} --kcv hosts-ceremony=$K2)"
+[ $? = 0 ] && grep -q "^DISJOINT revocation $K1$" <<< "$out" && P "a lower-case value is read as the card prints it (upper case)" || F "lower case: $out"
+out="$(run disjoint --kcv revocation=$K1 --kcv host-a=${K1,,})"
 [ $? = 1 ] && grep -q "NOT DISJOINT" <<< "$out" && P "the same value in lower case is the same value: refused" || F "lowercase dup: $out"
-out="$(run disjoint --kcv root=$K1 --kcv signing=$K2 --kcv revocation=$K3)"
-[ $? = 1 ] && grep -q "no other domain's key check value is given" <<< "$out" && P "no other domain given: refused" || F "no others: $out"
-out="$(run disjoint --kcv root=$K1 --kcv signing=$K2 --kcv revocation=$K3 --hosts-not-yet)"
-[ $? = 0 ] && grep -q "DISJOINT others none (--hosts-not-yet)" <<< "$out" && P "--hosts-not-yet: accepted, and said so in the output" || F "hosts-not-yet: $out"
-for bad in "root=0000000000000000" "root=12AB" "root" "Root=$K1"; do
-  out="$(run disjoint --kcv "$bad" --kcv signing=$K2 --kcv revocation=$K3 --kcv host=$K4)"
+out="$(run disjoint --kcv revocation=$K1)"
+[ $? = 1 ] && grep -q "a comparison with nothing proves nothing" <<< "$out" && P "no other domain given: refused" || F "no others: $out"
+out="$(run disjoint --kcv revocation=$K1 --kcv host-a=$K2 --hosts-not-yet)"
+[ $? = 1 ] && grep -q "unknown argument: --hosts-not-yet" <<< "$out" && P "there is no way to skip the comparison (--hosts-not-yet is gone)" || F "hosts-not-yet: $out"
+for bad in "revocation=0000000000000000" "revocation=12AB" "revocation" "Revocation=$K1"; do
+  out="$(run disjoint --kcv "$bad" --kcv host=$K2)"
   [ $? = 1 ] && grep -q REFUSED <<< "$out" && P "--kcv $bad: refused" || F "--kcv $bad: $out"
 done
-out="$(run disjoint --kcv signing=$K2 --kcv revocation=$K3 --kcv host=$K4)"
-[ $? = 1 ] && grep -q -- "--kcv root=… is required" <<< "$out" && P "root missing: refused" || F "root missing: $out"
+out="$(run disjoint --kcv host-a=$K2 --kcv host-b=$K3)"
+[ $? = 1 ] && grep -q -- "--kcv revocation=… is required" <<< "$out" && P "revocation missing: refused" || F "revocation missing: $out"
 
 hdr "4  backup: one age file to the break-glass recipient; the plaintext removed"
 if command -v age >/dev/null 2>&1 && command -v age-keygen >/dev/null 2>&1; then
   ( umask 077; age-keygen -pq -o "$ROOT/bg.key" 2>/dev/null || age-keygen -o "$ROOT/bg.key" 2>/dev/null )
   age-keygen -y "$ROOT/bg.key" > "$ROOT/bg.recipient"
-  pw="$(cat "$D/root.pw")"; share="$(base64 -w0 < "$D/root.pbe")"
-  out="$(run backup --domain root --dir "$D" --kcv "$KCV_ROOT" --recipient-file "$ROOT/bg.recipient")"; rc=$?
-  [ "$rc" = 0 ] && grep -q "^BACKUP root $D/dkek-root.age sha256 $(sha256sum "$D/dkek-root.age" 2>/dev/null | cut -d' ' -f1)$" <<< "$out" \
+  pw="$(cat "$D/revocation.pw")"; share="$(base64 -w0 < "$D/revocation.pbe")"
+  out="$(run backup --domain revocation --dir "$D" --kcv "$KCV_ROOT" --recipient-file "$ROOT/bg.recipient")"; rc=$?
+  [ "$rc" = 0 ] && grep -q "^BACKUP revocation $D/dkek-revocation.age sha256 $(sha256sum "$D/dkek-revocation.age" 2>/dev/null | cut -d' ' -f1)$" <<< "$out" \
     && P "backed up ($(head -c 4 "$ROOT/bg.recipient")… recipient), its SHA-256 printed" || F "backup (rc=$rc): $out"
-  [ ! -e "$D/root.pbe" ] && [ ! -e "$D/root.pw" ] && P "the plaintext share and password are gone" || F "plaintext left: $(ls "$D")"
-  plain="$(age -d -i "$ROOT/bg.key" "$D/dkek-root.age" 2>/dev/null)"
-  [ "$(sed -n 1p <<< "$plain")" = regalia.dkek-share/v1 ] && grep -qx "domain root" <<< "$plain" && grep -qx "kcv $KCV_ROOT" <<< "$plain" \
+  [ ! -e "$D/revocation.pbe" ] && [ ! -e "$D/revocation.pw" ] && P "the plaintext share and password are gone" || F "plaintext left: $(ls "$D")"
+  plain="$(age -d -i "$ROOT/bg.key" "$D/dkek-revocation.age" 2>/dev/null)"
+  [ "$(sed -n 1p <<< "$plain")" = regalia.dkek-share/v1 ] && grep -qx "domain revocation" <<< "$plain" && grep -qx "kcv $KCV_ROOT" <<< "$plain" \
     && grep -qxF "password $pw" <<< "$plain" && grep -qxF "share $share" <<< "$plain" \
     && P "the break-glass key opens it: the domain, its KCV, the password and the share" || F "decrypted: $(sed -n 1,3p <<< "$plain")"
-  grep -qaF -- "$pw" "$D/dkek-root.age" && F "the password is in the file in the clear" || P "the file does not hold the password in the clear"
-  out="$(run backup --domain root --dir "$D" --kcv "$KCV_ROOT" --recipient-file "$ROOT/bg.recipient")"
-  [ $? = 1 ] && grep -q "root.pbe is missing" <<< "$out" && P "a second backup: refused (the share is gone)" || F "second backup: $out"
+  grep -qaF -- "$pw" "$D/dkek-revocation.age" && F "the password is in the file in the clear" || P "the file does not hold the password in the clear"
+  out="$(run backup --domain revocation --dir "$D" --kcv "$KCV_ROOT" --recipient-file "$ROOT/bg.recipient")"
+  [ $? = 1 ] && grep -q "revocation.pbe is missing" <<< "$out" && P "a second backup: refused (the share is gone)" || F "second backup: $out"
   attach DENK0600005; card DENK0600005 pending
-  run create --domain signing --serial DENK0600005 --dir "$D" >/dev/null
+  rm -rf "$D2"; mkdir -p "$D2"; run create --domain revocation --serial DENK0600005 --dir "$D2" >/dev/null
   echo "not a recipient" > "$ROOT/bad.recipient"
-  out="$(run backup --domain signing --dir "$D" --kcv "$K2" --recipient-file "$ROOT/bad.recipient")"
-  [ $? = 1 ] && grep -q "does not hold an age recipient" <<< "$out" && [ -e "$D/signing.pbe" ] && P "no recipient: refused, the share kept" || F "bad recipient: $out"
-  out="$(run backup --domain signing --dir "$D" --kcv 12 --recipient-file "$ROOT/bg.recipient")"
+  out="$(run backup --domain revocation --dir "$D2" --kcv "$K2" --recipient-file "$ROOT/bad.recipient")"
+  [ $? = 1 ] && grep -q "does not hold an age recipient" <<< "$out" && [ -e "$D2/revocation.pbe" ] && P "no recipient: refused, the share kept" || F "bad recipient: $out"
+  out="$(run backup --domain revocation --dir "$D2" --kcv 12 --recipient-file "$ROOT/bg.recipient")"
   [ $? = 1 ] && grep -q -- "--kcv is the domain's key check value" <<< "$out" && P "a malformed --kcv: refused" || F "bad kcv: $out"
 else
   echo "  SKIP backup: age is not installed here (the emulator job installs age 1.3.2)"

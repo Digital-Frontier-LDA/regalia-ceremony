@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# hsm-domain.sh — a DKEK domain of its own for each key of the token ceremony (regalia-ceremony#111): the
-# membership root, the boot-image signing key and the revocation key, each on a card and a spare that share a
-# DKEK used by nothing else, so no blob of one key can ever be unwrapped on another key's cards or a KMS host's.
+# hsm-domain.sh — the revocation key's DKEK domain (regalia-ceremony#111): the revocation key's card and its
+# spare share a DKEK used by nothing else, so its blob can never be unwrapped on a KMS host's card or the funding
+# HSM, nor theirs on these. Since the owner's decision of 2026-10-04 the membership root and the boot-image
+# signing keys are Shamir-shared software keys, not HSM keys: revocation is the one HSM domain here.
 #
-#   hsm-domain.sh create   --domain root|signing|revocation --serial SERIAL --dir DIR
-#   hsm-domain.sh load     --domain D --serial SERIAL --dir DIR --first | --expect-kcv KCV
-#   hsm-domain.sh disjoint --kcv NAME=KCV ... [--hosts-not-yet]
+#   hsm-domain.sh create   --domain revocation --serial SERIAL --dir DIR
+#   hsm-domain.sh load     --domain revocation --serial SERIAL --dir DIR --first | --expect-kcv KCV
+#   hsm-domain.sh disjoint --kcv revocation=KCV --kcv NAME=KCV ...
 #   hsm-domain.sh backup   --domain D --dir DIR --kcv KCV --recipient-file FILE
 #
 # ONE SHARE, ONE PASSWORD, NO SPLIT. A domain's DKEK is one share under one generated password (sixty-four
@@ -23,15 +24,16 @@
 #   the card must be waiting for its one share (DKEK import pending). The share is imported, and the card
 #   must then report a complete DKEK; its key check value is printed (DOMAIN D card S KCV K). The first card
 #   is loaded with --first; every other with --expect-kcv (the first card's value), which must match: two cards
-#   share a DKEK iff their KCVs match, and a second card loaded without it would define its own domain unseen. A card that already holds a complete DKEK is not imported into again: with --expect-kcv equal
-#   to its value it is reported as loaded (a re-run), otherwise refused. EXIT STATUS IS NOT INTEGRITY
+#   share a DKEK iff their KCVs match, and a second card loaded without it would define its own domain unseen.
+#   A card that already holds a complete DKEK is not imported into again: with --expect-kcv equal to its value
+#   it is reported as loaded (a re-run), otherwise refused. EXIT STATUS IS NOT INTEGRITY
 #   (regalia#460): the state read back from the card decides, never the import's exit status.
 #
 # disjoint: every key check value given must be sixteen hex digits, not all zero, and different from every
-# other. root, signing and revocation are required, and at least one other domain (the hosts' ceremony's
-# dkek.kcv, each production host card's KCV read without a PIN) unless --hosts-not-yet, which is printed as
-# such. A KCV is a fingerprint of the DKEK: equal values mean the same DKEK, and this refuses them. The
-# cryptographic proof is hsm-signing-key.sh refuse, run on a card of every other domain.
+# other. revocation is required, and at least one other known domain (the hosts' ceremony's dkek.kcv, each
+# production host card's KCV read without a PIN): a comparison with nothing proves nothing. A KCV is a
+# fingerprint of the DKEK: equal values mean the same DKEK, and this refuses them. The cryptographic proof is
+# hsm-signing-key.sh refuse, run on a card of every other domain.
 #
 # backup: DIR/dkek-D.age, to the recipient in FILE (the break-glass key, age1pq1… or age1…). The plaintext
 # never touches a file: it goes to age on stdin. The result must be an age file that contains neither the
@@ -53,7 +55,7 @@ is_kcv(){ case "$1" in [0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][0-9A-F][
 upper(){ printf '%s' "$1" | tr 'a-f' 'A-F'; }
 
 COMMAND="${1-}"; [ $# -gt 0 ] && shift
-DOMAIN="" SERIAL="" DIR="" KCV="" RECIPIENT_FILE="" HOSTS_NOT_YET=0 FIRST=0 KCVS=()
+DOMAIN="" SERIAL="" DIR="" KCV="" RECIPIENT_FILE="" FIRST=0 KCVS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --domain)         need "$1" "${2-}"; DOMAIN="$2"; shift 2;;
@@ -62,7 +64,6 @@ while [ $# -gt 0 ]; do
     --expect-kcv)     need "$1" "${2-}"; KCV="$(upper "$2")"; shift 2;;
     --kcv)            need "$1" "${2-}"; if [ "$COMMAND" = disjoint ]; then KCVS+=("$2"); else KCV="$(upper "$2")"; fi; shift 2;;
     --recipient-file) need "$1" "${2-}"; RECIPIENT_FILE="$2"; shift 2;;
-    --hosts-not-yet)  HOSTS_NOT_YET=1; shift;;
     --first)          FIRST=1; shift;;
     --password|--password=*|--pin|--so-pin) die "no secret is taken on the command line";;
     -h|--help) sed -n '2,9p' "$0"; exit 0;;
@@ -83,16 +84,14 @@ if [ "$COMMAND" = disjoint ]; then
     [ -z "${by_value[$value]+x}" ] || die "DOMAINS NOT DISJOINT: $name and ${by_value[$value]} have the same DKEK key check value $value"
     by_name[$name]="$value"; by_value[$value]="$name"
   done
-  for d in root signing revocation; do [ -n "${by_name[$d]+x}" ] || die "--kcv $d=… is required"; done
-  others=0; for name in "${!by_name[@]}"; do case "$name" in root|signing|revocation) ;; *) others=$((others + 1));; esac; done
-  [ "$others" -gt 0 ] || [ "$HOSTS_NOT_YET" = 1 ] \
-    || die "no other domain's key check value is given (the hosts' ceremony's dkek.kcv, a host card's): pass them, or --hosts-not-yet, which the record states"
+  [ -n "${by_name[revocation]+x}" ] || die "--kcv revocation=… is required"
+  [ "${#by_name[@]}" -gt 1 ] \
+    || die "no other domain's key check value is given (the hosts' ceremony's dkek.kcv, a host card's): a comparison with nothing proves nothing"
   for name in $(printf '%s\n' "${!by_name[@]}" | sort); do printf 'DISJOINT %s %s\n' "$name" "${by_name[$name]}"; done
-  [ "$others" -gt 0 ] || echo "DISJOINT others none (--hosts-not-yet): the token domains were not compared with the KMS hosts'"
   exit 0
 fi
 
-case "$DOMAIN" in root|signing|revocation) ;; *) die "--domain is root, signing or revocation";; esac
+case "$DOMAIN" in revocation) ;; *) die "--domain is revocation (the root and signing keys are Shamir-shared software keys since 2026-10-04)";; esac
 [ -n "$DIR" ] && [ -d "$DIR" ] || die "--dir must be an existing directory"
 SHARE="$DIR/$DOMAIN.pbe" PWFILE="$DIR/$DOMAIN.pw" AGEFILE="$DIR/dkek-$DOMAIN.age"
 absent(){ { [ ! -e "$1" ] && [ ! -L "$1" ]; } || die "$1 already exists: nothing is overwritten"; }
