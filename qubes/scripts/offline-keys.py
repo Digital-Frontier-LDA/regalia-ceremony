@@ -668,7 +668,7 @@ def main(argv=None):
     s.add_argument("--tool-root", required=True, help="the regalia-kms tree the command runs from")
     s.add_argument("--tool-digest", required=True, help="that tree's digest, from the ceremony image's build evidence")
     s.add_argument("--output", action="append", default=[], help="a file the command must write (its SHA-256 is recorded)")
-    s.add_argument("--exec", nargs=argparse.REMAINDER, dest="command", required=True,
+    s.add_argument("--exec", nargs=argparse.REMAINDER, dest="exec_argv", required=True,
                    help="/usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …, last on the line")
     t = sub.add_parser("tree-digest", help="the digest of a regalia-kms tree, as --tool-digest takes it")
     t.add_argument("--root", required=True)
@@ -692,7 +692,7 @@ def main(argv=None):
             if missing:
                 print("FORMS NOT CHECKED %s (--partial)" % ",".join(str(i + 1) for i in missing))
         elif args.command == "sign":
-            session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.command, args.tool_root, args.tool_digest, args.output)
+            session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.exec_argv, args.tool_root, args.tool_digest, args.output)
             print("SIGNED by %s with %s (shares %s), session %s; record %s" % (session["tool"], ", ".join(session["keys"]),
                   ",".join(str(i) for i in session["share_indices"]), session["session"], path))
         elif args.command == "tree-digest":

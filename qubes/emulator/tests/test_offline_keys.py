@@ -430,6 +430,26 @@ if "nooutput" not in args:
         self.assertEqual(self.records(), [])
         self.assertFalse(os.path.exists(os.path.join(self.session_dir, "manifest.out")), "the tool never ran")
 
+    def test_the_command_line_runs_a_session(self):
+        """coderabbitai on #115: the CLI, not only the function. --exec's REMAINDER once overwrote the subcommand's name."""
+        import contextlib
+        import io
+        command = self.command("manifest")
+        argv = ["sign", "--sealed", self.sealed, "--who", "Owner", "--out", self.session_dir, "--tool-root", self.tree,
+                "--tool-digest", self.digest, "--output", command[command.index("--out") + 1], "--exec"] + command
+        import types
+        stdout = io.StringIO()
+        fake_sys = types.SimpleNamespace(stdin=io.StringIO("\n".join(self.all[1:4]) + "\n"),
+                                         stdout=types.SimpleNamespace(buffer=io.BytesIO()), stderr=io.StringIO())
+        fake_sys.stderr.buffer = io.BytesIO()
+        with unittest.mock.patch.object(ok, "sys", fake_sys), contextlib.redirect_stdout(stdout):
+            self.assertEqual(ok.main(argv), 0, fake_sys.stderr.getvalue())
+        self.assertIn("SIGNED by manifest with root (shares 2,3,4)", stdout.getvalue())
+        self.assertEqual(len(self.records()), 1)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ok.main(["tree-digest", "--root", self.tree]), 0)
+        self.assertEqual(out.getvalue().strip(), self.digest)
+
     def test_a_failing_command_is_recorded_then_refused(self):
         with self.assertRaisesRegex(ok.Refused, "the command exited 3: the session is recorded"):
             self.sign(self.command("manifest", "exit3"))
