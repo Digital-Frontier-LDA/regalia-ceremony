@@ -1073,11 +1073,19 @@ def card_record_check(record):
     """The card-ceremony record's rules (ADR-0002 D30, regalia-ceremony#111 step 2), as the writer enforces them and
     regalia-kms's verifier mirrors them (the vectors in qubes/emulator/tests/vectors/card-ceremony-record). Returns the
     record, or Refused naming the first rule broken."""
-    _exact(record, ("schema", "event", "owner_keys", "ownerauth_recipients", "ssh_signers", "release_key", "session", "root_entry",
-                    "root_fingerprint", "tool", "at"), "the record")
+    _exact(record, ("schema", "event", "sequence", "supersedes", "owner_keys", "ownerauth_recipients", "ssh_signers", "release_key",
+                    "session", "root_entry", "root_fingerprint", "tool", "at"), "the record")
     _ascii(record, "the record")
     require(record["schema"] == SCHEMA_CARDS and record["event"] == "card-ceremony", "schema must be %s, event card-ceremony" % SCHEMA_CARDS)
     require(isinstance(record["session"], str) and re.fullmatch(r"[0-9a-f]{32}", record["session"]) is not None, "session is 32 hex")
+    # freshness (regalia-kms#403): each card record under a root is one more than the last, and names its digest
+    require(isinstance(record["sequence"], int) and not isinstance(record["sequence"], bool) and record["sequence"] >= 1,
+            "sequence is an integer from 1")
+    if record["sequence"] == 1:
+        require(record["supersedes"] == "", "the first card record (sequence 1) supersedes nothing: supersedes is \"\"")
+    else:
+        require(isinstance(record["supersedes"], str) and _HEX64.fullmatch(record["supersedes"]) is not None,
+                "a card record after the first names the one it supersedes: the SHA-256 of its canonical bytes, 64 hex")
     require(isinstance(record["tool"], str) and record["tool"], "tool names the writer")
     require(isinstance(record["at"], str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", record["at"]) is not None,
             "at is YYYY-MM-DDTHH:MM:SSZ")
@@ -1130,6 +1138,55 @@ def card_record_check(record):
     ssh = [ssh_ed25519_raw(s["key"], "ssh_signers[%d].key" % i) for i, s in enumerate(record["ssh_signers"])]
     every = [record["root_entry"]["key"], rel["key"]] + [k["key"] for k in owners] + ssh
     require(len(set(every)) == len(every), "a key is used twice among the root, the release key, the owner keys and the SSH keys")
+    return record
+
+
+def card_record_digest(record):
+    """A card record's digest, as `supersedes` and the signing record name it: SHA-256 of its canonical bytes (the form
+    the signature covers, without RECORD_DOMAIN), 64 hex (regalia-kms#403)."""
+    return hashlib.sha256(canonical(record)).hexdigest()
+
+
+SIGNING_RECORD = "signing-record.jsonl"     # regalia-kms manifest.py's RECORD, in the same --state-dir
+
+
+def append_card_record_line(state_dir, record, now=None):
+    """When the root signs a card record: one line in the laptop's root signing record (the file `manifest sign
+    --state-dir` appends to), {kind, sequence, digest, key, at}, appended and synced as manifest.py's _append_record
+    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes."""
+    info = os.stat(state_dir)
+    require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
+    line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
+            "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        data = (json.dumps(line, sort_keys=True) + "\n").encode()
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return line
+
+
+def card_record_current(document, pinned_root, signing_lines):
+    """A card record that is the NEWEST the pinned root signed (regalia-kms#403): verify_card_record, then the laptop's
+    signing record's card-record lines (dicts, in file order) must run 1..M without a gap, this record must be line M
+    (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
+    refused: after a rotation it would vouch for a retired key. Returns the record."""
+    record = verify_card_record(document, pinned_root)
+    lines = [line for line in signing_lines if isinstance(line, dict) and line.get("kind") == "card-record"]
+    require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
+    require([line.get("sequence") for line in lines] == list(range(1, len(lines) + 1)),
+            "the signing record's card-record lines are not 1..%d without a gap" % len(lines))
+    require(all(line.get("key") == pinned_root for line in lines), "a card-record line names another root than the pinned one")
+    newest = lines[-1]
+    require(record["sequence"] == newest["sequence"] and card_record_digest(record) == newest.get("digest"),
+            "this card record is not the newest the root signed (sequence %d of %d): an older one is superseded"
+            % (record["sequence"], newest["sequence"]))
+    if len(lines) > 1:
+        require(record["supersedes"] == lines[-2].get("digest"), "this card record does not supersede the one before it in the signing record")
     return record
 
 
