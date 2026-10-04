@@ -179,6 +179,9 @@ p11_pin(){ REGALIA_PIN="$PIN" timeout 60 pkcs11-tool --module "$MODULE" --slot "
 schsm_pin(){ REGALIA_PIN="$PIN" timeout 60 sc-hsm-tool --reader "$READER" "$@" --pin env:REGALIA_PIN; }
 cert_tool(){ python3 -I "$CERT_TOOL" "$@"; }
 
+# One card by serial, its reader, its DKEK state: hsm-card.sh, shared with hsm-domain.sh.
+# shellcheck source=hsm-card.sh
+. "$HERE/hsm-card.sh"
 # The card's own evidence: readers (opensc-tool only, no PIN) and the verifier (pycvc).
 DEVAUT_SH="${HSM_DEVAUT_READ_SH:-$HERE/hsm-devaut-read.sh}"
 ATTEST_SH="${HSM_KEY_ATTEST_READ_SH:-$HERE/hsm-key-attestation-read.sh}"
@@ -199,18 +202,6 @@ object_ids(){ # $1 = pubkey | privkey
 }
 pubkey_ids(){ object_ids pubkey; }
 
-# The reader that holds THIS card: the readers in order, the first whose card reports serial $SERIAL
-# (opensc-tool numbers readers, and a laptop's own empty reader may be number 0). Sets READER and DEVOUT.
-find_reader(){
-  local r out
-  READER="" DEVOUT=""
-  for r in $(timeout 30 opensc-tool --list-readers 2>/dev/null | sed -n 's/^[[:space:]]*\([0-9][0-9]*\)[[:space:]].*/\1/p'); do
-    if out="$(timeout 60 bash "$DEVAUT_SH" --reader "$r" --expect-serial "$SERIAL" 2>/dev/null)" && grep -q '^DEVAUT_HEX=' <<< "$out"; then
-      READER="$r"; DEVOUT="$out"; return 0
-    fi
-  done
-  die "no reader holds card $SERIAL with a readable device certificate (EF 2F02)"
-}
 # Whether EF CE<ref> exists: "present", "absent", or a failure. DELETING A KEY LEAVES ITS EF CE<ref> BEHIND
 # (measured 2026-10-03, DENK0404380), and sc-hsm-tool --unwrap-key refuses a reference that still has one
 # ("Found existing certificate in EF with fid ce01"): a reference whose key was deleted is not free.
@@ -285,20 +276,7 @@ trap on_exit EXIT
 trap 'exit 130' INT; trap 'exit 143' TERM; trap 'exit 129' HUP
 
 # ---- 1. the one token, by serial --------------------------------------------------------------------
-slots="$(p11 --list-token-slots 2>/dev/null)" || die "cannot list the PKCS#11 token slots of $MODULE"
-SLOT_ID="" n=0 total=0 cur=""
-while IFS= read -r line; do
-  case "$line" in
-    "Slot "*"(0x"*")"*) cur="${line#*(}"; cur="${cur%%)*}";;
-    *"serial num"*:*)
-      total=$((total + 1))
-      s="${line#*:}"; s="$(printf '%s' "$s" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-      if [ -n "$cur" ] && [ "$s" = "$SERIAL" ]; then SLOT_ID="$cur"; n=$((n + 1)); fi
-      cur="";;
-  esac
-done <<< "$slots"
-[ "$n" -eq 1 ] || die "serial $SERIAL matches $n tokens — attach exactly that card"
-[ "$total" -eq 1 ] || die "$total tokens are attached; attach ONLY card $SERIAL (one card on the table is one card a mistake can reach)"
+hsm_only_token
 ok "card $SERIAL is the only token attached (slot $SLOT_ID)"
 
 # ---- 1b. the card's DKEK domain, by its key check value ---------------------------------------------
@@ -308,10 +286,8 @@ ok "card $SERIAL is the only token attached (slot $SLOT_ID)"
 # readers, and sc-hsm-tool numbers them alike), so none of them falls to OpenSC's default reader.
 [ -r "$DEVAUT_SH" ] || die "hsm-devaut-read.sh is needed to find the reader that holds card $SERIAL"
 find_reader
-status="$(timeout 60 sc-hsm-tool --reader "$READER" </dev/null 2>&1)" || die "sc-hsm-tool could not read card $SERIAL's status"
-CARD_KCV="$(sed -n 's/^DKEK key check value[[:space:]]*:[[:space:]]*\([0-9A-Fa-f]\{16\}\)[[:space:]]*$/\1/p' <<< "$status" | tr 'a-f' 'A-F')"
-[ "$(grep -c '^DKEK key check value' <<< "$status")" -eq 1 ] && [ -n "$CARD_KCV" ] \
-  || die "card $SERIAL holds no complete DKEK (no key check value; an import may be pending): $(grep -i dkek <<< "$status" | tr '\n' ' ')"
+hsm_dkek_state
+[ "$CARD_DKEK" = complete ] || die "card $SERIAL holds no complete DKEK (no key check value; an import may be pending): $CARD_DKEK"
 [ "$CARD_KCV" = "$KCV" ] || die "card $SERIAL holds DKEK $CARD_KCV, not $KCV, the domain --expect-kcv names: wrong card, or wrong share imported"
 ok "card $SERIAL holds DKEK $CARD_KCV"
 if [ "$COMMAND" != generate ]; then

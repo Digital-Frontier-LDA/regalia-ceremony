@@ -404,6 +404,7 @@ say "OPERATION PROOF (regalia#28 criterion 3): each new key signs a fresh challe
 
 say "SIGNING KEYS GENERATED ON AN OFFLINE HSM (regalia#554): certificate signed by the card, DKEK-wrapped backup, restore on the spare, a KMS-domain card refuses the blob"
 "$HERE/tests/test-hsm-signing-key.sh" || suite_failed "test-hsm-signing-key.sh"
+"$HERE/tests/test-hsm-domain.sh" || suite_failed "test-hsm-domain.sh"
 
 say "OFFLINE BUNDLE metadata, complete hash coverage, and centralized release signature verification"
 python3 "$HERE/../../debian/offline-bundle/test_bundle.py" || suite_failed "test_bundle.py"
