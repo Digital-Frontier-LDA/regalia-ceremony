@@ -16,6 +16,19 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
                                           the entries are authenticated and the root signs ownerauth-verified.record.json)
     python3 -Es offline-keys.py verify-record --record FILE
 
+
+CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):
+  * Tested on the dev qube and in CI only. Software GnuPG homes stand in for the developer cards, and nothing here has
+    run on the ceremony laptop or against a real card's keys (regalia-ceremony#123).
+  * ownerauth and ownerauth-verify have no ceremony.sh step: at a ceremony they are typed by hand, and the archive
+    does not gate the disc on their files (#122).
+  * The developer cards' keys (ADR-0002 D30: SIG owner key, DEC owner-auth, AUT SSH) are not made by any tool yet.
+    That step is gated by the D30.6 bench measurements, which have not run. Until then ownerauth has no real
+    --yk-keys (#111 step 2).
+  * The release key (D29.2/D30: Shamir developers' set, imported onto two release cards) is not implemented (#124).
+  * sign hands keys only to regalia-kms's manifest sign and uki.py sign. Any other signing purpose needs a new
+    allow-list entry and a reviewed change here.
+
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
 key. So, as a KMS splits its unseal key and not the keys it protects: one 256-bit OFFLINE MASTER SECRET is split
 k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the four keys are sealed under a key derived from it:
