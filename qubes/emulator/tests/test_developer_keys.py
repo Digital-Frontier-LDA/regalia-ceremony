@@ -358,10 +358,19 @@ class Trust(Case):
         record["release_key"].update(key=key or self.release["key"], fingerprint=fingerprint or self.release["fingerprint"])
         return cards.signed(record)
 
-    @staticmethod
-    def lines(*documents):
-        return [{"kind": "card-record", "sequence": d["record"]["sequence"], "digest": ok.card_record_digest(d["record"]),
-                 "key": d["record"]["root_entry"]["key"], "at": "2026-10-04T12:00:00Z"} for d in documents]
+    def lines(self, *documents, root=None):
+        """A signing state directory for the pinned root holding a card-record line for each document, in order."""
+        d = tempfile.mkdtemp(dir=self.d)
+        os.chmod(d, 0o700)
+        marker = os.path.join(d, ok.SIGNING_STATE)
+        with open(marker, "w") as f:
+            json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root or self.root}, f)
+        os.chmod(marker, 0o600)
+        with open(os.path.join(d, ok.SIGNING_RECORD), "w") as f:
+            for doc in documents:
+                f.write(json.dumps({"kind": "card-record", "sequence": doc["record"]["sequence"], "digest": ok.card_record_digest(doc["record"]),
+                                    "key": doc["record"]["root_entry"]["key"], "at": "2026-10-04T12:00:00Z"}) + "\n")
+        return d
 
     def test_vouched_by_the_root_signed_card_record(self):
         document = self.card_record()
@@ -376,7 +385,10 @@ class Trust(Case):
         self.assertEqual(str(caught.exception), "the release key is not the one the root-signed card record names: it is pending, and "
                          "nothing trusts it")
         with self.assertRaisesRegex(dk.Refused, "the record names another root than the pinned one"):
-            dk.vouched(self.developers, self.card_record(), cards.raw(cards.OTHER_ROOT), self.lines(self.card_record()))
+            dk.vouched(self.developers, self.card_record(), cards.raw(cards.OTHER_ROOT),
+                       self.lines(self.card_record(), root=cards.raw(cards.OTHER_ROOT)))
+        with self.assertRaisesRegex(dk.Refused, "regalia-signing-state.json names another root than the pinned one"):
+            dk.vouched(self.developers, self.card_record(), self.root, self.lines(self.card_record(), root=cards.raw(cards.OTHER_ROOT)))
         wrong = self.card_record(fingerprint="AB" * 20)
         with self.assertRaisesRegex(dk.Refused, "the release key is not the one"):
             dk.vouched(self.developers, wrong, self.root, self.lines(wrong))
