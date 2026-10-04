@@ -98,8 +98,9 @@ class Vectors(unittest.TestCase):
             for name in os.listdir(os.path.join(VECTORS, "freshness", case)):
                 shutil.copy(os.path.join(VECTORS, "freshness", case, name), d)
             os.chmod(d, 0o700)
-            if os.path.exists(os.path.join(d, ok.SIGNING_STATE)):
-                os.chmod(os.path.join(d, ok.SIGNING_STATE), 0o600)
+            for name in (ok.SIGNING_STATE, ok.SIGNING_RECORD):
+                if os.path.exists(os.path.join(d, name)):
+                    os.chmod(os.path.join(d, name), 0o600)
             with open(os.path.join(VECTORS, want["record"])) as f:
                 document = json.load(f)
             with self.subTest(case=case):
@@ -109,6 +110,46 @@ class Vectors(unittest.TestCase):
                     with self.assertRaises(ok.Refused) as caught:
                         ok.card_record_current(document, root, ok.read_signing_state(d, root))
                     self.assertIn(want["expect"], str(caught.exception))
+
+    def test_the_log_is_read_whole_and_never_through_a_link(self):
+        """d9 on #126: a log over the limit whose cut-off tail holds the newest line, and a log linked to an older copy,
+        would each make an older card record read as the newest. Both are refused."""
+        root = make.raw(make.ROOT)
+        first, second = make.signed(make.valid_record()), make.signed(make.sequence_two())
+        one = make.log_line(make.valid_record(), "2026-10-04T12:00:01Z")
+        two = make.log_line(make.sequence_two(), "2026-10-05T12:00:01Z")
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        marker = os.path.join(d, ok.SIGNING_STATE)
+        with open(marker, "w") as f:
+            json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root}, f)
+        os.chmod(marker, 0o600)
+        log = os.path.join(d, ok.SIGNING_RECORD)
+        filler = json.dumps({"kind": "manifest", "pad": "x" * 1000})
+        body = one + "\n" + "\n".join([filler] * (ok.MAX_SIGNING_RECORD // len(filler)))
+        with open(log, "w") as f:
+            f.write(body + "\n" + two + "\n")          # the newest line falls past the limit, on a line boundary
+        os.chmod(log, 0o600)
+        self.assertGreater(os.path.getsize(log), ok.MAX_SIGNING_RECORD)
+        with self.assertRaisesRegex(ok.Refused, "is larger than 4194304 bytes: refused whole, never read in part"):
+            ok.card_record_current(first, root, ok.read_signing_state(d, root))
+        older = os.path.join(d, "older.jsonl")
+        with open(older, "w") as f:
+            f.write(one + "\n")
+        os.chmod(older, 0o600)
+        os.unlink(log)
+        os.symlink(older, log)
+        with self.assertRaisesRegex(ok.Refused, "signing-record.jsonl cannot be opened as a regular file"):
+            ok.card_record_current(first, root, ok.read_signing_state(d, root))
+        os.unlink(log)
+        with open(log, "w") as f:
+            f.write(one + "\n" + two + "\n")
+        os.chmod(log, 0o644)
+        with self.assertRaisesRegex(ok.Refused, "signing-record.jsonl must be a regular file of the directory's owner, mode 0600"):
+            ok.read_signing_state(d, root)
+        os.chmod(log, 0o600)
+        self.assertEqual(ok.card_record_current(second, root, ok.read_signing_state(d, root))["sequence"], 2)
 
     def test_the_marker_must_be_the_owners_0600_regular_file(self):
         root = make.raw(make.ROOT)

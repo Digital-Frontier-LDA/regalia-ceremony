@@ -1150,6 +1150,7 @@ def card_record_digest(record):
 SIGNING_RECORD = "signing-record.jsonl"     # regalia-kms manifest.py's RECORD, in the same --state-dir
 SIGNING_STATE = "regalia-signing-state.json"    # the state directory's marker, agreed with regalia-kms-1e (#403 point 7)
 SCHEMA_SIGNING_STATE = "regalia.signing-state/v1"
+MAX_SIGNING_RECORD = 1 << 22             # 4 MiB: a larger signing record is refused, never read in part
 
 
 def read_signing_state(state_dir, pinned_root):
@@ -1176,15 +1177,30 @@ def read_signing_state(state_dir, pinned_root):
     _exact(marker, ("schema", "root"), SIGNING_STATE)
     require(marker["schema"] == SCHEMA_SIGNING_STATE, "%s's schema is not %s" % (SIGNING_STATE, SCHEMA_SIGNING_STATE))
     require(marker["root"] == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
-    path = os.path.join(state_dir, SIGNING_RECORD)
-    require(os.path.exists(path), "%s holds no %s" % (state_dir, SIGNING_RECORD))
+    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
+    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        log_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
+        data = f.read(MAX_SIGNING_RECORD + 1)
+    require(len(data) <= MAX_SIGNING_RECORD, "%s is larger than %d bytes: refused whole, never read in part" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
+    try:
+        texts = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise Refused("%s is not UTF-8" % SIGNING_RECORD) from None
     lines = []
-    with open(path) as f:
-        for i, text in enumerate(f.read(1 << 22).splitlines()):
-            try:
-                lines.append(json.loads(text))
-            except ValueError:
-                raise Refused("line %d of the signing record is not JSON (a torn write?)" % (i + 1)) from None
+    for i, text in enumerate(texts):
+        try:
+            lines.append(json.loads(text))
+        except ValueError:
+            raise Refused("line %d of the signing record is not JSON (a torn write?)" % (i + 1)) from None
     return lines
 
 
