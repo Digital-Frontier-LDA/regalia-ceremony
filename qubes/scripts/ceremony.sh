@@ -970,6 +970,9 @@ step_hsm_funding() {
   # Teed into the RAM-only workdir (umask 077) because step 2 feeds the shares straight back into
   # the import (#464). The capture holds all six shares, so it never leaves $WORK: the M-DISC
   # stage copies an allowlist and refuses any *share*.txt, and the workdir is shredded on exit.
+  # A key check value from an earlier attempt names THAT attempt's DKEK: gone before a new one exists, and
+  # written again only after this one's import (coderabbitai on #112).
+  rm -f "$WORK/dkek.kcv"
   run_tee "$WORK/dkek-shares.txt" "sc-hsm-tool --create-dkek-share '$WORK/dkek.pbe' --pwd-shares-threshold $(K) --pwd-shares-total $(N)" \
     || { rm -f "$WORK/dkek-shares.txt"; \
          err "DKEK share creation was skipped or failed — aborting the HSM step."; \

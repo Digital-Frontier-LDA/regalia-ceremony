@@ -222,7 +222,11 @@ reset_state
 # operator confirms every step EXCEPT the DKEK import (answers 'n' there). With no DKEK
 # loaded, generating the funding key would leave it with no recoverable backup.
 ask(){ case "$LAST_SHOWN" in *import-dkek-share*) return 1;; *) return 0;; esac; }
+printf 'bc6de92b2eabac3e\n' > "$WORK/dkek.kcv"          # an earlier attempt's: it names another DKEK than this one
 out="$(step_hsm_funding 2>&1)"
+[ ! -e "$WORK/dkek.kcv" ] \
+  && P "an earlier attempt's dkek.kcv is gone once a new DKEK share is made, the import skipped (coderabbitai on #112)" \
+  || F "a stale dkek.kcv outlived the new DKEK share: the archive would record another domain's identity"
 [ ! -f "$SCHSM_STATE/key_generated" ] \
   && P "funding key NOT generated after DKEK import was skipped" \
   || F "BUG: funding key generated with NO DKEK backup (unrecoverable born-in-HSM key)"
