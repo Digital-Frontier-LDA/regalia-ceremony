@@ -1028,6 +1028,19 @@ step_hsm_funding() {
     rm -f "$WORK/dkek.pbe" "$WORK/dkek-shares.txt"
     return 1
   fi
+  # The domain's key check value, kept as dkek.kcv: public, burned with the disc and committed beside
+  # breakglass.recipient. It is the identity of this ceremony's DKEK domain (the funding HSM's, and
+  # step 9's import), which the token ceremony (regalia-ceremony#111) proves its own three domains are
+  # not. A card that reports no value (a Pico: all zeros, which kcv_of rejects) leaves no file, and the
+  # real archive step then refuses the disc.
+  rm -f "$WORK/dkek.kcv"
+  local domain_kcv; domain_kcv="$(kcv_of "$WORK/kcv-a.log" || true)"
+  if [ -n "$domain_kcv" ]; then
+    printf '%s\n' "$domain_kcv" > "$WORK/dkek.kcv"
+    info "   DKEK key check value of this ceremony's domain: $domain_kcv (kept as dkek.kcv, public)"
+  else
+    warn "the card reported no DKEK key check value: dkek.kcv is not written, and a real ceremony's archive step refuses the disc"
+  fi
   info "3) Generate the funding key ON the device (non-exportable), secp256k1:"
   run "pkcs11-tool --login --keypairgen --key-type EC:secp256k1 --label akash-funding --id 01" \
     || { err "funding key generation was skipped or failed — aborting the HSM step."; return 1; }
@@ -2563,6 +2576,17 @@ step_archive() {
       return 1
     fi
   fi
+  # The DKEK domain's key check value (the DKEK step): the token ceremony needs it to prove its domains
+  # are not this one. A ceremony that made a DKEK (dkek.pbe exists) and has no valid value is refused.
+  if [ -e "$WORK/dkek.pbe" ] && ! grep -qxE '[0-9a-f]{16}' "$WORK/dkek.kcv" 2>/dev/null; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: no valid dkek.kcv from the DKEK step; the real ceremony refuses this disc."
+    else
+      err "dkek.kcv (the DKEK step) is missing or malformed: this ceremony's DKEK domain would have no recorded identity."
+      err "Read the card's key check value (sc-hsm-tool) and re-run the DKEK step's import; nothing was burned."
+      return 1
+    fi
+  fi
   mkdir -p "$kit/bin"
   local t staged=0
   for t in age age-keygen sops; do
@@ -2631,7 +2655,8 @@ step_archive() {
   # (df-cicd sops-breakglass.yml) and any later encryption to it need it, and it is not secret.
   # escrow-mac.kcv is the escrow MAC key's check value (step 0): not secret, committed with
   # breakglass.recipient to the private tracker's escrow/ after the ceremony.
-  local art; for art in dkek.pbe funding-wrapped.bin funding-pub.der payload.age breakglass.recipient escrow-mac.kcv; do
+  # dkek.kcv is the DKEK domain's key check value: public, committed with them (regalia-ceremony#111).
+  local art; for art in dkek.pbe dkek.kcv funding-wrapped.bin funding-pub.der payload.age breakglass.recipient escrow-mac.kcv; do
     [ -e "$WORK/$art" ] && cp "$WORK/$art" "$burn/" 2>/dev/null || true
   done
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then
