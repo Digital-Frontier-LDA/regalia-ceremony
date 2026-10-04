@@ -2571,6 +2571,8 @@ step_offline_keys() {
     python3 -Es "$HERE/offline-keys.py" generate --threshold "$(K)" --shares "$(N)" --out "$dir" --breakglass-recipient "$rcp" \
       || { err "the offline keys were NOT generated (reason above)."; return 1; }
     warn "ROOT-ENTRY above is the membership root's pin for regalia-kms root-key.json; it goes on the disc in the record."
+    warn "WRITE ROOT-FINGERPRINT (above, 64 hex) BY HAND on the ceremony sheet: the first manifest's signing"
+    warn "(manifest sign --genesis) and every host's enrol check ask for it typed, from that sheet, never from a screen."
   fi
   [ -s "$dir/offline-shares.txt" ] || { info "the offline keys' forms were already proven in this session."; return 0; }
   rm -f "$typed"

@@ -49,6 +49,7 @@ hdr "generate, copy and type back every form, prove them, shred the shares"
 W="$(new_work)"
 out="$(run_step "$W" copy)"
 grep -q "RC=0" <<< "$out" && grep -q "^ROOT-ENTRY {\"alg\": \"ed25519\"" <<< "$out" && grep -q "FORMS VERIFIED 1,2,3" <<< "$out" \
+  && grep -q "WRITE ROOT-FINGERPRINT" <<< "$out" \
   && P "the keys are generated and the three forms proven" || F "step o: $(tail -15 <<< "$out")"
 for f in offline-keys.sealed.json offline-keys.breakglass.age offline-keys.record.json; do
   [ -s "$W/offline/$f" ] && P "$f is in the workdir" || F "$f is missing"
