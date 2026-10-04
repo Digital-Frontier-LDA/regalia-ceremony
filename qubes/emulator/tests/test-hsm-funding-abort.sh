@@ -69,7 +69,8 @@ case "${1:-}" in
     # FAKE_ROUND_TRIP_REFUSED=1: the right shares, and the card refuses anyway. That is OpenSC's
     # leading-zero drop, 1 share file in 128 (#460).
     [ "${FAKE_ROUND_TRIP_REFUSED:-0}" = 1 ] && { echo "Error decrypting DKEK share. Password correct ?" >&2; exit 1; }
-    : > "$S/dkek_loaded"; echo "DKEK complete and active"; exit 0;;
+    # The key check value as OpenSC prints it; FAKE_KCV=0000000000000000 models a Pico, which reports zeros.
+    : > "$S/dkek_loaded"; echo "DKEK complete and active"; echo "DKEK key check value : ${FAKE_KCV:-BC6DE92B2EABAC3E}"; exit 0;;
   --wrap-key)
     out="$2"
     if [ -f "$S/dkek_loaded" ] && [ -f "$S/key_generated" ]; then
@@ -213,7 +214,7 @@ init_work
 LAST_SHOWN=""
 show(){ LAST_SHOWN="$*"; }     # capture the command run() is about to confirm (no echo)
 
-reset_state(){ rm -f "$SCHSM_STATE"/* "$WORK"/funding-* "$WORK"/dkek.pbe 2>/dev/null; }
+reset_state(){ rm -f "$SCHSM_STATE"/* "$WORK"/funding-* "$WORK"/dkek.pbe "$WORK"/dkek.kcv 2>/dev/null; }
 
 # =====================================================================================
 hdr "REGRESSION: a SKIPPED DKEK import must ABORT before the funding key is generated"
@@ -221,7 +222,11 @@ reset_state
 # operator confirms every step EXCEPT the DKEK import (answers 'n' there). With no DKEK
 # loaded, generating the funding key would leave it with no recoverable backup.
 ask(){ case "$LAST_SHOWN" in *import-dkek-share*) return 1;; *) return 0;; esac; }
+printf 'bc6de92b2eabac3e\n' > "$WORK/dkek.kcv"          # an earlier attempt's: it names another DKEK than this one
 out="$(step_hsm_funding 2>&1)"
+[ ! -e "$WORK/dkek.kcv" ] \
+  && P "an earlier attempt's dkek.kcv is gone once a new DKEK share is made, the import skipped (coderabbitai on #112)" \
+  || F "a stale dkek.kcv outlived the new DKEK share: the archive would record another domain's identity"
 [ ! -f "$SCHSM_STATE/key_generated" ] \
   && P "funding key NOT generated after DKEK import was skipped" \
   || F "BUG: funding key generated with NO DKEK backup (unrecoverable born-in-HSM key)"
@@ -305,6 +310,9 @@ out="$(step_hsm_funding 2>&1)"
   && P "the captured shares are removed once the imports are done" \
   || F "the captured DKEK shares outlived the step"
 grep -qiE "abort|refus" <<< "$out" && F "happy path wrongly aborted/refused" || P "happy path ran without aborting"
+[ "$(cat "$WORK/dkek.kcv" 2>/dev/null)" = bc6de92b2eabac3e ] \
+  && P "the DKEK domain's key check value is kept as dkek.kcv (public), for the token ceremony's disjointness proof" \
+  || F "dkek.kcv is not the card's key check value (got '$(cat "$WORK/dkek.kcv" 2>/dev/null)')"
 grep -qi "keypair-control proof PASSED" <<< "$(echo "$out")" \
   && P "happy path PROVES the HSM controls the private key before recording the address" \
   || F "happy path did not run the sign-then-verify keypair-control proof"
@@ -314,6 +322,18 @@ grep -q "FUNDING ADDRESS (public" <<< "$(echo "$out")" \
 grep -qi "restore-verify OK" <<< "$(echo "$out")" \
   && P "happy path RESTORE-VERIFIES the wrapped backup (unwrap round-trip + restored-pubkey match)" \
   || F "happy path did not restore-verify the wrapped DKEK backup before declaring the address fundable"
+
+# =====================================================================================
+hdr "regalia-ceremony#111: a card that reports no key check value leaves no dkek.kcv"
+reset_state
+printf 'stale\n' > "$WORK/dkek.kcv"
+ask(){ return 0; }
+out="$(FAKE_KCV=0000000000000000 step_hsm_funding 2>&1)"
+[ ! -e "$WORK/dkek.kcv" ] \
+  && P "an all-zero value (a Pico) is no identity: dkek.kcv is not written, and a stale one is removed" \
+  || F "dkek.kcv was kept or written from an all-zero key check value"
+grep -q "the card reported no DKEK key check value" <<< "$out" \
+  && P "the wizard says so" || F "the wizard did not say the key check value was missing"
 
 # =====================================================================================
 hdr "RESTORE-VERIFY: an UNRESTORABLE wrapped backup (unwrap fails) must NOT yield a fundable address"

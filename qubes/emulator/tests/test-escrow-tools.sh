@@ -288,5 +288,32 @@ out="$(
 grep -q "RC=1" <<< "$out" && grep -q "escrow-mac.kcv (step 0) is missing or malformed" <<< "$out" \
   && P "a malformed KCV: no disc" || F "$(tail -5 <<< "$out")"
 
+hdr "regalia-ceremony#111: the real archive step refuses a DKEK without its key check value"
+for case in missing malformed; do
+  out="$(
+    # shellcheck disable=SC1091
+    source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1
+    ask(){ return 0; }; pause(){ :; }
+    # shellcheck disable=SC2034  # read by the sourced ceremony.sh
+    PRINTER=""
+    init_work >/dev/null 2>&1; printf '0123456789abcdef\n' > "$WORK/escrow-mac.kcv"; printf 'pbe' > "$WORK/dkek.pbe"
+    [ "$case" = malformed ] && printf '0000\n' > "$WORK/dkek.kcv"
+    CEREMONY_SIMULATE=0 step_archive 2>&1; echo "RC=$?"
+  )"
+  grep -q "RC=1" <<< "$out" && grep -q "dkek.kcv (the DKEK step) is missing or malformed" <<< "$out" \
+    && P "a $case dkek.kcv beside dkek.pbe: no disc" || F "$case: $(tail -5 <<< "$out")"
+done
+out="$(
+  # shellcheck disable=SC1091
+  source "$SCRIPTS/ceremony.sh" >/dev/null 2>&1
+  ask(){ return 0; }; pause(){ :; }
+  # shellcheck disable=SC2034  # read by the sourced ceremony.sh
+  PRINTER=""
+  init_work >/dev/null 2>&1; printf '0123456789abcdef\n' > "$WORK/escrow-mac.kcv"
+  CEREMONY_SIMULATE=0 step_archive 2>&1; echo "RC=$?"
+)"
+grep -q "dkek.kcv" <<< "$out" && F "a ceremony that made no DKEK was asked for its key check value" \
+  || P "a ceremony that made no DKEK (no dkek.pbe) is not asked for one"
+
 echo; echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
