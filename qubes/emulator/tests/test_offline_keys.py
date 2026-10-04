@@ -82,6 +82,8 @@ class Generate(Case):
         self.assertEqual(sorted(record["publics"]), ["pcr-initrd", "pcr-system", "root", "secure-boot"])
         self.assertEqual({p["alg"] for n, p in record["publics"].items() if n != "root"}, {"rsa-2048"})
         self.assertEqual(record["root_entry"]["alg"], "ed25519")
+        self.assertEqual(record["root_fingerprint"], hashlib.sha256(bytes.fromhex(record["root_entry"]["key"])).hexdigest(),
+                         "the fingerprint regalia-kms#360's --genesis and enrol check take")
         self.assertEqual(len(record["root_entry"]["key"]), 64)
         with open(self.path("offline-keys.sealed.json"), "rb") as f:
             sealed = json.loads(f.read())
@@ -441,6 +443,14 @@ if "nooutput" not in args:
         with self.assertRaisesRegex(ok.Refused, "already exists"):
             self.sign(manifest, shares=["not a share"])
         self.assertEqual(self.records(), [])
+
+    def test_the_genesis_form_of_manifest_sign_is_allowed(self):
+        """regalia-kms#360: `manifest sign --genesis` (epoch 1, no chain) takes the root the same way."""
+        import sys
+        genesis = [sys.executable, "-Es", "-m", "deploy.baremetal.manifest", "sign", "--genesis", "--root-key", "ab" * 32,
+                   "--proposal", "p.json", "--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}",
+                   "--state-dir", "s", "--out", "e1.json", "--chain-out", "c.json"]
+        self.assertEqual(ok.check_command(genesis), ("manifest", ("root",)))
 
     def test_the_tree_digest_covers_every_file_under_deploy_and_refuses_links(self):
         with open(os.path.join(self.tree, "deploy", "baremetal", "regalia.service"), "w") as f:

@@ -190,6 +190,13 @@ def operation_proofs(keys):
     return out
 
 
+def root_fingerprint(entry):
+    """The root's fingerprint as the operator types it at `manifest sign --genesis` and `enrol check`: SHA-256 of the
+    raw 32-byte Ed25519 public key, 64 hex (regalia-kms#360). The record carries it, signed by that very root, so it is
+    typed from the record and not read back from the tool asking for it."""
+    return hashlib.sha256(bytes.fromhex(entry["key"])).hexdigest()
+
+
 def root_entry(keys):
     from cryptography.hazmat.primitives import serialization
     raw = keys["root"].public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
@@ -316,6 +323,7 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
     at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     record = {"schema": SCHEMA_RECORD, "event": "generate", "threshold": threshold, "shares": shares,
               "slip39_identifier": identifier, "master_id": mid, "publics": sealed["publics"], "root_entry": root_entry(keys),
+              "root_fingerprint": root_fingerprint(root_entry(keys)),
               "files": files, "operation_proof": proofs, "tool": TOOL, "at": at}
     signature = keys["root"].sign(RECORD_DOMAIN + canonical(record))      # the root, in this session (D28, 24's re-plan)
     write(FILES[3], canonical({"record": record, "signature": signature.hex()}) + b"\n", 0o644)
@@ -704,6 +712,8 @@ def main(argv=None):
         if args.command == "generate":
             record = generate(args.threshold, args.shares, args.out, args.breakglass_recipient)
             print("ROOT-ENTRY %s" % json.dumps(record["root_entry"], sort_keys=True))
+            print("ROOT-FINGERPRINT %s  (sha256 of the raw 32-byte Ed25519 key, as enrol check and manifest sign --genesis take it)"
+                  % record["root_fingerprint"])
             for name, pub in sorted(record["publics"].items()):
                 print("KEY %s %s spki-sha256 %s" % (name, pub["alg"], hashlib.sha256(base64.b64decode(pub["spki"])).hexdigest()))
             for name, digest in sorted(record["files"].items()):
@@ -725,7 +735,8 @@ def main(argv=None):
         else:
             with open(args.record, "rb") as f:
                 record = verify_record(json.loads(f.read(1 << 20)))
-            print("VERIFIED %s at %s, root %s" % (record["event"], record["at"], record["root_entry"]["key"]))
+            print("VERIFIED %s at %s, root %s, fingerprint %s" % (record["event"], record["at"], record["root_entry"]["key"],
+                                                                  root_fingerprint(record["root_entry"])))
     except (Refused, OSError, ValueError, KeyError) as error:
         print("offline-keys: REFUSED: %s" % error, file=sys.stderr)
         return 1
