@@ -92,10 +92,45 @@ def vectors():
     out.append(("unknown-field.json", signed(r), "owner_keys[0] has an unknown field: comment"))
     out.append(("sequence-2.json", signed(sequence_two()), "ok"))
     r = valid_record()
+    r["supersedes"] = ok.card_record_digest(valid_record())
+    out.append(("first-supersedes.json", signed(r), "the first card record (sequence 1) supersedes nothing: supersedes is \"\""))
+    r = valid_record()
     r["root_entry"] = {"alg": "ed25519", "key": raw(OTHER_ROOT)}
     r["root_fingerprint"] = ok.root_fingerprint(r["root_entry"])
     out.append(("other-root.json", signed(r, OTHER_ROOT), "the record names another root than the pinned one"))
     return out
+
+
+def log_line(record, at, **change):
+    line = {"kind": "card-record", "sequence": record["sequence"], "digest": ok.card_record_digest(record),
+            "key": record["root_entry"]["key"], "at": at}
+    line.update(change)
+    return json.dumps(line, sort_keys=True)
+
+
+def freshness():
+    """The card-record freshness cases (regalia-kms#403), shared with regalia-kms's consumer: each a state directory
+    (its marker, or none, and its signing record, verbatim) and the record judged in it. A reader copies a case's
+    directory, makes it 0700 and its marker 0600 (git keeps no modes), then runs read_signing_state and
+    card_record_current. Returns {case: (marker text or None, signing record text, record file, expected)}."""
+    one, two = log_line(valid_record(), "2026-10-04T12:00:01Z"), log_line(sequence_two(), "2026-10-05T12:00:01Z")
+    marker = json.dumps({"schema": ok.SCHEMA_SIGNING_STATE, "root": raw(ROOT)}, sort_keys=True) + "\n"
+    other = json.dumps({"schema": ok.SCHEMA_SIGNING_STATE, "root": raw(OTHER_ROOT)}, sort_keys=True) + "\n"
+    manifest = json.dumps({"kind": "manifest", "epoch": 1}, sort_keys=True)
+    return {
+        "current-1": (marker, one + "\n", "valid.json", "ok"),
+        "current-2": (marker, one + "\n" + manifest + "\n" + two + "\n", "sequence-2.json", "ok"),
+        "superseded": (marker, one + "\n" + two + "\n", "valid.json", "this card record is not the newest the root signed (sequence 1 of 2)"),
+        "gap": (marker, two + "\n", "sequence-2.json", "the signing record's card-record lines are not 1..1 without a gap"),
+        "foreign-key": (marker, one + "\n" + log_line(sequence_two(), "2026-10-05T12:00:01Z", key="00" * 32) + "\n", "sequence-2.json",
+                        "a card-record line names another root than the pinned one"),
+        "torn-line": (marker, one + "\n" + two[:40] + "\n", "sequence-2.json", "line 2 of the signing record is not JSON (a torn write?)"),
+        "not-an-object": (marker, one + "\n[1, 2]\n", "valid.json", "line 2 of the signing record is not an object with a kind"),
+        "bool-sequence": (marker, log_line(valid_record(), "2026-10-04T12:00:01Z", sequence=True) + "\n", "valid.json",
+                          "a card-record line of the signing record is malformed (sequence an integer, digest 64 hex)"),
+        "no-marker": (None, one + "\n", "valid.json", "has no regalia-signing-state.json"),
+        "marker-other-root": (other, one + "\n", "valid.json", "regalia-signing-state.json names another root than the pinned one"),
+    }
 
 
 def write(directory):
@@ -106,6 +141,18 @@ def write(directory):
         f.write(json.dumps({name: expected for name, _, expected in vectors()}, sort_keys=True, indent=1) + "\n")
     with open(os.path.join(directory, "root.hex"), "w") as f:
         f.write(raw(ROOT) + "\n")
+    cases = freshness()
+    for case, (marker, log, _, _) in cases.items():
+        where = os.path.join(directory, "freshness", case)
+        os.makedirs(where, exist_ok=True)
+        if marker is not None:
+            with open(os.path.join(where, ok.SIGNING_STATE), "w") as f:
+                f.write(marker)
+        with open(os.path.join(where, ok.SIGNING_RECORD), "w") as f:
+            f.write(log)
+    with open(os.path.join(directory, "freshness-expect.json"), "w") as f:
+        f.write(json.dumps({case: {"record": record, "expect": expected} for case, (_, _, record, expected) in cases.items()},
+                           sort_keys=True, indent=1) + "\n")
     # the laptop's root signing record after both card records (regalia-kms#403): one line each, in order
     with open(os.path.join(directory, "signing-record.jsonl"), "w") as f:
         for record, at in ((valid_record(), "2026-10-04T12:00:01Z"), (sequence_two(), "2026-10-05T12:00:01Z")):
