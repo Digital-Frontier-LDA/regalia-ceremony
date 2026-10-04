@@ -78,7 +78,8 @@ class Generate(unittest.TestCase):
         self.assertEqual(len(record["root_entry"]["key"]), 64)
         with open(self.path("offline-keys.sealed.json"), "rb") as f:
             sealed = json.loads(f.read())
-        self.assertEqual(record["files"]["offline-keys.sealed.json"], hashlib.sha256(open(self.path("offline-keys.sealed.json"), "rb").read()).hexdigest())
+        with open(self.path("offline-keys.sealed.json"), "rb") as f:
+            self.assertEqual(record["files"]["offline-keys.sealed.json"], hashlib.sha256(f.read()).hexdigest())
         # the sealed file is public: nothing of a private key in it, the publics in the clear
         self.assertNotIn("pkcs8", json.dumps(sealed))
         self.assertEqual(sealed["publics"], record["publics"])
@@ -194,6 +195,64 @@ class Generate(unittest.TestCase):
             with self.assertRaisesRegex(ok.Refused, "2 shares rebuilt the master secret"):
                 ok.split(master, 3, 4)
         self.assertIs(shamir_mnemonic.combine_mnemonics, real)
+
+    def forms(self, lines, partial=False):
+        import io
+        return ok.verify_forms(self.path("offline-keys.sealed.json"), self.path("offline-shares.txt"), io.StringIO("\n".join(lines) + "\n"), partial)
+
+    def test_every_form_typed_back_is_checked_and_then_the_shares_are_shredded(self):
+        """regalia-kms-d9 on #114: the copies the holders keep are proven while the shares still exist."""
+        self.generate(k=2, n=3)
+        shares = self.shares()
+        checked, missing = self.forms(["  " + s.upper().replace(" ", "   ") + " " for s in reversed(shares)])
+        self.assertEqual((checked, missing), ([0, 1, 2], []), "case and spacing as a person types them")
+        self.assertFalse(os.path.exists(self.path("offline-shares.txt")), "the shares file is shredded once every form is proven")
+
+    def test_a_form_copied_wrong_or_of_another_set_or_missing_is_refused(self):
+        from shamir_mnemonic import generate_mnemonics
+        self.generate(k=2, n=3)
+        shares = self.shares()
+        words = shares[1].split()
+        slipped = " ".join(words[:5] + [words[6]] + words[6:])                  # a word copied twice, one dropped
+        with self.assertRaisesRegex(ok.Refused, "not a valid SLIP-39 share"):
+            self.forms([shares[0], slipped, shares[2]])
+        foreign = generate_mnemonics(1, [(2, 3)], b"\x05" * 32)[0][0]
+        with self.assertRaisesRegex(ok.Refused, "belongs to another set"):
+            self.forms([shares[0], foreign, shares[2]])
+        with self.assertRaisesRegex(ok.Refused, "forms 3 were not typed back"):
+            self.forms(shares[:2])
+        with self.assertRaisesRegex(ok.Refused, "typed back twice"):
+            self.forms([shares[0], shares[0], shares[1]])
+        self.assertTrue(os.path.exists(self.path("offline-shares.txt")), "nothing is shredded after a refusal")
+        # a VALID share of another split that happens to carry this set's 15-bit identifier: its checksum and its
+        # identifier pass; only the comparison with the share actually made catches it
+        from shamir_mnemonic import shamir
+        with open(self.path("offline-keys.record.json")) as f:
+            record = json.load(f)["record"]
+        ems = shamir.EncryptedMasterSecret.from_master_secret(b"\x05" * 32, b"", record["slip39_identifier"], True, 1)
+        twin = shamir.split_ems(1, [(2, 3)], ems)[0][1].mnemonic()
+        with self.assertRaisesRegex(ok.Refused, "form 2 typed back is not the share made for it"):
+            self.forms([shares[0], twin, shares[2]])
+        checked, missing = self.forms(shares[:2], partial=True)
+        self.assertEqual((checked, missing), ([0, 1], [2]))
+
+    def test_each_key_signs_for_the_public_key_published(self):
+        """regalia-kms-d9 on #114: an operation proof per key, before sealing."""
+        record = self.generate(k=2, n=3)
+        self.assertEqual(record["operation_proof"], {n: "verified" for n, _ in ok.KEYS})
+        with open(self.path("offline-keys.sealed.json"), "rb") as f:
+            self.assertEqual(json.loads(f.read())["slip39_identifier"], record["slip39_identifier"])
+        real = ok.publics
+        def swapped(keys):
+            out = real(keys)
+            out["pcr-system"] = out["pcr-initrd"]
+            return out
+        shutil.rmtree(self.out)
+        os.mkdir(self.out)
+        with unittest.mock.patch.object(ok, "publics", swapped):
+            with self.assertRaisesRegex(ok.Refused, "key pcr-system does not sign for the public key that would be published"):
+                self.generate(k=2, n=3)
+        self.assertEqual(os.listdir(self.out), [])
 
     def test_the_cli_takes_no_secret_on_argv(self):
         with open(SCRIPT) as f:

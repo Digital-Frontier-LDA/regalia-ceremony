@@ -4,6 +4,7 @@ the three boot-image signing keys, generated as software keys on the air-gapped 
 Shamir share set of their own (separate from break-glass), and backed up to the break-glass key.
 
     python3 -Es offline-keys.py generate --threshold K --shares N --out DIR --breakglass-recipient FILE
+    python3 -Es offline-keys.py verify-forms --sealed FILE --shares-file FILE [--partial]   (the forms typed back on stdin)
     python3 -Es offline-keys.py verify-record --record FILE
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
@@ -13,14 +14,19 @@ k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the four keys are sealed unde
                                   public header (each key's name, algorithm and SubjectPublicKeyInfo, and the
                                   master's id) as its additional data. Public: stored openly, like a DKEK blob (D19).
                                   Symmetric, so nothing here waits for a quantum computer.
-  * offline-shares.txt            the SLIP-39 shares (0600), copied by hand onto the holders' forms (D12), then gone
-                                  with the RAM workdir. Every k-subset is reconstruct-verified (all of them up to 200
-                                  combinations, else 200 drawn at random), and a (k-1)-subset must recover nothing.
+  * offline-shares.txt            the SLIP-39 shares (0600), copied by hand onto the holders' forms (D12). Every
+                                  k-subset is reconstruct-verified (all of them up to 200 combinations, else 200 drawn
+                                  at random), and a (k-1)-subset must recover nothing. That proves the split, not the
+                                  copies: verify-forms then takes every form typed back (each must pass SLIP-39's
+                                  checksum and equal its share, and a typed-back k-subset must rebuild THIS master),
+                                  and only then shreds this file (regalia-kms-d9 on #114). A copying slip is found
+                                  while the shares still exist, not at the first signing session.
   * offline-keys.breakglass.age   the key bundle itself, encrypted with age to the break-glass recipient (D28.1's
                                   backup: a lost offline set never strands the fleet). The plaintext reaches age on
                                   stdin, and the file must hold none of it in the clear.
   * offline-keys.record.json      what was made (the publics, k and n, the SLIP-39 identifier, the master id, both
-                                  files' SHA-256), signed by the new root key in this same session, over
+                                  files' SHA-256, and that each key signed a fresh challenge its published public key
+                                  verifies), signed by the new root key in this same session, over
                                   RECORD_DOMAIN + its canonical bytes. RECORD_DOMAIN can never begin a membership
                                   signing input (regalia-kms: b"regalia-membership/v1\\0"), nor the reverse.
 
@@ -30,7 +36,8 @@ secure-boot: RSA-2048, the boot image's keys of regalia#554 under the labels hsm
 WHERE IT RUNS. DIR must be a RAM file system (tmpfs or ramfs) and swap must be off: the keys and the master secret
 must never reach a disk. CEREMONY_ALLOW_NONTMPFS=1 and CEREMONY_ALLOW_SWAP=1 are for tests. Key material and the
 master are kept in bytearrays where this code holds them, and zeroed when done; Python and the libraries it calls
-may hold copies this cannot reach. What bounds them is that the process ends, in RAM, on a laptop with no swap.
+may hold copies this cannot reach. So do the share mnemonics, which are Python strings until the process exits:
+all n of them are the master. What bounds all of these is that the process ends, in RAM, on a laptop with no swap.
 """
 import argparse
 import base64
@@ -133,6 +140,29 @@ def publics(keys):
     return out
 
 
+def operation_proofs(keys):
+    """Each key signs a fresh challenge as it will be used (Ed25519 for the root; RSA PKCS#1 v1.5 with SHA-256, as
+    sbsign and systemd-measure sign) and the signature must verify under the public key the sealed header will
+    publish: a header that does not match its bundle is found here, not at the first kernel signing (regalia-kms-d9
+    on #114). Returns {name: "verified"}."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import padding
+    out, published = {}, publics(keys)
+    for name, alg in KEYS:
+        challenge = secrets.token_bytes(32)
+        public = serialization.load_der_public_key(base64.b64decode(published[name]["spki"]))
+        try:
+            if alg == "ed25519":
+                public.verify(keys[name].sign(challenge), challenge)
+            else:
+                public.verify(keys[name].sign(challenge, padding.PKCS1v15(), hashes.SHA256()), challenge, padding.PKCS1v15(), hashes.SHA256())
+        except InvalidSignature:
+            raise Refused("key %s does not sign for the public key that would be published" % name) from None
+        out[name] = "verified"
+    return out
+
+
 def root_entry(keys):
     from cryptography.hazmat.primitives import serialization
     raw = keys["root"].public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
@@ -149,9 +179,11 @@ def bundle_bytes(keys):
     return bytearray(canonical(out))
 
 
-def seal(master, keys):
+def seal(master, keys, identifier):
+    """The sealed file. Its header names the SLIP-39 set's identifier, so a session refuses shares of another set
+    by name before combining them (regalia-kms-d9 on #114)."""
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-    header = {"schema": SCHEMA_SEALED, "master_id": master_id(master), "publics": publics(keys)}
+    header = {"schema": SCHEMA_SEALED, "master_id": master_id(master), "slip39_identifier": identifier, "publics": publics(keys)}
     nonce = secrets.token_bytes(12)
     plain = bundle_bytes(keys)
     key = bytearray(hkdf(master, b"regalia-offline-keys/v1 seal"))
@@ -169,7 +201,7 @@ def unseal(master, sealed):
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
     require(master_id(master) == sealed["master_id"], "these shares rebuild another master secret than the one this file was sealed under")
-    header = {k: sealed[k] for k in ("schema", "master_id", "publics")}
+    header = {k: sealed[k] for k in ("schema", "master_id", "slip39_identifier", "publics")}
     key = bytearray(hkdf(master, b"regalia-offline-keys/v1 seal"))
     try:
         plain = AESGCM(bytes(key)).decrypt(bytes.fromhex(sealed["nonce"]), base64.b64decode(sealed["ciphertext"]), canonical(header))
@@ -214,10 +246,11 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
     require(re.fullmatch(r"age1[0-9a-z]+", recipient) is not None, "%s does not hold an age recipient" % recipient_file)
 
     keys = new_keys()
+    proofs = operation_proofs(keys)
     master = bytearray(secrets.token_bytes(32))
     try:
-        sealed = seal(master, keys)
         mnemonics, identifier = split(master, threshold, shares)
+        sealed = seal(master, keys, identifier)
         mid = master_id(master)
     finally:
         zero(master)
@@ -256,11 +289,68 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
     at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     record = {"schema": SCHEMA_RECORD, "event": "generate", "threshold": threshold, "shares": shares,
               "slip39_identifier": identifier, "master_id": mid, "publics": sealed["publics"], "root_entry": root_entry(keys),
-              "files": files, "tool": TOOL, "at": at}
+              "files": files, "operation_proof": proofs, "tool": TOOL, "at": at}
     signature = keys["root"].sign(RECORD_DOMAIN + canonical(record))      # the root, in this session (D28, 24's re-plan)
     write(FILES[3], canonical({"record": record, "signature": signature.hex()}) + b"\n", 0o644)
     del keys
     return record
+
+
+# ---- the hand-copied forms -------------------------------------------------------------------------
+
+def normalise(mnemonic):
+    return " ".join(mnemonic.lower().split())
+
+
+def verify_forms(sealed_path, shares_path, stream, partial=False):
+    """The forms as the holders will keep them, typed back before the shares are gone: each must be a valid SLIP-39
+    share (its checksum) equal to one of the shares made, a k-subset of the typed forms must rebuild the master the
+    sealed file was made under, and every form must be typed back unless `partial` (then at least k, and the record
+    of it names the forms not checked). On success the shares file is overwritten with zeros and unlinked, by its exact
+    path. Returns (the indices checked, the indices not checked)."""
+    from shamir_mnemonic import combine_mnemonics
+    from shamir_mnemonic.share import Share
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    with open(shares_path) as f:
+        made = {Share.from_mnemonic(normalise(m)).index: normalise(m) for m in f.read().splitlines() if m.strip()}
+    typed = {}
+    for line in read_forms(stream):
+        try:
+            share = Share.from_mnemonic(normalise(line))
+        except Exception as error:      # noqa: BLE001 - a mistyped word fails the checksum: said, never guessed at
+            raise Refused("a form typed back is not a valid SLIP-39 share (%s): check that form against its share" % error) from None
+        require(share.identifier == sealed["slip39_identifier"], "a form typed back belongs to another set (identifier %d)" % share.identifier)
+        require(made.get(share.index) == normalise(line), "form %d typed back is not the share made for it: recopy form %d" % (share.index + 1, share.index + 1))
+        require(share.index not in typed, "form %d was typed back twice" % (share.index + 1))
+        typed[share.index] = normalise(line)
+    threshold = Share.from_mnemonic(next(iter(made.values()))).member_threshold
+    missing = sorted(set(made) - set(typed))
+    require(len(typed) >= threshold, "%d forms typed back; at least %d are needed to show they open the keys" % (len(typed), threshold))
+    require(partial or not missing, "forms %s were not typed back: type every form back (or --partial, which the output states)"
+            % ", ".join(str(i + 1) for i in missing))
+    try:
+        master = bytearray(combine_mnemonics([typed[i] for i in sorted(typed)[:threshold]]))
+    except Exception as error:         # noqa: BLE001 - shares that do not combine are a refusal, said by the library
+        raise Refused("the forms typed back do not combine: %s" % error) from None
+    try:
+        require(master_id(master) == sealed["master_id"], "the forms typed back rebuild another master secret than the sealed file's")
+    finally:
+        zero(master)
+    size = os.path.getsize(shares_path)
+    with open(shares_path, "r+b") as f:
+        f.write(bytes(size))
+        f.flush()
+        os.fsync(f.fileno())
+    os.unlink(shares_path)
+    return sorted(typed), missing
+
+
+def read_forms(stream, limit=64):
+    lines = [line.strip() for line in stream.read(1 << 16).splitlines() if line.strip()]
+    require(0 < len(lines) <= limit, "no forms were typed back on standard input")
+    return lines
 
 
 def verify_record(document):
@@ -288,6 +378,10 @@ def main(argv=None):
     g.add_argument("--shares", type=int, required=True)
     g.add_argument("--out", required=True)
     g.add_argument("--breakglass-recipient", required=True, help="the file holding the break-glass age recipient (public)")
+    w = sub.add_parser("verify-forms", help="the holders' forms typed back on standard input, one per line")
+    w.add_argument("--sealed", required=True)
+    w.add_argument("--shares-file", required=True)
+    w.add_argument("--partial", action="store_true", help="at least k forms, the rest named as not checked")
     v = sub.add_parser("verify-record")
     v.add_argument("--record", required=True)
     args = ap.parse_args(argv)
@@ -301,6 +395,12 @@ def main(argv=None):
                 print("FILE %s sha256 %s" % (name, digest))
             print("SHARES %s: %d-of-%d, SLIP-39 identifier %d. Copy each BY HAND onto its holder's form (D12)"
                   % (os.path.join(args.out, FILES[1]), record["threshold"], record["shares"], record["slip39_identifier"]))
+        elif args.command == "verify-forms":
+            checked, missing = verify_forms(args.sealed, args.shares_file, sys.stdin, args.partial)
+            print("FORMS VERIFIED %s: each equals its share and they open the sealed keys; the shares file is shredded"
+                  % ",".join(str(i + 1) for i in checked))
+            if missing:
+                print("FORMS NOT CHECKED %s (--partial)" % ",".join(str(i + 1) for i in missing))
         else:
             with open(args.record, "rb") as f:
                 record = verify_record(json.loads(f.read(1 << 20)))
