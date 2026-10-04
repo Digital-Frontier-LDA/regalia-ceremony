@@ -680,10 +680,16 @@ def _age_recipient(path):
 def breakglass_recipient(recipient, where):
     """The break-glass recipient: post-quantum (age1pq1…, ML-KEM-768 + X25519, as ceremony.sh makes it with age-keygen
     -pq), never a classical one, which a later quantum computer could open (coderabbitai on #120).
-    CEREMONY_ALLOW_CLASSICAL_BREAKGLASS=1 is for tests on a machine whose age predates 1.3."""
+    CEREMONY_ALLOW_CLASSICAL_BREAKGLASS=1 is for tests on a machine whose age predates 1.3, honoured only with
+    CEREMONY_SIMULATE=1 (go-nogo fails a real ceremony that has it set)."""
     require(re.fullmatch(r"age1[0-9a-z]+", recipient) is not None, "%s does not hold an age recipient" % where)
-    require(recipient.startswith("age1pq1") or os.environ.get("CEREMONY_ALLOW_CLASSICAL_BREAKGLASS") == "1",
+    if recipient.startswith("age1pq1"):
+        return recipient
+    require(os.environ.get("CEREMONY_ALLOW_CLASSICAL_BREAKGLASS") == "1",
             "%s holds a classical age recipient: the break-glass key is post-quantum (age1pq1…)" % where)
+    require(os.environ.get("CEREMONY_SIMULATE") == "1",
+            "CEREMONY_ALLOW_CLASSICAL_BREAKGLASS is set outside a simulation (CEREMONY_SIMULATE!=1): a real ceremony "
+            "takes a post-quantum break-glass recipient only")
     return recipient
 
 

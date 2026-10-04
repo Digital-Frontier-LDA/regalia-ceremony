@@ -33,6 +33,16 @@ for args in "--need" "--need=" "--need hsm --need" "--need hsm --need --env-only
   [ "$rc" = 2 ] && grep -qi "needs a device list" <<< "$out" && P "'$args' refused (exit 2)" || F "'$args' not refused (exit $rc)"
 done
 
+hdr "a test-only switch fails a real (non-simulated) preflight (d9 on #120)"
+for v in CEREMONY_ALLOW_CLASSICAL_BREAKGLASS CEREMONY_ALLOW_SWAP CEREMONY_ALLOW_NONTMPFS; do
+  out="$(env -u CEREMONY_SIMULATE "$v=1" "$GN" --env-only 2>&1)"; rc=$?
+  [ "$rc" -ne 0 ] && grep -q "test-only switches set: $v — unset them" <<< "$out" && P "$v=1 without CEREMONY_SIMULATE fails" \
+    || F "$v=1 without CEREMONY_SIMULATE did not fail (exit $rc)"
+done
+out="$(env -u CEREMONY_ALLOW_CLASSICAL_BREAKGLASS CEREMONY_SIMULATE=1 CEREMONY_ALLOW_CLASSICAL_BREAKGLASS=1 "$GN" --env-only 2>&1)"
+grep -q "test-only switches set: CEREMONY_ALLOW_CLASSICAL_BREAKGLASS — real ceremonies fail" <<< "$out" && P "under CEREMONY_SIMULATE it is a warning" \
+  || F "under CEREMONY_SIMULATE the switch was not reported as a warning"
+
 hdr "all valid device names are accepted (validation does not over-reject)"
 # this will proceed past validation into preflight; we only assert it does NOT fail on the
 # token validation (grep for the specific validation error, which must be absent).
