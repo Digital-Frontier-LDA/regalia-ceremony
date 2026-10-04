@@ -11,6 +11,8 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
     python3 -Es offline-keys.py tree-digest --root DIR
     python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-recipients FILE --breakglass-recipient FILE --out DIR
                                           (the k shares on standard input: the root signs the record)
+    python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --identity FILE --yubikey-serial N   (each YubiKey)
+    python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary
     python3 -Es offline-keys.py verify-record --record FILE
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
@@ -734,12 +736,93 @@ def ownerauth(sealed_path, nodes, yk_recipients, breakglass_recipient, out, stre
             if os.path.lexists(path):
                 os.unlink(path)
         raise
-    record = {"schema": SCHEMA_OWNERAUTH, "event": "ownerauth", "nodes": record_nodes, "root_entry": entry, "root_fingerprint": root_fingerprint(entry),
+    record = {"schema": SCHEMA_OWNERAUTH, "event": "ownerauth", "nodes": record_nodes, "yk_recipients": yk, "root_entry": entry, "root_fingerprint": root_fingerprint(entry),
               "session": secrets.token_hex(16), "share_indices": indices, "slip39_identifier": identifier, "master_id": sealed["master_id"],
               "tool": TOOL, "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
     write_record(out, "ownerauth", root, record)
     del root
     return record
+
+
+def recipient_of(identity_path, run=subprocess.run):
+    """The age recipient an identity file answers for: a native key's by age-keygen -y; an age-plugin-yubikey identity
+    file's from the "Recipient:" line the plugin writes into it (the identity itself only points at the YubiKey)."""
+    with open(identity_path) as f:
+        text = f.read(1 << 16)
+    found = re.findall(r"Recipient:\s*(age1[0-9a-z]+)", text)
+    if found:
+        require(len(set(found)) == 1, "%s names more than one recipient" % identity_path)
+        return found[0]
+    done = run(["age-keygen", "-y", identity_path], capture_output=True)
+    require(done.returncode == 0, "%s is neither an age-plugin-yubikey identity nor an age key" % identity_path)
+    return done.stdout.decode().strip()
+
+
+VERIFY_LOG = "ownerauth-verify.jsonl"
+
+
+def ownerauth_verify(record_path, directory, identity_path, serial, now=None, run=subprocess.run):
+    """With ONE approval YubiKey inserted (its age-plugin-yubikey identity file given): every node's .yk.age is decrypted
+    to a pipe, never shown, and must be 64 hex and a newline whose check value is the record's, from a file whose
+    SHA-256 is the record's (regalia-kms-d9 on #120: the envelopes are proven to open, not assumed to). The result,
+    good or not, is appended to DIR/ownerauth-verify.jsonl. Returns the nodes proven."""
+    with open(record_path, "rb") as f:
+        record = verify_record(json.loads(f.read(1 << 20)))
+    require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
+    require(re.fullmatch(r"[0-9]{1,12}", str(serial)) is not None, "--yubikey-serial is the inserted YubiKey's serial")
+    recipient = recipient_of(identity_path, run)
+    require(recipient in record["yk_recipients"], "this identity's recipient (%s…) is not one the envelopes were made to" % recipient[:24])
+    proven, failed = [], {}
+    for node, facts in sorted(record["nodes"].items()):
+        path = os.path.join(directory, "ownerauth-%s.yk.age" % node)
+        try:
+            with open(path, "rb") as f:
+                require(hashlib.sha256(f.read()).hexdigest() == facts["yk_sha256"], "%s is not the file the record names" % path)
+            done = run(["age", "-d", "-i", identity_path, path], capture_output=True)
+            plain = bytearray(done.stdout)
+            try:
+                require(done.returncode == 0, "age could not open it with this YubiKey")
+                require(re.fullmatch(rb"[0-9a-f]{64}\n", bytes(plain)) is not None, "it does not hold 64 hex and a newline")
+                value = bytearray(bytes.fromhex(bytes(plain[:64]).decode()))
+                try:
+                    import hmac
+                    require(hmac.compare_digest(ownerauth_check(value, node), facts["check"]), "its value is not the one the record checks")
+                finally:
+                    zero(value)
+            finally:
+                zero(plain)
+            proven.append(node)
+        except (Refused, OSError) as error:
+            failed[node] = str(error)
+    entry = {"serial": str(serial), "recipient": recipient, "proven": proven, "failed": failed, "session": record["session"],
+             "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    fd = os.open(os.path.join(directory, VERIFY_LOG), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "a") as f:
+        f.write(json.dumps(entry, sort_keys=True) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    require(not failed, "YubiKey %s did NOT open: %s" % (serial, "; ".join("%s (%s)" % kv for kv in sorted(failed.items()))))
+    return proven
+
+
+def ownerauth_summary(record_path, directory):
+    """Whether every recipient the envelopes were made to has opened every node's envelope (ownerauth-verify's log).
+    Returns {recipient: serial}; refused, naming what is missing, otherwise. The ceremony does not finish without it."""
+    with open(record_path, "rb") as f:
+        record = verify_record(json.loads(f.read(1 << 20)))
+    require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
+    nodes = sorted(record["nodes"])
+    seen = {}
+    log = os.path.join(directory, VERIFY_LOG)
+    if os.path.exists(log):
+        with open(log) as f:
+            for line in f:
+                e = json.loads(line)
+                if e.get("session") == record["session"] and sorted(e.get("proven", [])) == nodes and not e.get("failed"):
+                    seen[e["recipient"]] = e["serial"]
+    missing = [r for r in record["yk_recipients"] if r not in seen]
+    require(not missing, "not yet proven to open every envelope: %s" % ", ".join(r[:24] + "…" for r in missing))
+    return seen
 
 
 def write_record(out, stem, root, record):
@@ -800,6 +883,12 @@ def main(argv=None):
     o.add_argument("--yk-recipients", required=True, help="the approval YubiKeys' age-plugin-yubikey recipients, one per line")
     o.add_argument("--breakglass-recipient", required=True)
     o.add_argument("--out", required=True, help="a RAM directory for the files and the record")
+    ov = sub.add_parser("ownerauth-verify", help="with one approval YubiKey inserted: prove it opens every node's envelope")
+    ov.add_argument("--record", required=True)
+    ov.add_argument("--dir", required=True, help="where the envelopes are; the log is appended there")
+    ov.add_argument("--identity", help="the inserted YubiKey's age-plugin-yubikey identity file")
+    ov.add_argument("--yubikey-serial", help="the inserted YubiKey's serial, as ykman reports it")
+    ov.add_argument("--summary", action="store_true", help="refuse unless every YubiKey has opened every envelope")
     v = sub.add_parser("verify-record")
     v.add_argument("--record", required=True)
     args = ap.parse_args(argv)
@@ -830,6 +919,15 @@ def main(argv=None):
             for node, facts in sorted(record["nodes"].items()):
                 print("OWNERAUTH %s yk %s bg %s check %s" % (node, facts["yk_sha256"][:16], facts["bg_sha256"][:16], facts["check"][:16]))
             print("RECORD %s (root %s)" % (os.path.join(args.out, "ownerauth.record.json"), record["root_fingerprint"]))
+        elif args.command == "ownerauth-verify":
+            if args.summary:
+                for recipient, serial in sorted(ownerauth_summary(args.record, args.dir).items()):
+                    print("PROVEN YubiKey %s (%s…) opens every node's envelope" % (serial, recipient[:24]))
+                print("OWNERAUTH ENVELOPES PROVEN for every approval YubiKey")
+            else:
+                require(args.identity and args.yubikey_serial, "--identity and --yubikey-serial name the inserted YubiKey")
+                proven = ownerauth_verify(args.record, args.dir, args.identity, args.yubikey_serial)
+                print("YubiKey %s opens %s" % (args.yubikey_serial, ", ".join(proven)))
         elif args.command == "tree-digest":
             print(tree_digest(args.root))
         else:

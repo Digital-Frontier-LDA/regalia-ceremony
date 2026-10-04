@@ -617,11 +617,75 @@ class OwnerAuth(Case):
         with self.assertRaisesRegex(ok.Refused, "already exists"):
             self.run_oa(nodes=("a",))
 
+    def test_each_yubikey_must_prove_it_opens_every_envelope_before_the_ceremony_ends(self):
+        """regalia-kms-d9 on #120: the envelopes are proven to open, per YubiKey, not assumed to."""
+        record = self.run_oa()
+        self.assertEqual(record["yk_recipients"], [subprocess.run(["age-keygen", "-y", i], check=True, capture_output=True, text=True).stdout.strip()
+                                                   for i in self.yk_ids])
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
+            ok.ownerauth_summary(rec, self.oa)
+        for n, ident in enumerate(self.yk_ids[:2]):
+            self.assertEqual(ok.ownerauth_verify(rec, self.oa, ident, 1000 + n), ["a", "b", "c"])
+        with self.assertRaisesRegex(ok.Refused, "not yet proven"):
+            ok.ownerauth_summary(rec, self.oa)          # the third YubiKey has not opened them yet
+        ok.ownerauth_verify(rec, self.oa, self.yk_ids[2], 1002)
+        self.assertEqual(sorted(ok.ownerauth_summary(rec, self.oa).values()), ["1000", "1001", "1002"])
+        with open(os.path.join(self.oa, ok.VERIFY_LOG)) as f:
+            text = f.read()
+        for node in ("a", "b", "c"):
+            self.assertNotIn(self.decrypt(os.path.join(self.oa, "ownerauth-%s.yk.age" % node), self.yk_ids[0]).decode().strip(), text,
+                             "no value reaches the log")
+
+    def test_a_yubikey_that_cannot_open_an_envelope_is_logged_and_refused(self):
+        rec_ = self.run_oa(nodes=("a", "b"))
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        stranger = os.path.join(self.d, "stranger.key")
+        subprocess.run(["age-keygen", "-o", stranger], check=True, capture_output=True)
+        with self.assertRaisesRegex(ok.Refused, "not one the envelopes were made to"):
+            ok.ownerauth_verify(rec, self.oa, stranger, 9)
+        with open(os.path.join(self.oa, "ownerauth-b.yk.age"), "ab") as f:
+            f.write(b"x")                                       # b's envelope is no longer the one recorded
+        with self.assertRaisesRegex(ok.Refused, "YubiKey 7 did NOT open: b"):
+            ok.ownerauth_verify(rec, self.oa, self.yk_ids[0], 7)
+        with open(os.path.join(self.oa, ok.VERIFY_LOG)) as f:
+            entry = json.loads(f.read().splitlines()[-1])
+        self.assertEqual((entry["proven"], sorted(entry["failed"])), (["a"], ["b"]))
+        with self.assertRaisesRegex(ok.Refused, "not yet proven"):
+            ok.ownerauth_summary(rec, self.oa)
+        self.assertTrue(rec_["nodes"])
+
+    def test_a_swapped_envelope_or_a_wrong_value_is_caught_by_its_own_check(self):
+        self.run_oa(nodes=("a",))
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        env = os.path.join(self.oa, "ownerauth-a.yk.age")
+        value = self.decrypt(env, self.yk_ids[0])
+        # the same value, encrypted again to the same YubiKeys: it opens and checks, but it is not the recorded file
+        argv = ["age", "-o", env + ".new"]
+        for ident in self.yk_ids:
+            argv += ["-r", subprocess.run(["age-keygen", "-y", ident], check=True, capture_output=True, text=True).stdout.strip()]
+        subprocess.run(argv, input=value, check=True)
+        os.replace(env + ".new", env)
+        with self.assertRaisesRegex(ok.Refused, "is not the file the record names"):
+            ok.ownerauth_verify(rec, self.oa, self.yk_ids[0], 1)
+        # the recorded file, but a YubiKey (or a tool) that hands back another value
+        shutil.rmtree(self.oa)
+        os.mkdir(self.oa)
+        self.run_oa(nodes=("a",))
+        real = subprocess.run
+
+        def other_value(argv, *a, **k):
+            if argv[:2] == ["age", "-d"]:
+                return subprocess.CompletedProcess(argv, 0, ("ab" * 32 + "\n").encode(), b"")
+            return real(argv, *a, **k)
+        with self.assertRaisesRegex(ok.Refused, "its value is not the one the record checks"):
+            ok.ownerauth_verify(rec, self.oa, self.yk_ids[0], 1, run=other_value)
+
     def test_a_test_vector_for_regalia_kms_95(self):
         """The record and checks #242's reader verifies: a throwaway set, here so its format is pinned."""
         record = self.run_oa(nodes=("a",))
-        self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "root_entry", "root_fingerprint", "session", "share_indices",
-                                                 "slip39_identifier", "master_id", "tool", "at"]))
+        self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "yk_recipients", "root_entry", "root_fingerprint", "session",
+                                                 "share_indices", "slip39_identifier", "master_id", "tool", "at"]))
         self.assertEqual(sorted(record["nodes"]["a"]), ["bg_sha256", "check", "yk_sha256"])
 
 
