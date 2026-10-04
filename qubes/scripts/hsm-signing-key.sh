@@ -3,6 +3,12 @@
 # certificate and its DKEK-wrapped backup; and the proof that the backup restores and signs on the spare.
 # regalia#554 (regalia-kms#57: the two PCR keys and the Secure Boot key of the KMS hosts' boot image).
 #
+# SUPERSEDED FOR THE CEREMONY'S OWN KEYS (ADR-0002 D28, regalia#559, 2026-10-04): the membership root and the
+# three boot-image keys are Shamir-held software keys on the offline signing laptop (offline-keys.py), not HSM
+# keys; nothing in the first ceremony runs this script for them. It stays as the tested routine for a signing key
+# that is to live on an HSM, and its refusals and measurements (the card's attestation, the KCV, a blob that names
+# its DKEK) stand.
+#
 #   hsm-signing-key.sh generate --serial SERIAL --expect-kcv KCV --id HEX --label LABEL --subject "COMMON NAME"
 #                               --out DIR [--key-type rsa:2048|ec:prime256v1] [--days N] [--pin-fd N]
 #   hsm-signing-key.sh restore  --serial SPARE_SERIAL --expect-kcv KCV --blob LABEL.wrapped.bin
@@ -18,8 +24,8 @@
 # the blob it wrote names the card's KCV and records it (dkek_kcv); restore needs the blob's KCV to be the
 # card's; refuse needs them to DIFFER, and is never tried on a card of the blob's own domain.
 #
-# KEY TYPES. rsa:2048 (the default) for the boot image's keys (regalia#554); ec:prime256v1 for the membership
-# root (regalia-kms#156, option C), which lives on its OWN HSM and spare under a DKEK used by nothing else.
+# KEY TYPES. rsa:2048 (the default), the boot image's key type (regalia#554); ec:prime256v1, an ECDSA P-256 key (the
+# membership root's type under regalia-kms#156 option C, which D28 superseded: the root is now Ed25519 in software).
 # The card signs with SHA256-RSA-PKCS or ECDSA-SHA256 accordingly; restore and refuse read the type from the
 # certificate's key.
 #
@@ -40,10 +46,10 @@
 # happen, and the key it put there is deleted before the script stops.
 #
 # CUSTODY, ADR-0002 D19: "a new HSM key: generated on the token; its DKEK-wrapped blob is its backup."
-# The key is never outside a card. The signing HSM and its spare share a DKEK of their own, used by
-# nothing else (regalia#554): a card holding the KMS hosts' DKEK cannot unwrap these blobs, so an
-# image-signing key can never be restored onto an online host. That DKEK's share is a software secret
-# under the break-glass key; this script does not handle it (the card must already hold the DKEK).
+# The key is never outside a card. A card and its spare that this script serves share a DKEK of their own,
+# used by nothing else: a card holding the KMS hosts' DKEK cannot unwrap these blobs, so such a key can never be
+# restored onto an online host. That DKEK's share is a software secret under the break-glass key; this script
+# does not handle it (the card must already hold the DKEK).
 #
 # generate, on the signing HSM, with ONLY that card attached:
 #   1. the token is found BY SERIAL, and it must be the only token present: sc-hsm-tool addresses the
