@@ -90,8 +90,14 @@ class Writer(unittest.TestCase):
                 sequence = text.split("CARD RECORD ")[1].split(" ")[0]
                 digest = text.split("digest ")[1].split("\n")[0]
                 return confirm if confirm is not None else "%s %s" % (sequence, digest[:8])
-            return ok.card_record(self.sealed, cards or self.cards, imports or self.imports, self.state, self.out,
-                                  io.StringIO("\n".join(self.shares[:2]) + "\n"), first=first, ask=typed)
+            self.asked = 0
+
+            def counted(prompt):
+                self.asked += 1
+                return typed(prompt)
+            record, path, self.recovered = ok.card_record(self.sealed, cards or self.cards, imports or self.imports, self.state, self.out,
+                                                          io.StringIO("\n".join(self.shares[:2]) + "\n"), first=first, ask=counted)
+            return record, path
 
     def current(self, path):
         with open(path) as f:
@@ -125,7 +131,7 @@ class Writer(unittest.TestCase):
             self.sign(confirm="2 00000000")
         other = os.path.join(self.d, "other.json")
         with open(other, "w") as f:
-            json.dump(dict(json.load(open(self.imports[0])), key="00" * 32), f)
+            json.dump(dict(json.load(open(self.imports[1])), key="00" * 32), f)
         with self.assertRaisesRegex(ok.Refused, "the two release cards hold different keys"):
             self.sign(imports=[self.imports[0], other])
         bench = os.path.join(self.d, "bench.json")
@@ -162,6 +168,68 @@ class Writer(unittest.TestCase):
         self.assertEqual((record["sequence"], os.listdir(self.out)), (1, ["card-record-1.record.json"]))
         self.assertEqual(self.current(path)["sequence"], 1)
 
+    def test_the_writer_reads_the_log_as_strictly_as_the_reader(self):
+        """d9 on #128: a log the reader would refuse (here, a gap) is refused before anything is asked or signed."""
+        self.sign(first=True)
+        self.sign()
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+        lines = open(log).read().splitlines()
+        with open(log, "w") as f:
+            f.write(lines[1] + "\n")                           # line 1 lost: 2 alone
+        os.chmod(log, 0o600)
+        with self.assertRaisesRegex(ok.Refused, "not 1..1 without a gap"):
+            self.sign()
+        self.assertEqual(self.asked, 0, "refused before the confirmation and the shares")
+
+    def test_a_torn_or_forged_pending_record_never_strands_the_writer(self):
+        """d9 on #128: a pending record no line names is deleted; one the log names but that is damaged (torn, or with a
+        bad signature) is moved aside, the run refused, and the next run signs the following record superseding it."""
+        record, _ = self.sign(first=True)
+        torn = os.path.join(self.out, "card-record-2.pending.json")
+        with open(torn, "w") as f:
+            f.write('{"record": {"seq')                         # the next run's write, cut short: no line names 2
+        second, _ = self.sign()
+        self.assertEqual(second["sequence"], 2)
+        self.assertNotIn("card-record-2.pending.json", os.listdir(self.out))
+        # the log names 3, but its released file is lost and the pending copy damaged
+        with unittest.mock.patch.object(ok.os, "rename", side_effect=OSError("power cut")):
+            with self.assertRaises(OSError):
+                self.sign()
+        pending = os.path.join(self.out, "card-record-3.pending.json")
+        document = json.load(open(pending))
+        document["signature"] = "00" * 64                     # a bad signature: never released
+        with open(pending, "w") as f:
+            json.dump(document, f)
+        with self.assertRaisesRegex(ok.Refused, "card record 3 is on the log but its file is damaged \\(kept as card-record-3.damaged.json\\): "
+                                    "run again to sign 4, superseding it"):
+            self.sign()
+        self.assertIn("card-record-3.damaged.json", os.listdir(self.out))
+        fourth, path = self.sign()
+        lines = [json.loads(l) for l in open(os.path.join(self.state, ok.SIGNING_RECORD))]
+        self.assertEqual((fourth["sequence"], fourth["supersedes"]), (4, lines[2]["digest"]))
+        self.assertEqual(self.current(path)["sequence"], 4)
+
+    def test_a_first_run_that_logged_its_line_is_released_without_the_flag(self):
+        with unittest.mock.patch.object(ok.os, "rename", side_effect=OSError("power cut")):
+            with self.assertRaises(OSError):
+                self.sign(first=True)
+        with self.assertRaisesRegex(ok.Refused, "run again WITHOUT --first-card-record to release it"):
+            self.sign(first=True)
+        record, path = self.sign()
+        self.assertEqual((record["sequence"], self.recovered, os.path.basename(path)), (1, True, "card-record-1.record.json"))
+        self.assertEqual(self.current(path)["sequence"], 1)
+
+    def test_the_two_release_imports_are_two_cards(self):
+        with self.assertRaisesRegex(ok.Refused, "both --release-import files are for card 40000003"):
+            self.sign(first=True, imports=[self.imports[0], self.imports[0]])
+
+    def test_every_new_name_is_made_durable(self):
+        """d9 on #128: the directories are synced after the pending file, the marker, the log line and the release."""
+        synced = []
+        with unittest.mock.patch.object(ok, "_fsync_dir", side_effect=lambda path: synced.append(os.path.basename(path))):
+            self.sign(first=True)
+        self.assertEqual(synced, ["out", "state", "state", "out"])
+
     def test_a_crash_after_the_line_is_released_by_the_rerun(self):
         """The line is logged, the release (rename) never happened: the rerun releases exactly that record, and signs
         nothing new."""
@@ -175,7 +243,7 @@ class Writer(unittest.TestCase):
         self.assertEqual(len(lines), 2)
         self.assertIs(ok.os.rename, real_rename)
         record, path = self.sign()
-        self.assertEqual((record["sequence"], os.path.basename(path)), (2, "card-record-2.record.json"))
+        self.assertEqual((record["sequence"], os.path.basename(path), self.recovered), (2, "card-record-2.record.json", True))
         self.assertEqual(len(open(os.path.join(self.state, ok.SIGNING_RECORD)).read().splitlines()), 2, "nothing new was logged")
         self.assertEqual(self.current(path)["sequence"], 2)
 
