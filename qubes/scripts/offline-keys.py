@@ -833,6 +833,26 @@ def append_card_record_line(state_dir, record, now=None):
     return line
 
 
+def card_record_current(document, pinned_root, signing_lines):
+    """A card record that is the NEWEST the pinned root signed (regalia-kms#403): verify_card_record, then the laptop's
+    signing record's card-record lines (dicts, in file order) must run 1..M without a gap, this record must be line M
+    (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
+    refused: after a rotation it would vouch for a retired key. Returns the record."""
+    record = verify_card_record(document, pinned_root)
+    lines = [line for line in signing_lines if isinstance(line, dict) and line.get("kind") == "card-record"]
+    require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
+    require([line.get("sequence") for line in lines] == list(range(1, len(lines) + 1)),
+            "the signing record's card-record lines are not 1..%d without a gap" % len(lines))
+    require(all(line.get("key") == pinned_root for line in lines), "a card-record line names another root than the pinned one")
+    newest = lines[-1]
+    require(record["sequence"] == newest["sequence"] and card_record_digest(record) == newest.get("digest"),
+            "this card record is not the newest the root signed (sequence %d of %d): an older one is superseded"
+            % (record["sequence"], newest["sequence"]))
+    if len(lines) > 1:
+        require(record["supersedes"] == lines[-2].get("digest"), "this card record does not supersede the one before it in the signing record")
+    return record
+
+
 def verify_card_record(document, pinned_root):
     """A card-ceremony record as regalia-kms reads it: exactly {record, signature}, signed under the PINNED root (the
     record's root_entry must name it), over RECORD_DOMAIN and the canonical record, and every rule of

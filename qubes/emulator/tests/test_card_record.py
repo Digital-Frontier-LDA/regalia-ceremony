@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -81,6 +82,24 @@ class Vectors(unittest.TestCase):
         self.assertEqual([(l["kind"], l["sequence"], l["digest"], l["key"]) for l in lines],
                          [("card-record", 1, ok.card_record_digest(first), first["root_entry"]["key"]),
                           ("card-record", 2, ok.card_record_digest(second), first["root_entry"]["key"])])
+
+    def test_only_the_newest_card_record_is_current(self):
+        """regalia-kms#403: valid.json still verifies, but after sequence-2 it is superseded and refused as current."""
+        root = open(os.path.join(VECTORS, "root.hex")).read().strip()
+        docs = {n: json.load(open(os.path.join(VECTORS, n))) for n in ("valid.json", "sequence-2.json")}
+        with open(os.path.join(VECTORS, "signing-record.jsonl")) as f:
+            both = [json.loads(line) for line in f]
+        self.assertEqual(ok.card_record_current(docs["sequence-2.json"], root, both)["sequence"], 2)
+        self.assertEqual(ok.card_record_current(docs["valid.json"], root, both[:1])["sequence"], 1)
+        for document, lines, reason in (
+                (docs["valid.json"], both, "this card record is not the newest the root signed (sequence 1 of 2)"),
+                (docs["sequence-2.json"], both[1:], "the signing record's card-record lines are not 1..1 without a gap"),
+                (docs["sequence-2.json"], [], "the signing record holds no card-record line"),
+                (docs["sequence-2.json"], [both[0], dict(both[1], key="00" * 32)], "a card-record line names another root"),
+                (docs["sequence-2.json"], [dict(both[0], digest="00" * 32), both[1]],
+                 "this card record does not supersede the one before it in the signing record")):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ok.Refused, re.escape(reason)):
+                ok.card_record_current(document, root, lines)
 
     def test_the_signed_bytes_are_regalia_kms_membership_canonical_form(self):
         """regalia-kms's verifier canonicalises with ensure_ascii=True; an ASCII record makes the same bytes."""
