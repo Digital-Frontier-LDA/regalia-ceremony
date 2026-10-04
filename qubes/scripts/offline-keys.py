@@ -389,14 +389,39 @@ def verify_forms(sealed_path, shares_path, stream, partial=False, now=None):
     return sorted(typed), missing
 
 
+def read_hidden(stream, what):
+    """All of `stream`, to its end. When it is a terminal, with echo off for the length of the read (and the operator
+    told how to end it): a share typed at the console is never shown, nor left in the terminal's scrollback (found by
+    the end-to-end run on #111, where the shares typed into `sign` were echoed)."""
+    try:
+        fd = stream.fileno()
+    except (AttributeError, OSError, ValueError):
+        fd = None
+    if fd is None or not os.isatty(fd):
+        return stream.read(1 << 16)
+    import termios
+    old = termios.tcgetattr(fd)
+    new = list(old)
+    new[3] &= ~(termios.ECHO | termios.ECHONL)
+    termios.tcsetattr(fd, termios.TCSANOW, new)
+    try:
+        sys.stderr.write("type the %s, one per line, then Ctrl-D on an empty line (nothing is shown)\n" % what)
+        sys.stderr.flush()
+        return stream.read(1 << 16)
+    finally:
+        termios.tcsetattr(fd, termios.TCSANOW, old)
+
+
 def read_forms(stream, limit=64):
-    lines = [line.strip() for line in stream.read(1 << 16).splitlines() if line.strip()]
+    lines = [line.strip() for line in read_hidden(stream, "forms, as written on the paper").splitlines() if line.strip()]
     require(0 < len(lines) <= limit, "no forms were typed back on standard input")
     return lines
+
+
 # ---- a signing session ------------------------------------------------------------------------------
 
 def read_shares(stream, limit=64):
-    lines = [line.strip() for line in stream.read(1 << 16).splitlines()]
+    lines = [line.strip() for line in read_hidden(stream, "shares").splitlines()]
     shares = [line for line in lines if line]
     require(0 < len(shares) <= limit, "no shares were given on standard input")
     return shares
