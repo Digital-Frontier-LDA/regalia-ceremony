@@ -147,7 +147,8 @@ with SLIP-39: a new set, separate from break-glass, so a routine signing session
 that opens the vault. They are also encrypted to the break-glass key, so a lost offline set never strands
 the fleet. A signing session takes exactly k shares and hands each key only to the regalia-kms tool that
 checks what it signs: the root to `manifest sign`, the boot keys to `uki.py sign`, each as a sealed memfd.
-Every session is recorded and signed by the root.
+Every session is recorded and signed by the root. ADR-0002 D29's developers' set (the release signing key,
+regalia#530) follows the same offline-key pattern and gets a rule of its own when it is built.
 *Verified by:* `offline-keys.py` (`generate`, `verify-forms`, `sign`). Test: `test_offline_keys.py`
 (k shares open the keys and k-1 don't; another set is refused; the hand-copied forms are proven before
 the shares are shredded; no raw signing; the key is never a file; a key left behind is found).
