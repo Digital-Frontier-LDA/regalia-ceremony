@@ -12,6 +12,7 @@ import importlib.util
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,7 +37,7 @@ def fake_age(argv, input=None, capture_output=True):
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
 
-class Generate(unittest.TestCase):
+class Case(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.d, True)
@@ -67,6 +68,12 @@ class Generate(unittest.TestCase):
         with open(self.path("offline-shares.txt")) as f:
             return f.read().split("\n")[:-1]
 
+    def forms(self, lines, partial=False):
+        import io
+        return ok.verify_forms(self.path("offline-keys.sealed.json"), self.path("offline-shares.txt"), io.StringIO("\n".join(lines) + "\n"), partial)
+
+
+class Generate(Case):
     def test_four_keys_sealed_split_backed_up_and_recorded(self):
         record = self.generate()
         for name in ok.FILES:
@@ -196,10 +203,6 @@ class Generate(unittest.TestCase):
                 ok.split(master, 3, 4)
         self.assertIs(shamir_mnemonic.combine_mnemonics, real)
 
-    def forms(self, lines, partial=False):
-        import io
-        return ok.verify_forms(self.path("offline-keys.sealed.json"), self.path("offline-shares.txt"), io.StringIO("\n".join(lines) + "\n"), partial)
-
     def test_every_form_typed_back_is_checked_and_then_the_shares_are_shredded(self):
         """regalia-kms-d9 on #114: the copies the holders keep are proven while the shares still exist."""
         self.generate(k=2, n=3)
@@ -257,9 +260,240 @@ class Generate(unittest.TestCase):
     def test_the_cli_takes_no_secret_on_argv(self):
         with open(SCRIPT) as f:
             text = f.read()
-        for flag in ("--master", "--share", "--mnemonic", "--passphrase", "--secret", "--key"):
+        for flag in ("--master", "--share", "--mnemonic", "--passphrase", "--secret", "--private-key"):
             self.assertNotIn('"%s"' % flag, text, "a secret-bearing option on the command line")
 
+
+class Sign(Case):
+    """A signing session: exactly k shares of THIS set on standard input; the keys handed only to regalia-kms's
+    `manifest sign` (the root) or `uki.py sign` (the three boot keys), each as a sealed memfd; the session recorded first
+    and signed by the root. The two tools are stood in for by a tree of their own that checks what it was given."""
+
+    FAKE_TOOL = r'''
+import fcntl, hashlib, os, sys
+args = sys.argv[1:]
+assert args[0] == "sign", args
+def val(flag):
+    return args[args.index(flag) + 1]
+assert os.environ.get("PATH") == "/usr/bin:/bin" and set(os.environ) <= {"PATH", "LC_ALL", "LC_CTYPE"}, sorted(os.environ)
+lines = ["session " + val("--offline-session")]
+for flag in [a for a in args if a.endswith("key-fd")]:
+    fd = int(val(flag))
+    assert os.readlink("/proc/self/fd/%d" % fd).startswith("/memfd:"), "not a memfd"
+    assert fcntl.fcntl(fd, fcntl.F_GET_SEALS) & fcntl.F_SEAL_WRITE, "not sealed"
+    data = b""
+    while True:
+        chunk = os.read(fd, 4096)
+        if not chunk:
+            break
+        data += chunk
+    assert data.startswith(b"-----BEGIN PRIVATE KEY-----"), data[:30]
+    lines.append("%s %s" % (flag, hashlib.sha256(data).hexdigest()))
+    if "leak" in args:
+        with open(os.path.join(os.path.dirname(val("--out")), "kept.pem"), "wb") as f:
+            f.write(data)
+    if "leak-elsewhere" in args:
+        with open(os.path.join(val("--elsewhere"), "k"), "wb") as f:
+            f.write(data)
+    if "touch-tree" in args:
+        with open(os.path.join("deploy", "baremetal", "kept.py"), "w") as f:
+            f.write("x = 1\n")
+print("tool stdout")
+print("tool stderr", file=sys.stderr)
+if "exit3" in args:
+    sys.exit(3)
+if "nooutput" not in args:
+    with open(val("--out"), "w") as f:
+        f.write("\n".join(lines) + "\n")
+'''
+
+    def setUp(self):
+        super().setUp()
+        self.record = self.generate(k=3, n=5)
+        self.all = self.shares()
+        self.sealed = self.path("offline-keys.sealed.json")
+        self.session_dir = os.path.join(self.d, "session")
+        os.mkdir(self.session_dir)
+        self.tree = os.path.join(self.d, "regalia-kms")
+        os.makedirs(os.path.join(self.tree, "deploy", "baremetal"))
+        open(os.path.join(self.tree, "deploy", "__init__.py"), "w").close()
+        open(os.path.join(self.tree, "deploy", "baremetal", "__init__.py"), "w").close()
+        for module in ("manifest", "uki"):
+            with open(os.path.join(self.tree, "deploy", "baremetal", module + ".py"), "w") as f:
+                f.write(self.FAKE_TOOL)
+        self.digest = ok.tree_digest(self.tree)
+        import sys
+        patcher = unittest.mock.patch.object(ok, "PYTHON", sys.executable)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.elsewhere = os.path.join(self.d, "elsewhere")          # stands in for /tmp and /dev/shm
+        os.mkdir(self.elsewhere)
+        patcher = unittest.mock.patch.object(ok, "SCAN_DIRS", (self.elsewhere,))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def command(self, tool, *extra, out=None):
+        import sys
+        out = out or os.path.join(self.session_dir, "%s.out" % tool)
+        if tool == "manifest":
+            flags = ["--signer", "root", "--key-fd", "{keyfd:root}"]
+        else:
+            flags = ["--initrd-key-fd", "{keyfd:pcr-initrd}", "--system-key-fd", "{keyfd:pcr-system}", "--secure-boot-key-fd", "{keyfd:secure-boot}"]
+        return [sys.executable, "-Es", "-m", "deploy.baremetal." + tool, "sign"] + flags + ["--offline-session", "{session}", "--out", out] + list(extra)
+
+    def sign(self, command, shares=None, outputs=None, digest=None, who="Owner"):
+        import io
+        self.sinks = {"stdout": io.BytesIO(), "stderr": io.BytesIO()}
+        outs = outputs if outputs is not None else [command[command.index("--out") + 1]]
+        return ok.sign(self.sealed, who, self.session_dir, io.StringIO("\n".join(shares or self.all[1:4]) + "\n"), command,
+                       self.tree, digest or self.digest, outs, sinks=self.sinks)
+
+    def pem(self, name):
+        from shamir_mnemonic import combine_mnemonics
+        from cryptography.hazmat.primitives import serialization
+        with open(self.sealed, "rb") as f:
+            bundle = ok.unseal(combine_mnemonics(self.all[:3]), json.loads(f.read()))
+        key = serialization.load_der_private_key(base64.b64decode(bundle["keys"][name]["pkcs8"]), None)
+        return key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+
+    def records(self):
+        found = sorted(n for n in os.listdir(self.session_dir) if n.startswith("session-"))
+        out = []
+        for name in found:
+            with open(os.path.join(self.session_dir, name)) as f:
+                out.append(ok.verify_record(json.load(f)))
+        return out
+
+    def test_the_root_goes_only_to_manifest_sign_as_a_sealed_memfd_and_the_session_is_recorded(self):
+        session, record_path = self.sign(self.command("manifest"))
+        with open(os.path.join(self.session_dir, "manifest.out")) as f:
+            lines = f.read().split()
+        self.assertEqual(lines[:2], ["session", session["session"]], "the tool was told the session's id")
+        self.assertEqual(lines[2:], ["--key-fd", hashlib.sha256(self.pem("root")).hexdigest()], "it read the root, PEM, to EOF")
+        [verified] = self.records()
+        self.assertEqual((verified["event"], verified["tool"], verified["keys"], verified["who"], verified["exit"], verified["share_indices"]),
+                         ("sign", "manifest", ["root"], "Owner", 0, [2, 3, 4]))
+        self.assertEqual(verified["root_entry"], self.record["root_entry"])
+        self.assertEqual(verified["tool_digest"], self.digest)
+        self.assertEqual(verified["stdout_sha256"], hashlib.sha256(b"tool stdout\n").hexdigest())
+        self.assertEqual(self.sinks["stdout"].getvalue(), b"tool stdout\n", "the operator sees the tool's output")
+        with open(os.path.join(self.session_dir, "manifest.out"), "rb") as f:
+            self.assertEqual(list(verified["outputs"].values()), [hashlib.sha256(f.read()).hexdigest()])
+        self.assertEqual(verified["key_material_found"], [])
+
+    def test_the_three_boot_keys_go_together_to_uki_sign(self):
+        self.sign(self.command("uki"))
+        with open(os.path.join(self.session_dir, "uki.out")) as f:
+            lines = f.read().splitlines()
+        self.assertEqual(lines[1:], ["--initrd-key-fd %s" % hashlib.sha256(self.pem("pcr-initrd")).hexdigest(),
+                                     "--system-key-fd %s" % hashlib.sha256(self.pem("pcr-system")).hexdigest(),
+                                     "--secure-boot-key-fd %s" % hashlib.sha256(self.pem("secure-boot")).hexdigest()])
+        self.assertEqual(self.records()[0]["keys"], ["pcr-initrd", "pcr-system", "secure-boot"])
+
+    def test_any_other_command_or_entitlement_is_refused_before_a_share_is_read(self):
+        import sys
+        manifest = self.command("manifest")
+        cases = [
+            ("--exec runs only", ["/bin/sh", "-c", "cat /proc/self/fd/3"]),
+            ("--exec runs only", [sys.executable, "-c", "pass", "-m", "deploy.baremetal.manifest", "sign"]),
+            ("must carry --offline-session", [a for a in manifest if a not in ("--offline-session", "{session}")]),
+            ("must carry --signer root", [("pcr-system" if a == "root" else a) for a in manifest]),
+            ("not entitled to: {keyfd:root}", self.command("uki", "--extra", "{keyfd:root}")),
+            ("not entitled to: {keyfd:pcr-initrd}", manifest + ["{keyfd:pcr-initrd}"]),
+        ]
+        for reason, command in cases:
+            with self.assertRaisesRegex(ok.Refused, re.escape(reason)):
+                self.sign(command, shares=["not a share"], outputs=[])
+        with self.assertRaisesRegex(ok.Refused, "not the tree the image's evidence names"):
+            self.sign(manifest, shares=["not a share"], digest="00" * 32)
+        open(os.path.join(self.session_dir, "manifest.out"), "w").close()
+        with self.assertRaisesRegex(ok.Refused, "already exists"):
+            self.sign(manifest, shares=["not a share"])
+        self.assertEqual(self.records(), [])
+
+    def test_the_tree_digest_covers_every_file_under_deploy_and_refuses_links(self):
+        with open(os.path.join(self.tree, "deploy", "baremetal", "regalia.service"), "w") as f:
+            f.write("[Service]\n")
+        self.assertNotEqual(ok.tree_digest(self.tree), self.digest, "a unit file is part of the pinned tree")
+        os.symlink("/etc/passwd", os.path.join(self.tree, "deploy", "baremetal", "link"))
+        with self.assertRaisesRegex(ok.Refused, "is a link"):
+            ok.tree_digest(self.tree)
+
+    def test_wrong_counts_duplicates_and_another_set_are_refused_before_anything_opens(self):
+        from shamir_mnemonic import generate_mnemonics
+        command = self.command("manifest")
+        for shares, reason in ((self.all[:2], "2 shares given; this set needs exactly 3"), (self.all[:4], "4 shares given"),
+                               ([self.all[0], self.all[0], self.all[1]], "a share was given twice"),
+                               (generate_mnemonics(1, [(3, 5)], b"\x09" * 32)[0][:3], "not of the set this file was sealed under")):
+            with self.assertRaisesRegex(ok.Refused, reason):
+                self.sign(command, shares=shares)
+        self.assertEqual(self.records(), [])
+        self.assertFalse(os.path.exists(os.path.join(self.session_dir, "manifest.out")), "the tool never ran")
+
+    def test_the_command_line_runs_a_session(self):
+        """coderabbitai on #115: the CLI, not only the function. --exec's REMAINDER once overwrote the subcommand's name."""
+        import contextlib
+        import io
+        command = self.command("manifest")
+        argv = ["sign", "--sealed", self.sealed, "--who", "Owner", "--out", self.session_dir, "--tool-root", self.tree,
+                "--tool-digest", self.digest, "--output", command[command.index("--out") + 1], "--exec"] + command
+        import types
+        stdout = io.StringIO()
+        fake_sys = types.SimpleNamespace(stdin=io.StringIO("\n".join(self.all[1:4]) + "\n"),
+                                         stdout=types.SimpleNamespace(buffer=io.BytesIO()), stderr=io.StringIO())
+        fake_sys.stderr.buffer = io.BytesIO()
+        with unittest.mock.patch.object(ok, "sys", fake_sys), contextlib.redirect_stdout(stdout):
+            self.assertEqual(ok.main(argv), 0, fake_sys.stderr.getvalue())
+        self.assertIn("SIGNED by manifest with root (shares 2,3,4)", stdout.getvalue())
+        self.assertEqual(len(self.records()), 1)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ok.main(["tree-digest", "--root", self.tree]), 0)
+        self.assertEqual(out.getvalue().strip(), self.digest)
+
+    def test_a_failing_command_is_recorded_then_refused(self):
+        with self.assertRaisesRegex(ok.Refused, "the command exited 3: the session is recorded"):
+            self.sign(self.command("manifest", "exit3"))
+        [record] = self.records()
+        self.assertEqual(record["exit"], 3)
+
+    def test_a_key_left_in_the_ram_directory_is_found_recorded_and_refused(self):
+        with self.assertRaisesRegex(ok.Refused, "KEY MATERIAL LEFT IN .* kept.pem"):
+            self.sign(self.command("uki", "leak"))
+        self.assertEqual(self.records()[0]["key_material_found"], ["kept.pem"])
+
+    def test_a_key_left_in_tmp_or_dev_shm_is_found_too(self):
+        """regalia-kms-d9 on #115: the scan covers where else a tool could write, not only the session directory."""
+        with self.assertRaisesRegex(ok.Refused, "KEY MATERIAL LEFT"):
+            self.sign(self.command("manifest", "leak-elsewhere", "--elsewhere", self.elsewhere))
+        self.assertEqual(self.records()[0]["key_material_found"], [os.path.join(self.elsewhere, "k")])
+
+    def test_a_tree_the_command_changed_is_recorded_and_refused(self):
+        with self.assertRaisesRegex(ok.Refused, "the regalia-kms tree changed while the command ran"):
+            self.sign(self.command("manifest", "touch-tree"))
+        record = self.records()[0]
+        self.assertNotEqual(record["tool_digest_after"], record["tool_digest"])
+
+    def test_an_output_the_command_did_not_write_is_recorded_and_refused(self):
+        with self.assertRaisesRegex(ok.Refused, "the command did not write"):
+            self.sign(self.command("manifest", "nooutput"))
+        self.assertEqual(list(self.records()[0]["outputs"].values()), [None])
+
+    def test_a_session_needs_a_ram_directory_and_a_name(self):
+        with unittest.mock.patch.dict(os.environ, {"CEREMONY_ALLOW_NONTMPFS": "0"}), unittest.mock.patch.object(ok, "fs_type", lambda p: "ext4"):
+            with self.assertRaisesRegex(ok.Refused, "not a RAM file system"):
+                self.sign(self.command("manifest"))
+        with self.assertRaisesRegex(ok.Refused, "--who names the person signing"):
+            self.sign(self.command("manifest"), who="")
+
+    def test_verify_forms_records_what_it_checked_signed_by_the_root(self):
+        """regalia-kms-d9 on #114: with --partial, the unchecked forms are in the evidence, not only on the screen."""
+        self.forms(self.all[:4], partial=True)
+        records = [n for n in os.listdir(self.out) if n.startswith("forms-verified-")]
+        self.assertEqual(len(records), 1)
+        with open(self.path(records[0])) as f:
+            record = ok.verify_record(json.load(f))
+        self.assertEqual((record["event"], record["checked"], record["not_checked"]), ("forms-verified", [1, 2, 3, 4], [5]))
+        self.assertEqual(record["root_entry"], self.record["root_entry"])
 
 if __name__ == "__main__":
     unittest.main()

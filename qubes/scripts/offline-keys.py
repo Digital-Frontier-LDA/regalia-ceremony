@@ -5,6 +5,10 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
 
     python3 -Es offline-keys.py generate --threshold K --shares N --out DIR --breakglass-recipient FILE
     python3 -Es offline-keys.py verify-forms --sealed FILE --shares-file FILE [--partial]   (the forms typed back on stdin)
+    python3 -Es offline-keys.py sign --sealed FILE --who NAME --out DIR --tool-root DIR --tool-digest HEX [--output FILE]…
+                                     --exec /usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …
+                                          (the k shares on standard input, one per line)
+    python3 -Es offline-keys.py tree-digest --root DIR
     python3 -Es offline-keys.py verify-record --record FILE
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
@@ -33,6 +37,28 @@ k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the four keys are sealed unde
 THE KEYS. root: Ed25519 (regalia-kms root-key.json takes {"alg": "ed25519", "key": "<hex>"}); pcr-initrd, pcr-system,
 secure-boot: RSA-2048, the boot image's keys of regalia#554 under the labels hsm-signing-key.sh gave them.
 
+A SIGNING SESSION (sign). The shares come on standard input, one per line, never on the command line: exactly the
+set's threshold of them, each once, of the set the sealed file names (refused by its SLIP-39 identifier before they
+are combined, then by its master id), or nothing is opened. Nothing signs raw bytes: a key is only ever handed to the
+regalia-kms tool that checks what it signs (regalia-kms-24, -d9 and -1e on #115):
+  * the root, only to `manifest sign --signer root --key-fd {keyfd:root} --offline-session {session}`, which still makes
+    every check it makes for a token-held root (the chain, the transition, the measurement step, the typed confirmation);
+  * the three boot keys together, only to `uki.py sign --initrd-key-fd {keyfd:pcr-initrd} --system-key-fd
+    {keyfd:pcr-system} --secure-boot-key-fd {keyfd:secure-boot} --offline-session {session}`, which makes both PCR 11
+    signatures and the Secure Boot signature and checks each.
+  Each runs as `/usr/bin/python3 -Es -m <module> sign …` from a regalia-kms tree whose digest (every file under
+  deploy/; `tree-digest` prints it) must equal --tool-digest, typed from the ceremony image's build evidence; with its
+  environment cleared to PATH and LC_ALL, stdin /dev/null (manifest sign reads its confirmation from /dev/tty), and
+  that tree as its working directory. Each key reaches it as a sealed memfd, its number substituted for {keyfd:NAME},
+  closed after the command; never a file. {session} is a fresh 128-bit id that both tools' records and this one carry.
+  The session record is written first, whatever the command did, and then any refusal: who, the keys, the command as
+  typed, the tree and its digest, the exit status, the SHA-256 of its stdout and stderr (passed through to the
+  operator as they come) and of every --output it was to write, any file in the RAM directory written meanwhile that
+  holds a private key, there or in /tmp or /dev/shm (refused, and named), the tool tree's digest again after the
+  command (refused if it changed), the share numbers used, the set's identifier and master id; signed by the
+  root over RECORD_DOMAIN, as at generation. What a tool could still keep of a key is bounded by the laptop: no
+  network, RAM only, no swap, and the process's end.
+
 WHERE IT RUNS. DIR must be a RAM file system (tmpfs or ramfs) and swap must be off: the keys and the master secret
 must never reach a disk. CEREMONY_ALLOW_NONTMPFS=1 and CEREMONY_ALLOW_SWAP=1 are for tests. Key material and the
 master are kept in bytearrays where this code holds them, and zeroed when done; Python and the libraries it calls
@@ -51,6 +77,7 @@ import re
 import secrets
 import subprocess
 import sys
+import time
 
 SCHEMA_BUNDLE = "regalia.offline-keys/v1"
 SCHEMA_SEALED = "regalia.offline-keys-sealed/v1"
@@ -302,7 +329,7 @@ def normalise(mnemonic):
     return " ".join(mnemonic.lower().split())
 
 
-def verify_forms(sealed_path, shares_path, stream, partial=False):
+def verify_forms(sealed_path, shares_path, stream, partial=False, now=None):
     """The forms as the holders will keep them, typed back before the shares are gone: each must be a valid SLIP-39
     share (its checksum) equal to one of the shares made, a k-subset of the typed forms must rebuild the master the
     sealed file was made under, and every form must be typed back unless `partial` (then at least k, and the record
@@ -310,6 +337,8 @@ def verify_forms(sealed_path, shares_path, stream, partial=False):
     path. Returns (the indices checked, the indices not checked)."""
     from shamir_mnemonic import combine_mnemonics
     from shamir_mnemonic.share import Share
+    out = os.path.dirname(os.path.abspath(shares_path))
+    check_place(out)                    # the keys are opened below, to sign the record of this check
     with open(sealed_path, "rb") as f:
         sealed = json.loads(f.read(1 << 20))
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
@@ -336,8 +365,21 @@ def verify_forms(sealed_path, shares_path, stream, partial=False):
         raise Refused("the forms typed back do not combine: %s" % error) from None
     try:
         require(master_id(master) == sealed["master_id"], "the forms typed back rebuild another master secret than the sealed file's")
+        bundle = unseal(master, sealed)
     finally:
         zero(master)
+    # the evidence keeps which forms were proven, not only the screen (regalia-kms-d9 on #114): a forms-verified
+    # record, signed by the root the forms just opened
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    from cryptography.hazmat.primitives import serialization
+    at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = {"schema": SCHEMA_RECORD, "event": "forms-verified", "checked": [i + 1 for i in sorted(typed)],
+              "not_checked": [i + 1 for i in missing], "slip39_identifier": sealed["slip39_identifier"], "master_id": sealed["master_id"],
+              "root_entry": {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()},
+              "tool": TOOL, "at": at}
+    write_record(out, "forms-verified-%s" % at.replace(":", ""), root, record)
+    del root
     size = os.path.getsize(shares_path)
     with open(shares_path, "r+b") as f:
         f.write(bytes(size))
@@ -351,6 +393,243 @@ def read_forms(stream, limit=64):
     lines = [line.strip() for line in stream.read(1 << 16).splitlines() if line.strip()]
     require(0 < len(lines) <= limit, "no forms were typed back on standard input")
     return lines
+# ---- a signing session ------------------------------------------------------------------------------
+
+def read_shares(stream, limit=64):
+    lines = [line.strip() for line in stream.read(1 << 16).splitlines()]
+    shares = [line for line in lines if line]
+    require(0 < len(shares) <= limit, "no shares were given on standard input")
+    return shares
+
+
+def combine(shares, sealed):
+    """The master secret, as a bytearray, from exactly the set's threshold of distinct shares of the set the sealed
+    file was made under. Returns (master, the share indices used, the SLIP-39 identifier)."""
+    from shamir_mnemonic import combine_mnemonics
+    from shamir_mnemonic.share import Share
+    try:
+        parsed = [Share.from_mnemonic(m) for m in shares]
+    except Exception as error:           # noqa: BLE001 - a mistyped word is a refusal, said by the library
+        raise Refused("a share is not a valid SLIP-39 share: %s" % error) from None
+    identifiers = {p.identifier for p in parsed}
+    require(len(identifiers) == 1, "the shares come from %d different sets" % len(identifiers))
+    require(parsed[0].identifier == sealed["slip39_identifier"], "these shares are of set %d, not of the set this file was sealed under (%d)"
+            % (parsed[0].identifier, sealed["slip39_identifier"]))
+    indices = [p.index for p in parsed]
+    twice = sorted({i + 1 for i in indices if indices.count(i) > 1})
+    require(not twice, "a share was given twice (share %s)" % ",".join(str(i) for i in twice))
+    threshold = parsed[0].member_threshold
+    require(len(parsed) == threshold, "%d shares given; this set needs exactly %d: no more are taken than open it" % (len(parsed), threshold))
+    try:
+        master = bytearray(combine_mnemonics(shares))
+    except Exception as error:           # noqa: BLE001
+        raise Refused("the shares do not combine: %s" % error) from None
+    if master_id(master) != sealed["master_id"]:
+        zero(master)
+        raise Refused("these shares rebuild another master secret than the one this file was sealed under")
+    return master, sorted(i + 1 for i in indices), parsed[0].identifier     # numbered as the forms are, from 1
+
+
+def _private_key(entry):
+    from cryptography.hazmat.primitives import serialization
+    return serialization.load_der_private_key(base64.b64decode(entry["pkcs8"]), None)
+
+
+# The only commands a session runs, by the keys they take (regalia-kms-24 and -d9 on #115): the root only through
+# regalia-kms's `manifest sign`, the three boot keys only through `uki.py sign`, which makes both PCR 11 signatures and
+# the Secure Boot signature itself and checks each (regalia-kms-1e). Each runs from the regalia-kms tree whose digest
+# the operator types from the ceremony image's build evidence. A key reaches it as an inherited, sealed memfd, its
+# number where the command says {keyfd:NAME}; never a file, never a path.
+PYTHON = "/usr/bin/python3"
+TOOLS = {
+    "manifest": {"module": "deploy.baremetal.manifest", "keys": ("root",),
+                 "required": ("--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}")},
+    "uki": {"module": "deploy.baremetal.uki", "keys": ("pcr-initrd", "pcr-system", "secure-boot"),
+            "required": ("--initrd-key-fd", "{keyfd:pcr-initrd}", "--system-key-fd", "{keyfd:pcr-system}",
+                         "--secure-boot-key-fd", "{keyfd:secure-boot}", "--offline-session", "{session}")},
+}
+PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY")
+SCAN_DIRS = ("/tmp", "/dev/shm")      # beside the session's own directory: where else a tool could write (both RAM there)
+
+
+def tree_digest(root):
+    """The digest of a regalia-kms tree as its package build ships it: every file under deploy/ (no byte-code), sorted
+    by relative path, each as "path NUL sha256 LF" (regalia-kms-1e on #115). A link anywhere in it is refused."""
+    base = os.path.join(root, "deploy")
+    require(os.path.isdir(base) and not os.path.islink(base), "%s has no deploy/ directory" % root)
+    lines = []
+    for here, dirs, files in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__")
+        for name in dirs + files:
+            require(not os.path.islink(os.path.join(here, name)), "%s is a link: the tree is not pinned through links" % os.path.join(here, name))
+        for name in sorted(files):
+            if name.endswith(".pyc"):
+                continue
+            path = os.path.join(here, name)
+            with open(path, "rb") as f:
+                lines.append(b"%s\0%s\n" % (os.path.relpath(path, root).encode(), hashlib.sha256(f.read()).hexdigest().encode()))
+    return hashlib.sha256(b"".join(sorted(lines))).hexdigest()
+
+
+def check_command(command):
+    """The command, as typed: one of TOOLS, run as `/usr/bin/python3 -Es -m <module> sign …`, carrying each required
+    argument once and no placeholder it is not entitled to. Returns (the tool's name, the keys it takes)."""
+    require(command, "--exec needs a command")
+    found = [name for name, tool in TOOLS.items() if list(command[:5]) == [PYTHON, "-Es", "-m", tool["module"], "sign"]]
+    require(found, "--exec runs only %s" % " or ".join("`%s -Es -m %s sign …`" % (PYTHON, t["module"]) for t in TOOLS.values()))
+    tool = TOOLS[found[0]]
+    rest = list(command[5:])
+    pairs = list(zip(tool["required"][::2], tool["required"][1::2]))
+    for flag, value in pairs:
+        require(rest.count(flag) == 1 and rest.index(flag) + 1 < len(rest) and rest[rest.index(flag) + 1] == value,
+                "the %s command must carry %s %s, once" % (found[0], flag, value))
+    allowed = {value for _, value in pairs}
+    stray = [a for a in rest if "{" in a and a not in allowed]
+    require(not stray, "a placeholder this command is not entitled to: %s" % ", ".join(stray))
+    return found[0], tool["keys"]
+
+
+def _memfd(name, pem):
+    """A sealed memfd holding `pem`, rewound: what the tool reads to EOF (regalia-kms-1e requires F_SEAL_WRITE)."""
+    import fcntl
+    fd = os.memfd_create("offline-key-" + name, os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+    try:
+        os.write(fd, bytes(pem))
+        fcntl.fcntl(fd, fcntl.F_ADD_SEALS, fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_GROW | fcntl.F_SEAL_WRITE | fcntl.F_SEAL_SEAL)
+        os.lseek(fd, 0, os.SEEK_SET)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _tee(stream, sink, digest):
+    for chunk in iter(lambda: stream.read(4096), b""):
+        digest.update(chunk)
+        sink.write(chunk)
+        sink.flush()
+
+
+def _leaks(out, since, keys_der):
+    """Files written since the command started, in the session's RAM directory and in SCAN_DIRS, that hold a private
+    key: a PEM marker, or the DER of a key this session opened (regalia-kms-d9 on #115). Named relative to the session
+    directory when inside it, absolute otherwise."""
+    found = []
+    for top in (out,) + tuple(d for d in SCAN_DIRS if os.path.isdir(d)):
+        found += [p for p in _leaks_under(top, since, keys_der) if p not in found]
+    return sorted(os.path.relpath(p, out) if p.startswith(os.path.abspath(out) + os.sep) else p for p in found)
+
+
+def _leaks_under(top, since, keys_der):
+    found = []
+    for here, _, files in os.walk(top):
+        for name in files:
+            path = os.path.abspath(os.path.join(here, name))
+            try:
+                if os.lstat(path).st_mtime < since:
+                    continue
+                with open(path, "rb") as f:
+                    data = f.read(64 << 20)
+            except OSError:
+                continue
+            if any(m in data for m in PRIVATE_MARKERS) or any(der in data for der in keys_der):
+                found.append(path)
+    return found
+
+
+def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs=(), now=None, popen=subprocess.Popen,
+         sinks=None):
+    """A signing session (see the module's docstring). Returns (the session record, its path)."""
+    import threading
+    require(re.fullmatch(r"[A-Za-z][A-Za-z0-9 ._-]{0,63}", who or "") is not None, "--who names the person signing (letters, digits, . _ - and spaces)")
+    require(os.path.isdir(out), "--out %s is not a directory" % out)
+    check_place(out)
+    tool, key_names = check_command(list(command or []))
+    require(re.fullmatch(r"[0-9a-f]{64}", tool_digest or "") is not None, "--tool-digest is the regalia-kms tree's SHA-256 from the image's build evidence")
+    actual = tree_digest(tool_root)
+    require(actual == tool_digest, "the regalia-kms tree at %s is %s, not %s: not the tree the image's evidence names" % (tool_root, actual, tool_digest))
+    for path in outputs:
+        require(not os.path.lexists(path), "--output %s already exists: the command's outputs are recorded, never assumed" % path)
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    master, indices, identifier = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    from cryptography.hazmat.primitives import serialization
+    root = _private_key(bundle["keys"]["root"])
+    pems = {n: bytearray(_private_key(bundle["keys"][n]).private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                                                                       serialization.NoEncryption())) for n in key_names}
+    ders = [base64.b64decode(entry["pkcs8"]) for entry in bundle["keys"].values()]
+    del bundle
+    session_id = secrets.token_hex(16)
+    at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    session = {"schema": SCHEMA_RECORD, "event": "sign", "session": session_id, "keys": list(key_names), "who": who, "tool": tool,
+               "command": list(command), "tool_root": os.path.abspath(tool_root), "tool_digest": tool_digest,
+               "share_indices": indices, "slip39_identifier": identifier, "master_id": sealed["master_id"],
+               "root_entry": {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()},
+               "at": at}
+    fds, hashes = {}, {"stdout": hashlib.sha256(), "stderr": hashlib.sha256()}
+    sinks = sinks or {"stdout": sys.stdout.buffer, "stderr": sys.stderr.buffer}
+    started = time.time() - 1
+    try:
+        for name in key_names:
+            fds[name] = _memfd(name, pems[name])
+        argv = [a.replace("{session}", session_id) for a in command]
+        for name, fd in fds.items():
+            argv = [str(fd) if a == "{keyfd:%s}" % name else a for a in argv]
+        proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tool_root,
+                     env={"PATH": "/usr/bin:/bin", "LC_ALL": "C.UTF-8"}, pass_fds=tuple(fds.values()), close_fds=True)
+        threads = [threading.Thread(target=_tee, args=(getattr(proc, k), sinks[k], hashes[k])) for k in ("stdout", "stderr")]
+        for t in threads:
+            t.start()
+        exit_status = proc.wait()
+        for t in threads:
+            t.join()
+    finally:
+        for fd in fds.values():
+            os.close(fd)
+        for pem in pems.values():
+            zero(pem)
+    session["exit"] = exit_status
+    session["stdout_sha256"], session["stderr_sha256"] = hashes["stdout"].hexdigest(), hashes["stderr"].hexdigest()
+    session["outputs"] = {}
+    for path in outputs:
+        if os.path.isfile(path) and not os.path.islink(path):
+            with open(path, "rb") as f:
+                session["outputs"][os.path.abspath(path)] = hashlib.sha256(f.read()).hexdigest()
+        else:
+            session["outputs"][os.path.abspath(path)] = None
+    session["key_material_found"] = _leaks(out, started, ders)
+    try:                                 # anything the command wrote into the tree it ran from (regalia-kms-d9 on #115)
+        session["tool_digest_after"] = tree_digest(tool_root)
+    except Refused as refusal:
+        session["tool_digest_after"] = "refused: %s" % refusal
+    # recorded first, whatever happened (regalia-kms-d9 on #115): every refusal below names a record that exists
+    record_path = write_record(out, "session-%s-%s" % (at.replace(":", ""), tool), root, session)
+    del root
+    require(exit_status == 0, "the command exited %d: the session is recorded (%s), nothing it wrote is vouched for" % (exit_status, record_path))
+    require(not session["key_material_found"], "KEY MATERIAL LEFT IN %s by the command: %s. Recorded (%s); destroy those files and this RAM "
+            "directory before anything leaves the laptop" % (out, ", ".join(session["key_material_found"]), record_path))
+    require(session["tool_digest_after"] == tool_digest, "the regalia-kms tree changed while the command ran (%s): recorded (%s); "
+            "nothing it wrote is vouched for" % (session["tool_digest_after"], record_path))
+    missing = [path for path, digest in session["outputs"].items() if digest is None]
+    require(not missing, "the command did not write %s: recorded (%s)" % (", ".join(missing), record_path))
+    return session, record_path
+
+
+def write_record(out, stem, root, record):
+    """OUT/<stem>.record.json: `record` signed by the root over RECORD_DOMAIN, never overwriting. Returns the path."""
+    path = os.path.join(out, stem + ".record.json")
+    signature = root.sign(RECORD_DOMAIN + canonical(record))
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(canonical({"record": record, "signature": signature.hex()}) + b"\n")
+        f.flush()
+        os.fsync(f.fileno())
+    return path
 
 
 def verify_record(document):
@@ -382,6 +661,17 @@ def main(argv=None):
     w.add_argument("--sealed", required=True)
     w.add_argument("--shares-file", required=True)
     w.add_argument("--partial", action="store_true", help="at least k forms, the rest named as not checked")
+    s = sub.add_parser("sign", help="a signing session: the k shares on standard input, one per line")
+    s.add_argument("--sealed", required=True)
+    s.add_argument("--who", required=True, help="the person signing, as recorded")
+    s.add_argument("--out", required=True, help="the session's RAM directory, where its record goes")
+    s.add_argument("--tool-root", required=True, help="the regalia-kms tree the command runs from")
+    s.add_argument("--tool-digest", required=True, help="that tree's digest, from the ceremony image's build evidence")
+    s.add_argument("--output", action="append", default=[], help="a file the command must write (its SHA-256 is recorded)")
+    s.add_argument("--exec", nargs=argparse.REMAINDER, dest="exec_argv", required=True,
+                   help="/usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …, last on the line")
+    t = sub.add_parser("tree-digest", help="the digest of a regalia-kms tree, as --tool-digest takes it")
+    t.add_argument("--root", required=True)
     v = sub.add_parser("verify-record")
     v.add_argument("--record", required=True)
     args = ap.parse_args(argv)
@@ -401,6 +691,12 @@ def main(argv=None):
                   % ",".join(str(i + 1) for i in checked))
             if missing:
                 print("FORMS NOT CHECKED %s (--partial)" % ",".join(str(i + 1) for i in missing))
+        elif args.command == "sign":
+            session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.exec_argv, args.tool_root, args.tool_digest, args.output)
+            print("SIGNED by %s with %s (shares %s), session %s; record %s" % (session["tool"], ", ".join(session["keys"]),
+                  ",".join(str(i) for i in session["share_indices"]), session["session"], path))
+        elif args.command == "tree-digest":
+            print(tree_digest(args.root))
         else:
             with open(args.record, "rb") as f:
                 record = verify_record(json.loads(f.read(1 << 20)))
