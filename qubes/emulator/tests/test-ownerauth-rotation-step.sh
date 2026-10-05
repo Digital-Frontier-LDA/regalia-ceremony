@@ -255,6 +255,18 @@ out="$(leave "$S1" "")"
 grep -q "RC=1" <<< "$out" && grep -q "changed since its last burn was read back" <<< "$out" && P "quit with a state changed since its burn: refused (d9)" || F "quit unburned: $(tail -3 <<< "$out")"
 out="$(leave "$S1" "LEAVE WITHOUT BURNING")"
 grep -q "RC=0" <<< "$out" && grep -q "leaving without a burned state" <<< "$out" && P "... unless LEAVE WITHOUT BURNING is typed" || F "typed leave: $(tail -3 <<< "$out")"
+ended(){ # ended WORK: the menu's input ends; prints RC and whether the workdir is still there
+  WORKDIR="$1" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; unset CEREMONY_STATE_DIR
+    trap "echo SHREDDED" EXIT                      # stands in for cleanup(): menu_input_ended must clear it
+    menu_input_ended; echo "RETURNED"' 2>&1 < /dev/null; echo "RC=$?"
+}
+out="$(ended "$S1")"
+grep -q "RC=3" <<< "$out" && ! grep -q "SHREDDED\|RETURNED" <<< "$out" && grep -q "the workdir is KEPT, not shredded" <<< "$out" && [ -d "$S1/state" ] \
+  && P "input ending with the state unburned: the workdir is kept, exit 3 (d9)" || F "EOF unburned: $(tail -4 <<< "$out")"
+out="$(ended "$S2")"
+grep -q "RETURNED" <<< "$out" && P "input ending with no signing state: the menu ends as before" || F "EOF no state: $(tail -3 <<< "$out")"
 out="$(leave "$S2" "")"
 grep -q "RC=0" <<< "$out" && P "a session with no signing state quits freely" || F "no state: $(tail -3 <<< "$out")"
 

@@ -2668,6 +2668,16 @@ step_state_readback() {
     || { err "the disc's state is NOT this session's (reason above): do NOT write the sheet; burn the disc again."; return 1; }
   sha256sum < "$sd/signing-record.jsonl" | cut -c1-64 > "$WORK/.state-burned"
 }
+# menu_input_ended: the menu's input ended (a closed terminal, an exhausted pipe), so no one can answer. With a signing
+# state not yet burned and read back, the workdir is KEPT (no shred) and the script exits non-zero, so an operator who
+# comes back can still burn it; an abandoned RAM workdir dies with the qube anyway (d9 on #139). Otherwise it returns.
+menu_input_ended() {
+  STATE_LEAVE="" CEREMONY_SIMULATE=1 state_may_leave </dev/null >/dev/null 2>&1 && return 0
+  err "input ended with the root's signing state NOT burned and read back (step w): the workdir is KEPT, not shredded ($WORK)."
+  err "Burn the archive disc and run step w from a new menu on this workdir, or power the qube off to discard it."
+  trap - EXIT INT TERM
+  exit 3
+}
 # state_may_leave: quitting shreds the workdir; a signing state changed since its last read-back burn would be lost
 # with it, so leaving then takes a typed "LEAVE WITHOUT BURNING" (d9 on #139)
 state_may_leave() {
@@ -3260,8 +3270,7 @@ MENU
     printf '   q) quit (workdir is shredded)\n'
     # Break on EOF (Ctrl-D, or an exhausted piped stdin) so the menu never spins forever on
     # empty reads — a non-interactive run must terminate, not hang.
-    read -r -p "   > " choice || { STATE_LEAVE="" CEREMONY_SIMULATE=1 state_may_leave </dev/null >/dev/null 2>&1 \
-                                       || err "input ended with the signing state NOT burned and read back (step w): it is lost with the workdir."; break; }
+    read -r -p "   > " choice || { menu_input_ended; break; }
     case "$choice" in
       0) step_set_pins;;
       1) step_yubikey_ops;;
