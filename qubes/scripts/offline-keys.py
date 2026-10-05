@@ -578,7 +578,9 @@ def check_command(command):
         name = a.split("=", 1)[0]
         require(a != "--", "the %s command must not carry a bare --" % found[0])
         # a short option: argparse takes `-s x`, `-sx` and clustered flags, untouched by allow_abbrev. None of the tools
-        # defines one but argparse's -h, so any single-dash token is refused (d9 on #136)
+        # defines one but argparse's -h, so any single-dash token is refused (d9 on #136). That also refuses a VALUE that
+        # starts with "-" ("-" for stdin, a negative number): no value here can (fds, paths, session ids), and a future
+        # option that takes one is a deliberate change to this check
         require(not (a.startswith("-") and not a.startswith("--") and len(a) > 1),
                 "the %s command carries %s, a short option: every argument here is a long one" % (found[0], a))
         for flag, _ in pairs:
