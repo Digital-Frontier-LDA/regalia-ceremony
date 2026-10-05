@@ -95,8 +95,8 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     run (#111).
   - The release key's import onto the release cards is not implemented (#124).
   - The card-ceremony record's rules and verifier are in review (#121). Its writer, `offline-keys.py card-record`, is
-    in review too. It signs inputs that no tool makes from the cards yet, and a lost state directory can't be
-    rebuilt yet (regalia-kms#406).
+    in review too. It signs inputs that no tool makes from the cards yet. A lost state directory is rebuilt from the
+    disc (regalia-kms#406); before genesis only the paper sheet bounds that.
   - Nothing produces OpenPGP attestation certificates yet, so a record's "attested" has no certificate behind it
     (#127).
   - The release key's tool is in review (#126), modelled against a stand-in card only.
