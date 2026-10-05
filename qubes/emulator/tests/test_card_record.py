@@ -185,6 +185,12 @@ class Vectors(unittest.TestCase):
             both = [json.loads(line) for line in f]
         self.assertEqual(ok.card_record_current(docs["sequence-2.json"], root, both)["sequence"], 2)
         self.assertEqual(ok.card_record_current(docs["valid.json"], root, both[:1])["sequence"], 1)
+        # the K_A signer's lines (regalia-kms#464) between card records are objects with a kind, never counted (d9, 1e)
+        anchors = [{"kind": k, "node_id": "a", "digest": "ab" * 32, "key": root, "at": "2026-10-05T00:00:00Z"}
+                   for k in ("anchor-approval", "anchor-first", "anchor-increment")]
+        self.assertEqual(ok.card_record_current(docs["sequence-2.json"], root, both[:1] + anchors + both[1:])["sequence"], 2)
+        with self.assertRaisesRegex(ok.Refused, re.escape("not the newest the root signed (sequence 1 of 2)")):
+            ok.card_record_current(docs["valid.json"], root, anchors + both[:1] + anchors + both[1:] + anchors)
         for document, lines, reason in (
                 (docs["valid.json"], both, "this card record is not the newest the root signed (sequence 1 of 2)"),
                 (docs["sequence-2.json"], both[1:], "the signing record's card-record lines are not 1..1 without a gap"),
@@ -327,9 +333,12 @@ class Rules(unittest.TestCase):
             ok.append_card_record_line(d, first)                      # no marker: the root is unknown
         marker(d, first["root_entry"]["key"])
         ok.append_card_record_line(d, first)
+        with open(os.path.join(d, ok.SIGNING_RECORD), "a") as f:           # the K_A signer's lines between them (#464)
+            for kind in ("anchor-approval", "anchor-first", "anchor-increment"):
+                f.write(json.dumps({"kind": kind, "node_id": "a", "at": "2026-10-05T00:00:00Z"}) + "\n")
         ok.append_card_record_line(d, second)
         with open(os.path.join(d, ok.SIGNING_RECORD)) as f:
-            lines = [json.loads(line) for line in f]
+            lines = [json.loads(line) for line in f if json.loads(line)["kind"] == "card-record"]
         self.assertEqual([(l["kind"], l["sequence"], l["digest"]) for l in lines],
                          [("card-record", 1, ok.card_record_digest(first)), ("card-record", 2, ok.card_record_digest(second))])
         self.assertEqual(oct(os.stat(os.path.join(d, ok.SIGNING_RECORD)).st_mode & 0o777), "0o600")
