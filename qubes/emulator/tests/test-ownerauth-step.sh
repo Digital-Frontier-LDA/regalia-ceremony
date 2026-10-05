@@ -214,12 +214,13 @@ drill(){ # drill WORK [EXTRA]: EXTRA is shell run before the drill (a stand-in)
     pause(){ :; }; ask(){ return 0; }; PRINTER=""
     HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
     eval "$EXTRA"
-    ownerauth_drill; echo "RC=$?"; trap -p' 2>&1
+    before="$(trap -p)"; ownerauth_drill; echo "RC=$?"
+    [ "$(trap -p)" = "$before" ] && echo "TRAPS UNCHANGED" || { echo "TRAPS CHANGED"; trap -p; }' 2>&1
 }
 out="$(drill "$W")"
 grep -q "RC=0" <<< "$out" && grep -q "owner-auth drill passed for every node (a b c)" <<< "$out" && [ ! -e "$W/ownerauth-recovery.key" ] \
   && P "the drill opens every node's recovery copy, checks each, and leaves no identity file" || F "drill: $(tail -6 <<< "$out")"
-! grep -q "^trap" <<< "$out" && P "the drill leaves the session's traps as they were" || F "traps left: $(grep '^trap' <<< "$out")"
+grep -q "TRAPS UNCHANGED" <<< "$out" && P "the drill leaves the session's traps as they were" || F "traps changed: $(grep '^trap' <<< "$out")"
 cp "$W/ownerauth/ownerauth-c.bg.sops" "$T/c.keep"; cp "$W/ownerauth/ownerauth-a.bg.sops" "$W/ownerauth/ownerauth-c.bg.sops"
 out="$(drill "$W")"
 grep -q "RC=1" <<< "$out" && grep -q "owner-auth drill FAILED for node c" <<< "$out" && grep -q "node b's recovery copy opens" <<< "$out" \
