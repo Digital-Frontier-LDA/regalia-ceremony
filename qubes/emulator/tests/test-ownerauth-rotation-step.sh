@@ -89,9 +89,14 @@ PY2
 }
 
 
-later_session(){ # a session after the first ceremony: its sealed set moved to a "disc", the card record kept
+later_session(){ # a session after the first ceremony: its sealed set and its owner authorizations on a "disc"
   local w; w="$(new_work)"
-  mkdir -p "$w.disc/offline" && mv "$w/offline/offline-keys.sealed.json" "$w.disc/offline/" && rm -rf -- "$w/offline"
+  mkdir -p "$w.disc/offline" "$w.disc/ownerauth"
+  python3 -Es "$SCRIPTS/offline-keys.py" ownerauth --sealed "$w/offline/offline-keys.sealed.json" --nodes a,b,c --yk-keys "$w/cards/owner-cards.gpg" \
+      --card-record "$w/cards/card-record-1.record.json" --state-dir "$w/state" --out "$w.disc/ownerauth" < "$w/two-shares" >/dev/null 2>&1 \
+    || { echo "later_session: the first set's owner authorizations were not made" >&2; return 1; }
+  mv "$w/offline/offline-keys.sealed.json" "$w.disc/offline/" && rm -rf -- "$w/offline"
+  sleep 1                                       # the rotation's record is later than the current one, to the second
   printf '%s' "$w"
 }
 rotate(){ # rotate WORK [EXTRA]: step t, the operator inserting card1 then card2; EXTRA is shell run first (a stand-in)
@@ -99,6 +104,7 @@ rotate(){ # rotate WORK [EXTRA]: step t, the operator inserting card1 then card2
     source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
     pause(){ :; }; ask(){ return 0; }; PRINTER=""
     HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"; OA_ROTATE_SEALED="$WORK.disc/offline/offline-keys.sealed.json"
+    OA_ROTATE_CURRENT="$WORK.disc/ownerauth/ownerauth.record.json"
     oa_insert_card(){ if [ "$1" = 1 ]; then OA_SERIAL=1001; export CARD_HOME="$T/card1"; else OA_SERIAL=1002; export CARD_HOME="$T/card2"; fi
                       export CARD_SERIAL="$OA_SERIAL"; }
     eval "$EXTRA"
@@ -124,7 +130,12 @@ done
 [ ! -e "$W/offline" ] && [ ! -e "$W/ownerauth" ] && [ "$(stat -c %a "$W/rotation/offline-keys.sealed.json")" = 600 ] \
   && P "the sealed copy is in rotation/ (0600), and the session has no offline/ or ownerauth/ of its own" || F "layout: $(ls "$W")"
 grep -q "hsm-backups/ownerauth/rotation-20[0-9-]*T[0-9]*Z/, beside the set it replaces, never over it" <<< "$out" \
-  && grep -q "enrol ownerauth --rotate-from" <<< "$out" && P "it says where to commit and what each node runs" || F "instructions: $(grep -i 'commit\|enrol' <<< "$out")"
+  && grep -qF "cd /usr/lib/regalia-kms && (gpg --decrypt <current set>/ownerauth-<n>.yk.gpg; gpg --decrypt ownerauth-<n>.yk.gpg) | sudo python3 -Es -m deploy.baremetal.enrol ownerauth --rotate-from <current set>/ownerauth.record.json --record ownerauth.record.json --node-id <n> --root-key <root>" <<< "$out" \
+  && grep -qF "enrol ownerauth --check --adopt --record <current set>/ownerauth.record.json" <<< "$out" \
+  && P "it says where to commit, and each node's whole command (current value first, then new; the one-time adopt)" || F "instructions: $(grep -i 'commit\|enrol' <<< "$out")"
+cur_at="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["record"]["at"])' "$W.disc/ownerauth/ownerauth.record.json")"
+new_at="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["record"]["at"])' "$W/ownerauth-rotation/ownerauth.record.json")"
+[[ "$new_at" > "$cur_at" ]] && P "the new record is later than the current one ($new_at > $cur_at)" || F "at: $new_at vs $cur_at"
 out2="$(rotate "$W")"
 grep -q "RC=0" <<< "$out2" && grep -q "already proven in this session" <<< "$out2" && ! grep -q "drill passed" <<< "$out2" \
   && P "run again: nothing is made or drilled twice" || F "rerun: $(tail -5 <<< "$out2")"
@@ -133,10 +144,11 @@ hdr "a second rotation from the same disc: fresh values, a later record"
 W2="$(later_session)"
 cp "$W.disc/offline/offline-keys.sealed.json" "$W2.disc/offline/offline-keys.sealed.json"
 cp "$W/two-shares" "$W2/two-shares"; cp -r "$W/state/." "$W2/state/"; cp "$W/cards/"* "$W2/cards/"
+cp "$W/ownerauth-rotation/ownerauth.record.json" "$W2.disc/ownerauth/ownerauth.record.json"   # the first rotation is now current
 sleep 1
 out="$(rotate "$W2")"
 grep -q "RC=0" <<< "$out" && [ "$(checks "$W/ownerauth-rotation/ownerauth.record.json")" != "$(checks "$W2/ownerauth-rotation/ownerauth.record.json")" ] \
-  && P "the same sealed set, another rotation: every node's check value is new" || F "second rotation: $(tail -5 <<< "$out")"
+  && P "a second rotation, from the first one's record: every node's check value is new" || F "second rotation: $(tail -5 <<< "$out")"
 
 hdr "the archive: the rotation staged beside the old set; a real burn waits for the proof and the drill"
 arch "$W" 1 > "$T/arch.out"
@@ -158,6 +170,25 @@ W4="$(later_session)"
 out="$(rotate "$W4" 'oa_insert_card(){ OA_SERIAL=1001; export CARD_HOME="$T/stranger" CARD_SERIAL=1001; }')"
 out="$(arch "$W4" 0)"
 grep -q "RC=1" <<< "$out" && grep -q "the rotation is not proven" <<< "$out" && P "unproven by the cards: a real burn is refused" || F "unproven archive: $(tail -4 <<< "$out")"
+
+hdr "the current record and this laptop's clock, before the root signs anything (95 on #137)"
+W8="$(later_session)"
+out="$(rotate "$W8" 'oa_utc_now(){ echo 2020-01-01T00:00:00Z; }')"
+grep -q "RC=1" <<< "$out" && grep -q "this laptop's clock (2020-01-01T00:00:00Z) is not later than the current record's" <<< "$out" && [ ! -e "$W8/ownerauth-rotation" ] \
+  && P "a clock behind the current record: refused, nothing made" || F "clock behind: $(tail -4 <<< "$out")"
+at8="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["record"]["at"])' "$W8.disc/ownerauth/ownerauth.record.json")"
+out="$(rotate "$W8" "oa_utc_now(){ echo $at8; }")"
+grep -q "RC=1" <<< "$out" && grep -q "is not later than the current record's ($at8)" <<< "$out" && [ ! -e "$W8/ownerauth-rotation" ] \
+  && P "a clock equal to the current record's at: refused (strictly later)" || F "clock equal: $(tail -4 <<< "$out")"
+W9="$(later_session)"; W10="$(later_session)"
+out="$(rotate "$W9" "OA_ROTATE_CURRENT=$W10.disc/ownerauth/ownerauth.record.json")"
+grep -q "RC=1" <<< "$out" && grep -q "the record is signed by another root than this sealed set's" <<< "$out" \
+  && grep -q "the current record is not this root's owner-authorization record" <<< "$out" && [ ! -e "$W9/ownerauth-rotation" ] && [ ! -e "$W9/rotation/current.record.json" ] \
+  && P "another root's record as the current one: refused, and its copy removed" || F "other root: $(tail -4 <<< "$out")"
+ln -s "$W9.disc/ownerauth/ownerauth.record.json" "$T/link.current.json"
+out="$(rotate "$W9" 'OA_ROTATE_CURRENT="$T/link.current.json"')"
+grep -q "RC=1" <<< "$out" && grep -q "is not the current record (a regular file, not a link)" <<< "$out" && [ ! -e "$W9/ownerauth-rotation" ] \
+  && P "a link given as the current record: refused" || F "current link: $(tail -3 <<< "$out")"
 
 hdr "the preconditions"
 W5="$(new_work)"

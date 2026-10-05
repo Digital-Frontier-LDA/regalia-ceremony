@@ -98,7 +98,8 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
   - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed
     file, but each node's switch is regalia-kms's `enrol ownerauth --rotate-from`, which is in review there. Neither
     side has run on hardware. The sealed file is authenticated only by the shares opening it; the step does not check
-    it against the archived offline-keys record.
+    it against the archived offline-keys record. A laptop clock set behind the current record is refused before
+    anything is signed; one set AHEAD passes both sides (regalia-kms#461).
   - The tool's own docstring lists its limitations in full.
 - **The laptop-side YubiKeys (D30):**
   - No tool makes the developer cards' keys yet. That step waits on the D30.6 bench measurements, which have not

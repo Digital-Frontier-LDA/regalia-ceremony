@@ -2701,6 +2701,13 @@ oa_rotate_sealed_in() {
   read -r -p "   the archived offline-keys.sealed.json (the disc mounted read-only, e.g. /mnt/offline/offline-keys.sealed.json): " OA_ROTATE_PATH
   printf '%s' "$OA_ROTATE_PATH"
 }
+oa_rotate_current_in() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${OA_ROTATE_CURRENT:-}" ]; then printf '%s' "$OA_ROTATE_CURRENT"; return; fi
+  read -r -p "   the nodes' CURRENT ownerauth.record.json (the newest archived set, from hsm-backups/ownerauth/): " OA_ROTATE_PATH
+  printf '%s' "$OA_ROTATE_PATH"
+}
+# oa_utc_now: this laptop's clock, in the records' form (a stand-in in the tests)
+oa_utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 step_ownerauth_rotate() {
   b "Owner-authorization ROTATION — new TPM owner auths for the enrolled KMS hosts, to the current owner cards (#135)"
   local dir="$WORK/ownerauth-rotation" sealed="$WORK/rotation/offline-keys.sealed.json" src
@@ -2712,13 +2719,33 @@ step_ownerauth_rotate() {
     [ -n "$src" ] && [ -f "$src" ] && [ ! -L "$src" ] || { err "'$src' is not the archived sealed file (a regular file, not a link): nothing was made."; return 1; }
     ( umask 077; mkdir -p "$WORK/rotation" && cp -- "$src" "$sealed" ) || { err "the sealed file could not be copied into $WORK/rotation."; return 1; }
   fi
+  # the set it replaces, checked as this root's, and this laptop's clock strictly after it, BEFORE the root signs: each
+  # node refuses a record not newer than its current one, so a clock set behind is caught here, not at the nodes (95)
+  if [ ! -e "$dir/ownerauth.record.json" ]; then
+    if [ ! -s "$WORK/rotation/current.record.json" ]; then
+      src="$(oa_rotate_current_in)"
+      [ -n "$src" ] && [ -f "$src" ] && [ ! -L "$src" ] || { err "'$src' is not the current record (a regular file, not a link): nothing was made."; return 1; }
+      ( umask 077; cp -- "$src" "$WORK/rotation/current.record.json" ) || { err "the current record could not be copied into $WORK/rotation."; return 1; }
+    fi
+    local current now
+    current="$(python3 -Es "$HERE/offline-keys.py" ownerauth-current --record "$WORK/rotation/current.record.json" --sealed "$sealed")" \
+      || { rm -f -- "$WORK/rotation/current.record.json"; err "the current record is not this root's owner-authorization record (reason above): nothing was made."; return 1; }
+    current="${current#CURRENT }"; current="${current%% *}"; now="$(oa_utc_now)"
+    [[ "$now" > "$current" ]] \
+      || { err "this laptop's clock ($now) is not later than the current record's ($current): every node would refuse the new record. Set the clock; nothing was made."; return 1; }
+  fi
   ownerauth_make "$dir" "$sealed" "$WORK/ownerauth-rotation-gnupg" || return 1
   if [ ! -e "$dir/drill-passed" ]; then
     ownerauth_drill "$dir" "$sealed" || { err "the new recovery copies did NOT pass the drill: this rotation is not to be used or burned."; return 1; }
     : > "$dir/drill-passed"
   fi
-  info "rotation made and proven. On EACH node, with its CURRENT record and this one (regalia-kms enrol ownerauth --rotate-from):"
-  show "enrol ownerauth --rotate-from <the node's current ownerauth.record.json> --record ownerauth.record.json --node-id <node> --root-key <root>"
+  info "rotation made and proven. On EACH node <n>, from a copy of both sets, the CURRENT value first and then the NEW one on stdin"
+  info "(regalia-kms#456; the owner card decrypts each envelope):"
+  # isolation-exempt: printed for the operator to run ON A NODE, where -m finds the package from /usr/lib/regalia-kms (as the units' WorkingDirectory)
+  show "cd /usr/lib/regalia-kms && (gpg --decrypt <current set>/ownerauth-<n>.yk.gpg; gpg --decrypt ownerauth-<n>.yk.gpg) | sudo python3 -Es -m deploy.baremetal.enrol ownerauth --rotate-from <current set>/ownerauth.record.json --record ownerauth.record.json --node-id <n> --root-key <root>"
+  info "A node set or checked before regalia-kms#456 knows no current record: once, before its rotation, with the CURRENT value on stdin:"
+  # isolation-exempt: printed for the operator to run ON A NODE, where -m finds the package from /usr/lib/regalia-kms (as the units' WorkingDirectory)
+  show "cd /usr/lib/regalia-kms && gpg --decrypt <current set>/ownerauth-<n>.yk.gpg | sudo python3 -Es -m deploy.baremetal.enrol ownerauth --check --adopt --record <current set>/ownerauth.record.json --node-id <n> --root-key <root>"
   ownerauth_commit_list "$dir" "hsm-backups/ownerauth/rotation-$(oa_record_at "$dir")/, beside the set it replaces, never over it"
 }
 # oa_record_at DIR: the root-signed record's `at`, as the rotation's directory name (colons left out)
