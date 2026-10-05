@@ -530,7 +530,9 @@ TOOLS = {
             "required": ("--initrd-key-fd", "{keyfd:pcr-initrd}", "--system-key-fd", "{keyfd:pcr-system}",
                          "--secure-boot-key-fd", "{keyfd:secure-boot}", "--offline-session", "{session}"),
             # uki.py sign's own options that are prefixes of a required flag: argparse matches them exactly, never as an
-            # abbreviation of it, so they cannot override it (--initrd is the image's required input)
+            # abbreviation of it, so they cannot override it (--initrd is the image's required input). Correct only while
+            # each name is a real option of the tool; the tools set allow_abbrev=False (regalia-kms#466, #464), so a stale
+            # entry cannot become an abbreviation (d9 on #136)
             "exact": ("--initrd", "--initrd-key", "--system-key", "--secure-boot-key")},
 }
 PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY")
@@ -575,6 +577,10 @@ def check_command(command):
     for a in rest:
         name = a.split("=", 1)[0]
         require(a != "--", "the %s command must not carry a bare --" % found[0])
+        # a short option: argparse takes `-s x`, `-sx` and clustered flags, untouched by allow_abbrev. None of the tools
+        # defines one but argparse's -h, so any single-dash token is refused (d9 on #136)
+        require(not (a.startswith("-") and not a.startswith("--") and len(a) > 1),
+                "the %s command carries %s, a short option: every argument here is a long one" % (found[0], a))
         for flag, _ in pairs:
             require(not (a.startswith("--") and name == flag and "=" in a),
                     "the %s command gives %s with '=': each required argument stands alone, once" % (found[0], flag))

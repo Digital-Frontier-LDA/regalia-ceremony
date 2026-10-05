@@ -473,6 +473,10 @@ if "nooutput" not in args:
             ("carries --offline, a prefix of --offline-session", manifest + ["--offline", "x"]),
             ("carries --system-key-f, a prefix of --system-key-fd", self.command("uki") + ["--system-key-f", "0"]),
             ("must not carry a bare --", manifest + ["--"]),
+            # short options, which allow_abbrev does not touch (d9 on #136): a fabricated -s alias in each form, and -h
+            ("carries -s, a short option", manifest + ["-s", "pcr-system"]),
+            ("carries -spcr-system, a short option", manifest + ["-spcr-system"]),
+            ("carries -h, a short option", manifest + ["-h"]),
         ]
         for reason, command in cases:
             with self.assertRaisesRegex(ok.Refused, re.escape(reason)):
