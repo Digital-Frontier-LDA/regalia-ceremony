@@ -95,8 +95,10 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
   - The root's signing state lives in the session's RAM (`$WORK/state`) and travels on the archive disc (`state/`),
     since no ceremony profile persists anything. A later session restores it from the newest disc. The sheet's
     session count is typed, and an older disc is refused by name; other discs are compared, so a newer one or a fork
-    is refused; after genesis the chain's pin is checked. The disc's readback of `state/` is the archive's own
-    checksum readback, run by the operator. Two sessions that restore the same disc before genesis can still fork;
+    is refused; after genesis the chain's pin is checked (required then). The sheet takes the session count
+    only from step w, after the disc's `state/` reads back equal (qubes/README.md, "The root's signing state between
+    sessions"); the burn and its readback themselves are run by the operator, so nothing forces step w before the
+    session is left. Two sessions that restore the same disc before genesis can still fork;
     only the sheet bounds that (as regalia-kms#406 accepts). The card-record writer has no ceremony step yet (#111),
     so the first ceremony's state is not made by `ceremony.sh` either.
   - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed

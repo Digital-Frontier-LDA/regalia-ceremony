@@ -2020,6 +2020,31 @@ def state_status(state_dir, sealed_path):
     return len(session_lines_of(data, lines, root)), _newest_by_kind(lines)
 
 
+def after_genesis(lines):
+    """Genesis has run when the log holds a manifest signature that verified (regalia-kms manifest.py's line: kind
+    "manifest", verified true). One that did not verify made no chain, so it does not count."""
+    return any(isinstance(line, dict) and line.get("kind") == "manifest" and line.get("verified") is True for line in lines)
+
+
+STATE_FILES = (SIGNING_STATE, SIGNING_RECORD, REBUILD_RECORD)
+
+
+def state_burned(state_dir, disc_dir, sealed_path):
+    """The disc's state/ (mounted read-only) read back equal to this session's state, file by file: only then does the
+    sheet take the session count, so the sheet always names a burned disc (d9 on #139). Returns (S, newest by kind)."""
+    sessions, newest = state_status(state_dir, sealed_path)
+    for name in STATE_FILES:
+        mine, theirs = os.path.join(state_dir, name), os.path.join(disc_dir, name)
+        require(os.path.lexists(mine) == os.path.lexists(theirs), "%s is %s on the disc but %s in this session: not this session's state"
+                % (name, "present" if os.path.lexists(theirs) else "missing", "present" if os.path.lexists(mine) else "missing"))
+        if os.path.lexists(mine):
+            require(not os.path.islink(theirs), "the disc's %s is a link" % name)
+            with open(mine, "rb") as a, open(theirs, "rb") as b:
+                require(a.read(MAX_SIGNING_RECORD + 1) == b.read(MAX_SIGNING_RECORD + 1),
+                        "the disc's %s is not this session's: do NOT write the sheet; burn the disc again" % name)
+    return sessions, newest
+
+
 def state_open(state_dir, sealed_path, typed, others=(), pin=None, now=None):
     """A restored state directory opened for this session: its session count must be `typed` (the sheet's), every
     other disc's log given in `others` (their state directories) a prefix of it, and, after genesis, `pin` (the
@@ -2031,6 +2056,10 @@ def state_open(state_dir, sealed_path, typed, others=(), pin=None, now=None):
     require(sessions == typed, "this disc's state is session %d, and the sheet says %d: %s. Nothing was signed"
             % (sessions, typed, "an OLDER disc; restore the newest one" if sessions < typed else "a disc newer than the sheet; find the newer sheet"))
     data = _signing_record_bytes(state_dir, os.stat(state_dir))
+    # after genesis the chain's pin is the second, independent check, for when the sheet itself is wrong: required (d9)
+    require(pin is not None or not after_genesis(_signing_record_lines(data)),
+            "this log holds a verified manifest signature (genesis has run): give --chain, whose card_record pin is the "
+            "second check after genesis. Nothing was signed")
     for other in others:
         theirs = _signing_record_bytes(other, _marker_for(other, root))
         require(data.startswith(theirs) or theirs.startswith(data),
@@ -2120,6 +2149,11 @@ def main(argv=None):
     so.add_argument("--chain", help="after genesis: the chain (from any node); its card_record pin is computed by regalia-kms's verifier")
     so.add_argument("--tool-root", help="with --chain: the image's regalia-kms tree")
     so.add_argument("--tool-digest", help="with --chain: that tree's digest, from the image's build evidence")
+    sb = sub.add_parser("state-burned", help="after the readback: the disc's state/ equal to this session's, and only then "
+                        "the session count for the sheet")
+    sb.add_argument("--state-dir", required=True)
+    sb.add_argument("--disc", required=True, help="the burned disc's state/ directory, mounted read-only")
+    sb.add_argument("--sealed", required=True)
     ss = sub.add_parser("state-status", help="the state directory's session count and newest line of each kind, for the sheet")
     ss.add_argument("--state-dir", required=True)
     ss.add_argument("--sealed", required=True)
@@ -2170,7 +2204,7 @@ def main(argv=None):
         elif args.command == "ownerauth-check":
             ownerauth_check_value(args.record, args.node, sys.stdin, args.sealed)
             print("OWNERAUTH %s: the value matches the check value of a record this sealed set's root signed" % args.node)
-        elif args.command in ("state-open", "state-status"):
+        elif args.command in ("state-open", "state-status", "state-burned"):
             if args.command == "state-open":
                 pin = None
                 if args.chain:
@@ -2179,6 +2213,11 @@ def main(argv=None):
                         pin = chain_pin(args.chain, root_entry_of(json.loads(f.read(1 << 20))), args.tool_root, args.tool_digest)
                 sessions, newest = state_open(args.state_dir, args.sealed, args.session, args.compare, pin)
                 print("SESSION %d opened (the disc's state was session %d%s)" % (sessions, sessions - 1, ", matching the chain's pin" if pin else ""))
+                print("Do NOT write session %d on the sheet yet: only after the archive's readback (ceremony.sh step w)" % sessions)
+            elif args.command == "state-burned":
+                sessions, newest = state_burned(args.state_dir, args.disc, args.sealed)
+                print("STATE READ BACK from the disc, equal to this session's")
+                print("WRITE ON THE SHEET AND ON THE DISC LABEL: SESSIONS %d" % sessions)
             else:
                 sessions, newest = state_status(args.state_dir, args.sealed)
                 print("SESSIONS %d" % sessions)

@@ -2649,9 +2649,23 @@ state_restore() {
 state_commit_note() {
   local sd; sd="$(state_dir)"
   [ -e "$sd/regalia-signing-state.json" ] || return 0
-  warn "WRITE ON THE SHEET AND ON THE DISC LABEL the state below (the next session types its SESSIONS count):"
+  info "the signing state is staged in state/ (its newest lines below):"
   python3 -Es "$HERE/offline-keys.py" state-status --state-dir "$sd" --sealed "$1" | sed 's/^/     /'
+  warn "Do NOT write the session count on the sheet yet: after the disc's readback, run step w with its state/ mounted."
   warn "COMMIT it too (hsm-backups/state/): $(cd "$sd" && ls | tr '\n' ' ')"
+}
+# step w: after the archive's readback, the disc's state/ compared with this session's; only then the sheet's count.
+# So the sheet always names a burned, read-back disc, and a session that fails before its burn strands nothing (d9)
+step_state_readback() {
+  b "The disc's signing state, read back: what the sheet and the disc label take"
+  local sd disc sealed
+  sd="$(state_dir)"
+  [ -e "$sd/regalia-signing-state.json" ] || { info "no signing state in this session: nothing for the sheet."; return 0; }
+  sealed="$WORK/offline/offline-keys.sealed.json"; [ -s "$sealed" ] || sealed="$WORK/rotation/offline-keys.sealed.json"
+  disc="$(state_ask "the BURNED disc's state directory, mounted read-only (e.g. /mnt/state)" STATE_READBACK)"
+  [ -n "$disc" ] && [ -d "$disc" ] && [ ! -L "$disc" ] || { err "'$disc' is not the disc's state directory: nothing for the sheet."; return 1; }
+  python3 -Es "$HERE/offline-keys.py" state-burned --state-dir "$sd" --disc "$disc" --sealed "$sealed" \
+    || { err "the disc's state is NOT this session's (reason above): do NOT write the sheet; burn the disc again."; return 1; }
 }
 
 # ---- step a: the KMS hosts' TPM owner authorizations (regalia-kms#242, regalia-ceremony#122) -------------------------
@@ -3224,6 +3238,7 @@ main() {
    6) Print break-glass recovery instruction card (DVD-case sized)
    o) Offline keys: the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
    a) Owner authorizations: each KMS host's TPM owner auth, to both owner cards + its SOPS recovery copy (after o, card record)
+   w) After the archive's readback: the disc's signing state checked, then what the sheet and the disc label take
    t) Owner-auth rotation: new owner auths for enrolled hosts, from the archived sealed set (a later session; card record)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
@@ -3246,6 +3261,7 @@ MENU
       o|O) step_offline_keys;;
       a|A) step_ownerauth;;
       t|T) step_ownerauth_rotate;;
+      w|W) step_state_readback;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
       q|Q) break;;
       *) warn "pick 1-9 or q";;

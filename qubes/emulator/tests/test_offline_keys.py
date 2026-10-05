@@ -1164,6 +1164,40 @@ class StateDir(Case):
         with self.assertRaisesRegex(ok.Refused, "the chain pins card record 2 .* this disc's newest is 1"):
             ok.state_open(self.disc("b"), self.sealed, 0, pin=(2, "ab" * 32))
 
+    def test_after_genesis_the_chain_is_required(self):
+        """d9 on #139: once the log holds a verified manifest signature, a restore without the chain's pin is refused;
+        a manifest signature that did not verify made no chain and does not count."""
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+        newest = ok.state_status(self.state, self.sealed)[1]["card-record"]
+        line = {"kind": "manifest", "epoch": 1, "digest": "cd" * 32, "signer": "root", "key": self.root, "verified": False,
+                "reason": "x", "at": 1, "genesis": True}
+        with open(log, "a") as f:
+            f.write(json.dumps(line, sort_keys=True) + "\n")
+        self.assertEqual(ok.state_open(self.disc("unverified"), self.sealed, 0)[0], 1, "an unverified signature: no chain yet")
+        with open(log, "a") as f:
+            f.write(json.dumps(dict(line, verified=True, reason=""), sort_keys=True) + "\n")
+        with self.assertRaisesRegex(ok.Refused, "this log holds a verified manifest signature \\(genesis has run\\): give --chain"):
+            ok.state_open(self.disc("nochain"), self.sealed, 0)
+        self.assertEqual(ok.state_open(self.disc("chain"), self.sealed, 0, pin=(1, newest["digest"]))[0], 1)
+
+    def test_the_sheet_takes_the_count_only_from_a_disc_read_back_equal(self):
+        """d9 on #139: state-burned compares the disc's state/ with this session's, file by file, before the sheet line."""
+        ok.state_open(self.state, self.sealed, 0)
+        disc = self.disc("burned")
+        self.assertEqual(ok.state_burned(self.state, disc, self.sealed)[0], 1)
+        with open(os.path.join(disc, ok.SIGNING_RECORD), "rb") as f:
+            data = f.read()
+        with open(os.path.join(disc, ok.SIGNING_RECORD), "wb") as f:
+            f.write(data[:-1])                               # a disc that lost its last byte
+        with self.assertRaisesRegex(ok.Refused, "the disc's signing-record.jsonl is not this session's: do NOT write the sheet"):
+            ok.state_burned(self.state, disc, self.sealed)
+        os.unlink(os.path.join(disc, ok.SIGNING_RECORD))
+        with self.assertRaisesRegex(ok.Refused, "signing-record.jsonl is missing on the disc but present in this session"):
+            ok.state_burned(self.state, disc, self.sealed)
+        os.symlink(os.path.join(self.state, ok.SIGNING_RECORD), os.path.join(disc, ok.SIGNING_RECORD))
+        with self.assertRaisesRegex(ok.Refused, "the disc's signing-record.jsonl is a link"):
+            ok.state_burned(self.state, disc, self.sealed)
+
     def test_a_session_line_is_judged_like_the_rest(self):
         ok.state_open(self.state, self.sealed, 0, now=self.at(1))
         log = os.path.join(self.state, ok.SIGNING_RECORD)
@@ -1200,6 +1234,7 @@ class StateDir(Case):
             self.assertEqual(ok.main(["state-open", "--state-dir", self.state, "--sealed", self.sealed, "--session", "0"]), 0)
         text = out.getvalue()
         self.assertIn("SESSION 1 opened (the disc's state was session 0)", text)
+        self.assertIn("Do NOT write session 1 on the sheet yet: only after the archive's readback (ceremony.sh step w)", text)
         self.assertRegex(text, r"NEWEST card-record sequence=1 [0-9a-f]{16}")
         self.assertRegex(text, r"NEWEST session sequence=1 [0-9a-f]{16}")
         out = io.StringIO()

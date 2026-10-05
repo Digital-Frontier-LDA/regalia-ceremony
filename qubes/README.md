@@ -169,6 +169,28 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 # hand-copy + verify shares onto their printed blank forms, seal them, power off (RAM wiped).
 ```
 
+### The root's signing state between sessions
+
+Nothing persists on the ceremony laptop, so the root's signing state (`state/`: the marker, `signing-record.jsonl`,
+a rebuild's record) is burned on each archive disc and committed to `hsm-backups/state/`.
+
+- **First ceremony:** the card record's writer creates it, as session 0.
+- **A later session:** step t (or any step that signs) restores it from the NEWEST disc's `state/`, mounted
+  read-only, and asks for the sheet's session count. An older disc, a disc newer than the sheet, a fork or (after
+  genesis) a disc the chain's pin does not match are refused, and nothing is signed. The session then records
+  itself as session S+1.
+- **Writing the sheet:** do **not** write S+1 when the session opens. Burn the archive disc, run its checksum
+  readback, mount the disc's `state/` read-only, and run **step w**. Only when it prints `WRITE ON THE SHEET AND ON
+  THE DISC LABEL: SESSIONS n` do the sheet and the disc label take n. So the sheet always names a disc that exists
+  and reads back.
+- **A sheet written in error** (n written, but that session's disc never burned or read back): the next restore
+  refuses the newest real disc as "an OLDER disc". Cross the wrong line out on the sheet, initial and date the
+  correction, and type the last count that step w printed for a burned disc. Do not type a number no disc holds.
+- **Two discs that disagree** (a fork), or a lost state: `offline-keys.py card-record --rebuild-from-disc`
+  (regalia-kms#406).
+- **Residual:** two sessions before genesis that both restore the same disc can still fork. Only the sheet bounds
+  that.
+
 ### Ceremony media on a laptop (few USB ports, no hub)
 
 Attach devices per step with `qvm-usb attach <dispvm> sys-usb:<id>` and detach what the step no

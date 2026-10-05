@@ -215,8 +215,22 @@ grep -q "RC=0" <<< "$out" && grep -q "SESSION 1 opened (the disc's state was ses
   && P "the state restored into the session's RAM (0700, 0600), session 1 opened, its newest lines shown" || F "restore: $(grep -v '^gpg' <<< "$out" | tail -8)"
 arch "$S1" 1 > "$T/arch-s.out"
 [ -s "$S1/mdisc/state/signing-record.jsonl" ] && [ -s "$S1/mdisc/state/regalia-signing-state.json" ] && grep -q "SESSIONS 1" "$T/arch-s.out" \
-  && grep -q "WRITE ON THE SHEET AND ON THE DISC LABEL" "$T/arch-s.out" && grep -q "hsm-backups/state/" "$T/arch-s.out" \
-  && P "the archive stages state/ and says what the sheet and the label take" || F "archive state: $(grep -i 'state\|SESSION' "$T/arch-s.out" | head -5)"
+  && ! grep -q "WRITE ON THE SHEET" "$T/arch-s.out" && grep -q "Do NOT write the session count on the sheet yet" "$T/arch-s.out" \
+  && grep -q "hsm-backups/state/" "$T/arch-s.out" \
+  && P "the archive stages state/, and the sheet waits for the readback (d9)" || F "archive state: $(grep -i 'state\|SESSION\|sheet' "$T/arch-s.out" | head -5)"
+readback(){ # readback WORK DISC_STATE: step w
+  WORKDIR="$1" DISC="$2" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; unset CEREMONY_STATE_DIR; STATE_READBACK="$DISC"
+    step_state_readback; echo "RC=$?"' 2>&1 < /dev/null
+}
+out="$(readback "$S1" "$S1/mdisc/state")"
+grep -q "RC=0" <<< "$out" && grep -q "WRITE ON THE SHEET AND ON THE DISC LABEL: SESSIONS 1" <<< "$out" \
+  && P "step w: the disc's state/ read back equal, then the sheet's count" || F "step w: $(tail -4 <<< "$out")"
+cp -r "$S1/mdisc/state" "$T/s1-bad"; printf 'x' >> "$T/s1-bad/signing-record.jsonl"
+out="$(readback "$S1" "$T/s1-bad")"
+grep -q "RC=1" <<< "$out" && grep -q "do NOT write the sheet; burn the disc again" <<< "$out" && ! grep -q "WRITE ON THE SHEET" <<< "$out" \
+  && P "step w: a disc whose state/ differs: no sheet line" || F "step w bad disc: $(tail -4 <<< "$out")"
 S2="$(disc_state)"
 out="$(rotate_disc "$S2" 1)"
 grep -q "RC=1" <<< "$out" && grep -q "this disc's state is session 0, and the sheet says 1: an OLDER disc" <<< "$out" \
