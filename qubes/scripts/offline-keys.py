@@ -15,6 +15,11 @@ to the break-glass key.
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary --sealed FILE   (the k shares on standard input:
                                           the entries are authenticated and the root signs ownerauth-verified.record.json)
+    python3 -Es offline-keys.py card-record --sealed FILE --cards FILE --release-import FILE --release-import FILE
+                                     --state-dir DIR --out DIR [--first-card-record]
+    python3 -Es offline-keys.py card-record --sealed FILE --rebuild-from-disc DISC/card-record-N.record.json
+                                     --state-dir EMPTY --out DIR [--chain C --tool-root DIR --tool-digest HEX]   (a lost state dir)
+                                          (the k shares on standard input; the confirmation from the terminal)
     python3 -Es offline-keys.py verify-record --record FILE
 
 
@@ -36,6 +41,13 @@ CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when 
     separate parameters, so it needs a conversion with a test vector.
   * A sealed file made before K_A (four keys) still opens, but holds no K_A, and nothing adds K_A to an existing set:
     K_A comes only with a new set (generate). No ceremony has run, so no such file is in use.
+  * card-record signs what --cards and --release-import say. Nothing yet makes --cards from the owner cards
+    (step 2, gated by D30.6), and its attestation digests have no certificates behind them until #127. The record
+    is only as true as those inputs and the operator's typed confirmation of the owner keys shown.
+  * A lost state directory is rebuilt with --rebuild-from-disc (regalia-kms#406). Before genesis it is bounded only by
+    the sheet's values: nothing arbitrates a fork, and a root reconstructed elsewhere could sign a later record this
+    laptop never sees. After genesis the chain's card_record pin bounds it, and every reader must take that pin. The
+    manifest signatures lost with the directory are evidenced by the chain and the ceremony log, not the laptop.
   * sign hands keys only to regalia-kms's manifest sign and uki.py sign. Any other signing purpose needs a new
     allow-list entry and a reviewed change here.
 
@@ -107,6 +119,7 @@ import os
 import random
 import re
 import secrets
+import struct
 import subprocess
 import sys
 import time
@@ -1217,6 +1230,665 @@ def verify_record(document):
     return record
 
 
+SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
+CARD_ROLES = ("owner-main", "owner-backup")     # ADR-0002 D30.7: the OWNER pair, not the developer cards
+# The bench's staging YubiKeys (the memory of 2026-10-01; D28.5/D30: never a bench serial in the ceremony). One list,
+# checked once in the record, so neither reader has to keep its own (regalia-kms-d9 on #121).
+BENCH_YUBIKEYS = ("36345471", "36344616", "35718625")
+_SERIAL = re.compile(r"[1-9][0-9]{0,9}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_FPR = re.compile(r"[0-9A-F]{40}")
+
+
+def _exact(obj, keys, where):
+    require(isinstance(obj, dict), "%s is not an object" % where)
+    unknown, missing = sorted(set(obj) - set(keys)), sorted(set(keys) - set(obj))
+    require(not unknown, "%s has an unknown field: %s" % (where, ", ".join(unknown)))
+    require(not missing, "%s is missing: %s" % (where, ", ".join(missing)))
+
+
+def _ascii(value, where):
+    """Every string in the record is ASCII, so the bytes signed (ensure_ascii=False) are the bytes regalia-kms's
+    membership.canonical (ensure_ascii=True) makes of it: one canonical form on both sides."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _ascii(k, where)
+            _ascii(v, "%s.%s" % (where, k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _ascii(v, "%s[%d]" % (where, i))
+    elif isinstance(value, str):
+        require(value.isascii(), "%s is not ASCII" % where)
+
+
+def ssh_ed25519_raw(line, where):
+    """The raw 32-byte key of an `ssh-ed25519 <base64>` line, as 64 hex."""
+    fields = line.split(" ") if isinstance(line, str) else []
+    require(len(fields) == 2 and fields[0] == "ssh-ed25519", "%s is not an `ssh-ed25519 <base64>` line" % where)
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except ValueError:
+        raise Refused("%s is not base64" % where) from None
+    parts, at = [], 0
+    while at + 4 <= len(blob) and len(parts) < 3:
+        (size,) = struct.unpack(">I", blob[at:at + 4])
+        parts.append(blob[at + 4:at + 4 + size])
+        at += 4 + size
+    require(at == len(blob) and len(parts) == 2 and parts[0] == b"ssh-ed25519" and len(parts[1]) == 32,
+            "%s does not hold exactly one 32-byte Ed25519 key" % where)
+    return parts[1].hex()
+
+
+def card_record_check(record):
+    """The card-ceremony record's rules (ADR-0002 D30, regalia-ceremony#111 step 2), as the writer enforces them and
+    regalia-kms's verifier mirrors them (the vectors in qubes/emulator/tests/vectors/card-ceremony-record). Returns the
+    record, or Refused naming the first rule broken."""
+    _exact(record, ("schema", "event", "sequence", "supersedes", "owner_keys", "ownerauth_recipients", "ssh_signers", "release_key",
+                    "session", "root_entry", "root_fingerprint", "tool", "at"), "the record")
+    _ascii(record, "the record")
+    require(record["schema"] == SCHEMA_CARDS and record["event"] == "card-ceremony", "schema must be %s, event card-ceremony" % SCHEMA_CARDS)
+    require(isinstance(record["session"], str) and re.fullmatch(r"[0-9a-f]{32}", record["session"]) is not None, "session is 32 hex")
+    # freshness (regalia-kms#403): each card record under a root is one more than the last, and names its digest
+    require(isinstance(record["sequence"], int) and not isinstance(record["sequence"], bool) and record["sequence"] >= 1,
+            "sequence is an integer from 1")
+    if record["sequence"] == 1:
+        require(record["supersedes"] == "", "the first card record (sequence 1) supersedes nothing: supersedes is \"\"")
+    else:
+        require(isinstance(record["supersedes"], str) and _HEX64.fullmatch(record["supersedes"]) is not None,
+                "a card record after the first names the one it supersedes: the SHA-256 of its canonical bytes, 64 hex")
+    require(isinstance(record["tool"], str) and record["tool"], "tool names the writer")
+    require(isinstance(record["at"], str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", record["at"]) is not None,
+            "at is YYYY-MM-DDTHH:MM:SSZ")
+    _exact(record["root_entry"], ("alg", "key"), "root_entry")
+    require(record["root_entry"]["alg"] == "ed25519" and _HEX64.fullmatch(str(record["root_entry"]["key"])), "root_entry is an Ed25519 key, 64 hex")
+    require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "root_fingerprint is not the SHA-256 of the root key")
+    owners = record["owner_keys"]
+    require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two owner cards' SIG keys (D30.7)")
+    for i, k in enumerate(owners):
+        _exact(k, ("role", "serial", "alg", "key", "attested", "attestation_sha256"), "owner_keys[%d]" % i)
+        require(k["role"] in CARD_ROLES, "owner_keys[%d].role is owner-main or owner-backup" % i)
+        require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
+        require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
+        require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
+        # the evidence behind "attested" (d9 on #121): the SHA-256 of the SIG and DEC keys' attestation certificates,
+        # whose files go on the disc beside the record, so an auditor re-checks the claim and not only the root's word
+        _exact(k["attestation_sha256"], ("sig", "dec"), "owner_keys[%d].attestation_sha256" % i)
+        require(all(isinstance(v, str) and _HEX64.fullmatch(v) for v in k["attestation_sha256"].values()),
+                "owner_keys[%d].attestation_sha256 gives each certificate's SHA-256, 64 hex" % i)
+    require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles owner-main and owner-backup, once each")
+    serials = {k["serial"] for k in owners}
+    require(len(serials) == 2, "the two owner cards have distinct serials")
+    rel = record["release_key"]
+    _exact(rel, ("alg", "key", "fingerprint", "cards", "imported", "attested"), "release_key")
+    require(rel["alg"] == "ed25519" and isinstance(rel["key"], str) and _HEX64.fullmatch(rel["key"]), "release_key is an Ed25519 key, 64 hex")
+    require(isinstance(rel["fingerprint"], str) and _FPR.fullmatch(rel["fingerprint"]), "release_key.fingerprint is 40 upper-case hex")
+    require(rel["imported"] is True and rel["attested"] is False, "the release key is imported, not attested (D29.2)")
+    require(isinstance(rel["cards"], list) and len(rel["cards"]) == 2 and all(isinstance(c, str) and _SERIAL.fullmatch(c) for c in rel["cards"])
+            and len(set(rel["cards"])) == 2, "release_key.cards are the two release cards' serials")
+    require(not set(rel["cards"]) & serials, "a release card is also an owner card: the owner cards never hold the release key (D30.7)")
+    require(rel["key"] not in {k["key"] for k in owners}, "the release key is an owner key: the release cards hold no owner key (D30.7)")
+    for name, fields in (("ownerauth_recipients", ("serial", "primary", "subkey")), ("ssh_signers", ("serial", "key"))):
+        items = record[name]
+        require(isinstance(items, list), "%s is a list" % name)
+        for i, item in enumerate(items):
+            _exact(item, fields, "%s[%d]" % (name, i))
+            require(isinstance(item["serial"], str) and _SERIAL.fullmatch(item["serial"]), "%s[%d].serial is a decimal YubiKey serial" % (name, i))
+        require(sorted(item["serial"] for item in items) == sorted(serials), "%s has one entry for each owner card" % name)
+    for i, r in enumerate(record["ownerauth_recipients"]):
+        require(all(isinstance(r[f], str) and _FPR.fullmatch(r[f]) for f in ("primary", "subkey")) and r["primary"] != r["subkey"],
+                "ownerauth_recipients[%d] names a primary and a different encryption subkey, 40 upper-case hex" % i)
+    fprs = [r[f] for r in record["ownerauth_recipients"] for f in ("primary", "subkey")]
+    require(len(set(fprs)) == len(fprs), "an ownerauth fingerprint is used twice: each owner card has its own primary and its own "
+            "decryption subkey, or one card would count twice in the proof (d9 on #121)")
+    certs = [v for k in owners for v in k["attestation_sha256"].values()]
+    require(len(set(certs)) == len(certs), "an attestation certificate is named twice: each key has its own")
+    every_serial = sorted(serials | set(rel["cards"]))
+    bench = [x for x in every_serial if x in BENCH_YUBIKEYS]
+    require(not bench, "a bench YubiKey is named (%s): the ceremony never uses a bench serial (D28.5, D30)" % ", ".join(bench))
+    ssh = [ssh_ed25519_raw(s["key"], "ssh_signers[%d].key" % i) for i, s in enumerate(record["ssh_signers"])]
+    every = [record["root_entry"]["key"], rel["key"]] + [k["key"] for k in owners] + ssh
+    require(len(set(every)) == len(every), "a key is used twice among the root, the release key, the owner keys and the SSH keys")
+    return record
+
+
+def card_record_digest(record):
+    """A card record's digest, as `supersedes` and the signing record name it: SHA-256 of its canonical bytes (the form
+    the signature covers, without RECORD_DOMAIN), 64 hex (regalia-kms#403)."""
+    return hashlib.sha256(canonical(record)).hexdigest()
+
+
+SIGNING_RECORD = "signing-record.jsonl"     # regalia-kms manifest.py's RECORD, in the same --state-dir
+SIGNING_STATE = "regalia-signing-state.json"    # the state directory's marker, agreed with regalia-kms-1e (#403 point 7)
+SCHEMA_SIGNING_STATE = "regalia.signing-state/v1"
+MAX_SIGNING_RECORD = 1 << 22             # 4 MiB: a larger signing record is refused, never read in part
+
+
+def _marker_for(state_dir, pinned_root):
+    """The state directory's marker, checked (O_NOFOLLOW, a 0600 regular file of the directory's owner, exactly
+    {schema, root}, root the pinned one). Returns the directory's stat."""
+    import stat as _stat
+    info = os.stat(state_dir)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_STATE), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s has no %s: not a signing state directory this root's records can be judged in" % (state_dir, SIGNING_STATE)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_STATE, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        marker_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(marker_info.st_mode) and marker_info.st_uid == info.st_uid and _stat.S_IMODE(marker_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_STATE)
+        try:
+            marker = json.loads(f.read(4096))
+        except ValueError:
+            raise Refused("%s is not JSON" % SIGNING_STATE) from None
+    _exact(marker, ("schema", "root"), SIGNING_STATE)
+    require(marker["schema"] == SCHEMA_SIGNING_STATE, "%s's schema is not %s" % (SIGNING_STATE, SCHEMA_SIGNING_STATE))
+    require(marker["root"] == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
+    return info
+
+
+def read_signing_state(state_dir, pinned_root):
+    """The card-record consumer's view of the laptop's state directory: its marker (O_NOFOLLOW, a regular file of the
+    directory's owner, 0600, exactly {schema, root}, root the PINNED one; a missing marker is refused, since an empty
+    or foreign directory cannot be judged) and then its signing record's lines. Returns the lines (dicts or
+    whatever JSON each line holds, for card_record_current to judge)."""
+    import stat as _stat
+    info = _marker_for(state_dir, pinned_root)
+
+    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
+    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        log_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
+        data = f.read(MAX_SIGNING_RECORD + 1)
+    require(len(data) <= MAX_SIGNING_RECORD, "%s is larger than %d bytes: refused whole, never read in part" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
+    try:
+        texts = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise Refused("%s is not UTF-8" % SIGNING_RECORD) from None
+    lines = []
+    for i, text in enumerate(texts):
+        try:
+            lines.append(json.loads(text))
+        except ValueError:
+            raise Refused("line %d of the signing record is not JSON (a torn write?)" % (i + 1)) from None
+    baselines = [line for line in lines if isinstance(line, dict) and line.get("kind") == BASELINE_KIND]
+    if baselines:                               # a rebuilt log carries the root-signed record of its rebuild (d9 on #406)
+        try:
+            fd = os.open(os.path.join(state_dir, REBUILD_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
+            raise Refused("the signing record has a baseline but %s holds no %s as a regular file" % (state_dir, REBUILD_RECORD)) from None
+        with os.fdopen(fd, "rb") as f:
+            rb_info = os.fstat(f.fileno())
+            require(_stat.S_ISREG(rb_info.st_mode) and rb_info.st_uid == info.st_uid and _stat.S_IMODE(rb_info.st_mode) == 0o600,
+                    "%s must be a regular file of the directory's owner, mode 0600" % REBUILD_RECORD)
+            rebuild = verify_rebuild_record(json.loads(f.read(1 << 20)), pinned_root)
+        base = baselines[0]
+        require(rebuild["baseline"] == {"sequence": base.get("sequence"), "digest": base.get("digest"), "source": base.get("source")},
+                "the rebuild record does not name the signing record's baseline")
+        # the record the rebuild signed is the one after the baseline, not another N+1 beside it (1e on #444)
+        after = [line for line in lines if isinstance(line, dict) and line.get("kind") == "card-record"
+                 and line.get("sequence") == rebuild["rebuilt"].get("sequence")]
+        require(all(line.get("digest") == rebuild["rebuilt"].get("digest") for line in after),
+                "the signing record's card record %s is not the one its rebuild record re-signed" % rebuild["rebuilt"].get("sequence"))
+    return lines
+
+
+def verify_rebuild_record(document, pinned_root):
+    """The root-signed record of a rebuild (regalia-kms#406): exactly {record, signature}, schema SCHEMA_REBUILD, signed
+    by the PINNED root over REBUILD_DOMAIN and the canonical record. Returns the record."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not a rebuild record: exactly record and signature")
+    record = document["record"]
+    _exact(record, ("schema", "event", "baseline", "disc_record_sha256", "rebuilt", "root_entry", "root_fingerprint", "session",
+                    "tool", "at"), "the rebuild record")
+    require(record["schema"] == SCHEMA_REBUILD and record["event"] == "card-record-rebuild", "not a rebuild record")
+    _ascii(document, "the rebuild record")
+    _exact(record["baseline"], ("sequence", "digest", "source"), "the rebuild record's baseline")
+    _exact(record["rebuilt"], ("sequence", "digest"), "the rebuild record's rebuilt")
+    require(record["root_entry"] == {"alg": "ed25519", "key": pinned_root}, "the rebuild record names another root than the pinned one")
+    require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "the rebuild record's root_fingerprint is not the root's")
+    # as regalia-kms's verify_rebuild (1e's #444): every field typed, and the rebuilt record the one after the baseline
+    for what in ("baseline", "rebuilt"):
+        entry = record[what]
+        require(isinstance(entry["sequence"], int) and not isinstance(entry["sequence"], bool) and entry["sequence"] >= 1,
+                "the rebuild record's %s.sequence is not a count from 1" % what)
+        require(isinstance(entry["digest"], str) and _HEX64.fullmatch(entry["digest"]) is not None,
+                "the rebuild record's %s.digest is not a SHA-256 (64 lowercase hex)" % what)
+    require(record["baseline"]["source"] in BASELINE_SOURCES, "the rebuild record's baseline.source is not one of chain, sheet")
+    require(record["rebuilt"]["sequence"] == record["baseline"]["sequence"] + 1, "the rebuild record's rebuilt record is not the one after its baseline")
+    require(isinstance(record["disc_record_sha256"], str) and _HEX64.fullmatch(record["disc_record_sha256"]) is not None,
+            "the rebuild record's disc_record_sha256 is not a SHA-256 (64 lowercase hex)")
+    try:
+        ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
+                                                                                      REBUILD_DOMAIN + canonical(record))
+    except (InvalidSignature, ValueError, TypeError):
+        raise Refused("the rebuild record's signature does not verify under the pinned root") from None
+    return record
+
+
+def append_card_record_line(state_dir, record, now=None):
+    """When the root signs a card record: one line in the laptop's root signing record (the file `manifest sign
+    --state-dir` appends to), {kind, sequence, digest, key, at}, appended and synced as manifest.py's _append_record
+    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes."""
+    info = os.stat(state_dir)
+    require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
+    line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
+            "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    return _append_line(state_dir, line)
+
+
+def _append_line(state_dir, line):
+    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        data = (json.dumps(line, sort_keys=True) + "\n").encode()
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return line
+
+
+BASELINE_KIND = "card-record-baseline"
+BASELINE_SOURCES = ("chain", "sheet")
+REBUILD_RECORD = "card-record-rebuild.record.json"
+SCHEMA_REBUILD = "regalia.card-record-rebuild/v1"
+# its own signing domain (1e on #406): a signature over a rebuild record can never be presented as a card record's,
+# even to a reader that checks less than the exact field sets do
+REBUILD_DOMAIN = b"regalia-card-record-rebuild/v1\0"
+
+
+def card_lines_of(signing_lines, pinned_root):
+    """The signing record's card-record lines, judged as both the reader (card_record_current) and the writer
+    (card_record) judge them, so the writer never extends a log the reader refuses (d9 on #128): every line an object
+    with a kind; each card-record line exactly {kind, sequence (an integer), digest (64 hex), key, at}; sequences 1..M
+    without a gap; every key the pinned root. Returns the card-record lines, possibly none."""
+    for i, line in enumerate(signing_lines):       # every line judged by name, never skipped (d9 on #126, #403 point 6)
+        require(isinstance(line, dict) and isinstance(line.get("kind"), str) and line["kind"],
+                "line %d of the signing record is not an object with a kind" % (i + 1))
+    card = [line for line in signing_lines if line["kind"] in ("card-record", BASELINE_KIND)]
+    baselines = [i for i, line in enumerate(card) if line["kind"] == BASELINE_KIND]
+    # a rebuilt log (regalia-kms#406): ONE baseline line, the first card line, standing for the history 1..N it lost
+    require(len(baselines) <= 1, "the signing record holds more than one card-record-baseline line")
+    require(not baselines or baselines == [0], "a card-record-baseline line is not the first card line of the signing record")
+    if baselines:
+        base = card[0]
+        _exact(base, ("kind", "sequence", "digest", "key", "at", "source"), "the card-record-baseline line")
+        require(isinstance(base["sequence"], int) and not isinstance(base["sequence"], bool) and base["sequence"] >= 1
+                and isinstance(base["digest"], str) and _HEX64.fullmatch(base["digest"]) is not None and base["source"] in BASELINE_SOURCES,
+                "the card-record-baseline line is malformed (sequence an integer from 1, digest 64 hex, source chain or sheet)")
+        require(base["key"] == pinned_root, "the card-record-baseline line names another root than the pinned one")
+    lines = card[1:] if baselines else card
+    for line in lines:
+        _exact(line, ("kind", "sequence", "digest", "key", "at"), "a card-record line of the signing record")
+        require(isinstance(line["sequence"], int) and not isinstance(line["sequence"], bool) and isinstance(line["digest"], str)
+                and _HEX64.fullmatch(line["digest"]) is not None and isinstance(line["key"], str),
+                "a card-record line of the signing record is malformed (sequence an integer, digest 64 hex)")
+    start = card[0]["sequence"] + 1 if baselines else 1
+    require([line.get("sequence") for line in lines] == list(range(start, start + len(lines))),
+            ("the signing record's card-record lines are not 1..%d without a gap" % len(lines)) if not baselines else
+            ("the signing record's card-record lines are not %d..%d without a gap after its baseline" % (start, start + len(lines) - 1)))
+    require(all(line.get("key") == pinned_root for line in lines), "a card-record line names another root than the pinned one")
+    return card
+
+
+def _fsync_dir(path):
+    """The directory entry made durable: a file's own fsync does not make its name survive a power cut (d9 on #128)."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def card_record_current(document, pinned_root, signing_lines, pin=None, note=None):
+    """A card record that is the NEWEST the pinned root signed (regalia-kms#403): verify_card_record, then the laptop's
+    signing record's card-record lines (dicts, in file order) must run 1..M without a gap, this record must be line M
+    (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
+    refused: after a rotation it would vouch for a retired key. Returns the record."""
+    record = verify_card_record(document, pinned_root)
+    lines = card_lines_of(signing_lines, pinned_root)
+    require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
+    if pin is not None:
+        # after genesis the verified chain's card_record pin decides, not the laptop's log (d9 on #406): the record must
+        # be the pinned one, and the log must hold it (its line, or the baseline that stands for it)
+        require(isinstance(pin, (tuple, list)) and len(pin) == 2, "the pin is (sequence, digest)")
+        require((record["sequence"], card_record_digest(record)) == (pin[0], pin[1]),
+                "this card record is not the one the chain pins (sequence %s): only the pinned record counts after genesis" % pin[0])
+        require(any((line["sequence"], line["digest"]) == (pin[0], pin[1]) for line in lines),
+                "the chain's pinned card record is not in this signing record")
+        return record
+    newest = lines[-1]
+    require(record["sequence"] == newest["sequence"] and card_record_digest(record) == newest.get("digest"),
+            "this card record is not the newest the root signed (sequence %d of %d): an older one is superseded"
+            % (record["sequence"], newest["sequence"]))
+    if len(lines) > 1:
+        require(record["supersedes"] == lines[-2].get("digest"), "this card record does not supersede the one before it in the signing record")
+    elif newest["kind"] == BASELINE_KIND:
+        (note or (lambda text: sys.stderr.write(text + "\n")))("supersedes not checked: history before %d rebuilt from %s"
+                                                               % (newest["sequence"], newest["source"]))
+    return record
+
+
+def verify_card_record(document, pinned_root):
+    """A card-ceremony record as regalia-kms reads it: exactly {record, signature}, signed under the PINNED root (the
+    record's root_entry must name it), over RECORD_DOMAIN and the canonical record, and every rule of
+    card_record_check. Returns the record, or Refused."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not a record: exactly record and signature")
+    require(isinstance(document["signature"], str) and re.fullmatch(r"[0-9a-f]{128}", document["signature"]) is not None,
+            "the signature is 128 hex")
+    record = document["record"]
+    require(isinstance(record, dict) and isinstance(record.get("root_entry"), dict) and record["root_entry"].get("key") == pinned_root,
+            "the record names another root than the pinned one")
+    _ascii(record, "the record")
+    try:
+        ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
+                                                                                      RECORD_DOMAIN + canonical(record))
+    except (InvalidSignature, ValueError):
+        raise Refused("the signature does not verify under the pinned root") from None
+    return card_record_check(record)
+
+
+SCHEMA_RELEASE_IMPORT = "regalia.release-import/v1"     # developer-keys.py's facts, one per release card (#124)
+CARD_FIELDS = ("owner_keys", "ownerauth_recipients", "ssh_signers")
+
+
+def _tty_ask(prompt):
+    with open("/dev/tty") as tty:
+        sys.stderr.write(prompt)
+        sys.stderr.flush()
+        return tty.readline().strip()
+
+
+def release_from_imports(paths):
+    """The card record's release_key, from the two release cards' import facts (developer-keys.py release-import):
+    one key and one fingerprint on both, imported, not attested."""
+    require(isinstance(paths, list) and len(paths) == 2, "--release-import is given twice: the two release cards' facts")
+    facts = []
+    for path in paths:
+        with open(path, "rb") as f:
+            fact = json.loads(f.read(1 << 16))
+        require(isinstance(fact, dict) and fact.get("schema") == SCHEMA_RELEASE_IMPORT, "%s is not a release card's import facts" % path)
+        require(fact.get("imported") is True and fact.get("attested") is False and fact.get("touch") == "fixed",
+                "%s does not record a key imported with a fixed touch policy" % path)
+        facts.append(fact)
+    require(facts[0].get("serial") != facts[1].get("serial"), "both --release-import files are for card %s: give each release card's"
+            % facts[0].get("serial"))
+    require(facts[0]["key"] == facts[1]["key"] and facts[0]["fingerprint"] == facts[1]["fingerprint"],
+            "the two release cards hold different keys: one release key goes on both")
+    return {"alg": "ed25519", "key": facts[0]["key"], "fingerprint": facts[0]["fingerprint"],
+            "cards": [facts[0]["serial"], facts[1]["serial"]], "imported": True, "attested": False}
+
+
+def _state_dir(path):
+    info = os.stat(path)
+    require(os.path.isdir(path) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            "the state directory %s must be a directory of this user's, mode 0700" % path)
+    return path
+
+
+def card_record(sealed_path, cards_path, release_paths, state_dir, out, stream, first=False, ask=_tty_ask, now=None):
+    """Sign the next card-ceremony record with the root (the k offline shares on `stream`), as regalia-kms#403 and the
+    marker agreed with regalia-kms-1e require (rc#111's writer requirements):
+      * first=True (--first-card-record): the state directory holds no marker and no signing record; the marker
+        {schema, root} is created (O_EXCL, O_NOFOLLOW, 0600) before the first line. manifest sign never creates one,
+        so this is the first signing step of a laptop's state directory;
+      * otherwise the directory is read through its marker (read_signing_state), must hold a card-record line, and the
+        sequence and supersedes continue its log: never from OUT;
+      * card_record_check, then the operator types the sequence and the record's digest, then the root signs;
+      * released crash-safe: the signed record goes to OUT as card-record-<N>.pending.json, the log line is appended,
+        then the file is renamed to card-record-<N>.record.json. A rerun deletes a pending file the log does not name,
+        and releases one it does, before anything else.
+    Returns (the record, the released path, whether it was only the last run's record released)."""
+    import stat as _stat
+    check_place(out)
+    _state_dir(state_dir)
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    root_hex = root_entry_of(sealed)
+    # a release left half-done by an earlier run: finished or discarded first, by its exact name
+    pending = sorted(n for n in os.listdir(out) if re.fullmatch(r"card-record-[0-9]+\.pending\.json", n))
+    require(len(pending) <= 1, "OUT holds more than one pending card record: %s" % ", ".join(pending))
+    marker_path = os.path.join(state_dir, SIGNING_STATE)
+    log_path = os.path.join(state_dir, SIGNING_RECORD)
+    if first:
+        require(not os.path.lexists(log_path), "--first-card-record is for a state directory with no signing record; %s holds one. "
+                "If the first run got as far as the log line, run again WITHOUT --first-card-record to release it" % state_dir)
+        if os.path.lexists(marker_path):        # only a first run that crashed after the marker, before its line, leaves this
+            _marker_for(state_dir, root_hex)
+        card_lines = []
+    else:
+        card_lines = card_lines_of(read_signing_state(state_dir, root_hex), root_hex)    # as strictly as the reader
+        require(card_lines, "%s has a marker but no card-record line: not a state directory this writer made" % state_dir)
+    newest = card_lines[-1]["sequence"] if card_lines else 0
+    for name in pending:
+        path, n = os.path.join(out, name), int(name.split("-")[2].split(".")[0])
+        if n != newest:                         # no line names it (the crash came before the line): never released
+            os.unlink(path)
+            continue
+        try:                                    # the log names it: the last run crashed after the line, before release
+            with open(path, "rb") as f:
+                document = json.loads(f.read(1 << 20))
+            record = verify_card_record(document, root_hex)
+            require(record["sequence"] == n and card_record_digest(record) == card_lines[-1]["digest"], "not the record the log names")
+        except (Refused, ValueError, KeyError, TypeError):
+            kept, k = path.replace(".pending.json", ".damaged.json"), 0
+            while os.path.lexists(kept):        # never over earlier evidence (d9 on #128)
+                k += 1
+                kept = path.replace(".pending.json", ".damaged.%d.json" % k)
+            os.rename(path, kept)               # kept as evidence, out of the way
+            _fsync_dir(out)
+            raise Refused("card record %d is on the log but its file is damaged (kept as %s): run again to sign %d, superseding it"
+                          % (n, os.path.basename(kept), n + 1)) from None
+        final = path.replace(".pending.json", ".record.json")
+        require(not os.path.lexists(final), "%s exists beside its pending copy" % final)
+        os.rename(path, final)
+        _fsync_dir(out)
+        return record, final, True
+    sequence = newest + 1
+    supersedes = card_lines[-1]["digest"] if card_lines else ""
+    with open(cards_path, "rb") as f:
+        cards = json.loads(f.read(1 << 20))
+    _exact(cards, CARD_FIELDS, "--cards")
+    entry = {"alg": "ed25519", "key": root_hex}
+    record = dict({k: cards[k] for k in CARD_FIELDS}, schema=SCHEMA_CARDS, event="card-ceremony", sequence=sequence, supersedes=supersedes,
+                  release_key=release_from_imports(release_paths), session=secrets.token_hex(16), root_entry=entry,
+                  root_fingerprint=root_fingerprint(entry), tool=TOOL,
+                  at=(now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    card_record_check(record)
+    digest = card_record_digest(record)
+    sys.stderr.write("CARD RECORD %d (supersedes %s)\n" % (sequence, supersedes or "nothing"))
+    for k in record["owner_keys"]:
+        sys.stderr.write("  owner key %-10s card %s  %s\n" % (k["role"], k["serial"], k["key"]))
+    sys.stderr.write("  release key %s on cards %s\n" % (record["release_key"]["fingerprint"], ", ".join(record["release_key"]["cards"])))
+    sys.stderr.write("  digest %s\n" % digest)
+    sys.stderr.write("  compare the sequence with the ceremony sheet before typing it\n")
+    typed = ask("Type the sequence and the digest's first 8 hex to sign: ")
+    require(typed == "%d %s" % (sequence, digest[:8]), "the confirmation typed is not \"%d %s\": nothing was signed" % (sequence, digest[:8]))
+    master, indices, identifier = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    from cryptography.hazmat.primitives import serialization
+    require(root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex() == root_hex,
+            "the sealed root is not the one its header publishes")
+    signed = canonical({"record": record, "signature": root.sign(RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
+    del root
+    pending_path = os.path.join(out, "card-record-%d.pending.json" % sequence)
+    final_path = os.path.join(out, "card-record-%d.record.json" % sequence)
+    require(not os.path.lexists(final_path), "%s already exists: nothing is overwritten" % final_path)
+    fd = os.open(pending_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(signed)
+        f.flush()
+        os.fsync(f.fileno())
+    _fsync_dir(out)
+    if first and not os.path.lexists(marker_path):     # the marker before the first line, never over one
+        fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(canonical({"schema": SCHEMA_SIGNING_STATE, "root": root_hex}) + b"\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _fsync_dir(state_dir)
+    append_card_record_line(state_dir, record, now)       # the log names it BEFORE it is released
+    _fsync_dir(state_dir)
+    os.rename(pending_path, final_path)
+    _fsync_dir(out)
+    return record, final_path, False
+
+
+def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=None, ask=_tty_ask, now=None):
+    """Rebuild a lost signing-state directory (regalia-kms#406, agreed with 1e and d9): into an EMPTY state directory,
+    the marker, a card-record-baseline line standing for the lost history 1..N, the root-signed rebuild record, and
+    N+1, the same content as the disc's record N, superseding it, released as card_record releases.
+      * after genesis, `pin` = (sequence, digest) of the verified chain's newest card_record: the disc copy must be it;
+      * before genesis (no pin), the sheet's sequence and 16-hex digest prefix are typed, and the copy must match them.
+    The k offline shares on `stream`. Returns (the N+1 record, its released path, the baseline source)."""
+    check_place(out)
+    _state_dir(state_dir)
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    root_hex = root_entry_of(sealed)
+    with open(disc_record, "rb") as f:
+        disc_bytes = f.read(1 << 20)                # read once: these bytes are verified and hashed (d9 on #406)
+    old = verify_card_record(json.loads(disc_bytes), root_hex)
+    n, digest = old["sequence"], card_record_digest(old)
+    pending_path = os.path.join(out, "card-record-%d.pending.json" % (n + 1))
+    final_path = os.path.join(out, "card-record-%d.record.json" % (n + 1))
+    if os.path.lexists(os.path.join(state_dir, SIGNING_RECORD)) and os.path.lexists(pending_path):
+        # a rebuild that crashed after N+1's line, before its release: the rerun releases exactly that record
+        lines = card_lines_of(read_signing_state(state_dir, root_hex), root_hex)
+        if [(l["kind"], l["sequence"]) for l in lines] == [(BASELINE_KIND, n), ("card-record", n + 1)] and lines[0]["digest"] == digest:
+            with open(pending_path, "rb") as f:
+                document = json.loads(f.read(1 << 20))
+            record = verify_card_record(document, root_hex)
+            require((record["sequence"], card_record_digest(record)) == (n + 1, lines[1]["digest"]),
+                    "card-record-%d.pending.json is not the record the rebuilt log names: remove it and the state directory by name, and rebuild" % (n + 1))
+            require(not os.path.lexists(final_path), "%s exists beside its pending copy" % final_path)
+            os.rename(pending_path, final_path)
+            _fsync_dir(out)
+            return record, final_path, lines[0]["source"]
+    for name in (SIGNING_STATE, SIGNING_RECORD, REBUILD_RECORD):
+        require(not os.path.lexists(os.path.join(state_dir, name)),
+                "a rebuild goes into an EMPTY state directory; %s holds %s. A crashed rebuild leaves a directory nothing "
+                "trusts yet: remove it by name and rebuild again" % (state_dir, name))
+    require(not os.path.lexists(pending_path), "a crashed rebuild left %s in OUT: remove it by name and rebuild" % os.path.basename(pending_path))
+    if pin is not None:
+        require((n, digest) == (pin[0], pin[1]), "the disc's card record %d (%s…) is not the one the chain pins (%s, %s…): a rebuild "
+                "supersedes exactly the pinned record" % (n, digest[:16], pin[0], str(pin[1])[:16]))
+        source = "chain"
+    else:
+        sys.stderr.write("REBUILT, sheet-bounded: no chain pin (before genesis). The sheet's values are the only bound.\n")
+        typed = ask("Type the sheet's newest card-record sequence and its digest's first 16 hex: ").split()
+        require(len(typed) == 2 and typed[0] == str(n) and re.fullmatch(r"[0-9a-f]{16}", typed[1] or "") is not None
+                and digest.startswith(typed[1]), "the disc's card record (%d, %s…) is not the sheet's newest: nothing was written"
+                % (n, digest[:16]))
+        source = "sheet"
+    entry = {"alg": "ed25519", "key": root_hex}
+    stamp = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    record = dict(old, sequence=n + 1, supersedes=digest, session=secrets.token_hex(16), at=stamp, tool=TOOL)
+    card_record_check(record)
+    new_digest = card_record_digest(record)
+    sys.stderr.write("REBUILD: card record %d (from the disc, %s-bounded) superseded by %d, the same owner keys and release key\n"
+                     % (n, source, n + 1))
+    sys.stderr.write("  digest %s\n  compare the sequence with the ceremony sheet before typing it\n" % new_digest)
+    require(ask("Type the new sequence and the digest's first 8 hex to sign: ") == "%d %s" % (n + 1, new_digest[:8]),
+            "the confirmation typed is not \"%d %s\": nothing was signed" % (n + 1, new_digest[:8]))
+    master, _, _ = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    from cryptography.hazmat.primitives import serialization
+    require(root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex() == root_hex,
+            "the sealed root is not the one its header publishes")
+    disc_sha = hashlib.sha256(disc_bytes).hexdigest()
+    rebuild = {"schema": SCHEMA_REBUILD, "event": "card-record-rebuild", "baseline": {"sequence": n, "digest": digest, "source": source},
+               "disc_record_sha256": disc_sha, "rebuilt": {"sequence": n + 1, "digest": new_digest}, "root_entry": entry,
+               "root_fingerprint": root_fingerprint(entry), "session": record["session"], "tool": TOOL, "at": stamp}
+    signed_rebuild = canonical({"record": rebuild, "signature": root.sign(REBUILD_DOMAIN + canonical(rebuild)).hex()}) + b"\n"
+    signed = canonical({"record": record, "signature": root.sign(RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
+    del root
+
+    def write_new(path, data, mode):
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, mode)
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+
+    require(not os.path.lexists(final_path), "%s already exists: nothing is overwritten" % final_path)
+    write_new(pending_path, signed, 0o644)
+    _fsync_dir(out)
+    write_new(os.path.join(state_dir, SIGNING_STATE), canonical({"schema": SCHEMA_SIGNING_STATE, "root": root_hex}) + b"\n", 0o600)
+    write_new(os.path.join(state_dir, REBUILD_RECORD), signed_rebuild, 0o600)
+    _fsync_dir(state_dir)
+    _append_line(state_dir, {"kind": BASELINE_KIND, "sequence": n, "digest": digest, "key": root_hex, "at": stamp, "source": source})
+    write_new(os.path.join(out, "card-record-rebuild-%d.record.json" % n), signed_rebuild, 0o644)     # for the disc
+    append_card_record_line(state_dir, record, now)       # the log names N+1 BEFORE it is released
+    _fsync_dir(state_dir)
+    os.rename(pending_path, final_path)
+    _fsync_dir(out)
+    return record, final_path, source
+
+
+def chain_pin(chain_path, root_hex, tool_root, tool_digest, run=subprocess.run):
+    """The verified chain's card_record pin, computed here, never typed (d9 on #406): regalia-kms's own verifier, run
+    from a tree whose digest is the one typed from the image's build evidence (as sign's tools are), with a cleared
+    environment, must exit 0 and end with its CARD-RECORD-PIN line. A chain with no card_record (before v4) prints no
+    such line, and is refused. `tool_digest` must be the ceremony kit's pinned value for the reviewed regalia-kms
+    commit, typed from that evidence, NEVER computed from the tree it checks: otherwise it only proves the tree is
+    itself (d9 on #406)."""
+    require(tree_digest(tool_root) == tool_digest, "the regalia-kms tree's digest is not --tool-digest: nothing is run from it")
+    done = run(["/usr/bin/python3", "-Es", "-m", "deploy.baremetal.manifest", "verify", "--chain", os.path.abspath(chain_path),
+                "--root-key", root_hex], cwd=tool_root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, stdin=subprocess.DEVNULL,
+               capture_output=True, text=True)
+    require(done.returncode == 0, "regalia-kms did not verify the chain under this root: %s" % (done.stderr or done.stdout).strip()[-300:])
+    require(tree_digest(tool_root) == tool_digest, "the regalia-kms tree changed while it ran: its pin is not believed")
+    lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
+    require(lines and lines[-1].startswith("CARD-RECORD-PIN "), "the verified chain carries no card_record pin (a chain before v4)")
+    return parse_pin(lines[-1])
+
+
+def parse_pin(text):
+    """The verified chain's card_record pin: regalia-manifest verify's last line, "CARD-RECORD-PIN <seq> <64 hex>"
+    (regalia-kms#438), or "SEQ:DIGEST". Anything else, including an empty pin from a chain with no card_record, is refused."""
+    fields = text.replace(":", " ").split()
+    if fields and fields[0] == "CARD-RECORD-PIN":
+        fields = fields[1:]
+    require(len(fields) == 2 and re.fullmatch(r"[1-9][0-9]*", fields[0]) is not None and _HEX64.fullmatch(fields[1]) is not None,
+            "the pin is 'CARD-RECORD-PIN <sequence> <64 hex>' (regalia-manifest verify's last line) or SEQ:DIGEST; a chain "
+            "that prints none has no card_record, and is refused")
+    return int(fields[0]), fields[1]
+
+
+def root_entry_of(sealed):
+    """The root's raw public key, 64 hex, from the sealed file's public header."""
+    from cryptography.hazmat.primitives import serialization
+    spki = base64.b64decode(sealed["publics"]["root"]["spki"])
+    return serialization.load_der_public_key(spki).public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -1229,6 +1901,20 @@ def main(argv=None):
     w.add_argument("--sealed", required=True)
     w.add_argument("--shares-file", required=True)
     w.add_argument("--partial", action="store_true", help="at least k forms, the rest named as not checked")
+    c = sub.add_parser("card-record", help="sign the next card-ceremony record with the root: the k shares on standard input")
+    c.add_argument("--sealed", required=True)
+    c.add_argument("--cards", help="the developer cards' facts: {owner_keys, ownerauth_recipients, ssh_signers} (not with --rebuild-from-disc)")
+    c.add_argument("--release-import", action="append", default=[], help="a release card's import facts (developer-keys.py); twice")
+    c.add_argument("--state-dir", required=True, help="the laptop's signing state directory, shared with manifest sign")
+    c.add_argument("--out", required=True)
+    c.add_argument("--first-card-record", action="store_true", help="the first: creates the state directory's marker")
+    c.add_argument("--rebuild-from-disc", metavar="RECORD", help="a lost state directory (regalia-kms#406): the disc's newest card "
+                   "record, re-signed as the next into an EMPTY --state-dir")
+    c.add_argument("--chain", help="with --rebuild-from-disc, after genesis: the chain (from any node); its card_record pin is "
+                   "computed by regalia-kms's verifier from --tool-root, never typed")
+    c.add_argument("--tool-root", help="with --chain: the image's regalia-kms tree")
+    c.add_argument("--tool-digest", help="with --chain: the ceremony kit's pinned digest for the reviewed regalia-kms commit, typed "
+                   "from that evidence; never computed from the tree it checks")
     s = sub.add_parser("sign", help="a signing session: the k shares on standard input, one per line")
     s.add_argument("--sealed", required=True)
     s.add_argument("--who", required=True, help="the person signing, as recorded")
@@ -1311,6 +1997,28 @@ def main(argv=None):
                 require(args.yubikey_serial, "--yubikey-serial names the inserted YubiKey")
                 proven = ownerauth_verify(args.record, args.dir, args.yubikey_serial, args.gnupghome)
                 print("YubiKey %s opens %s" % (args.yubikey_serial, ", ".join(proven)))
+        elif args.command == "card-record" and args.rebuild_from_disc:
+            require(not args.first_card_record, "--rebuild-from-disc and --first-card-record are different first steps: one, not both")
+            require(not args.cards and not args.release_import, "--rebuild-from-disc re-signs the disc's record: no --cards, no --release-import")
+            pin = None
+            if args.chain is not None or args.tool_root is not None or args.tool_digest is not None:
+                require(args.chain and args.tool_root and args.tool_digest, "--chain takes --tool-root and --tool-digest")
+                with open(args.sealed, "rb") as f:
+                    pin = chain_pin(args.chain, root_entry_of(json.loads(f.read(1 << 20))), args.tool_root, args.tool_digest)
+            record, path, source = card_record_rebuild(args.sealed, args.rebuild_from_disc, args.state_dir, args.out, sys.stdin, pin)
+            print("REBUILT, %s-bounded: card record %d superseded by %d (%s); the state directory %s holds the marker, the "
+                  "baseline and the rebuild record" % (source, record["sequence"] - 1, record["sequence"], path, args.state_dir))
+        elif args.command == "card-record":
+            require(args.cards, "--cards is required")
+            record, path, recovered = card_record(args.sealed, args.cards, args.release_import, args.state_dir, args.out, sys.stdin,
+                                                  args.first_card_record)
+            if recovered:
+                print("RELEASED card record %d left by the last run (it crashed after the log line): %s. Nothing new was signed; "
+                      "run again to sign the next" % (record["sequence"], path))
+            else:
+                print("CARD RECORD %d SIGNED by the root (%s): %s; digest %s, in %s"
+                      % (record["sequence"], record["root_fingerprint"], path, card_record_digest(record),
+                         os.path.join(args.state_dir, SIGNING_RECORD)))
         elif args.command == "tree-digest":
             print(tree_digest(args.root))
         else:
