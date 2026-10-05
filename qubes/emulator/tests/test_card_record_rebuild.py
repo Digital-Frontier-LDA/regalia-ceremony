@@ -71,6 +71,11 @@ class Rebuild(unittest.TestCase):
         self.assertEqual([(l["kind"], l["sequence"]) for l in lines], [("card-record-baseline", 2), ("card-record", 3)])
         self.assertEqual(oct(os.stat(os.path.join(self.state, ok.REBUILD_RECORD)).st_mode & 0o777), "0o600")
         self.assertEqual(ok.card_record_current(json.load(open(path)), self.root, lines)["sequence"], 3)
+        # the writer counts the baseline as line 2 (CodeRabbit on #121): record 3 again is a duplicate, refused unwritten
+        size = os.path.getsize(os.path.join(self.state, ok.SIGNING_RECORD))
+        with self.assertRaisesRegex(ok.Refused, "sequence 4 superseding %s expected, got 3 superseding %s" % (lines[1]["digest"], self.d2)):
+            ok.append_card_record_line(self.state, record)
+        self.assertEqual(os.path.getsize(os.path.join(self.state, ok.SIGNING_RECORD)), size)
         self.assertTrue(os.path.exists(os.path.join(self.out, "card-record-rebuild-2.record.json")), "a copy for the disc")
         # the writer goes on from the rebuilt log
         fourth, fourth_path = self.sign()

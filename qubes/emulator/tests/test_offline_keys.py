@@ -82,8 +82,15 @@ class Generate(Case):
         for name in ok.FILES:
             self.assertTrue(os.path.exists(self.path(name)), name)
         self.assertEqual(oct(os.stat(self.path("offline-shares.txt")).st_mode & 0o777), "0o600")
-        self.assertEqual(sorted(record["publics"]), ["pcr-initrd", "pcr-system", "root", "secure-boot"])
-        self.assertEqual({p["alg"] for n, p in record["publics"].items() if n != "root"}, {"rsa-2048"})
+        self.assertEqual(sorted(record["publics"]), ["anchor-policy", "pcr-initrd", "pcr-system", "root", "secure-boot"])
+        self.assertEqual({p["alg"] for n, p in record["publics"].items() if n not in ("root", "anchor-policy")}, {"rsa-2048"})
+        # K_A (regalia-kms#361): ECDSA P-256, its public key typed as the v4 manifest types one, and the sealed one
+        from cryptography.hazmat.primitives import serialization
+        self.assertEqual(record["publics"]["anchor-policy"]["alg"], "ecdsa-p256")
+        entry = record["anchor_policy_entry"]
+        self.assertEqual((entry["alg"], len(entry["key"]), entry["key"][:2]), ("ecdsa-p256", 130, "04"))
+        spki = serialization.load_der_public_key(base64.b64decode(record["publics"]["anchor-policy"]["spki"]))
+        self.assertEqual(spki.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint).hex(), entry["key"])
         self.assertEqual(record["root_entry"]["alg"], "ed25519")
         self.assertEqual(record["root_fingerprint"], hashlib.sha256(bytes.fromhex(record["root_entry"]["key"])).hexdigest(),
                          "the fingerprint regalia-kms#360's --genesis and enrol check take")
@@ -108,7 +115,7 @@ class Generate(Case):
             sealed = json.loads(f.read())
         for subset in itertools.combinations(shares, 3):
             bundle = ok.unseal(combine_mnemonics(list(subset)), sealed)
-            self.assertEqual(sorted(bundle["keys"]), ["pcr-initrd", "pcr-system", "root", "secure-boot"])
+            self.assertEqual(sorted(bundle["keys"]), ["anchor-policy", "pcr-initrd", "pcr-system", "root", "secure-boot"])
         with self.assertRaises(Exception):
             combine_mnemonics(shares[:2])
         # every key in the bundle is the one the header names
@@ -267,6 +274,20 @@ class Generate(Case):
         os.mkdir(self.out)
         with unittest.mock.patch.object(ok, "publics", swapped):
             with self.assertRaisesRegex(ok.Refused, "key pcr-system does not sign for the public key that would be published"):
+                self.generate(k=2, n=3)
+        self.assertEqual(os.listdir(self.out), [])
+        # K_A, ECDSA P-256: its header names another P-256 key, and the proof refuses it
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ec
+        other = base64.b64encode(ec.generate_private_key(ec.SECP256R1()).public_key().public_bytes(
+            serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)).decode()
+
+        def swapped_ka(keys):
+            out = real(keys)
+            out["anchor-policy"] = dict(out["anchor-policy"], spki=other)
+            return out
+        with unittest.mock.patch.object(ok, "publics", swapped_ka):
+            with self.assertRaisesRegex(ok.Refused, "key anchor-policy does not sign for the public key that would be published"):
                 self.generate(k=2, n=3)
         self.assertEqual(os.listdir(self.out), [])
 
