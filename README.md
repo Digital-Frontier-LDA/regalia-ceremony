@@ -88,8 +88,9 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
 - **The offline keys (`qubes/scripts/offline-keys.py`, ADR-0002 D28):**
   - They have run in CI and on a development machine only, never on the ceremony laptop or against real developer
     cards (#123).
-  - The owner authorizations run as `ceremony.sh` step a, and the disc waits for both developer cards' proof. The
-    step needs the developer cards' exported keys, which no step makes yet (#122, #111 step 2). So no real disc that
+  - The owner authorizations run as `ceremony.sh` step a, to the OWNER pair (ADR-0002 D30.7), with a SOPS recovery copy
+    opened by the offline set's shares; the disc waits for both owner cards' proof. The step needs the owner cards'
+    exported keys and the card record, which no step makes yet (#122, #111 step 2). So no real disc that
     holds the offline keys can be burned until the developer cards' step exists: the cards come first.
   - The tool's own docstring lists its limitations in full.
 - **The laptop-side YubiKeys (D30):**
