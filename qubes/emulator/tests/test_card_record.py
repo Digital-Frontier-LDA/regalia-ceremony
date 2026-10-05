@@ -269,6 +269,8 @@ class Rules(unittest.TestCase):
              "a key is used twice among the root, the release key, the owner keys and the SSH keys"),
             (lambda r: r["owner_keys"][0].pop("attestation_sha256"), "owner_keys[0] is missing: attestation_sha256"),
             (lambda r: r["owner_keys"][0]["attestation_sha256"].pop("dec"), "owner_keys[0].attestation_sha256 is missing: dec"),
+            (lambda r: r["owner_keys"][0]["attestation_sha256"].pop("aut"), "owner_keys[0].attestation_sha256 is missing: aut"),
+            (lambda r: r["owner_keys"][0]["attestation_sha256"].update(aut="e1" * 32), "an attestation certificate is named twice: each key has its own"),
             (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="D1" * 32),
              "owner_keys[1].attestation_sha256 gives each certificate's SHA-256, 64 hex"),
             (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="d1" * 32), "an attestation certificate is named twice: each key has its own"),
