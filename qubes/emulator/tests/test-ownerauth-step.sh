@@ -95,6 +95,48 @@ grep -q "RC=1" <<< "$out" && grep -q "the owner authorizations are not proven by
 out="$(arch "$W2" 1)"
 grep -q "simulated run: the owner authorizations are not proven" <<< "$out" && P "a simulated burn says so" || F "simulated archive: $(tail -5 <<< "$out")"
 
+hdr "the same card inserted twice cannot stand in for both (3e on #130)"
+W7="$(new_work)"
+out="$(run_step "$W7" card1)"
+grep -q "RC=1" <<< "$out" && grep -q "not yet proven to open every envelope" <<< "$out" && [ ! -e "$W7/ownerauth/ownerauth-verified.record.json" ] \
+  && P "card 1 twice: the summary refuses, nothing signed" || F "same card twice: $(tail -6 <<< "$out")"
+
+hdr "outside a simulation a stray OA_NODES is ignored: the three hosts, always (3e on #130)"
+W8="$(new_work)"
+out="$(WORKDIR="$W8" PATH="$T/shim:$PATH" OA_NODES=a,b bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    pause(){ :; }; ask(){ return 0; }; PRINTER=""
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"
+    oa_shares_in(){ printf "%s" "$WORK/two-shares"; }           # the terminal, stood in for
+    python3(){ CEREMONY_SIMULATE=1 command python3 "$@"; }       # offline-keys keeps this machine'"'"'s test overrides (an older age)
+    oa_insert_card(){ if [ "$1" = 1 ]; then OA_SERIAL=1001; export CARD_HOME="$T/card1"; else OA_SERIAL=1002; export CARD_HOME="$T/card2"; fi
+                      export CARD_SERIAL="$OA_SERIAL"; }
+    CEREMONY_SIMULATE= step_ownerauth; echo "RC=$?"' 2>&1)"
+nodes="$(python3 -c 'import json,sys; print(",".join(sorted(json.load(open(sys.argv[1]))["record"]["nodes"])))' "$W8/ownerauth/ownerauth.record.json" 2>/dev/null)"
+grep -q "RC=0" <<< "$out" && [ "$nodes" = "a,b,c" ] && P "OA_NODES=a,b outside a simulation: records for a, b and c" || F "real-mode nodes: $nodes $(tail -4 <<< "$out")"
+
+hdr "offline keys made and step a skipped altogether: a real burn is refused too (d9 on #130)"
+W5="$(new_work)"
+out="$(arch "$W5" 0)"
+grep -q "RC=1" <<< "$out" && grep -q "step a skipped, failed or unfinished" <<< "$out" && P "no ownerauth/ at all: a real burn is refused" \
+  || F "skipped step a: $(tail -5 <<< "$out")"
+
+hdr "a card gpg cannot see is said as such"
+W6="$(new_work)"
+out="$(WORKDIR="$W6" PATH="$T/shim:$PATH" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    pause(){ :; }; ask(){ return 0; }; PRINTER=""
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
+    gpg(){ for a in "$@"; do [ "$a" = --card-status ] && return 2; done; command gpg "$@"; }
+    oa_insert_card(){ OA_SERIAL=1001; }
+    step_ownerauth; echo "RC=$?"' 2>&1)"
+grep -q "RC=1" <<< "$out" && grep -q "gpg cannot see a card: is developer card 1 inserted, and is pcscd running" <<< "$out" \
+  && P "no card seen: said by name" || F "unseen card: $(tail -5 <<< "$out")"
+
+hdr "no session workdir: the step does nothing"
+out="$(bash -c 'source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM; WORK=""; step_ownerauth; echo "RC=$?"' 2>&1)"
+grep -q "RC=1" <<< "$out" && grep -q "no session workdir" <<< "$out" && P "WORK empty: refused before anything" || F "empty WORK: $(tail -3 <<< "$out")"
+
 hdr "the archive stages the envelopes, the records and the verify log"
 arch "$W" 1 > "$T/arch.out"
 burned="$(ls "$W/mdisc/ownerauth" 2>/dev/null | tr '\n' ' ')"

@@ -2626,7 +2626,10 @@ ownerauth_commit_list() {
 step_ownerauth() {
   b "Owner authorizations — each KMS host's TPM owner auth, to both developer cards and break-glass (regalia-kms#242)"
   local dir="$WORK/ownerauth" sealed="$WORK/offline/offline-keys.sealed.json" rcp="$WORK/breakglass.recipient"
-  local keys="${OA_DEVELOPER_KEYS:-$WORK/cards/developer-cards.gpg}" nodes="${OA_NODES:-a,b,c}" home="$WORK/ownerauth-gnupg" n
+  local keys="$WORK/cards/developer-cards.gpg" nodes="a,b,c" home="$WORK/ownerauth-gnupg" n
+  # the three KMS hosts (ADR-0002 D17) and the session's own exported keys; a simulation may name others (3e on #130)
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_DEVELOPER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made (or removed) outside it."; return 1; }
   [ -s "$sealed" ] || { err "no offline keys in this session ($sealed): run step o first (the root signs these records)."; return 1; }
   [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
   [ -s "$keys" ] || { err "no developer cards' public keys ($keys): the developer cards' step exports them (#111 step 2)."; return 1; }
@@ -2647,7 +2650,9 @@ step_ownerauth() {
   for n in 1 2; do
     oa_insert_card "$n"
     case "$OA_SERIAL" in ''|*[!0-9]*) err "a card's serial is digits: nothing was checked."; return 1;; esac
-    gpg --homedir "$home" --batch --card-status >/dev/null 2>&1      # the card's stubs, for the decryption key
+    # the card's stubs, for the decryption key; a card gpg cannot see is said as such, not as a failed decryption
+    gpg --homedir "$home" --batch --card-status >/dev/null 2>&1 \
+      || { err "gpg cannot see a card: is developer card $n inserted, and is pcscd running? Nothing was checked."; return 1; }
     python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" \
         --yubikey-serial "$OA_SERIAL" --gnupghome "$home" \
       || { err "developer card $n ($OA_SERIAL) did NOT open every envelope (reason above): run this step again with it."; return 1; }
@@ -2711,13 +2716,16 @@ step_archive() {
       return 1
     fi
   fi
-  # The owner authorizations (step a, regalia-kms#242): made, but not proven by both developer cards, means a KMS
-  # host's owner auth might open for neither card. The disc waits for the root-signed proof.
-  if [ -e "$WORK/ownerauth/ownerauth.record.json" ] && [ ! -e "$WORK/ownerauth/ownerauth-verified.record.json" ]; then
+  # The owner authorizations (step a, regalia-kms#242): a ceremony that made the offline keys (step o) makes the KMS
+  # platform, and no host enrols under v4 without its owner auth set. So, once the offline keys exist, the disc waits
+  # for step a's root-signed proof that both developer cards open every node's envelope, whether step a was skipped,
+  # failed and cleaned up, or left unproven (d9 on #130). A ceremony without the offline keys is not held to it.
+  if { [ -e "$WORK/offline/offline-keys.sealed.json" ] || [ -e "$WORK/ownerauth/ownerauth.record.json" ]; } \
+     && [ ! -e "$WORK/ownerauth/ownerauth-verified.record.json" ]; then
     if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
       warn "simulated run: the owner authorizations are not proven by both developer cards; the real ceremony refuses this disc."
     else
-      err "the owner authorizations are not proven by both developer cards (no ownerauth-verified.record.json). Finish step a; nothing was burned."
+      err "the owner authorizations are not proven by both developer cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
       return 1
     fi
   fi
