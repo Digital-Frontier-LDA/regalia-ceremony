@@ -6,6 +6,7 @@
    {
     "alg": "ed25519",
     "attestation_sha256": {
+     "aut": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
      "dec": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
      "sig": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
     },
@@ -59,5 +60,5 @@
   "supersedes": "",
   "tool": "card-ceremony-vectors/1"
  },
- "signature": "a34bac9f645db3738177f85593b30a3f6fb266135b36fa3dfe8cfa3e36a06549f3771f0eda609ae149ffa6d2f63edd3f20521c31b5b108f562f629183550d20e"
+ "signature": "a8089a08c90c8483d069cd63d209fc84ed2d839663eba5e9c79993e724a1c60e0b6b332698af3c39c1c7f65f72d639938ed8b0c68fd55ebba580a347e914ae03"
 }

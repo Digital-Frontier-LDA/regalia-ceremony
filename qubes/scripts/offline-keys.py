@@ -1199,9 +1199,10 @@ def card_record_check(record):
         require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
         require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
         require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
-        # the evidence behind "attested" (d9 on #121): the SHA-256 of the SIG and DEC keys' attestation certificates,
-        # whose files go on the disc beside the record, so an auditor re-checks the claim and not only the root's word
-        _exact(k["attestation_sha256"], ("sig", "dec"), "owner_keys[%d].attestation_sha256" % i)
+        # the evidence behind "attested" (d9 on #121): the SHA-256 of the DER of the SIG, DEC and AUT keys' attestation
+        # certificates (all three touch-fixed under D30.7, so all three named: 1e on #400), whose files go on the disc
+        # beside the record, so an auditor re-checks the claim and not only the root's word
+        _exact(k["attestation_sha256"], ("sig", "dec", "aut"), "owner_keys[%d].attestation_sha256" % i)
         require(all(isinstance(v, str) and _HEX64.fullmatch(v) for v in k["attestation_sha256"].values()),
                 "owner_keys[%d].attestation_sha256 gives each certificate's SHA-256, 64 hex" % i)
     require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles owner-main and owner-backup, once each")
