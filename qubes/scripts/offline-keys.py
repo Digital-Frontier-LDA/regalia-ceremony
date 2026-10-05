@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""offline-keys.py — the offline keys of ADR-0002 D28 (regalia#559, regalia-ceremony#111): the membership root and
-the three boot-image signing keys, generated as software keys on the air-gapped ceremony laptop, held by one
-Shamir share set of their own (separate from break-glass), and backed up to the break-glass key.
+"""offline-keys.py — the offline keys of ADR-0002 D28 (regalia#559, regalia-ceremony#111): the membership root, the
+three boot-image signing keys and the anchor policy authority K_A (regalia-kms#361), generated as software keys on
+the air-gapped ceremony laptop, held by one Shamir share set of their own (separate from break-glass), and backed up
+to the break-glass key.
 
     python3 -Es offline-keys.py generate --threshold K --shares N --out DIR --breakglass-recipient FILE
     python3 -Es offline-keys.py verify-forms --sealed FILE --shares-file FILE [--partial]   (the forms typed back on stdin)
@@ -23,8 +24,9 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
 CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):
   * Tested on the dev qube and in CI only. Software GnuPG homes stand in for the developer cards, and nothing here has
     run on the ceremony laptop or against a real card's keys (regalia-ceremony#123).
-  * ownerauth and ownerauth-verify have no ceremony.sh step: at a ceremony they are typed by hand, and the archive
-    does not gate the disc on their files (#122).
+  * ownerauth runs as ceremony.sh step a, which needs the developer cards' exported public keys
+    ($WORK/cards/developer-cards.gpg). No step makes that file yet: it comes with the developer cards' step (#111
+    step 2, gated by D30.6). Until then the step refuses (#122).
   * The developer cards' keys (ADR-0002 D30: SIG owner key, DEC owner-auth, AUT SSH) are not made by any tool yet.
     That step is gated by the D30.6 bench measurements, which have not run. Until then ownerauth has no real
     --yk-keys (#111 step 2).
@@ -34,12 +36,20 @@ CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when 
     is only as true as those inputs and the operator's typed confirmation of the owner keys shown.
   * A lost state directory cannot be rebuilt yet (regalia-kms#406). Without it no card record or genesis can be signed
     on that laptop.
+  * K_A (anchor-policy, regalia-kms#361) is generated, sealed, split and backed up with the others, and its public key
+    is output (ANCHOR-POLICY-ENTRY) for the genesis manifest. The manifest's field name for it is still being settled
+    on #361. No tool takes it yet: sign hands it to nothing until regalia-kms's K_A signer (the policy approvals and
+    rotation-counter increments) exists and is added to the allow-list by a reviewed change. That signer must
+    convert: cryptography's ECDSA sign() returns DER, while the TPM's PolicyAuthorize verification takes r and s as
+    separate parameters, so it needs a conversion with a test vector.
+  * A sealed file made before K_A (four keys) still opens, but holds no K_A, and nothing adds K_A to an existing set:
+    K_A comes only with a new set (generate). No ceremony has run, so no such file is in use.
   * sign hands keys only to regalia-kms's manifest sign and uki.py sign. Any other signing purpose needs a new
     allow-list entry and a reviewed change here.
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
 key. So, as a KMS splits its unseal key and not the keys it protects: one 256-bit OFFLINE MASTER SECRET is split
-k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the four keys are sealed under a key derived from it:
+k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the five keys are sealed under a key derived from it:
   * offline-keys.sealed.json      AES-256-GCM over the key bundle, under HKDF-SHA256(master, "…/v1 seal"), with the
                                   public header (each key's name, algorithm and SubjectPublicKeyInfo, and the
                                   master's id) as its additional data. Public: stored openly, like a DKEK blob (D19).
@@ -62,6 +72,10 @@ k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the four keys are sealed unde
 
 THE KEYS. root: Ed25519 (regalia-kms root-key.json takes {"alg": "ed25519", "key": "<hex>"}); pcr-initrd, pcr-system,
 secure-boot: RSA-2048, the boot image's keys of regalia#554 under the labels hsm-signing-key.sh gave them.
+anchor-policy (K_A): ECDSA P-256, the anchor policy authority (regalia-kms#361, ADR-0002 D28 via regalia#567). It
+signs offline only: system-key policy approvals and single-use rotation-counter increments, never the initrd key.
+Its public key is pinned immutably at genesis, so losing it means a new genesis: it is held, restored and tested
+as the other four are.
 
 A SIGNING SESSION (sign). The shares come on standard input, one per line, never on the command line: exactly the
 set's threshold of them, each once, of the set the sealed file names (refused by its SLIP-39 identifier before they
@@ -111,7 +125,8 @@ SCHEMA_SEALED = "regalia.offline-keys-sealed/v1"
 SCHEMA_RECORD = "regalia.offline-keys-record/v1"
 RECORD_DOMAIN = b"regalia-ceremony-record/v1\0"
 MEMBERSHIP_DOMAIN = b"regalia-membership/v1\0"       # regalia-kms deploy/baremetal/membership.py DOMAIN
-KEYS = (("root", "ed25519"), ("pcr-initrd", "rsa-2048"), ("pcr-system", "rsa-2048"), ("secure-boot", "rsa-2048"))
+KEYS = (("root", "ed25519"), ("pcr-initrd", "rsa-2048"), ("pcr-system", "rsa-2048"), ("secure-boot", "rsa-2048"),
+        ("anchor-policy", "ecdsa-p256"))     # K_A, the anchor policy authority (regalia-kms#361, ADR-0002 D28 via regalia#567)
 FILES = ("offline-keys.sealed.json", "offline-shares.txt", "offline-keys.breakglass.age", "offline-keys.record.json")
 MAX_SUBSETS = 200
 TOOL = "offline-keys.py/1"
@@ -178,10 +193,15 @@ def check_place(out):
 # ---- the keys ---------------------------------------------------------------------------------------
 
 def new_keys():
-    from cryptography.hazmat.primitives.asymmetric import ed25519, rsa
+    from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
     keys = {}
     for name, alg in KEYS:
-        keys[name] = ed25519.Ed25519PrivateKey.generate() if alg == "ed25519" else rsa.generate_private_key(65537, 2048)
+        if alg == "ed25519":
+            keys[name] = ed25519.Ed25519PrivateKey.generate()
+        elif alg == "ecdsa-p256":
+            keys[name] = ec.generate_private_key(ec.SECP256R1())
+        else:
+            keys[name] = rsa.generate_private_key(65537, 2048)
     return keys
 
 
@@ -201,7 +221,7 @@ def operation_proofs(keys):
     on #114). Returns {name: "verified"}."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import padding
+    from cryptography.hazmat.primitives.asymmetric import ec, padding
     out, published = {}, publics(keys)
     for name, alg in KEYS:
         challenge = secrets.token_bytes(32)
@@ -209,6 +229,8 @@ def operation_proofs(keys):
         try:
             if alg == "ed25519":
                 public.verify(keys[name].sign(challenge), challenge)
+            elif alg == "ecdsa-p256":           # as a TPM PolicyAuthorize signature is made: ECDSA over SHA-256
+                public.verify(keys[name].sign(challenge, ec.ECDSA(hashes.SHA256())), challenge, ec.ECDSA(hashes.SHA256()))
             else:
                 public.verify(keys[name].sign(challenge, padding.PKCS1v15(), hashes.SHA256()), challenge, padding.PKCS1v15(), hashes.SHA256())
         except InvalidSignature:
@@ -222,6 +244,15 @@ def root_fingerprint(entry):
     raw 32-byte Ed25519 public key, 64 hex (regalia-kms#360). The record carries it, signed by that very root, so it is
     typed from the record and not read back from the tool asking for it."""
     return hashlib.sha256(bytes.fromhex(entry["key"])).hexdigest()
+
+
+def anchor_policy_entry(keys):
+    """K_A's public key as regalia-kms's v4 manifest types an ECDSA P-256 key: {"alg": "ecdsa-p256", "key": "04 || X || Y"},
+    130 hex (membership.typed_key). The genesis manifest pins it immutably (regalia-kms#361; its field name is settled
+    there), so the ceremony outputs it for propose --genesis."""
+    from cryptography.hazmat.primitives import serialization
+    point = keys["anchor-policy"].public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
+    return {"alg": "ecdsa-p256", "key": point.hex()}
 
 
 def root_entry(keys):
@@ -257,7 +288,7 @@ def seal(master, keys, identifier):
 
 
 def unseal(master, sealed):
-    """The key bundle (a dict of the four PKCS#8 keys) from the sealed file and a master secret, or Refused."""
+    """The key bundle (a dict of the five PKCS#8 keys) from the sealed file and a master secret, or Refused."""
     from cryptography.exceptions import InvalidTag
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
@@ -349,6 +380,7 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
     at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
     record = {"schema": SCHEMA_RECORD, "event": "generate", "threshold": threshold, "shares": shares,
               "slip39_identifier": identifier, "master_id": mid, "publics": sealed["publics"], "root_entry": root_entry(keys),
+              "anchor_policy_entry": anchor_policy_entry(keys),
               "root_fingerprint": root_fingerprint(root_entry(keys)),
               "files": files, "operation_proof": proofs, "tool": TOOL, "at": at}
     signature = keys["root"].sign(RECORD_DOMAIN + canonical(record))      # the root, in this session (D28, 24's re-plan)
@@ -1220,6 +1252,12 @@ def read_signing_state(state_dir, pinned_root):
         require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
                 "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
         data = f.read(MAX_SIGNING_RECORD + 1)
+    return _signing_record_lines(data)
+
+
+def _signing_record_lines(data):
+    """The signing record's bytes as its lines (whatever JSON each holds), by one rule for the reader and the writer:
+    whole (at most MAX_SIGNING_RECORD), UTF-8, each line JSON."""
     require(len(data) <= MAX_SIGNING_RECORD, "%s is larger than %d bytes: refused whole, never read in part" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
     try:
         texts = data.decode("utf-8").splitlines()
@@ -1237,14 +1275,31 @@ def read_signing_state(state_dir, pinned_root):
 def append_card_record_line(state_dir, record, now=None):
     """When the root signs a card record: one line in the laptop's root signing record (the file `manifest sign
     --state-dir` appends to), {kind, sequence, digest, key, at}, appended and synced as manifest.py's _append_record
-    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes."""
+    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes.
+
+    Nothing is appended that the reader would refuse (CodeRabbit on #121): the log must be the directory owner's 0600
+    regular file, and the record must continue its card-record lines, sequence M+1 superseding line M's digest (1 and
+    "" on an empty log). A duplicate, a gap or a fork is refused before a byte is written."""
+    import stat as _stat
     info = os.stat(state_dir)
     require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
             "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
     line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
             "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
+        log_info = os.fstat(fd)
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600: nothing was appended" % SIGNING_RECORD)
+        existing, chunk = b"", True
+        while chunk and len(existing) <= MAX_SIGNING_RECORD:
+            chunk = os.pread(fd, MAX_SIGNING_RECORD + 1 - len(existing), len(existing))
+            existing += chunk
+        before = [old for old in _signing_record_lines(existing) if isinstance(old, dict) and old.get("kind") == "card-record"]
+        expected = (len(before) + 1, before[-1].get("digest") if before else "")
+        require((record["sequence"], record["supersedes"]) == expected,
+                "this card record does not follow the signing record (sequence %d superseding %s expected, got %d superseding %s): "
+                "nothing was appended" % (expected[0], expected[1] or "nothing", record["sequence"], record["supersedes"] or "nothing"))
         data = (json.dumps(line, sort_keys=True) + "\n").encode()
         while data:
             data = data[os.write(fd, data):]
@@ -1532,6 +1587,7 @@ def main(argv=None):
             print("ROOT-ENTRY %s" % json.dumps(record["root_entry"], sort_keys=True))
             print("ROOT-FINGERPRINT %s  (sha256 of the raw 32-byte Ed25519 key, as enrol check and manifest sign --genesis take it)"
                   % record["root_fingerprint"])
+            print("ANCHOR-POLICY-ENTRY %s  (K_A, pinned in the genesis manifest: regalia-kms#361)" % json.dumps(record["anchor_policy_entry"], sort_keys=True))
             for name, pub in sorted(record["publics"].items()):
                 print("KEY %s %s spki-sha256 %s" % (name, pub["alg"], hashlib.sha256(base64.b64decode(pub["spki"])).hexdigest()))
             for name, digest in sorted(record["files"].items()):
