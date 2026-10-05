@@ -2647,12 +2647,15 @@ step_ownerauth() {
   # the root-signed card record names the two owner cards: ownerauth refuses an export that is not theirs (d9, 1e on #451)
   card="$(oa_card_record)"
   [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (card-record)."; return 1; }
+  # only the NEWEST card record the root signed counts (d9 on rc#133), by the laptop's signing state directory
+  [ -n "${CEREMONY_STATE_DIR:-}" ] && [ -d "$CEREMONY_STATE_DIR" ] \
+    || { err "CEREMONY_STATE_DIR does not name the laptop's signing state directory (the card records' log): nothing was made."; return 1; }
   if [ ! -e "$dir/ownerauth.record.json" ]; then
     [ ! -e "$dir" ] || { err "$dir holds a partial run: remove it (rm -r -- '$dir') and run this step again."; return 1; }
     ( umask 077; mkdir "$dir" ) || return 1
     info "type $(K) shares of the OFFLINE keys' set (the root signs the record), then Ctrl-D:"
     python3 -Es "$HERE/offline-keys.py" ownerauth --sealed "$sealed" --nodes "$nodes" --yk-keys "$keys" \
-        --card-record "$card" --out "$dir" < "$(oa_shares_in)" \
+        --card-record "$card" --state-dir "$CEREMONY_STATE_DIR" --out "$dir" < "$(oa_shares_in)" \
       || { err "the owner authorizations were NOT made (reason above); nothing is kept."; rm -rf -- "$dir"; return 1; }
   fi
   [ -e "$dir/ownerauth-verified.record.json" ] && { info "both owner cards were already proven in this session."; ownerauth_commit_list; return 0; }
@@ -2902,24 +2905,40 @@ step_archive() {
 # from k shares of the offline set into a 0600 file in the RAM workdir, one node's recovery copy decrypted with sops and
 # checked against the root-signed record's check value (no TPM), and the identity file shredded by its exact path.
 ownerauth_drill() {
-  local dir="$WORK/ownerauth" key="$WORK/ownerauth-recovery.key" node="${1:-a}" rc=0
+  local dir="$WORK/ownerauth" key="$WORK/ownerauth-recovery.key" nodes
   [ -e "$dir/ownerauth.record.json" ] || { info "no owner authorizations in this session: no owner-auth drill."; return 0; }
   [ ! -e "$key" ] || { err "$key exists: a drill before this one did not finish; shred it (shred -u -- '$key') first."; return 1; }
-  info "Owner-auth recovery drill: type $(K) shares of the OFFLINE keys' set, then Ctrl-D:"
-  python3 -Es "$HERE/offline-keys.py" open-recovery-identity --sealed "$WORK/offline/offline-keys.sealed.json" --out "$key" \
-      < "$(oa_shares_in)" >/dev/null || { err "the recovery identity was NOT opened (reason above)."; return 1; }
-  SOPS_AGE_KEY_FILE="$key" sops decrypt --input-type binary --output-type binary "$dir/ownerauth-$node.bg.sops" \
-    | python3 -Es "$HERE/offline-keys.py" ownerauth-check --record "$dir/ownerauth.record.json" --node "$node" || rc=1
-  shred -u -- "$key" 2>/dev/null || rm -f -- "$key"
+  nodes="$(python3 -Es -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["record"]["nodes"])))' "$dir/ownerauth.record.json")" \
+    || { err "the owner-authorization record cannot be read."; return 1; }
+  # in a subshell: its EXIT trap removes the identity on every path out (a failed open or decrypt, Ctrl-C), and the
+  # session's own traps are left as they were (d9 on rc#133)
+  (
+    trap 'shred -u -- "$key" 2>/dev/null || rm -f -- "$key"' EXIT
+    trap 'exit 130' INT TERM
+    rc=0
+    info "Owner-auth recovery drill: type $(K) shares of the OFFLINE keys' set, then Ctrl-D:"
+    python3 -Es "$HERE/offline-keys.py" open-recovery-identity --sealed "$WORK/offline/offline-keys.sealed.json" --out "$key" \
+        < "$(oa_shares_in)" >/dev/null || { err "the recovery identity was NOT opened (reason above)."; exit 1; }
+    for node in $nodes; do
+      if SOPS_AGE_KEY_FILE="$key" sops decrypt --input-type binary --output-type binary "$dir/ownerauth-$node.bg.sops" \
+           | python3 -Es "$HERE/offline-keys.py" ownerauth-check --record "$dir/ownerauth.record.json" --node "$node" \
+               --sealed "$WORK/offline/offline-keys.sealed.json" >/dev/null; then
+        info "owner-auth drill: node $node's recovery copy opens and matches the record the root signed."
+      else
+        err "owner-auth drill FAILED for node $node: its recovery copy does not give the recorded value (reason above)."; rc=1
+      fi
+    done
+    exit "$rc"
+  )
+  local rc=$?
   [ ! -e "$key" ] || { err "the recovery identity file $key could not be removed: remove it by hand NOW."; return 1; }
-  if [ "$rc" = 0 ]; then info "owner-auth drill passed: node $node's recovery copy opens and matches the root-signed record."
-  else err "owner-auth drill FAILED for node $node: its recovery copy does not give the recorded value (reason above)."; fi
+  [ "$rc" = 0 ] && info "owner-auth drill passed for every node ($nodes)."
   return "$rc"
 }
 
 step_drill() {
   b "Recovery drill (do this BEFORE relying on any share set)"
-  ownerauth_drill a || return 1
+  ownerauth_drill || return 1
   info "Reconstruct from exactly k shares on THIS air-gapped qube, prove it works, re-seal."
   info "ssss:        feed any $(K) of the $(N) share lines to:   ssss-combine -t $(K) -q"
   info "SLIP-0039:   shamir recover   (paste any $(K) word-shares)"

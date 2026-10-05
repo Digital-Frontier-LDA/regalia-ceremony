@@ -54,24 +54,42 @@ new_work(){ # a session after step o: the break-glass key, the offline keys and 
   head -2 "$w/offline/offline-shares.txt" > "$w/two-shares"
   rm -f -- "$w/offline/offline-shares.txt"         # step o's forms taken as proven (its own gate is test-offline-keys-step's)
   { "$REAL_GPG" --homedir "$T/card1" --export; "$REAL_GPG" --homedir "$T/card2" --export; } > "$w/cards/owner-cards.gpg"
-  # the root-signed card record naming card1 and card2 as the owner cards (only what ownerauth reads of it)
-  python3 -Es - "$SCRIPTS/offline-keys.py" "$w" "$("$REAL_GPG" --homedir "$T/card1" --with-colons --list-keys | awk -F: '/^fpr/{print $10}' | sed -n 2p)" \
-      "$("$REAL_GPG" --homedir "$T/card2" --with-colons --list-keys | awk -F: '/^fpr/{print $10}' | sed -n 2p)" <<'PY2'
-import importlib.machinery, importlib.util, json, sys
-loader = importlib.machinery.SourceFileLoader("ok", sys.argv[1]); ok = importlib.util.module_from_spec(importlib.util.spec_from_loader("ok", loader)); loader.exec_module(ok)
-w = sys.argv[2]
-sealed = json.load(open(w + "/offline/offline-keys.sealed.json"))
-shares = [" ".join(open(w + "/two-shares").read().splitlines()[i].split()) for i in range(2)]
-root = ok._private_key(ok.unseal(ok.combine(shares, sealed)[0], sealed)["keys"]["root"])
-record = {"schema": ok.SCHEMA_CARD_RECORD, "ownerauth_recipients": [{"serial": "1001", "primary": "A" * 40, "subkey": sys.argv[3]},
-                                                                     {"serial": "1002", "primary": "B" * 40, "subkey": sys.argv[4]}]}
-json.dump({"record": record, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}, open(w + "/cards/card-record-1.record.json", "w"))
-PY2
+  ( umask 077; mkdir "$w/state" )                   # the laptop's signing state directory (CEREMONY_STATE_DIR)
+  sign_card_record "$w" card1 card2 1
   printf '%s' "$w"
 }
 
+sign_card_record(){ # sign_card_record WORK CARD_A CARD_B N: card record N naming the two homes' keys, signed by WORK's root, logged
+  python3 -Es - "$SCRIPTS/offline-keys.py" "$HERE/vectors/card-ceremony-record/make.py" "$1" "$4" \
+      "$("$REAL_GPG" --homedir "$T/$2" --with-colons --list-keys | awk -F: '/^fpr/{print $10}' | head -2 | tr '\n' ' ')" \
+      "$("$REAL_GPG" --homedir "$T/$3" --with-colons --list-keys | awk -F: '/^fpr/{print $10}' | head -2 | tr '\n' ' ')" <<'PY2'
+import importlib.machinery, importlib.util, json, os, sys
+def load(name, path):
+    loader = importlib.machinery.SourceFileLoader(name, path); m = importlib.util.module_from_spec(importlib.util.spec_from_loader(name, loader)); loader.exec_module(m); return m
+ok, vectors = load("ok", sys.argv[1]), load("vectors", sys.argv[2])
+w, n, cards = sys.argv[3], int(sys.argv[4]), [a.split() for a in sys.argv[5:7]]
+sealed = json.load(open(w + "/offline/offline-keys.sealed.json"))
+shares = [" ".join(line.split()) for line in open(w + "/two-shares").read().splitlines()[:2]]
+root = ok._private_key(ok.unseal(ok.combine(shares, sealed)[0], sealed)["keys"]["root"])
+entry = {"alg": "ed25519", "key": ok.root_entry_of(sealed)}
+state = w + "/state"
+if n == 1:
+    with open(os.path.join(state, ok.SIGNING_STATE), "w") as f:
+        json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": entry["key"]}, f)
+    os.chmod(os.path.join(state, ok.SIGNING_STATE), 0o600)
+lines = ok.card_lines_of(ok.read_signing_state(state, entry["key"]), entry["key"]) if n > 1 else []
+record = vectors.valid_record()
+for i, (primary, subkey) in enumerate(cards):
+    record["ownerauth_recipients"][i].update(primary=primary, subkey=subkey)
+record.update(root_entry=entry, root_fingerprint=ok.root_fingerprint(entry), sequence=n, supersedes=lines[-1]["digest"] if lines else "")
+ok.card_record_check(record)
+ok.append_card_record_line(state, record)
+json.dump({"record": record, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}, open(w + "/cards/card-record-%d.record.json" % n, "w"))
+PY2
+}
+
 run_step(){ # run_step WORK SECOND_CARD: the operator inserts card1 (serial 1001) then SECOND_CARD (serial 1002)
-  WORKDIR="$1" SECOND="$2" PATH="$T/shim:$PATH" bash -c '
+  WORKDIR="$1" SECOND="$2" CEREMONY_STATE_DIR="$1/state" PATH="$T/shim:$PATH" bash -c '
     source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
     pause(){ :; }; ask(){ return 0; }; PRINTER=""
     HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
@@ -119,7 +137,7 @@ grep -q "RC=1" <<< "$out" && grep -q "not yet proven to open every envelope" <<<
 
 hdr "outside a simulation a stray OA_NODES is ignored: the three hosts, always (3e on #130)"
 W8="$(new_work)"
-out="$(WORKDIR="$W8" PATH="$T/shim:$PATH" OA_NODES=a,b bash -c '
+out="$(WORKDIR="$W8" CEREMONY_STATE_DIR="$W8/state" PATH="$T/shim:$PATH" OA_NODES=a,b bash -c '
     source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
     pause(){ :; }; ask(){ return 0; }; PRINTER=""
     HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"
@@ -139,7 +157,7 @@ grep -q "RC=1" <<< "$out" && grep -q "step a skipped, failed or unfinished" <<< 
 
 hdr "a card gpg cannot see is said as such"
 W6="$(new_work)"
-out="$(WORKDIR="$W6" PATH="$T/shim:$PATH" bash -c '
+out="$(WORKDIR="$W6" CEREMONY_STATE_DIR="$W6/state" PATH="$T/shim:$PATH" bash -c '
     source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
     pause(){ :; }; ask(){ return 0; }; PRINTER=""
     HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
@@ -172,23 +190,46 @@ grep -q "RC=1" <<< "$out" && grep -q "no owner cards' public keys" <<< "$out" &&
 W5b="$(new_work)"; rm "$W5b/cards/card-record-1.record.json"
 out="$(run_step "$W5b" card2)"
 grep -q "RC=1" <<< "$out" && grep -q "no card record in this session" <<< "$out" && P "no card record: refused" || F "no card record: $(tail -3 <<< "$out")"
+W5c="$(new_work)"
+out="$(WORKDIR="$W5c" PATH="$T/shim:$PATH" CEREMONY_STATE_DIR="" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    pause(){ :; }; ask(){ return 0; }; PRINTER=""; HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
+    step_ownerauth; echo "RC=$?"' 2>&1)"
+grep -q "RC=1" <<< "$out" && grep -q "CEREMONY_STATE_DIR does not name the laptop's signing state directory" <<< "$out" && [ ! -e "$W5c/ownerauth" ] \
+  && P "no signing state directory: refused before anything" || F "no state dir: $(tail -3 <<< "$out")"
 
-hdr "the rehearsal drill: the recovery identity from the shares, one node's recovery copy checked, the key shredded"
-drill(){ # drill WORK NODE
-  WORKDIR="$1" NODE="$2" bash -c '
+hdr "an older card record after an owner-card replacement: refused (d9 on rc#133)"
+W9="$(new_work)"
+cp "$W9/cards/card-record-1.record.json" "$T/w9-first"
+sign_card_record "$W9" stranger card2 2
+rm "$W9/cards/card-record-2.record.json"; cp "$T/w9-first" "$W9/cards/card-record-1.record.json"   # only record 1 left in the session
+out="$(run_step "$W9" card2)"
+grep -q "RC=1" <<< "$out" && grep -q "not the newest the root signed (sequence 1 of 2)" <<< "$out" && [ ! -e "$W9/ownerauth" ] \
+  && P "card record 1 after record 2: refused, nothing made" || F "stale card record: $(tail -5 <<< "$out")"
+
+hdr "the rehearsal drill: the recovery identity from the shares, every node's recovery copy checked, the key shredded"
+drill(){ # drill WORK [EXTRA]: EXTRA is shell run before the drill (a stand-in)
+  WORKDIR="$1" EXTRA="${2:-}" bash -c '
     source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
     pause(){ :; }; ask(){ return 0; }; PRINTER=""
     HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
-    ownerauth_drill "$NODE"; echo "RC=$?"' 2>&1
+    eval "$EXTRA"
+    ownerauth_drill; echo "RC=$?"; trap -p' 2>&1
 }
-out="$(drill "$W" a)"
-grep -q "RC=0" <<< "$out" && grep -q "owner-auth drill passed: node a's recovery copy opens" <<< "$out" && [ ! -e "$W/ownerauth-recovery.key" ] \
-  && P "the drill opens node a's recovery copy, checks it, and leaves no identity file" || F "drill: $(tail -6 <<< "$out")"
-cp "$W/ownerauth/ownerauth-b.bg.sops" "$T/b.keep"; cp "$W/ownerauth/ownerauth-a.bg.sops" "$W/ownerauth/ownerauth-b.bg.sops"
-out="$(drill "$W" b)"
-grep -q "RC=1" <<< "$out" && grep -q "owner-auth drill FAILED for node b" <<< "$out" && [ ! -e "$W/ownerauth-recovery.key" ] \
-  && P "a recovery copy holding another node's value fails the drill, and the identity file is still removed" || F "swapped copy: $(tail -6 <<< "$out")"
-cp "$T/b.keep" "$W/ownerauth/ownerauth-b.bg.sops"
+out="$(drill "$W")"
+grep -q "RC=0" <<< "$out" && grep -q "owner-auth drill passed for every node (a b c)" <<< "$out" && [ ! -e "$W/ownerauth-recovery.key" ] \
+  && P "the drill opens every node's recovery copy, checks each, and leaves no identity file" || F "drill: $(tail -6 <<< "$out")"
+! grep -q "^trap" <<< "$out" && P "the drill leaves the session's traps as they were" || F "traps left: $(grep '^trap' <<< "$out")"
+cp "$W/ownerauth/ownerauth-c.bg.sops" "$T/c.keep"; cp "$W/ownerauth/ownerauth-a.bg.sops" "$W/ownerauth/ownerauth-c.bg.sops"
+out="$(drill "$W")"
+grep -q "RC=1" <<< "$out" && grep -q "owner-auth drill FAILED for node c" <<< "$out" && grep -q "node b's recovery copy opens" <<< "$out" \
+  && [ ! -e "$W/ownerauth-recovery.key" ] \
+  && P "the last node's copy holding another node's value fails the drill (every node is checked), and the identity is removed" || F "swapped copy: $(tail -6 <<< "$out")"
+cp "$T/c.keep" "$W/ownerauth/ownerauth-c.bg.sops"
+out="$(drill "$W" 'sops(){ cat "$SOPS_AGE_KEY_FILE" > "$T/seen-key"; me=$BASHPID; while read -r k v; do [ "$k" = PPid: ] && kill -INT "$v"; done < /proc/$me/status; }')"
+grep -q "RC=130" <<< "$out" && [ -s "$T/seen-key" ] && [ ! -e "$W/ownerauth-recovery.key" ] \
+  && P "interrupted with the identity open: it is removed all the same" || F "interrupt: $(tail -6 <<< "$out")"
+rm -f -- "$T/seen-key"
 src="$(bash -c 'source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM; OA_SHARES_FROM=/x; CEREMONY_SIMULATE= oa_shares_in')"
 [ "$src" = /dev/tty ] && P "outside a simulation the shares come from the terminal, whatever OA_SHARES_FROM says" || F "share source: $src"
 
