@@ -2716,6 +2716,16 @@ step_archive() {
       return 1
     fi
   fi
+  # The offline keys' shares are on paper only: a shares file still in the workdir means step o never proved the
+  # forms, and the disc waits for that (ADR-0002 D28).
+  if [ -e "$WORK/offline/offline-shares.txt" ]; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the offline keys' forms were not proven (offline-shares.txt is still here); the real ceremony refuses this disc."
+    else
+      err "the offline keys' forms were not proven: $WORK/offline/offline-shares.txt is still here. Finish step o; nothing was burned."
+      return 1
+    fi
+  fi
   # The owner authorizations (step a, regalia-kms#242): a ceremony that made the offline keys (step o) makes the KMS
   # platform, and no host enrols under v4 without its owner auth set. So, once the offline keys exist, the disc waits
   # for step a's root-signed proof that both developer cards open every node's envelope, whether step a was skipped,
@@ -2727,16 +2737,6 @@ step_archive() {
     else
       err "the owner authorizations are not proven by both developer cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
       err "step a needs the developer cards' exported keys, so the developer cards' step (#111 step 2) comes before this disc."
-      return 1
-    fi
-  fi
-  # The offline keys' shares are on paper only: a shares file still in the workdir means step o never proved the
-  # forms, and the disc waits for that (ADR-0002 D28).
-  if [ -e "$WORK/offline/offline-shares.txt" ]; then
-    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
-      warn "simulated run: the offline keys' forms were not proven (offline-shares.txt is still here); the real ceremony refuses this disc."
-    else
-      err "the offline keys' forms were not proven: $WORK/offline/offline-shares.txt is still here. Finish step o; nothing was burned."
       return 1
     fi
   fi
