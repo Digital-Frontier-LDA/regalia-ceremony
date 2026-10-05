@@ -324,6 +324,34 @@ class Rules(unittest.TestCase):
         with self.assertRaisesRegex(ok.Refused, "must be a directory of this user's, mode 0700"):
             ok.append_card_record_line(d, first)
 
+    def test_nothing_is_appended_that_the_reader_would_refuse(self):
+        """CodeRabbit on #121: a log that is not the owner's 0600 file, and a record that does not continue the
+        card-record lines (a duplicate, a gap, a fork, a second "first"), are refused before a byte is written."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        log = os.path.join(d, ok.SIGNING_RECORD)
+        first, second = make.valid_record(), make.sequence_two()
+        with self.assertRaisesRegex(ok.Refused, "does not follow the signing record \\(sequence 1 superseding nothing expected, got 2"):
+            ok.append_card_record_line(d, second)                     # a gap on an empty log
+        ok.append_card_record_line(d, first)
+        size = os.path.getsize(log)
+        with self.assertRaisesRegex(ok.Refused, "sequence 2 superseding %s expected, got 1 superseding nothing" % ok.card_record_digest(first)):
+            ok.append_card_record_line(d, first)                      # the same record again
+        fork = dict(second, supersedes="0" * 64)
+        with self.assertRaisesRegex(ok.Refused, "sequence 2 superseding %s expected, got 2 superseding 0{64}" % ok.card_record_digest(first)):
+            ok.append_card_record_line(d, fork)                       # a record 2 that supersedes another record 1
+        self.assertEqual(os.path.getsize(log), size, "nothing was appended")
+        os.chmod(log, 0o644)
+        with self.assertRaisesRegex(ok.Refused, "must be a regular file of the directory's owner, mode 0600: nothing was appended"):
+            ok.append_card_record_line(d, second)
+        self.assertEqual(os.path.getsize(log), size)
+        os.chmod(log, 0o600)
+        with open(log, "ab") as f:
+            f.write(b'{"kind": "card-record", "sequ')                 # a torn last line: the reader refuses it, so does the writer
+        with self.assertRaisesRegex(ok.Refused, "line 2 of the signing record is not JSON"):
+            ok.append_card_record_line(d, second)
+
     def test_the_verifier_takes_exactly_a_record_and_a_hex_signature(self):
         with open(os.path.join(VECTORS, "valid.json")) as f:
             document = json.load(f)

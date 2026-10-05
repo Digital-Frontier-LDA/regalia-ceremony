@@ -1235,6 +1235,12 @@ def read_signing_state(state_dir, pinned_root):
         require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
                 "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
         data = f.read(MAX_SIGNING_RECORD + 1)
+    return _signing_record_lines(data)
+
+
+def _signing_record_lines(data):
+    """The signing record's bytes as its lines (whatever JSON each holds), by one rule for the reader and the writer:
+    whole (at most MAX_SIGNING_RECORD), UTF-8, each line JSON."""
     require(len(data) <= MAX_SIGNING_RECORD, "%s is larger than %d bytes: refused whole, never read in part" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
     try:
         texts = data.decode("utf-8").splitlines()
@@ -1252,14 +1258,31 @@ def read_signing_state(state_dir, pinned_root):
 def append_card_record_line(state_dir, record, now=None):
     """When the root signs a card record: one line in the laptop's root signing record (the file `manifest sign
     --state-dir` appends to), {kind, sequence, digest, key, at}, appended and synced as manifest.py's _append_record
-    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes."""
+    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes.
+
+    Nothing is appended that the reader would refuse (CodeRabbit on #121): the log must be the directory owner's 0600
+    regular file, and the record must continue its card-record lines, sequence M+1 superseding line M's digest (1 and
+    "" on an empty log). A duplicate, a gap or a fork is refused before a byte is written."""
+    import stat as _stat
     info = os.stat(state_dir)
     require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
             "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
     line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
             "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
+        log_info = os.fstat(fd)
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600: nothing was appended" % SIGNING_RECORD)
+        existing, chunk = b"", True
+        while chunk and len(existing) <= MAX_SIGNING_RECORD:
+            chunk = os.pread(fd, MAX_SIGNING_RECORD + 1 - len(existing), len(existing))
+            existing += chunk
+        before = [old for old in _signing_record_lines(existing) if isinstance(old, dict) and old.get("kind") == "card-record"]
+        expected = (len(before) + 1, before[-1].get("digest") if before else "")
+        require((record["sequence"], record["supersedes"]) == expected,
+                "this card record does not follow the signing record (sequence %d superseding %s expected, got %d superseding %s): "
+                "nothing was appended" % (expected[0], expected[1] or "nothing", record["sequence"], record["supersedes"] or "nothing"))
         data = (json.dumps(line, sort_keys=True) + "\n").encode()
         while data:
             data = data[os.write(fd, data):]
