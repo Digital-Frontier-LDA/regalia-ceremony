@@ -202,6 +202,14 @@ class Vectors(unittest.TestCase):
         self.assertEqual(ok.canonical(record), json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode())
 
 
+def marker(d, root):
+    """The state directory's marker naming `root`, as the first card-record writer makes it."""
+    path = os.path.join(d, ok.SIGNING_STATE)
+    with open(path, "w") as f:
+        json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root}, f)
+    os.chmod(path, 0o600)
+
+
 class Rules(unittest.TestCase):
     """Every rule of card_record_check, each by its own refusal message."""
 
@@ -315,6 +323,9 @@ class Rules(unittest.TestCase):
         self.addCleanup(shutil.rmtree, d, True)
         os.chmod(d, 0o700)
         first, second = make.valid_record(), make.sequence_two()
+        with self.assertRaisesRegex(ok.Refused, "has no regalia-signing-state.json"):
+            ok.append_card_record_line(d, first)                      # no marker: the root is unknown
+        marker(d, first["root_entry"]["key"])
         ok.append_card_record_line(d, first)
         ok.append_card_record_line(d, second)
         with open(os.path.join(d, ok.SIGNING_RECORD)) as f:
@@ -334,6 +345,7 @@ class Rules(unittest.TestCase):
         os.chmod(d, 0o700)
         log = os.path.join(d, ok.SIGNING_RECORD)
         first, second = make.valid_record(), make.sequence_two()
+        marker(d, first["root_entry"]["key"])
         with self.assertRaisesRegex(ok.Refused, "does not follow the signing record \\(sequence 1 superseding nothing expected, got 2"):
             ok.append_card_record_line(d, second)                     # a gap on an empty log
         ok.append_card_record_line(d, first)
@@ -353,6 +365,29 @@ class Rules(unittest.TestCase):
             f.write(b'{"kind": "card-record", "sequ')                 # a torn last line: the reader refuses it, so does the writer
         with self.assertRaisesRegex(ok.Refused, "line 2 of the signing record is not JSON"):
             ok.append_card_record_line(d, second)
+
+    def test_only_a_valid_record_of_the_markers_root_is_appended(self):
+        """CodeRabbit on #121: the appender judges the record by card_record_check, and binds it and every card-record
+        line already logged to the root the directory's marker names."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        first = make.valid_record()
+        marker(d, "11" * 32)
+        with self.assertRaisesRegex(ok.Refused, "this card record is signed for another root than regalia-signing-state.json names"):
+            ok.append_card_record_line(d, first)
+        marker(d, first["root_entry"]["key"])
+        broken = dict(first)
+        del broken["ownerauth_recipients"]
+        with self.assertRaises(ok.Refused):
+            ok.card_record_check(broken)                              # the reader's own refusal...
+        with self.assertRaisesRegex(ok.Refused, "ownerauth_recipients"):
+            ok.append_card_record_line(d, broken)                     # ...is the appender's
+        with open(os.path.join(d, ok.SIGNING_RECORD), "w") as f:
+            f.write(json.dumps({"kind": "card-record", "sequence": 1, "digest": "0" * 64, "key": "11" * 32, "at": "2026-10-05T00:00:00Z"}) + "\n")
+        os.chmod(os.path.join(d, ok.SIGNING_RECORD), 0o600)
+        with self.assertRaisesRegex(ok.Refused, "the signing record holds a card-record line of another root: nothing was appended"):
+            ok.append_card_record_line(d, dict(make.sequence_two()))
 
     def test_the_verifier_takes_exactly_a_record_and_a_hex_signature(self):
         with open(os.path.join(VECTORS, "valid.json")) as f:
