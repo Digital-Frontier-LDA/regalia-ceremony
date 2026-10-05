@@ -1021,7 +1021,7 @@ def verify_record(document):
 
 
 SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
-CARD_ROLES = ("dev-main", "dev-backup")
+CARD_ROLES = ("owner-main", "owner-backup")     # ADR-0002 D30.7: the OWNER pair, not the developer cards
 # The bench's staging YubiKeys (the memory of 2026-10-01; D28.5/D30: never a bench serial in the ceremony). One list,
 # checked once in the record, so neither reader has to keep its own (regalia-kms-d9 on #121).
 BENCH_YUBIKEYS = ("36345471", "36344616", "35718625")
@@ -1093,10 +1093,10 @@ def card_record_check(record):
     require(record["root_entry"]["alg"] == "ed25519" and _HEX64.fullmatch(str(record["root_entry"]["key"])), "root_entry is an Ed25519 key, 64 hex")
     require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "root_fingerprint is not the SHA-256 of the root key")
     owners = record["owner_keys"]
-    require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two developer cards' SIG keys (D30.3)")
+    require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two owner cards' SIG keys (D30.7)")
     for i, k in enumerate(owners):
         _exact(k, ("role", "serial", "alg", "key", "attested", "attestation_sha256"), "owner_keys[%d]" % i)
-        require(k["role"] in CARD_ROLES, "owner_keys[%d].role is dev-main or dev-backup" % i)
+        require(k["role"] in CARD_ROLES, "owner_keys[%d].role is owner-main or owner-backup" % i)
         require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
         require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
         require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
@@ -1105,9 +1105,9 @@ def card_record_check(record):
         _exact(k["attestation_sha256"], ("sig", "dec"), "owner_keys[%d].attestation_sha256" % i)
         require(all(isinstance(v, str) and _HEX64.fullmatch(v) for v in k["attestation_sha256"].values()),
                 "owner_keys[%d].attestation_sha256 gives each certificate's SHA-256, 64 hex" % i)
-    require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles dev-main and dev-backup, once each")
+    require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles owner-main and owner-backup, once each")
     serials = {k["serial"] for k in owners}
-    require(len(serials) == 2, "the two developer cards have distinct serials")
+    require(len(serials) == 2, "the two owner cards have distinct serials")
     rel = record["release_key"]
     _exact(rel, ("alg", "key", "fingerprint", "cards", "imported", "attested"), "release_key")
     require(rel["alg"] == "ed25519" and isinstance(rel["key"], str) and _HEX64.fullmatch(rel["key"]), "release_key is an Ed25519 key, 64 hex")
@@ -1115,20 +1115,20 @@ def card_record_check(record):
     require(rel["imported"] is True and rel["attested"] is False, "the release key is imported, not attested (D29.2)")
     require(isinstance(rel["cards"], list) and len(rel["cards"]) == 2 and all(isinstance(c, str) and _SERIAL.fullmatch(c) for c in rel["cards"])
             and len(set(rel["cards"])) == 2, "release_key.cards are the two release cards' serials")
-    require(not set(rel["cards"]) & serials, "a release card is also a developer card: the developer cards never hold the release key (D30.3)")
-    require(rel["key"] not in {k["key"] for k in owners}, "the release key is an owner key: the release cards hold no owner key (D30.3)")
+    require(not set(rel["cards"]) & serials, "a release card is also an owner card: the owner cards never hold the release key (D30.7)")
+    require(rel["key"] not in {k["key"] for k in owners}, "the release key is an owner key: the release cards hold no owner key (D30.7)")
     for name, fields in (("ownerauth_recipients", ("serial", "primary", "subkey")), ("ssh_signers", ("serial", "key"))):
         items = record[name]
         require(isinstance(items, list), "%s is a list" % name)
         for i, item in enumerate(items):
             _exact(item, fields, "%s[%d]" % (name, i))
             require(isinstance(item["serial"], str) and _SERIAL.fullmatch(item["serial"]), "%s[%d].serial is a decimal YubiKey serial" % (name, i))
-        require(sorted(item["serial"] for item in items) == sorted(serials), "%s has one entry for each developer card" % name)
+        require(sorted(item["serial"] for item in items) == sorted(serials), "%s has one entry for each owner card" % name)
     for i, r in enumerate(record["ownerauth_recipients"]):
         require(all(isinstance(r[f], str) and _FPR.fullmatch(r[f]) for f in ("primary", "subkey")) and r["primary"] != r["subkey"],
                 "ownerauth_recipients[%d] names a primary and a different encryption subkey, 40 upper-case hex" % i)
     fprs = [r[f] for r in record["ownerauth_recipients"] for f in ("primary", "subkey")]
-    require(len(set(fprs)) == len(fprs), "an ownerauth fingerprint is used twice: each developer card has its own primary and its own "
+    require(len(set(fprs)) == len(fprs), "an ownerauth fingerprint is used twice: each owner card has its own primary and its own "
             "decryption subkey, or one card would count twice in the proof (d9 on #121)")
     certs = [v for k in owners for v in k["attestation_sha256"].values()]
     require(len(set(certs)) == len(certs), "an attestation certificate is named twice: each key has its own")
