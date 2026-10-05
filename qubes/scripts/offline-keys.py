@@ -1249,6 +1249,11 @@ def read_signing_state(state_dir, pinned_root):
         base = baselines[0]
         require(rebuild["baseline"] == {"sequence": base.get("sequence"), "digest": base.get("digest"), "source": base.get("source")},
                 "the rebuild record does not name the signing record's baseline")
+        # the record the rebuild signed is the one after the baseline, not another N+1 beside it (1e on #444)
+        after = [line for line in lines if isinstance(line, dict) and line.get("kind") == "card-record"
+                 and line.get("sequence") == rebuild["rebuilt"].get("sequence")]
+        require(all(line.get("digest") == rebuild["rebuilt"].get("digest") for line in after),
+                "the signing record's card record %s is not the one its rebuild record re-signed" % rebuild["rebuilt"].get("sequence"))
     return lines
 
 

@@ -145,6 +145,10 @@ class Rebuild(unittest.TestCase):
             f.write(json.dumps(dict(base, sequence=1)) + "\n" + json.dumps(dict(third, sequence=2)) + "\n")
         with self.assertRaisesRegex(ok.Refused, "the rebuild record does not name the signing record's baseline"):
             ok.read_signing_state(self.state, self.root)
+        with open(log, "w") as f:                       # the right baseline, and a different N+1 beside it
+            f.write(json.dumps(base) + "\n" + json.dumps(dict(third, digest="cd" * 32)) + "\n")
+        with self.assertRaisesRegex(ok.Refused, "the signing record's card record 3 is not the one its rebuild record re-signed"):
+            ok.read_signing_state(self.state, self.root)
         document = json.loads(kept)
         document["signature"] = "00" * 64
         with open(rebuild_path, "w") as f:
