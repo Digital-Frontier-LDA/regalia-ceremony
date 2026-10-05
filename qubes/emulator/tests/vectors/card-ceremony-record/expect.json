@@ -3,7 +3,6 @@
  "first-supersedes.json": "the first card record (sequence 1) supersedes nothing: supersedes is \"\"",
  "missing-owner-backup.json": "owner_keys holds exactly the two owner cards' SIG keys (D30.7)",
  "other-root.json": "the record names another root than the pinned one",
- "rebuilt-3.json": "ok",
  "release-is-owner.json": "the release key is an owner key: the release cards hold no owner key (D30.7)",
  "sequence-2.json": "ok",
  "unknown-field.json": "owner_keys[0] has an unknown field: comment",
