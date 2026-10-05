@@ -40,7 +40,8 @@ card(){ # card NAME: a software "developer card", an Ed25519 primary and a cv255
   local home="$T/$1" fpr
   ( umask 077; mkdir "$home" )
   "$REAL_GPG" --homedir "$home" --batch --pinentry-mode loopback --passphrase "" --quick-gen-key "$1 <$1@example.invalid>" ed25519 sign never 2>/dev/null
-  fpr="$("$REAL_GPG" --homedir "$home" --with-colons --list-keys | awk -F: '/^fpr/{print $10; exit}')"
+  local listing; listing="$("$REAL_GPG" --homedir "$home" --with-colons --list-keys)"
+  fpr="$(awk -F: '/^fpr/{print $10; exit}' <<< "$listing")"
   "$REAL_GPG" --homedir "$home" --batch --pinentry-mode loopback --passphrase "" --quick-add-key "$fpr" cv25519 encr never 2>/dev/null
 }
 card card1; card card2; card stranger
