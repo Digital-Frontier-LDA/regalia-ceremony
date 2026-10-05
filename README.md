@@ -93,12 +93,15 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     holds the offline keys can be burned until the developer cards' step exists: the cards come first.
   - The tool's own docstring lists its limitations in full.
 - **The laptop-side YubiKeys (D30):**
-  - No tool makes the developer cards' keys yet. That step waits on the D30.6 bench measurements, which have not
-    run (#111).
+  - The owner cards' keys (ADR-0002 D30.7): `qubes/scripts/owner-cards.py` generates SIG, DEC and AUT on each card,
+    has gpg build the certificate from them, writes the fingerprints back, sets touch fixed on all three and checks
+    each attestation, then joins both cards into the card record's input. It is tested against a stand-in card and a
+    stand-in gpg dialogue only; its run on a staging YubiKey has not happened yet, and no `ceremony.sh` step runs it
+    (#111). The D30.6 bench measurements it follows passed on 2026-10-05.
   - The release key's import onto the release cards is not implemented (#124).
   - The card-ceremony record's rules and verifier are in review (#121); no tool writes the record yet.
-  - Nothing produces OpenPGP attestation certificates yet, so a record's "attested" has no certificate behind it
-    (#127).
+  - The owner cards' attestation certificates are produced and checked by `owner-cards.py` (each claim and key), and
+    named in the card record by their DER's SHA-256; the chain to Yubico's root is regalia-kms's to check (#400).
   - The release key's tool (#126) and its `ceremony.sh` step r are in review, modelled against a stand-in card only.
 - **Open issues in the existing tooling:**
   - Every emulator suite is now kept off the real pcscd. What remains open is stand-ins for `opensc-tool`,
