@@ -1652,7 +1652,9 @@ def chain_pin(chain_path, root_hex, tool_root, tool_digest, run=subprocess.run):
     """The verified chain's card_record pin, computed here, never typed (d9 on #406): regalia-kms's own verifier, run
     from a tree whose digest is the one typed from the image's build evidence (as sign's tools are), with a cleared
     environment, must exit 0 and end with its CARD-RECORD-PIN line. A chain with no card_record (before v4) prints no
-    such line, and is refused."""
+    such line, and is refused. `tool_digest` must be the ceremony kit's pinned value for the reviewed regalia-kms
+    commit, typed from that evidence, NEVER computed from the tree it checks: otherwise it only proves the tree is
+    itself (d9 on #406)."""
     require(tree_digest(tool_root) == tool_digest, "the regalia-kms tree's digest is not --tool-digest: nothing is run from it")
     done = run(["/usr/bin/python3", "-Es", "-m", "deploy.baremetal.manifest", "verify", "--chain", os.path.abspath(chain_path),
                 "--root-key", root_hex], cwd=tool_root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, stdin=subprocess.DEVNULL,
@@ -1707,7 +1709,8 @@ def main(argv=None):
     c.add_argument("--chain", help="with --rebuild-from-disc, after genesis: the chain (from any node); its card_record pin is "
                    "computed by regalia-kms's verifier from --tool-root, never typed")
     c.add_argument("--tool-root", help="with --chain: the image's regalia-kms tree")
-    c.add_argument("--tool-digest", help="with --chain: that tree's digest, typed from the image's build evidence (tree-digest)")
+    c.add_argument("--tool-digest", help="with --chain: the ceremony kit's pinned digest for the reviewed regalia-kms commit, typed "
+                   "from that evidence; never computed from the tree it checks")
     s = sub.add_parser("sign", help="a signing session: the k shares on standard input, one per line")
     s.add_argument("--sealed", required=True)
     s.add_argument("--who", required=True, help="the person signing, as recorded")
