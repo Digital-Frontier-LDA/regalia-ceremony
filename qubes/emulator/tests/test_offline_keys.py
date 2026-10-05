@@ -337,11 +337,11 @@ class Sign(Case):
     FAKE_TOOL = r'''
 import fcntl, hashlib, os, sys
 args = sys.argv[1:]
-assert args[0] == "sign", args
+assert args[0] in ("sign", "approve-first", "approve", "approve-increment"), args
 def val(flag):
     return args[args.index(flag) + 1]
 assert os.environ.get("PATH") == "/usr/bin:/bin" and set(os.environ) <= {"PATH", "LC_ALL", "LC_CTYPE"}, sorted(os.environ)
-lines = ["session " + val("--offline-session")]
+lines = ["session " + val("--offline-session")] + ["%s %s" % (f, val(f)) for f in ("--root-key", "--state-dir") if f in args]
 for flag in [a for a in args if a.endswith("key-fd")]:
     fd = int(val(flag))
     assert os.readlink("/proc/self/fd/%d" % fd).startswith("/memfd:"), "not a memfd"
@@ -383,10 +383,11 @@ if "nooutput" not in args:
         os.makedirs(os.path.join(self.tree, "deploy", "baremetal"))
         open(os.path.join(self.tree, "deploy", "__init__.py"), "w").close()
         open(os.path.join(self.tree, "deploy", "baremetal", "__init__.py"), "w").close()
-        for module in ("manifest", "uki"):
+        for module in ("manifest", "uki", "anchorpolicy"):
             with open(os.path.join(self.tree, "deploy", "baremetal", module + ".py"), "w") as f:
                 f.write(self.FAKE_TOOL)
         self.digest = ok.tree_digest(self.tree)
+        self.state = self.state_dir(ok.root_entry_of(json.load(open(self.sealed))))
         import sys
         patcher = unittest.mock.patch.object(ok, "PYTHON", sys.executable)
         patcher.start()
@@ -397,21 +398,32 @@ if "nooutput" not in args:
         patcher.start()
         self.addCleanup(patcher.stop)
 
-    def command(self, tool, *extra, out=None):
+    def state_dir(self, root):
+        """A 0700 signing state directory whose marker names `root`."""
+        d = tempfile.mkdtemp(dir=self.d)
+        os.chmod(d, 0o700)
+        with open(os.path.join(d, ok.SIGNING_STATE), "w") as f:
+            json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root}, f)
+        os.chmod(os.path.join(d, ok.SIGNING_STATE), 0o600)
+        return d
+
+    def command(self, tool, *extra, out=None, subcommand="sign"):
         import sys
         out = out or os.path.join(self.session_dir, "%s.out" % tool)
         if tool == "manifest":
-            flags = ["--signer", "root", "--key-fd", "{keyfd:root}"]
+            flags = ["--signer", "root", "--key-fd", "{keyfd:root}", "--root-key", "{root}", "--state-dir", "{state}"]
+        elif tool == "anchorpolicy":
+            flags = ["--key-fd", "{keyfd:anchor-policy}", "--root-key", "{root}", "--state-dir", "{state}"]
         else:
             flags = ["--initrd-key-fd", "{keyfd:pcr-initrd}", "--system-key-fd", "{keyfd:pcr-system}", "--secure-boot-key-fd", "{keyfd:secure-boot}"]
-        return [sys.executable, "-Es", "-m", "deploy.baremetal." + tool, "sign"] + flags + ["--offline-session", "{session}", "--out", out] + list(extra)
+        return [sys.executable, "-Es", "-m", "deploy.baremetal." + tool, subcommand] + flags + ["--offline-session", "{session}", "--out", out] + list(extra)
 
-    def sign(self, command, shares=None, outputs=None, digest=None, who="Owner"):
+    def sign(self, command, shares=None, outputs=None, digest=None, who="Owner", state="default"):
         import io
         self.sinks = {"stdout": io.BytesIO(), "stderr": io.BytesIO()}
         outs = outputs if outputs is not None else [command[command.index("--out") + 1]]
         return ok.sign(self.sealed, who, self.session_dir, io.StringIO("\n".join(shares or self.all[1:4]) + "\n"), command,
-                       self.tree, digest or self.digest, outs, sinks=self.sinks)
+                       self.tree, digest or self.digest, outs, sinks=self.sinks, state_dir=self.state if state == "default" else state)
 
     def pem(self, name):
         from shamir_mnemonic import combine_mnemonics
@@ -434,7 +446,10 @@ if "nooutput" not in args:
         with open(os.path.join(self.session_dir, "manifest.out")) as f:
             lines = f.read().split()
         self.assertEqual(lines[:2], ["session", session["session"]], "the tool was told the session's id")
-        self.assertEqual(lines[2:], ["--key-fd", hashlib.sha256(self.pem("root")).hexdigest()], "it read the root, PEM, to EOF")
+        root_hex = ok.root_entry_of(json.load(open(self.sealed)))
+        self.assertEqual(lines[2:], ["--root-key", root_hex, "--state-dir", os.path.abspath(self.state),
+                                     "--key-fd", hashlib.sha256(self.pem("root")).hexdigest()],
+                         "{root} is this set's root, {state} the directory its marker binds; it read the root, PEM, to EOF")
         [verified] = self.records()
         self.assertEqual((verified["event"], verified["tool"], verified["keys"], verified["who"], verified["exit"], verified["share_indices"]),
                          ("sign", "manifest", ["root"], "Owner", 0, [2, 3, 4]))
@@ -445,6 +460,42 @@ if "nooutput" not in args:
         with open(os.path.join(self.session_dir, "manifest.out"), "rb") as f:
             self.assertEqual(list(verified["outputs"].values()), [hashlib.sha256(f.read()).hexdigest()])
         self.assertEqual(verified["key_material_found"], [])
+
+    def test_k_a_goes_only_to_its_signer_one_entry_per_subcommand(self):
+        """regalia-kms#361 C2 (#464): K_A alone, to anchorpolicy approve-first, approve or approve-increment, each its own
+        entry (the record names which); {root} and {state} filled as for manifest; no other key, no other subcommand."""
+        root_hex = ok.root_entry_of(json.load(open(self.sealed)))
+        for subcommand, tool in (("approve-first", "anchor-first"), ("approve", "anchor-approve"), ("approve-increment", "anchor-increment")):
+            out = os.path.join(self.session_dir, "%s.out" % subcommand)
+            session, path = self.sign(self.command("anchorpolicy", subcommand=subcommand, out=out))
+            with open(out) as f:
+                self.assertEqual(f.read().split()[2:], ["--root-key", root_hex, "--state-dir", os.path.abspath(self.state),
+                                                       "--key-fd", hashlib.sha256(self.pem("anchor-policy")).hexdigest()])
+            with open(path) as f:
+                recorded = ok.verify_record(json.load(f))
+            self.assertEqual((recorded["tool"], recorded["keys"]), (tool, ["anchor-policy"]))
+        for reason, command in (
+                ("--exec runs only", self.command("anchorpolicy", subcommand="sign")),
+                ("not entitled to: {keyfd:root}", self.command("anchorpolicy", "{keyfd:root}", subcommand="approve")),
+                ("must carry --root-key {root}", [root_hex if a == "{root}" else a for a in self.command("anchorpolicy", subcommand="approve")]),
+                ("must carry --state-dir {state}", [a for a in self.command("anchorpolicy", subcommand="approve-first") if a not in ("--state-dir", "{state}")])):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ok.Refused, re.escape(reason)):
+                self.sign(command, shares=["not a share"], outputs=[])
+
+    def test_the_state_directory_is_the_sealed_roots_checked_before_a_share_is_read(self):
+        """{state} is sign's own --state-dir, and only once its marker names THIS sealed set's root (1e, d9 on #361)."""
+        command = self.command("manifest")
+        loose = self.state_dir(ok.root_entry_of(json.load(open(self.sealed))))
+        os.chmod(loose, 0o755)
+        for state, reason in ((None, "give --state-dir"),
+                              (self.state_dir("ab" * 32), "names another root than this sealed set's"),
+                              (loose, "must be a directory of this user's, mode 0700"),
+                              (tempfile.mkdtemp(dir=self.d), "has no regalia-signing-state.json")):
+            if state and reason.startswith("has no"):
+                os.chmod(state, 0o700)
+            with self.subTest(reason=reason), self.assertRaisesRegex(ok.Refused, re.escape(reason)):
+                self.sign(command, shares=["not a share"], state=state)       # refused before the shares are read
+        self.assertEqual(self.records(), [])
 
     def test_the_three_boot_keys_go_together_to_uki_sign(self):
         self.sign(self.command("uki"))
@@ -463,6 +514,8 @@ if "nooutput" not in args:
             ("--exec runs only", [sys.executable, "-c", "pass", "-m", "deploy.baremetal.manifest", "sign"]),
             ("must carry --offline-session", [a for a in manifest if a not in ("--offline-session", "{session}")]),
             ("must carry --signer root", [("pcr-system" if a == "root" else a) for a in manifest]),
+            ("must carry --root-key {root}", [("ab" * 32 if a == "{root}" else a) for a in manifest]),       # never typed
+            ("must carry --state-dir {state}", [("/tmp/s" if a == "{state}" else a) for a in manifest]),
             ("not entitled to: {keyfd:root}", self.command("uki", "--extra", "{keyfd:root}")),
             ("not entitled to: {keyfd:pcr-initrd}", manifest + ["{keyfd:pcr-initrd}"]),
             # argparse's abbreviations and `=` form, the last occurrence winning (51 on regalia-kms#464)
@@ -491,9 +544,9 @@ if "nooutput" not in args:
     def test_the_genesis_form_of_manifest_sign_is_allowed(self):
         """regalia-kms#360: `manifest sign --genesis` (epoch 1, no chain) takes the root the same way."""
         import sys
-        genesis = [sys.executable, "-Es", "-m", "deploy.baremetal.manifest", "sign", "--genesis", "--root-key", "ab" * 32,
+        genesis = [sys.executable, "-Es", "-m", "deploy.baremetal.manifest", "sign", "--genesis", "--root-key", "{root}",
                    "--proposal", "p.json", "--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}",
-                   "--state-dir", "s", "--out", "e1.json", "--chain-out", "c.json"]
+                   "--state-dir", "{state}", "--out", "e1.json", "--chain-out", "c.json"]
         self.assertEqual(ok.check_command(genesis), ("manifest", ("root",)))
 
     def test_a_tools_own_options_of_a_prefix_name_are_allowed(self):
@@ -529,7 +582,7 @@ if "nooutput" not in args:
         import io
         command = self.command("manifest")
         argv = ["sign", "--sealed", self.sealed, "--who", "Owner", "--out", self.session_dir, "--tool-root", self.tree,
-                "--tool-digest", self.digest, "--output", command[command.index("--out") + 1], "--exec"] + command
+                "--tool-digest", self.digest, "--output", command[command.index("--out") + 1], "--state-dir", self.state, "--exec"] + command
         import types
         stdout = io.StringIO()
         fake_sys = types.SimpleNamespace(stdin=io.StringIO("\n".join(self.all[1:4]) + "\n"),
