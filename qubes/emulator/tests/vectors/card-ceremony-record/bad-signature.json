@@ -6,6 +6,7 @@
    {
     "alg": "ed25519",
     "attestation_sha256": {
+     "aut": "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3",
      "dec": "d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2",
      "sig": "d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1"
     },
@@ -17,6 +18,7 @@
    {
     "alg": "ed25519",
     "attestation_sha256": {
+     "aut": "e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3e3",
      "dec": "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
      "sig": "e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1"
     },
@@ -70,5 +72,5 @@
   "supersedes": "",
   "tool": "card-ceremony-vectors/1"
  },
- "signature": "4658402967e34092a906f28d35428e2ca5f98b479ac3e6d526ed22e5d0c8852036475b88a35222b41b1b974acd8873ef68f32bdd01bfbf941ec2f54251a74700"
+ "signature": "3bbf50da973658163e076b55d749ae2ecb11a2196091eab467fd5d6b90fd8c425fd98b844a675460003e9b37a7a176e12efd0d26dbc0be9420463079136ba500"
 }
