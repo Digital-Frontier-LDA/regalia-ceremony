@@ -47,7 +47,7 @@ def software_key(home, name):
 class FakeCard:
     """yubikit's OpenPgpSession, as enroll uses it."""
 
-    def __init__(self, serial, keys, firmware="5.7.4", held=(), uif=None, lie=None, other_key=None, forgets=()):
+    def __init__(self, serial, keys, firmware="5.7.4", held=(), uif=None, lie=None, other_key=None, forgets=(), other_ca=False):
         from yubikit.openpgp import KEY_REF, KEY_STATUS, UIF
         self.KEY_REF, self.KEY_STATUS, self.UIF = KEY_REF, KEY_STATUS, UIF
         self.serial, self.firmware, self.keys, self.lie = serial, firmware, keys, lie or {}
@@ -56,6 +56,7 @@ class FakeCard:
         self.uif = {ref: (uif or {}).get(self.refs[ref], UIF.OFF) for ref in self.refs}
         self.fingerprints, self.times, self.generated, self.pins = {}, {}, set(), []
         self.other_key, self.forgets = other_key, forgets       # an attestation over another key; writes the card drops
+        self.other_ca = other_ca                                # a card CA that did not sign the leaves
 
     def verify_pin(self, pin):
         assert pin == USER, "the user PIN"
@@ -111,7 +112,8 @@ class FakeCard:
 
     def get_certificate(self, ref):
         assert ref == self.KEY_REF.ATT
-        return make._cert("YubiKey OPGP Attestation", "Yubico OPGP Attestation B 1", make.YB1, make.key(35).public_key(), int(self.serial), ca=True)
+        return make._cert("YubiKey OPGP Attestation", "Yubico OPGP Attestation B 1", make.YB1,
+                          make.key(37 if self.other_ca else 35).public_key(), int(self.serial), ca=True)
 
 
 class Enroll(unittest.TestCase):
@@ -169,12 +171,14 @@ class Enroll(unittest.TestCase):
             self.assertEqual(self.card.fingerprints[ref].hex().upper(), keys[slot]["fingerprint"])
             self.assertEqual(self.card.times[ref], keys[slot]["created"])
             self.assertEqual(self.card.uif[ref], self.card.UIF.FIXED)
+        named = oc.outputs(self.out, "40000001")
         for slot in oc.SLOTS:
-            with open(os.path.join(self.out, "%s.attest.der" % slot), "rb") as f:
+            with open(named[slot], "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), facts["attestation_sha256"][slot])
-        self.assertTrue(os.path.exists(os.path.join(self.out, "att.der")))
+        self.assertTrue(os.path.exists(named["att"]))
+        self.assertTrue(os.path.getsize(named["rev"]) > 0, "gpg's revocation certificate is kept for the disc")
         self.assertEqual(ok.ssh_ed25519_raw(facts["ssh"], "ssh"), keys["aut"]["point"])
-        self.assertFalse(os.path.exists(os.path.join(self.out, "gnupg-40000001")), "the GnuPG home is removed")
+        self.assertFalse(os.path.exists(named["home"]), "the GnuPG home is removed")
         with open(os.path.join(self.out, "owner-card-40000001.json"), "rb") as f:
             self.assertEqual(json.loads(f.read()), facts)
 
@@ -194,6 +198,49 @@ class Enroll(unittest.TestCase):
         self.assertEqual(len([t for t, _ in oc.packets(both) if t == 6]), 2, "both certificates, as step a imports them")
         with self.assertRaisesRegex(ok.Refused, "is not owner-main's facts"):
             oc.cards(os.path.join(backup_out, "owner-card-40000002.json"), os.path.join(main_out, "owner-card-40000001.json"), self.out)
+        # d9 on #140: the facts are re-proved from the files beside them
+        facts_path = os.path.join(main_out, "owner-card-40000001.json")
+        kept = open(facts_path, "rb").read()
+        for change, reason in ((lambda f: f["keys"]["dec"].update(fingerprint="AB" * 20), "DEC attestation does not say what its facts say"),
+                               (lambda f: f["attestation_sha256"].update(aut="00" * 32), "AUT attestation is not the file beside it"),
+                               (lambda f: f.update(ssh=oc.ssh_line("11" * 32)), "primary or SSH key is not its SIG or AUT key")):
+            with self.subTest(reason=reason):
+                edited = json.loads(kept)
+                change(edited)
+                with open(facts_path, "wb") as f:
+                    f.write(json.dumps(edited).encode())
+                with self.assertRaisesRegex(ok.Refused, reason):
+                    oc.cards(facts_path, os.path.join(backup_out, "owner-card-40000002.json"), tempfile.mkdtemp(dir=self.out))
+        with open(facts_path, "wb") as f:
+            f.write(kept)
+
+    def test_any_output_already_there_is_refused_before_the_card_is_touched(self):
+        """d9 on #140: a second card into the same directory, or a leftover, never costs a card its keys."""
+        for which in ("att", "aut", "rev", "home"):
+            with self.subTest(which=which):
+                out = tempfile.mkdtemp(dir=self.out)
+                path = oc.outputs(out, "40000001")[which]
+                os.mkdir(path) if which == "home" else open(path, "w").close()
+                with self.assertRaisesRegex(ok.Refused, "already exist.*nothing is overwritten, and the card was not touched"):
+                    self.enroll(out=out)
+                self.assertEqual(self.card.generated, set())
+        self.enroll()                                            # owner-main, then owner-backup into the same directory
+        self.assertEqual(self.enroll("backup", "owner-backup", "40000002")["serial"], "40000002")
+
+    def test_every_refusal_after_generation_says_the_card_needs_a_reset(self):
+        def broken(home, name, email, pin):
+            raise subprocess.CalledProcessError(2, ["gpg"])
+        self.card = FakeCard("40000001", self.keys_of("main"))
+
+        @contextlib.contextmanager
+        def card(s):
+            yield self.card, self.card.firmware
+        pins = iter([ADMIN, USER])
+        with self.assertRaisesRegex(ok.Refused, "Owner card 40000001 now holds NEW keys: reset its OpenPGP applet"):
+            oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, ask_secret=lambda p: next(pins), card=card, build=broken)
+        self.assertEqual(self.card.generated, set(oc.SLOTS))
+        with self.assertRaisesRegex(ok.Refused, "the SIG attestation is not signed by the card's attestation CA.*now holds NEW keys"):
+            self.enroll(out=tempfile.mkdtemp(dir=self.out), other_ca=True)
 
     def test_refused_before_the_card_changes(self):
         for kw, reason in (
@@ -207,6 +254,7 @@ class Enroll(unittest.TestCase):
                     self.enroll(**kw)
                 if hasattr(self, "card") and kw.get("serial") != "35718625":
                     self.assertEqual(self.card.generated, set(), "nothing was generated")
+                    self.card = None
         pins = iter([oc.DEFAULT_ADMIN_PIN, USER])
         with self.assertRaisesRegex(ok.Refused, "a PIN typed is the factory default"):
             oc.enroll("owner-main", "40000001", "Owner", "o@example.invalid", self.out, ask_secret=lambda p: next(pins), card=None)
@@ -262,29 +310,35 @@ class Enroll(unittest.TestCase):
 
 
 class Dialogue(unittest.TestCase):
-    """build_certificate's gpg dialogue: the answers regalia-kms-24 measured, the PIN on the command fd only."""
+    """build_certificate's gpg dialogue against regalia-kms-24's bench transcripts (gpg 2.4.7, YubiKey 35718625,
+    2026-10-05: ~/.cache/24/d306/gen2.log, add-dec.log, add-aut2.log): the questions gpg asked, in order, replayed;
+    the answers must be the measured ones, the PIN on the command fd only (d9 on #140)."""
+
+    TRANSCRIPTS = {  # question keys as gpg asked them, None where a status line came between
+        "--full-generate-key": ["keygen.algo", "keygen.cardkey", "keygen.flags", "keygen.valid", "keygen.name", "keygen.email",
+                                "keygen.comment", "passphrase.enter", None, "passphrase.enter", "KEY_CREATED P"],
+        "addkey 2": ["keyedit.prompt", "keygen.algo", "keygen.cardkey", "keygen.flags", "keygen.valid", "passphrase.enter",
+                     "KEY_CREATED S", "keyedit.prompt"],
+        "addkey 3": ["keyedit.prompt", "keygen.algo", "keygen.cardkey", "keygen.flags", "keygen.flags", "keygen.valid",
+                     "passphrase.enter", "KEY_CREATED S", "keyedit.prompt"]}
 
     def test_the_answers_and_the_pin(self):
         calls = []
 
         class FakeGpg:
             def __init__(self, argv, **kw):
-                import io
                 self.argv, self.answers = argv, []
                 calls.append(self)
-                edit = "--edit-key" in argv
-                cardkey = str(1 + sum(1 for c in calls if "--edit-key" in c.argv)) if edit else "1"
-                asked = (["keyedit.prompt"] if edit else []) + ["keygen.algo", "keygen.cardkey"] + \
-                        (["keygen.flags", "keygen.flags"] if cardkey == "3" else ["keygen.flags"]) + ["keygen.valid"] + \
-                        ([] if edit else ["keygen.name", "keygen.email", "keygen.comment"]) + ["passphrase.enter"] + \
-                        (["keyedit.prompt"] if edit else [])
-                self.lines = ["[GNUPG:] GET_LINE %s\n" % q for q in asked] + ["[GNUPG:] KEY_CREATED P %s\n" % ("AB" * 20)]
-                self.stdin = self
-                self.stdout = self._out()
-
-            def _out(self):
-                for line in self.lines:
-                    yield line
+                which = "--full-generate-key" if "--full-generate-key" in argv else "addkey %d" % (1 + len(calls) - 1)
+                lines = []
+                for step in Dialogue.TRANSCRIPTS[which]:
+                    if step is None:
+                        lines.append("[GNUPG:] KEY_CONSIDERED %s 0\n" % ("9B" * 20))
+                    elif step.startswith("KEY_CREATED"):
+                        lines.append("[GNUPG:] %s %s\n" % (step, "9B" * 20))
+                    else:
+                        lines.append("[GNUPG:] GET_%s %s\n" % ("HIDDEN" if step == "passphrase.enter" else "LINE", step))
+                self.stdin, self.stdout = self, iter(lines)
 
             def write(self, text):
                 self.answers.append(text.rstrip("\n"))
@@ -295,11 +349,11 @@ class Dialogue(unittest.TestCase):
             def wait(self):
                 return 0
         primary = oc.build_certificate("/nonexistent", "Owner Main", "owner@example.invalid", USER, run=FakeGpg)
-        self.assertEqual(primary, "AB" * 20)
+        self.assertEqual(primary, "9B" * 20)
         self.assertEqual([c.answers for c in calls], [
-            ["14", "1", "Q", "0", "Owner Main", "owner@example.invalid", "", USER],
+            ["14", "1", "Q", "0", "Owner Main", "owner@example.invalid", "", USER, USER],     # the PIN twice: the key, its revocation
             ["addkey", "14", "2", "Q", "0", USER, "save"],
-            ["addkey", "14", "3", "S", "Q", "0", USER, "save"]])
+            ["addkey", "14", "3", "S", "Q", "0", USER, "save"]])            # S toggled off leaves A (24: S then A left none)
         self.assertTrue(all(USER not in " ".join(c.argv) for c in calls), "the PIN is never in argv")
 
     def test_an_unexpected_question_is_refused(self):

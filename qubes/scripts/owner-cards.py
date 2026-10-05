@@ -17,10 +17,14 @@ Per card (enroll), in this order, which the D30.6 bench measurements on YubiKey 
      slots (D30.7). Only THEN each slot attested, so the attestation names the certificate's fingerprint: every leaf must
      say generated on the card (5.2 = 1), this serial (5.7), the slot's fingerprint (5.4), its creation time (5.5) and
      touch fixed (5.8 = 02), and carry the slot's key.
-  4. Written to --out: owner-card-<serial>.gpg (the public certificate), sig/dec/aut.attest.der and att.der (the card's
-     attestation CA), and owner-card-<serial>.json, the facts.
+  4. Written to --out, every name serial-qualified (so both cards can share one directory) and each checked absent
+     BEFORE the card is touched: owner-card-<serial>.gpg (the public certificate), .rev (gpg's revocation certificate,
+     for the disc), .sig/.dec/.aut.attest.der and .att.der (each slot's attestation and the card's attestation CA,
+     every leaf verified against it), and .json, the facts.
 cards then joins the two cards' facts into the card record's --cards input (owner_keys, ownerauth_recipients,
-ssh_signers) and owner-cards.gpg (both certificates, as ceremony.sh step a imports them).
+ssh_signers) and owner-cards.gpg (both certificates, as ceremony.sh step a imports them). It re-proves each card from
+the files beside its facts (each attestation's digest recomputed, each leaf verified against the card's CA and its
+claims re-read against the facts), so a hand-edited facts file carries nothing (d9 on #140).
 
 CURRENT LIMITATIONS (2026-10-05):
   * Built and tested against a stand-in card and a stand-in for gpg's card dialogue only. The real dialogue (the
@@ -177,6 +181,23 @@ def raw_public(public_key):
     return public_key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
 
 
+def outputs(out, serial):
+    """Every file and directory enroll makes for `serial` in `out`, by name: all checked absent before the card changes."""
+    base = os.path.join(out, "owner-card-%s" % serial)
+    named = {"facts": base + ".json", "gpg": base + ".gpg", "rev": base + ".rev", "att": base + ".att.der", "home": base + ".gnupg"}
+    named.update({slot: "%s.%s.attest.der" % (base, slot) for slot in SLOTS})
+    return named
+
+
+def verify_leaf(leaf_der, ca_der, slot):
+    """The slot's attestation signed by the card's attestation CA (the chain above it is regalia-kms#400's)."""
+    from cryptography import x509
+    try:
+        x509.load_der_x509_certificate(leaf_der).verify_directly_issued_by(x509.load_der_x509_certificate(ca_der))
+    except Exception as error:              # noqa: BLE001 - any failure is a refusal by name
+        raise Refused("the %s attestation is not signed by the card's attestation CA (%s)" % (slot.upper(), error)) from None
+
+
 def attestation_claims(der, slot, serial):
     """A slot's attestation certificate, read: {key, generated, serial, fingerprint, created, touch} from its subject
     key and Yubico's extensions (DER values as the card writes them)."""
@@ -253,8 +274,10 @@ def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_
     require(re.fullmatch(r"[1-9][0-9]{0,9}", serial) is not None, "--yubikey-serial is the owner card's decimal serial")
     require(serial not in ok.BENCH_YUBIKEYS, "YubiKey %s is a bench card: the ceremony never uses a bench serial (D28.5, D30)" % serial)
     require(os.path.isdir(out), "--out %s is not a directory" % out)
-    facts_path = os.path.join(out, "owner-card-%s.json" % serial)
-    require(not os.path.lexists(facts_path), "%s already exists: nothing is overwritten" % facts_path)
+    named = outputs(out, serial)
+    present = sorted(path for path in named.values() if os.path.lexists(path))
+    require(not present, "%s already exist%s: nothing is overwritten, and the card was not touched"
+            % (", ".join(present), "s" if len(present) == 1 else ""))
     admin = ask_secret("Admin PIN of owner card %s: " % serial)
     user = ask_secret("User PIN of owner card %s: " % serial)
     require(admin != DEFAULT_ADMIN_PIN and user != DEFAULT_USER_PIN,
@@ -283,9 +306,18 @@ def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_
         require(not fixed, "owner card %s has a fixed touch policy on %s, which only a reset undoes: reset its OpenPGP applet "
                 "(ykman openpgp reset), set its PINs, then retry. Nothing was changed" % (serial, ", ".join(s.upper() for s in fixed)))
         publics = {slot: raw_public(session.generate_ec_key(refs[slot], curves[slot])) for slot in SLOTS}
+    try:
+        return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now)
+    except Exception as error:              # noqa: BLE001 - whatever stopped it, the card now holds new keys
+        raise Refused("%s. Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used "
+                      "again" % (str(error).rstrip("."), serial)) from None
+
+
+def _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now):
+    """Steps 2-4 of enroll, once the card holds its new keys."""
+    from yubikit.openpgp import KEY_REF, UIF
     # 2. the certificate, by gpg from the card's own keys, then read back from its packets
-    home = os.path.join(out, "gnupg-%s" % serial)
-    require(not os.path.lexists(home), "%s exists: a run before this one did not finish; remove it by name" % home)
+    home = named["home"]
     os.mkdir(home, 0o700)
     try:
         primary = build(home, name, email, user)
@@ -295,7 +327,13 @@ def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_
         _agent_stop(home, run)
     for slot in SLOTS:
         require(keys[slot]["point"] == publics[slot], "the certificate's %s key is not the one owner card %s generated: nothing "
-                "was written; reset the card's OpenPGP applet before using it again" % (slot.upper(), serial))
+                "was written" % (slot.upper(), serial))
+    revocations = [os.path.join(home, "openpgp-revocs.d", n) for n in sorted(os.listdir(os.path.join(home, "openpgp-revocs.d")))] \
+        if os.path.isdir(os.path.join(home, "openpgp-revocs.d")) else []
+    revocation = b""
+    if revocations:
+        with open(revocations[0], "rb") as f:
+            revocation = f.read()
     require(keys["sig"]["fingerprint"] == primary, "gpg's new key %s is not the certificate's primary %s" % (primary, keys["sig"]["fingerprint"]))
     # 3. the fingerprints and times written, touch fixed, and only then each slot attested
     attestations = {}
@@ -314,25 +352,27 @@ def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_
             attestations[slot] = _der(session.attest_key(refs[slot]))
         card_ca = _der(session.get_certificate(KEY_REF.ATT))
     for slot in SLOTS:
+        verify_leaf(attestations[slot], card_ca, slot)
         claims = attestation_claims(attestations[slot], slot, serial)
         problems = [what for what, good in (
             ("not generated on the card", claims["generated"] == GENERATED), ("another serial %s" % claims["serial"], claims["serial"] == serial),
             ("another key", claims["key"] == publics[slot]), ("another fingerprint", claims["fingerprint"] == keys[slot]["fingerprint"]),
             ("another creation time", claims["created"] == keys[slot]["created"]), ("touch not fixed", claims["touch"] == TOUCH_FIXED)) if not good]
-        require(not problems, "owner card %s's %s attestation says %s: nothing was written; reset the card's OpenPGP applet "
-                "before using it again" % (serial, slot.upper(), ", ".join(problems)))
+        require(not problems, "owner card %s's %s attestation says %s: nothing was written" % (serial, slot.upper(), ", ".join(problems)))
     # 4. the files
-    files = {"owner-card-%s.gpg" % serial: export, "att.der": card_ca}
-    files.update({"%s.attest.der" % slot: attestations[slot] for slot in SLOTS})
-    for name_, data in files.items():
-        _write_new(os.path.join(out, name_), data)
+    files = {named["gpg"]: export, named["att"]: card_ca}
+    if revocation:
+        files[named["rev"]] = revocation
+    files.update({named[slot]: attestations[slot] for slot in SLOTS})
+    for path, data in files.items():
+        _write_new(path, data)
     shutil.rmtree(home)
     facts = {"schema": SCHEMA_FACTS, "role": role, "serial": serial, "firmware": firmware, "primary": keys["sig"]["fingerprint"],
              "keys": {slot: {"key": publics[slot], "fingerprint": keys[slot]["fingerprint"], "created": keys[slot]["created"]} for slot in SLOTS},
              "ssh": ssh_line(publics["aut"]), "touch": "fixed",
              "attestation_sha256": {slot: hashlib.sha256(attestations[slot]).hexdigest() for slot in SLOTS},
              "tool": TOOL, "at": stamp(now)}
-    _write_new(facts_path, canonical(facts) + b"\n")
+    _write_new(named["facts"], canonical(facts) + b"\n")
     return facts
 
 
@@ -356,8 +396,25 @@ def cards(main_path, backup_path, out):
         with open(path, "rb") as f:
             entry = json.loads(f.read(1 << 20))
         require(entry.get("schema") == SCHEMA_FACTS and entry.get("role") == role, "%s is not %s's facts" % (path, role))
-        with open(os.path.join(os.path.dirname(os.path.abspath(path)), "owner-card-%s.gpg" % entry["serial"]), "rb") as f:
+        named = outputs(os.path.dirname(os.path.abspath(path)), entry["serial"])
+        with open(named["gpg"], "rb") as f:
             entry["_export"] = f.read()
+        # the facts re-proved from the files beside them, never taken on their word (d9 on #140)
+        with open(named["att"], "rb") as f:
+            card_ca = f.read()
+        for slot in SLOTS:
+            with open(named[slot], "rb") as f:
+                der = f.read()
+            require(hashlib.sha256(der).hexdigest() == entry["attestation_sha256"][slot],
+                    "%s's %s attestation is not the file beside it" % (path, slot.upper()))
+            verify_leaf(der, card_ca, slot)
+            claims = attestation_claims(der, slot, entry["serial"])
+            require(claims["generated"] == GENERATED and claims["serial"] == entry["serial"] and claims["touch"] == TOUCH_FIXED
+                    and claims["key"] == entry["keys"][slot]["key"] and claims["fingerprint"] == entry["keys"][slot]["fingerprint"]
+                    and claims["created"] == entry["keys"][slot]["created"],
+                    "%s's %s attestation does not say what its facts say" % (path, slot.upper()))
+        require(entry["primary"] == entry["keys"]["sig"]["fingerprint"] and entry["ssh"] == ssh_line(entry["keys"]["aut"]["key"]),
+                "%s's primary or SSH key is not its SIG or AUT key" % path)
         facts.append(entry)
     require(facts[0]["serial"] != facts[1]["serial"], "owner-main and owner-backup are one card (%s)" % facts[0]["serial"])
     joined = {"owner_keys": [{"role": e["role"], "serial": e["serial"], "alg": "ed25519", "key": e["keys"]["sig"]["key"], "attested": True,
