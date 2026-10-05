@@ -216,7 +216,20 @@ assert_hsm_blank() {
 WORK=""
 RESIDUE_CANARY=""
 MOUNT_BASELINE=""
+# work_agents_stop: the card's session reset (an OpenPGP card keeps PW1 verified for DEC and AUT until reset or power-
+# off), then the gpg-agents of the session's GnuPG homes (steps a and t) stopped: neither the host nor the card keeps a
+# verified PIN after the session, whether its workdir is removed or kept (d9 on #139). No card present: nothing to reset.
+work_agents_stop() {
+  local h
+  for h in "$WORK"/ownerauth-gnupg "$WORK"/ownerauth-rotation-gnupg; do
+    [ -d "$h" ] || continue
+    gpg-connect-agent --homedir "$h" "SCD RESET" /bye >/dev/null 2>&1
+    gpgconf --homedir "$h" --kill all 2>/dev/null
+  done
+  return 0
+}
 cleanup() {
+  [ -n "$WORK" ] && [ -d "$WORK" ] && work_agents_stop
   # NOTE: on tmpfs `shred` is not a secure overwrite (pages aren't rewritten in place);
   # the real guarantee is that tmpfs is RAM-only and the DispVM wipes memory on shutdown.
   # We still rm the files; shred only helps on the non-tmpfs fallback path.
@@ -2675,6 +2688,7 @@ menu_input_ended() {
   STATE_LEAVE="" CEREMONY_SIMULATE=1 state_may_leave </dev/null >/dev/null 2>&1 && return 0
   err "input ended with the root's signing state NOT burned and read back (step w): the workdir is KEPT, not shredded ($WORK)."
   err "Burn the archive disc and run step w from a new menu on this workdir, or power the qube off to discard it."
+  work_agents_stop                        # what cleanup does besides removing the workdir; its evidence comes at the real quit
   trap - EXIT INT TERM
   exit 3
 }
@@ -2779,6 +2793,7 @@ ownerauth_make() {
       --sealed "$sealed" < "$(oa_shares_in)" \
     || { err "the proof is not complete (reason above): run this step again."; return 1; }
   info "owner authorizations done: both owner cards open every node's envelope, signed by the root."
+  warn "REMOVE the owner card now: it stays PIN-verified until it is removed or reset (d9 on #139)."
 }
 
 # ---- step t: owner-authorization ROTATION for KMS hosts already enrolled (regalia-ceremony#135) ----------------------

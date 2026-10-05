@@ -262,9 +262,17 @@ ended(){ # ended WORK: the menu's input ends; prints RC and whether the workdir 
     trap "echo SHREDDED" EXIT                      # stands in for cleanup(): menu_input_ended must clear it
     menu_input_ended; echo "RETURNED"' 2>&1 < /dev/null; echo "RC=$?"
 }
-out="$(ended "$S1")"
+mkdir -p "$T/agentshim"; printf '#!/bin/sh\necho "$*" >> "%s/gpgconf.calls"\n' "$T" > "$T/agentshim/gpgconf"; chmod +x "$T/agentshim/gpgconf"
+printf '#!/bin/sh\necho "connect $*" >> "%s/gpgconf.calls"\n' "$T" > "$T/agentshim/gpg-connect-agent"; chmod +x "$T/agentshim/gpg-connect-agent"
+mkdir -p "$S1/ownerauth-rotation-gnupg"; : > "$T/gpgconf.calls"
+out="$(PATH="$T/agentshim:$PATH" ended "$S1")"
 grep -q "RC=3" <<< "$out" && ! grep -q "SHREDDED\|RETURNED" <<< "$out" && grep -q "the workdir is KEPT, not shredded" <<< "$out" && [ -d "$S1/state" ] \
-  && P "input ending with the state unburned: the workdir is kept, exit 3 (d9)" || F "EOF unburned: $(tail -4 <<< "$out")"
+  && [ "$(cat "$T/gpgconf.calls")" = "$(printf 'connect --homedir %s SCD RESET /bye\n--homedir %s --kill all' "$S1/ownerauth-rotation-gnupg" "$S1/ownerauth-rotation-gnupg")" ] \
+  && P "input ending with the state unburned: the workdir is kept, exit 3, the card reset, then its gpg-agents stopped (d9)" || F "EOF unburned: $(tail -4 <<< "$out")"
+CW="$(mktemp -d "$T/cw.XXXXXX")"; mkdir "$CW/ownerauth-gnupg"; : > "$T/gpgconf.calls"
+WORKDIR="$CW" PATH="$T/agentshim:$PATH" bash -c 'source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM; WORK="$WORKDIR"; CEREMONY_SIMULATE=1 cleanup' < /dev/null >/dev/null 2>&1
+[ "$(cat "$T/gpgconf.calls")" = "$(printf 'connect --homedir %s SCD RESET /bye\n--homedir %s --kill all' "$CW/ownerauth-gnupg" "$CW/ownerauth-gnupg")" ] && [ ! -e "$CW" ] \
+  && P "the normal cleanup resets the card, then stops the workdir's gpg-agents, before removing it" || F "cleanup agents: $(cat "$T/gpgconf.calls")"
 out="$(ended "$S2")"
 grep -q "RETURNED" <<< "$out" && P "input ending with no signing state: the menu ends as before" || F "EOF no state: $(tail -3 <<< "$out")"
 out="$(leave "$S2" "")"

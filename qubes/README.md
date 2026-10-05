@@ -190,6 +190,9 @@ a rebuild's record) is burned on each archive disc and committed to `hsm-backups
   (regalia-kms#406).
 - **Residual:** two sessions before genesis that both restore the same disc can still fork. Only the sheet bounds
   that.
+- **Owner cards:** remove the owner card after each owner step (a, t). An OpenPGP card stays PIN-verified until it is
+  removed, reset or powered off. On quitting, `ceremony.sh` also resets the card's session (`SCD RESET`) and stops
+  the session's gpg-agents.
 
 ### Ceremony media on a laptop (few USB ports, no hub)
 
