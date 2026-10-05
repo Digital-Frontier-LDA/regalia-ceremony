@@ -95,6 +95,10 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
   - Step a takes the laptop's signing state directory from `CEREMONY_STATE_DIR`; `ceremony.sh` does not yet set where
     it lives on the laptop, and the card-record writer has no ceremony step of its own (#111). Only the newest card
     record the root signed is used, by that directory's log.
+  - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed
+    file, but each node's switch is regalia-kms's `enrol ownerauth --rotate-from`, which is in review there. Neither
+    side has run on hardware. The sealed file is authenticated only by the shares opening it; the step does not check
+    it against the archived offline-keys record.
   - The tool's own docstring lists its limitations in full.
 - **The laptop-side YubiKeys (D30):**
   - No tool makes the developer cards' keys yet. That step waits on the D30.6 bench measurements, which have not
