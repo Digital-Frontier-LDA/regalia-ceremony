@@ -21,8 +21,9 @@ to the break-glass key.
 CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):
   * Tested on the dev qube and in CI only. Software GnuPG homes stand in for the developer cards, and nothing here has
     run on the ceremony laptop or against a real card's keys (regalia-ceremony#123).
-  * ownerauth and ownerauth-verify have no ceremony.sh step: at a ceremony they are typed by hand, and the archive
-    does not gate the disc on their files (#122).
+  * ownerauth runs as ceremony.sh step a, which needs the developer cards' exported public keys
+    ($WORK/cards/developer-cards.gpg). No step makes that file yet: it comes with the developer cards' step (#111
+    step 2, gated by D30.6). Until then the step refuses (#122).
   * The developer cards' keys (ADR-0002 D30: SIG owner key, DEC owner-auth, AUT SSH) are not made by any tool yet.
     That step is gated by the D30.6 bench measurements, which have not run. Until then ownerauth has no real
     --yk-keys (#111 step 2).

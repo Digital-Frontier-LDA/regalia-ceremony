@@ -101,6 +101,7 @@ python3 "$HERE/tests/test_yubikey_attestation_verify.py" || suite_failed "test_y
 python3 "$HERE/tests/test_slip39_mint.py" || suite_failed "test_slip39_mint.py"
 python3 "$HERE/tests/test_offline_keys.py" || suite_failed "test_offline_keys.py"
 "$HERE/tests/test-offline-keys-step.sh" || suite_failed "test-offline-keys-step.sh"
+"$HERE/tests/test-ownerauth-step.sh" || suite_failed "test-ownerauth-step.sh"
 python3 "$HERE/tests/test_metal_stamp.py" || suite_failed "test_metal_stamp.py"
 python3 "$HERE/tests/test_recovery_procedure.py" || suite_failed "test_recovery_procedure.py"
 python3 "$HERE/tests/test_payload_qr.py" || suite_failed "test_payload_qr.py"
