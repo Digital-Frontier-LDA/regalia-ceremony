@@ -2726,6 +2726,7 @@ step_archive() {
       warn "simulated run: the owner authorizations are not proven by both developer cards; the real ceremony refuses this disc."
     else
       err "the owner authorizations are not proven by both developer cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
+      err "step a needs the developer cards' exported keys, so the developer cards' step (#111 step 2) comes before this disc."
       return 1
     fi
   fi
