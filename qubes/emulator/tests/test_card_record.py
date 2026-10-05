@@ -50,7 +50,8 @@ class Vectors(unittest.TestCase):
             root = f.read().strip()
         self.assertEqual(sorted(expect), sorted(n for n in os.listdir(VECTORS) if n.endswith(".json") and n not in ("expect.json", "freshness-expect.json")))
         self.assertEqual(sorted(expect), ["bad-signature.json", "first-supersedes.json", "missing-dev-backup.json", "other-root.json",
-                                          "release-is-owner.json", "sequence-2.json", "unknown-field.json", "valid.json", "wrong-domain.json"])
+                                          "rebuilt-3.json", "release-is-owner.json", "sequence-2.json", "unknown-field.json", "valid.json",
+                                          "wrong-domain.json"])
         for name, expected in sorted(expect.items()):
             with self.subTest(vector=name), open(os.path.join(VECTORS, name)) as f:
                 document = json.load(f)
@@ -98,17 +99,18 @@ class Vectors(unittest.TestCase):
             for name in os.listdir(os.path.join(VECTORS, "freshness", case)):
                 shutil.copy(os.path.join(VECTORS, "freshness", case, name), d)
             os.chmod(d, 0o700)
-            for name in (ok.SIGNING_STATE, ok.SIGNING_RECORD):
+            for name in (ok.SIGNING_STATE, ok.SIGNING_RECORD, ok.REBUILD_RECORD):
                 if os.path.exists(os.path.join(d, name)):
                     os.chmod(os.path.join(d, name), 0o600)
             with open(os.path.join(VECTORS, want["record"])) as f:
                 document = json.load(f)
+            pin = tuple(want["pin"]) if "pin" in want else None
             with self.subTest(case=case):
                 if want["expect"] == "ok":
-                    ok.card_record_current(document, root, ok.read_signing_state(d, root))
+                    ok.card_record_current(document, root, ok.read_signing_state(d, root), pin=pin, note=lambda text: None)
                 else:
                     with self.assertRaises(ok.Refused) as caught:
-                        ok.card_record_current(document, root, ok.read_signing_state(d, root))
+                        ok.card_record_current(document, root, ok.read_signing_state(d, root), pin=pin, note=lambda text: None)
                     self.assertIn(want["expect"], str(caught.exception))
 
     def test_the_log_is_read_whole_and_never_through_a_link(self):

@@ -152,6 +152,48 @@ class Rebuild(unittest.TestCase):
         with self.assertRaisesRegex(ok.Refused, "the rebuild record's signature does not verify"):
             ok.read_signing_state(self.state, self.root)
 
+    def stub_tree(self, stdout, code=0):
+        """A regalia-kms tree whose `manifest verify` prints `stdout` and exits `code` (the real verifier is regalia-kms's)."""
+        tree = tempfile.mkdtemp(dir=self.d)
+        os.makedirs(os.path.join(tree, "deploy", "baremetal"))
+        for name in ("deploy/__init__.py", "deploy/baremetal/__init__.py"):
+            open(os.path.join(tree, name), "w").close()
+        with open(os.path.join(tree, "deploy", "baremetal", "manifest.py"), "w") as f:
+            f.write("import sys\nassert sys.argv[1:3] == ['verify', '--chain']\nsys.stdout.write(%r)\nsys.exit(%d)\n" % (stdout, code))
+        return tree, ok.tree_digest(tree)
+
+    def test_the_pin_is_computed_from_the_chain_never_typed(self):
+        """d9 on #406: the pin is the verified chain's, from regalia-kms's verifier run from a digest-checked tree."""
+        chain = os.path.join(self.d, "chain.json")
+        open(chain, "w").write("[]")
+        tree, digest = self.stub_tree("chain verified: 3 envelopes, epoch 3, digest x\nCARD-RECORD-PIN 2 %s\n" % self.d2)
+        self.assertEqual(ok.chain_pin(chain, self.root, tree, digest), (2, self.d2))
+        for out, code, reason in (("chain verified: 1 envelopes\n", 0, "carries no card_record pin"),
+                                  ("CONFLICT\n", 1, "regalia-kms did not verify the chain under this root"),
+                                  ("CARD-RECORD-PIN 2 %s\nmore\n" % self.d2, 0, "carries no card_record pin")):
+            tree, digest = self.stub_tree(out, code)
+            with self.subTest(reason=reason), self.assertRaisesRegex(ok.Refused, reason):
+                ok.chain_pin(chain, self.root, tree, digest)
+        tree, digest = self.stub_tree("CARD-RECORD-PIN 2 %s\n" % self.d2)
+        with self.assertRaisesRegex(ok.Refused, "the regalia-kms tree's digest is not --tool-digest"):
+            ok.chain_pin(chain, self.root, tree, "0" * 64)
+
+    def test_a_rerun_after_a_crash_releases_or_names_what_was_left(self):
+        """d9 on #406: a crash after N+1's line is finished by the same command; a pending N+1 left in OUT before
+        anything was written is named, not met with a bare File exists."""
+        with unittest.mock.patch.object(ok.os, "rename", side_effect=OSError("power cut")):
+            with self.assertRaises(OSError):
+                self.rebuild(pin=(2, self.d2))
+        record, path, source = self.rebuild(pin=(2, self.d2), typed=["unused"])
+        self.assertEqual((record["sequence"], os.path.basename(path), source), (3, "card-record-3.record.json", "chain"))
+        self.assertEqual(self.current(path)["sequence"], 3)
+        shutil.rmtree(self.state)
+        os.mkdir(self.state, 0o700)
+        os.unlink(path)
+        open(os.path.join(self.out, "card-record-3.pending.json"), "w").write("{")
+        with self.assertRaisesRegex(ok.Refused, "a crashed rebuild left card-record-3.pending.json in OUT: remove it by name and rebuild"):
+            self.rebuild(pin=(2, self.d2))
+
     def test_the_pin_as_regalia_manifest_prints_it(self):
         digest = "ab" * 32
         self.assertEqual(ok.parse_pin("CARD-RECORD-PIN 7 " + digest), (7, digest))

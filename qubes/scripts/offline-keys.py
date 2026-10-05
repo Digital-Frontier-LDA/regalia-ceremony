@@ -17,7 +17,7 @@ Shamir share set of their own (separate from break-glass), and backed up to the 
     python3 -Es offline-keys.py card-record --sealed FILE --cards FILE --release-import FILE --release-import FILE
                                      --state-dir DIR --out DIR [--first-card-record]
     python3 -Es offline-keys.py card-record --sealed FILE --rebuild-from-disc DISC/card-record-N.record.json
-                                     --state-dir EMPTY --out DIR [--pin 'CARD-RECORD-PIN N DIGEST']   (a lost state dir)
+                                     --state-dir EMPTY --out DIR [--chain C --tool-root DIR --tool-digest HEX]   (a lost state dir)
                                           (the k shares on standard input; the confirmation from the terminal)
     python3 -Es offline-keys.py verify-record --record FILE
 
@@ -1254,7 +1254,7 @@ def read_signing_state(state_dir, pinned_root):
 
 def verify_rebuild_record(document, pinned_root):
     """The root-signed record of a rebuild (regalia-kms#406): exactly {record, signature}, schema SCHEMA_REBUILD, signed
-    by the PINNED root over RECORD_DOMAIN and the canonical record. Returns the record."""
+    by the PINNED root over REBUILD_DOMAIN and the canonical record. Returns the record."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import ed25519
     require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not a rebuild record: exactly record and signature")
@@ -1266,7 +1266,7 @@ def verify_rebuild_record(document, pinned_root):
     require(record["root_entry"].get("key") == pinned_root, "the rebuild record names another root than the pinned one")
     try:
         ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
-                                                                                      RECORD_DOMAIN + canonical(record))
+                                                                                      REBUILD_DOMAIN + canonical(record))
     except (InvalidSignature, ValueError, TypeError):
         raise Refused("the rebuild record's signature does not verify under the pinned root") from None
     return record
@@ -1300,6 +1300,9 @@ BASELINE_KIND = "card-record-baseline"
 BASELINE_SOURCES = ("chain", "sheet")
 REBUILD_RECORD = "card-record-rebuild.record.json"
 SCHEMA_REBUILD = "regalia.card-record-rebuild/v1"
+# its own signing domain (1e on #406): a signature over a rebuild record can never be presented as a card record's,
+# even to a reader that checks less than the exact field sets do
+REBUILD_DOMAIN = b"regalia-card-record-rebuild/v1\0"
 
 
 def card_lines_of(signing_lines, pinned_root):
@@ -1560,14 +1563,30 @@ def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=No
         sealed = json.loads(f.read(1 << 20))
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
     root_hex = root_entry_of(sealed)
+    with open(disc_record, "rb") as f:
+        disc_bytes = f.read(1 << 20)                # read once: these bytes are verified and hashed (d9 on #406)
+    old = verify_card_record(json.loads(disc_bytes), root_hex)
+    n, digest = old["sequence"], card_record_digest(old)
+    pending_path = os.path.join(out, "card-record-%d.pending.json" % (n + 1))
+    final_path = os.path.join(out, "card-record-%d.record.json" % (n + 1))
+    if os.path.lexists(os.path.join(state_dir, SIGNING_RECORD)) and os.path.lexists(pending_path):
+        # a rebuild that crashed after N+1's line, before its release: the rerun releases exactly that record
+        lines = card_lines_of(read_signing_state(state_dir, root_hex), root_hex)
+        if [(l["kind"], l["sequence"]) for l in lines] == [(BASELINE_KIND, n), ("card-record", n + 1)] and lines[0]["digest"] == digest:
+            with open(pending_path, "rb") as f:
+                document = json.loads(f.read(1 << 20))
+            record = verify_card_record(document, root_hex)
+            require((record["sequence"], card_record_digest(record)) == (n + 1, lines[1]["digest"]),
+                    "card-record-%d.pending.json is not the record the rebuilt log names: remove it and the state directory by name, and rebuild" % (n + 1))
+            require(not os.path.lexists(final_path), "%s exists beside its pending copy" % final_path)
+            os.rename(pending_path, final_path)
+            _fsync_dir(out)
+            return record, final_path, lines[0]["source"]
     for name in (SIGNING_STATE, SIGNING_RECORD, REBUILD_RECORD):
         require(not os.path.lexists(os.path.join(state_dir, name)),
                 "a rebuild goes into an EMPTY state directory; %s holds %s. A crashed rebuild leaves a directory nothing "
                 "trusts yet: remove it by name and rebuild again" % (state_dir, name))
-    with open(disc_record, "rb") as f:
-        document = json.loads(f.read(1 << 20))
-    old = verify_card_record(document, root_hex)
-    n, digest = old["sequence"], card_record_digest(old)
+    require(not os.path.lexists(pending_path), "a crashed rebuild left %s in OUT: remove it by name and rebuild" % os.path.basename(pending_path))
     if pin is not None:
         require((n, digest) == (pin[0], pin[1]), "the disc's card record %d (%s…) is not the one the chain pins (%s, %s…): a rebuild "
                 "supersedes exactly the pinned record" % (n, digest[:16], pin[0], str(pin[1])[:16]))
@@ -1599,12 +1618,11 @@ def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=No
     from cryptography.hazmat.primitives import serialization
     require(root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex() == root_hex,
             "the sealed root is not the one its header publishes")
-    with open(disc_record, "rb") as f:
-        disc_sha = hashlib.sha256(f.read()).hexdigest()
+    disc_sha = hashlib.sha256(disc_bytes).hexdigest()
     rebuild = {"schema": SCHEMA_REBUILD, "event": "card-record-rebuild", "baseline": {"sequence": n, "digest": digest, "source": source},
                "disc_record_sha256": disc_sha, "rebuilt": {"sequence": n + 1, "digest": new_digest}, "root_entry": entry,
                "root_fingerprint": root_fingerprint(entry), "session": record["session"], "tool": TOOL, "at": stamp}
-    signed_rebuild = canonical({"record": rebuild, "signature": root.sign(RECORD_DOMAIN + canonical(rebuild)).hex()}) + b"\n"
+    signed_rebuild = canonical({"record": rebuild, "signature": root.sign(REBUILD_DOMAIN + canonical(rebuild)).hex()}) + b"\n"
     signed = canonical({"record": record, "signature": root.sign(RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
     del root
 
@@ -1615,8 +1633,6 @@ def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=No
             f.flush()
             os.fsync(f.fileno())
 
-    pending_path = os.path.join(out, "card-record-%d.pending.json" % (n + 1))
-    final_path = os.path.join(out, "card-record-%d.record.json" % (n + 1))
     require(not os.path.lexists(final_path), "%s already exists: nothing is overwritten" % final_path)
     write_new(pending_path, signed, 0o644)
     _fsync_dir(out)
@@ -1630,6 +1646,22 @@ def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=No
     os.rename(pending_path, final_path)
     _fsync_dir(out)
     return record, final_path, source
+
+
+def chain_pin(chain_path, root_hex, tool_root, tool_digest, run=subprocess.run):
+    """The verified chain's card_record pin, computed here, never typed (d9 on #406): regalia-kms's own verifier, run
+    from a tree whose digest is the one typed from the image's build evidence (as sign's tools are), with a cleared
+    environment, must exit 0 and end with its CARD-RECORD-PIN line. A chain with no card_record (before v4) prints no
+    such line, and is refused."""
+    require(tree_digest(tool_root) == tool_digest, "the regalia-kms tree's digest is not --tool-digest: nothing is run from it")
+    done = run(["/usr/bin/python3", "-Es", "-m", "deploy.baremetal.manifest", "verify", "--chain", os.path.abspath(chain_path),
+                "--root-key", root_hex], cwd=tool_root, env={"PATH": "/usr/bin:/bin", "LC_ALL": "C"}, stdin=subprocess.DEVNULL,
+               capture_output=True, text=True)
+    require(done.returncode == 0, "regalia-kms did not verify the chain under this root: %s" % (done.stderr or done.stdout).strip()[-300:])
+    require(tree_digest(tool_root) == tool_digest, "the regalia-kms tree changed while it ran: its pin is not believed")
+    lines = [line for line in (done.stdout or "").splitlines() if line.strip()]
+    require(lines and lines[-1].startswith("CARD-RECORD-PIN "), "the verified chain carries no card_record pin (a chain before v4)")
+    return parse_pin(lines[-1])
 
 
 def parse_pin(text):
@@ -1672,8 +1704,10 @@ def main(argv=None):
     c.add_argument("--first-card-record", action="store_true", help="the first: creates the state directory's marker")
     c.add_argument("--rebuild-from-disc", metavar="RECORD", help="a lost state directory (regalia-kms#406): the disc's newest card "
                    "record, re-signed as the next into an EMPTY --state-dir")
-    c.add_argument("--pin", help="with --rebuild-from-disc, after genesis: the verified chain's newest card_record, as "
-                   "regalia-manifest verify prints it ('CARD-RECORD-PIN SEQ DIGEST') or SEQ:DIGEST")
+    c.add_argument("--chain", help="with --rebuild-from-disc, after genesis: the chain (from any node); its card_record pin is "
+                   "computed by regalia-kms's verifier from --tool-root, never typed")
+    c.add_argument("--tool-root", help="with --chain: the image's regalia-kms tree")
+    c.add_argument("--tool-digest", help="with --chain: that tree's digest, typed from the image's build evidence (tree-digest)")
     s = sub.add_parser("sign", help="a signing session: the k shares on standard input, one per line")
     s.add_argument("--sealed", required=True)
     s.add_argument("--who", required=True, help="the person signing, as recorded")
@@ -1741,7 +1775,11 @@ def main(argv=None):
         elif args.command == "card-record" and args.rebuild_from_disc:
             require(not args.first_card_record, "--rebuild-from-disc and --first-card-record are different first steps: one, not both")
             require(not args.cards and not args.release_import, "--rebuild-from-disc re-signs the disc's record: no --cards, no --release-import")
-            pin = parse_pin(args.pin) if args.pin is not None else None
+            pin = None
+            if args.chain is not None or args.tool_root is not None or args.tool_digest is not None:
+                require(args.chain and args.tool_root and args.tool_digest, "--chain takes --tool-root and --tool-digest")
+                with open(args.sealed, "rb") as f:
+                    pin = chain_pin(args.chain, root_entry_of(json.loads(f.read(1 << 20))), args.tool_root, args.tool_digest)
             record, path, source = card_record_rebuild(args.sealed, args.rebuild_from_disc, args.state_dir, args.out, sys.stdin, pin)
             print("REBUILT, %s-bounded: card record %d superseded by %d (%s); the state directory %s holds the marker, the "
                   "baseline and the rebuild record" % (source, record["sequence"] - 1, record["sequence"], path, args.state_dir))
