@@ -92,9 +92,13 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     opened by the offline set's shares; the disc waits for both owner cards' proof. The step needs the owner cards'
     exported keys and the card record, which no step makes yet (#122, #111 step 2). So no real disc that
     holds the offline keys can be burned until the owner cards' step exists: the cards come first.
-  - Step a takes the laptop's signing state directory from `CEREMONY_STATE_DIR`; `ceremony.sh` does not yet set where
-    it lives on the laptop, and the card-record writer has no ceremony step of its own (#111). Only the newest card
-    record the root signed is used, by that directory's log.
+  - The root's signing state lives in the session's RAM (`$WORK/state`) and travels on the archive disc (`state/`),
+    since no ceremony profile persists anything. A later session restores it from the newest disc. The sheet's
+    session count is typed, and an older disc is refused by name; other discs are compared, so a newer one or a fork
+    is refused; after genesis the chain's pin is checked. The disc's readback of `state/` is the archive's own
+    checksum readback, run by the operator. Two sessions that restore the same disc before genesis can still fork;
+    only the sheet bounds that (as regalia-kms#406 accepts). The card-record writer has no ceremony step yet (#111),
+    so the first ceremony's state is not made by `ceremony.sh` either.
   - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed
     file, but each node's switch is regalia-kms's `enrol ownerauth --rotate-from`, which is in review there. Neither
     side has run on hardware. The sealed file is authenticated only by the shares opening it; the step does not check

@@ -190,6 +190,44 @@ out="$(rotate "$W9" 'OA_ROTATE_CURRENT="$T/link.current.json"')"
 grep -q "RC=1" <<< "$out" && grep -q "is not the current record (a regular file, not a link)" <<< "$out" && [ ! -e "$W9/ownerauth-rotation" ] \
   && P "a link given as the current record: refused" || F "current link: $(tail -3 <<< "$out")"
 
+hdr "the signing state restored from the newest disc and opened (24, d9, 1e)"
+disc_state(){ # a later session whose signing state is on the disc only: $WORK/state is restored from it
+  local w; w="$(later_session)" || return 1
+  mv "$w/state" "$w.disc/state"
+  printf '%s' "$w"
+}
+rotate_disc(){ # rotate_disc WORK SESSION [EXTRA]: step t with the state restored from WORK.disc/state, the sheet saying SESSION
+  WORKDIR="$1" SESS="$2" EXTRA="${3:-}" PATH="$T/shim:$PATH" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    pause(){ :; }; ask(){ return 0; }; PRINTER=""
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"; OA_ROTATE_SEALED="$WORK.disc/offline/offline-keys.sealed.json"
+    OA_ROTATE_CURRENT="$WORK.disc/ownerauth/ownerauth.record.json"; unset CEREMONY_STATE_DIR
+    STATE_FROM="$WORK.disc/state"; STATE_SESSION="$SESS"; STATE_COMPARE=""; STATE_CHAIN=""
+    oa_insert_card(){ if [ "$1" = 1 ]; then OA_SERIAL=1001; export CARD_HOME="$T/card1"; else OA_SERIAL=1002; export CARD_HOME="$T/card2"; fi
+                      export CARD_SERIAL="$OA_SERIAL"; }
+    eval "$EXTRA"
+    step_ownerauth_rotate; echo "RC=$?"' 2>&1 < /dev/null
+}
+S1="$(disc_state)"
+out="$(rotate_disc "$S1" 0)"
+grep -q "RC=0" <<< "$out" && grep -q "SESSION 1 opened (the disc's state was session 0)" <<< "$out" && grep -q "NEWEST card-record sequence=1" <<< "$out" \
+  && [ "$(stat -c %a "$S1/state")" = 700 ] && [ "$(stat -c %a "$S1/state/signing-record.jsonl")" = 600 ] \
+  && P "the state restored into the session's RAM (0700, 0600), session 1 opened, its newest lines shown" || F "restore: $(grep -v '^gpg' <<< "$out" | tail -8)"
+arch "$S1" 1 > "$T/arch-s.out"
+[ -s "$S1/mdisc/state/signing-record.jsonl" ] && [ -s "$S1/mdisc/state/regalia-signing-state.json" ] && grep -q "SESSIONS 1" "$T/arch-s.out" \
+  && grep -q "WRITE ON THE SHEET AND ON THE DISC LABEL" "$T/arch-s.out" && grep -q "hsm-backups/state/" "$T/arch-s.out" \
+  && P "the archive stages state/ and says what the sheet and the label take" || F "archive state: $(grep -i 'state\|SESSION' "$T/arch-s.out" | head -5)"
+S2="$(disc_state)"
+out="$(rotate_disc "$S2" 1)"
+grep -q "RC=1" <<< "$out" && grep -q "this disc's state is session 0, and the sheet says 1: an OLDER disc" <<< "$out" \
+  && [ ! -e "$S2/state" ] && [ ! -e "$S2/ownerauth-rotation" ] && P "an older disc than the sheet: refused, nothing restored or made" || F "older disc: $(tail -5 <<< "$out")"
+out="$(rotate_disc "$S2" 0 'STATE_FROM="$WORK.disc/offline"')"
+grep -q "RC=1" <<< "$out" && grep -q "is not a disc's state directory" <<< "$out" && [ ! -e "$S2/state" ] \
+  && P "a directory that is not a disc's state: refused" || F "not a state dir: $(tail -3 <<< "$out")"
+out="$(rotate_disc "$S2" "zero")"
+grep -q "RC=1" <<< "$out" && grep -q "the session count is a number from the sheet" <<< "$out" && [ ! -e "$S2/state" ] \
+  && P "a session count that is not a number: refused" || F "typed count: $(tail -3 <<< "$out")"
+
 hdr "the preconditions"
 W5="$(new_work)"
 out="$(WORKDIR="$W5" CEREMONY_STATE_DIR="$W5/state" bash -c '

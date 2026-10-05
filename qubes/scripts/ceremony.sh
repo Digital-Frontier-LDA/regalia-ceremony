@@ -2600,6 +2600,60 @@ step_offline_keys() {
   offline_commit_list
 }
 
+# ---- the laptop's signing state directory (24, d9, 1e, 2026-10-05) ---------------------------------------------------
+# Every ceremony profile is non-persistent (CEREMONY-PROFILES.md), so the root's signing state (the marker, the signing
+# record, a rebuild's record) lives in this session's RAM, $WORK/state, and travels on the archive disc (state/). The
+# first ceremony creates it (the card record's writer makes the marker): session 0. A later session restores it from
+# the NEWEST disc and opens it with offline-keys.py state-open: the sheet's session count typed (an older disc is
+# refused by name), other discs compared (a newer one or a fork refused), after genesis the chain's pin checked, and
+# session S+1 recorded first. The archive stages it, and the sheet and the disc label take the new count.
+state_dir() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${CEREMONY_STATE_DIR:-}" ]; then printf '%s' "$CEREMONY_STATE_DIR"; else printf '%s' "$WORK/state"; fi
+}
+state_ask() { # state_ask PROMPT SIMULATION_VARIABLE: the operator's answer (a simulation's variable instead)
+  local v="$2"
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${!v+x}" ]; then printf '%s' "${!v}"; return; fi
+  local answer; read -r -p "   $1: " answer; printf '%s' "$answer"
+}
+# state_restore SEALED: this session's state directory restored from the newest disc and opened, unless it is already
+state_restore() {
+  local sealed="$1" sd src typed others chain tool_root tool_digest f args=()
+  sd="$(state_dir)"
+  if [ -e "$sd/regalia-signing-state.json" ]; then info "the signing state is already open in this session ($sd)."; return 0; fi
+  [ ! -e "$sd" ] || { err "$sd exists without its marker: remove it (rm -r -- '$sd') and restore again."; return 1; }
+  info "Restore the root's signing state from the NEWEST archive disc (its state/ directory, mounted read-only)."
+  src="$(state_ask "the disc's state directory (e.g. /mnt/state)" STATE_FROM)"
+  [ -n "$src" ] && [ -d "$src" ] && [ ! -L "$src" ] && [ -f "$src/regalia-signing-state.json" ] && [ -f "$src/signing-record.jsonl" ] \
+    || { err "'$src' is not a disc's state directory (a directory, not a link, with regalia-signing-state.json and signing-record.jsonl)."; return 1; }
+  typed="$(state_ask "the SHEET's newest state session count (a number; 0 after the first ceremony)" STATE_SESSION)"
+  case "$typed" in ''|*[!0-9]*) err "the session count is a number from the sheet: nothing was restored."; return 1;; esac
+  others="$(state_ask "other discs' state directories to compare, separated by spaces (blank if none)" STATE_COMPARE)"
+  chain="$(state_ask "after genesis, the chain file (blank before genesis)" STATE_CHAIN)"
+  ( umask 077; mkdir "$sd" ) || return 1
+  for f in regalia-signing-state.json signing-record.jsonl card-record-rebuild.record.json; do
+    [ -f "$src/$f" ] || continue
+    [ ! -L "$src/$f" ] || { err "$src/$f is a link: nothing was restored."; rm -rf -- "$sd"; return 1; }
+    ( umask 077; cp -- "$src/$f" "$sd/$f" && chmod 600 "$sd/$f" ) || { rm -rf -- "$sd"; return 1; }
+  done
+  for f in $others; do args+=(--compare "$f"); done
+  if [ -n "$chain" ]; then
+    tool_root="$(state_ask "the image's regalia-kms tree" STATE_TOOL_ROOT)"
+    tool_digest="$(state_ask "that tree's digest, from the image's build evidence" STATE_TOOL_DIGEST)"
+    args+=(--chain "$chain" --tool-root "$tool_root" --tool-digest "$tool_digest")
+  fi
+  python3 -Es "$HERE/offline-keys.py" state-open --state-dir "$sd" --sealed "$sealed" --session "$typed" ${args[@]+"${args[@]}"} \
+    || { err "the signing state was NOT opened (reason above): nothing is restored, nothing was signed."; rm -rf -- "$sd"; return 1; }
+  warn "Compare the NEWEST lines above with the sheet before going on."
+}
+# state_commit_note SEALED: what the sheet and the disc label take, at the archive
+state_commit_note() {
+  local sd; sd="$(state_dir)"
+  [ -e "$sd/regalia-signing-state.json" ] || return 0
+  warn "WRITE ON THE SHEET AND ON THE DISC LABEL the state below (the next session types its SESSIONS count):"
+  python3 -Es "$HERE/offline-keys.py" state-status --state-dir "$sd" --sealed "$1" | sed 's/^/     /'
+  warn "COMMIT it too (hsm-backups/state/): $(cd "$sd" && ls | tr '\n' ' ')"
+}
+
 # ---- step a: the KMS hosts' TPM owner authorizations (regalia-kms#242, regalia-ceremony#122) -------------------------
 # Per node, 32 random bytes encrypted to BOTH owner cards' OpenPGP decryption keys (ADR-0002 D30.7, the card record's
 # ownerauth_recipients) and, as the recovery copy, to the D28 set's recovery identity in a binary SOPS file; the record
@@ -2655,14 +2709,14 @@ ownerauth_make() {
   card="$(oa_card_record)"
   [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (card-record)."; return 1; }
   # only the NEWEST card record the root signed counts (d9 on rc#133), by the laptop's signing state directory
-  [ -n "${CEREMONY_STATE_DIR:-}" ] && [ -d "$CEREMONY_STATE_DIR" ] \
-    || { err "CEREMONY_STATE_DIR does not name the laptop's signing state directory (the card records' log): nothing was made."; return 1; }
+  [ -d "$(state_dir)" ] \
+    || { err "no signing state directory in this session ($(state_dir)): the card record makes it, or a later session restores it from the disc. Nothing was made."; return 1; }
   if [ ! -e "$dir/ownerauth.record.json" ]; then
     [ ! -e "$dir" ] || { err "$dir holds a partial run: remove it (rm -r -- '$dir') and run this step again."; return 1; }
     ( umask 077; mkdir "$dir" ) || return 1
     info "type $(K) shares of the OFFLINE keys' set (the root signs the record), then Ctrl-D:"
     python3 -Es "$HERE/offline-keys.py" ownerauth --sealed "$sealed" --nodes "$nodes" --yk-keys "$keys" \
-        --card-record "$card" --state-dir "$CEREMONY_STATE_DIR" --out "$dir" < "$(oa_shares_in)" \
+        --card-record "$card" --state-dir "$(state_dir)" --out "$dir" < "$(oa_shares_in)" \
       || { err "the owner authorizations were NOT made (reason above); nothing is kept."; rm -rf -- "$dir"; return 1; }
   fi
   [ -e "$dir/ownerauth-verified.record.json" ] && { info "both owner cards were already proven in this session."; return 0; }
@@ -2719,6 +2773,8 @@ step_ownerauth_rotate() {
     [ -n "$src" ] && [ -f "$src" ] && [ ! -L "$src" ] || { err "'$src' is not the archived sealed file (a regular file, not a link): nothing was made."; return 1; }
     ( umask 077; mkdir -p "$WORK/rotation" && cp -- "$src" "$sealed" ) || { err "the sealed file could not be copied into $WORK/rotation."; return 1; }
   fi
+  # the root's signing state, restored from the newest disc and opened for this session, before anything is made
+  [ -e "$dir/ownerauth.record.json" ] || state_restore "$sealed" || return 1
   # the set it replaces, checked as this root's, and this laptop's clock strictly after it, BEFORE the root signs: each
   # node refuses a record not newer than its current one, so a clock set behind is caught here, not at the nodes (95)
   if [ ! -e "$dir/ownerauth.record.json" ]; then
@@ -2926,6 +2982,13 @@ step_archive() {
       [ -f "$art" ] && cp "$art" "$burn/ownerauth/"
     done
     ownerauth_commit_list
+  fi
+  if [ -e "$(state_dir)/regalia-signing-state.json" ]; then
+    mkdir -p "$burn/state"
+    for art in "$(state_dir)"/regalia-signing-state.json "$(state_dir)"/signing-record.jsonl "$(state_dir)"/card-record-rebuild.record.json; do
+      [ -f "$art" ] && cp "$art" "$burn/state/"
+    done
+    state_commit_note "$( [ -s "$WORK/offline/offline-keys.sealed.json" ] && echo "$WORK/offline/offline-keys.sealed.json" || echo "$WORK/rotation/offline-keys.sealed.json")"
   fi
   if [ -d "$WORK/ownerauth-rotation" ]; then
     mkdir -p "$burn/ownerauth-rotation"
