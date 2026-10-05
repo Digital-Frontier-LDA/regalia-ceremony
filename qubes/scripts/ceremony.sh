@@ -2908,10 +2908,12 @@ ownerauth_drill() {
   local dir="$WORK/ownerauth" key="$WORK/ownerauth-recovery.key" nodes
   [ -e "$dir/ownerauth.record.json" ] || { info "no owner authorizations in this session: no owner-auth drill."; return 0; }
   [ ! -e "$key" ] || { err "$key exists: a drill before this one did not finish; shred it (shred -u -- '$key') first."; return 1; }
-  nodes="$(python3 -Es -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["record"]["nodes"])))' "$dir/ownerauth.record.json")" \
+  nodes="$(python3 -I -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["record"]["nodes"])))' "$dir/ownerauth.record.json")" \
     || { err "the owner-authorization record cannot be read."; return 1; }
   # in a subshell: its EXIT trap removes the identity on every path out (a failed open or decrypt, Ctrl-C), and the
   # session's own traps are left as they were (d9 on rc#133)
+  # No trap survives SIGKILL or a power cut: the identity is then left on the RAM file system only, and the next
+  # drill refuses to start until it is shredded by hand (the check above).
   (
     trap 'shred -u -- "$key" 2>/dev/null || rm -f -- "$key"' EXIT
     trap 'exit 130' INT TERM
