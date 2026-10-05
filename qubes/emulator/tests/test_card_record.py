@@ -7,6 +7,7 @@ _hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(
 import copy
 import importlib.machinery
 import importlib.util
+import hashlib
 import json
 import os
 import re
@@ -42,6 +43,35 @@ class Vectors(unittest.TestCase):
         for name in tree(d):
             with open(os.path.join(d, name), "rb") as a, open(os.path.join(VECTORS, name), "rb") as b:
                 self.assertEqual(a.read(), b.read(), name)
+
+    def test_the_stand_in_attestations_chain_and_say_what_the_record_says(self):
+        """regalia-kms#400's fixtures: each owner card's SIG, DEC and AUT leaf chains to the stand-in root through
+        "Yubico OPGP Attestation B 1" and the card's CA; its extensions say generated on the card, this serial, touch
+        fixed, and the record's fingerprint (SIG: the primary, DEC: the ownerauth subkey); its key is the record's (SIG:
+        the owner key, AUT: the ssh_signers key); and the record names each leaf by the SHA-256 of its DER."""
+        from cryptography import x509
+        from cryptography.hazmat.primitives import serialization
+        where = os.path.join(VECTORS, "attestations")
+        root = x509.load_pem_x509_certificate(open(os.path.join(where, "standin-yubico-root.pem"), "rb").read())
+        b1 = x509.load_pem_x509_certificate(open(os.path.join(where, "standin-yubico-intermediates.pem"), "rb").read())
+        b1.verify_directly_issued_by(root)
+        record = json.load(open(os.path.join(VECTORS, "valid.json")))["record"]
+        ext = lambda cert, n: cert.extensions.get_extension_for_oid(x509.ObjectIdentifier("1.3.6.1.4.1.41482.5.%d" % n)).value.value
+        raw = lambda key: key.public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+        for owner, recipient, ssh in zip(record["owner_keys"], record["ownerauth_recipients"], record["ssh_signers"]):
+            card = os.path.join(where, "owner-card-%s" % owner["serial"])
+            ca = x509.load_der_x509_certificate(open(os.path.join(card, "att.der"), "rb").read())
+            ca.verify_directly_issued_by(b1)
+            for slot, fpr in (("sig", recipient["primary"]), ("dec", recipient["subkey"]), ("aut", None)):
+                data = open(os.path.join(card, "%s.attest.der" % slot), "rb").read()
+                self.assertEqual(hashlib.sha256(data).hexdigest(), owner["attestation_sha256"][slot])
+                leaf = x509.load_der_x509_certificate(data)
+                leaf.verify_directly_issued_by(ca)
+                self.assertEqual((ext(leaf, 2), ext(leaf, 7), ext(leaf, 8)), (b"\x02\x01\x01", b"\x02\x04" + int(owner["serial"]).to_bytes(4, "big"), b"\x04\x01\x02"))
+                if fpr:
+                    self.assertEqual(ext(leaf, 4), b"\x04\x14" + bytes.fromhex(fpr))
+            self.assertEqual(raw(x509.load_der_x509_certificate(open(os.path.join(card, "sig.attest.der"), "rb").read()).public_key()), owner["key"])
+            self.assertEqual(ok.ssh_ed25519_raw(ssh["key"], "ssh"), raw(x509.load_der_x509_certificate(open(os.path.join(card, "aut.attest.der"), "rb").read()).public_key()))
 
     def test_each_vector_verifies_or_is_refused_as_expect_json_says(self):
         with open(os.path.join(VECTORS, "expect.json")) as f:
@@ -270,10 +300,10 @@ class Rules(unittest.TestCase):
             (lambda r: r["owner_keys"][0].pop("attestation_sha256"), "owner_keys[0] is missing: attestation_sha256"),
             (lambda r: r["owner_keys"][0]["attestation_sha256"].pop("dec"), "owner_keys[0].attestation_sha256 is missing: dec"),
             (lambda r: r["owner_keys"][0]["attestation_sha256"].pop("aut"), "owner_keys[0].attestation_sha256 is missing: aut"),
-            (lambda r: r["owner_keys"][0]["attestation_sha256"].update(aut="e1" * 32), "an attestation certificate is named twice: each key has its own"),
+            (lambda r: r["owner_keys"][0]["attestation_sha256"].update(aut=r["owner_keys"][1]["attestation_sha256"]["sig"]), "an attestation certificate is named twice: each key has its own"),
             (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="D1" * 32),
              "owner_keys[1].attestation_sha256 gives each certificate's SHA-256, 64 hex"),
-            (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="d1" * 32), "an attestation certificate is named twice: each key has its own"),
+            (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig=r["owner_keys"][0]["attestation_sha256"]["sig"]), "an attestation certificate is named twice: each key has its own"),
             (lambda r: r["ownerauth_recipients"][1].update(subkey=r["ownerauth_recipients"][0]["subkey"]),
              "an ownerauth fingerprint is used twice: each owner card has its own primary and its own decryption subkey, or one "
              "card would count twice in the proof (d9 on #121)"),
