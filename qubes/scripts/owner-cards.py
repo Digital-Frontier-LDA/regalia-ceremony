@@ -2,7 +2,8 @@
 """owner-cards.py — the OWNER pair's YubiKeys (ADR-0002 D30.7): each card's OpenPGP keys generated ON the card, its
 certificate built from them, and the facts the root-signed card record names (regalia-ceremony#111 step 2).
 
-    python3 -Es owner-cards.py enroll --role owner-main|owner-backup --yubikey-serial N --name NAME --email ADDR --out DIR [--replace]
+    python3 -Es owner-cards.py enroll --role owner-main|owner-backup --yubikey-serial N --name NAME --email ADDR \
+                                      --breakglass-recipient FILE --out DIR [--replace]
     python3 -Es owner-cards.py cards --main FACTS --backup FACTS --out DIR
 
 Per card (enroll), in this order, which the D30.6 bench measurements on YubiKey 35718625 fixed (regalia-kms-24):
@@ -18,8 +19,10 @@ Per card (enroll), in this order, which the D30.6 bench measurements on YubiKey 
      say generated on the card (5.2 = 1), this serial (5.7), the slot's fingerprint (5.4), its creation time (5.5) and
      touch fixed (5.8 = 02), and carry the slot's key.
   4. Written to --out, every name serial-qualified (so both cards can share one directory) and each checked absent
-     BEFORE the card is touched: owner-card-<serial>.gpg (the public certificate), .rev (gpg's revocation certificate,
-     for the disc), .sig/.dec/.aut.attest.der and .att.der (each slot's attestation and the card's attestation CA,
+     BEFORE the card is touched: owner-card-<serial>.gpg (the public certificate), .rev.age (gpg's revocation
+     certificate, pre-signed, so anyone holding it could revoke the owner certificate: encrypted to the break-glass
+     recipient, the sealed-recovery place, its plaintext never outside the RAM GnuPG home, which is removed; the facts
+     keep its SHA-256 only, d9 on #140), .sig/.dec/.aut.attest.der and .att.der (each slot's attestation and the card's attestation CA,
      every leaf verified against it), and .json, the facts.
 cards then joins the two cards' facts into the card record's --cards input (owner_keys, ownerauth_recipients,
 ssh_signers) and owner-cards.gpg (both certificates, as ceremony.sh step a imports them). It re-proves each card from
@@ -184,7 +187,7 @@ def raw_public(public_key):
 def outputs(out, serial):
     """Every file and directory enroll makes for `serial` in `out`, by name: all checked absent before the card changes."""
     base = os.path.join(out, "owner-card-%s" % serial)
-    named = {"facts": base + ".json", "gpg": base + ".gpg", "rev": base + ".rev", "att": base + ".att.der", "home": base + ".gnupg"}
+    named = {"facts": base + ".json", "gpg": base + ".gpg", "rev": base + ".rev.age", "att": base + ".att.der", "home": base + ".gnupg"}
     named.update({slot: "%s.%s.attest.der" % (base, slot) for slot in SLOTS})
     return named
 
@@ -265,7 +268,7 @@ def _agent_stop(home, run=subprocess.run):
     run(["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
 
 
-def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_ask_secret, card=open_card,
+def enroll(role, serial, name, email, out, recipient_file, replace=False, ask=_ask, ask_secret=_ask_secret, card=open_card,
            build=build_certificate, run=subprocess.run, now=None):
     """One owner card, enrolled (see the docstring): returns its facts."""
     from yubikit.openpgp import KEY_REF, KEY_STATUS, OID, UIF
@@ -278,6 +281,7 @@ def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_
     present = sorted(path for path in named.values() if os.path.lexists(path))
     require(not present, "%s already exist%s: nothing is overwritten, and the card was not touched"
             % (", ".join(present), "s" if len(present) == 1 else ""))
+    recipient = ok._age_recipient(recipient_file)              # the break-glass recipient, judged before the card changes
     admin = ask_secret("Admin PIN of owner card %s: " % serial)
     user = ask_secret("User PIN of owner card %s: " % serial)
     require(admin != DEFAULT_ADMIN_PIN and user != DEFAULT_USER_PIN,
@@ -307,13 +311,13 @@ def enroll(role, serial, name, email, out, replace=False, ask=_ask, ask_secret=_
                 "(ykman openpgp reset), set its PINs, then retry. Nothing was changed" % (serial, ", ".join(s.upper() for s in fixed)))
         publics = {slot: raw_public(session.generate_ec_key(refs[slot], curves[slot])) for slot in SLOTS}
     try:
-        return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now)
+        return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient)
     except Exception as error:              # noqa: BLE001 - whatever stopped it, the card now holds new keys
         raise Refused("%s. Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used "
                       "again" % (str(error).rstrip("."), serial)) from None
 
 
-def _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now):
+def _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient):
     """Steps 2-4 of enroll, once the card holds its new keys."""
     from yubikit.openpgp import KEY_REF, UIF
     # 2. the certificate, by gpg from the card's own keys, then read back from its packets
@@ -328,12 +332,11 @@ def _after_generation(role, serial, name, email, named, admin, user, publics, re
     for slot in SLOTS:
         require(keys[slot]["point"] == publics[slot], "the certificate's %s key is not the one owner card %s generated: nothing "
                 "was written" % (slot.upper(), serial))
-    revocations = [os.path.join(home, "openpgp-revocs.d", n) for n in sorted(os.listdir(os.path.join(home, "openpgp-revocs.d")))] \
-        if os.path.isdir(os.path.join(home, "openpgp-revocs.d")) else []
-    revocation = b""
-    if revocations:
-        with open(revocations[0], "rb") as f:
-            revocation = f.read()
+    revocation_path = os.path.join(home, "openpgp-revocs.d", "%s.rev" % primary)
+    require(os.path.isfile(revocation_path), "gpg wrote no revocation certificate for %s" % primary)
+    with open(revocation_path, "rb") as f:
+        revocation = f.read()
+    sealed_revocation = _age_encrypt(revocation, recipient, named["rev"] + ".tmp", run)
     require(keys["sig"]["fingerprint"] == primary, "gpg's new key %s is not the certificate's primary %s" % (primary, keys["sig"]["fingerprint"]))
     # 3. the fingerprints and times written, touch fixed, and only then each slot attested
     attestations = {}
@@ -360,20 +363,33 @@ def _after_generation(role, serial, name, email, named, admin, user, publics, re
             ("another creation time", claims["created"] == keys[slot]["created"]), ("touch not fixed", claims["touch"] == TOUCH_FIXED)) if not good]
         require(not problems, "owner card %s's %s attestation says %s: nothing was written" % (serial, slot.upper(), ", ".join(problems)))
     # 4. the files
-    files = {named["gpg"]: export, named["att"]: card_ca}
-    if revocation:
-        files[named["rev"]] = revocation
+    files = {named["gpg"]: export, named["att"]: card_ca, named["rev"]: sealed_revocation}
     files.update({named[slot]: attestations[slot] for slot in SLOTS})
     for path, data in files.items():
         _write_new(path, data)
     shutil.rmtree(home)
     facts = {"schema": SCHEMA_FACTS, "role": role, "serial": serial, "firmware": firmware, "primary": keys["sig"]["fingerprint"],
              "keys": {slot: {"key": publics[slot], "fingerprint": keys[slot]["fingerprint"], "created": keys[slot]["created"]} for slot in SLOTS},
-             "ssh": ssh_line(publics["aut"]), "touch": "fixed",
+             "ssh": ssh_line(publics["aut"]), "touch": "fixed", "revocation_sha256": hashlib.sha256(revocation).hexdigest(),
              "attestation_sha256": {slot: hashlib.sha256(attestations[slot]).hexdigest() for slot in SLOTS},
              "tool": TOOL, "at": stamp(now)}
     _write_new(named["facts"], canonical(facts) + b"\n")
     return facts
+
+
+def _age_encrypt(plain, recipient, tmp, run=subprocess.run):
+    """`plain` encrypted with age to `recipient`, on age's stdin, never in a file of ours: the ciphertext (`tmp` is age's
+    output, removed after it is read)."""
+    try:
+        done = run(["age", "-r", recipient, "-o", tmp], input=plain, capture_output=True)
+        require(done.returncode == 0, "age could not encrypt to the break-glass recipient: %s" % done.stderr.decode(errors="replace").strip()[-200:])
+        with open(tmp, "rb") as f:
+            sealed = f.read()
+    finally:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+    require(sealed.startswith(b"age-encryption.org/v1") and plain not in sealed, "age wrote no age file, or one with the plaintext in it")
+    return sealed
 
 
 def _der(cert):
@@ -434,6 +450,7 @@ def main(argv=None):
     e.add_argument("--yubikey-serial", required=True)
     e.add_argument("--name", required=True, help="the certificate's user ID name")
     e.add_argument("--email", required=True)
+    e.add_argument("--breakglass-recipient", required=True, help="the break-glass age recipient: gpg's revocation certificate is sealed to it")
     e.add_argument("--out", required=True)
     e.add_argument("--replace", action="store_true", help="the card holds keys: replace them (the serial is typed again)")
     c = sub.add_parser("cards")
@@ -443,7 +460,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "enroll":
-            facts = enroll(args.role, args.yubikey_serial, args.name, args.email, args.out, args.replace)
+            facts = enroll(args.role, args.yubikey_serial, args.name, args.email, args.out, args.breakglass_recipient, args.replace)
             print("ENROLLED %s card %s: primary %s, touch fixed on SIG, DEC and AUT, each attested generated on the card"
                   % (facts["role"], facts["serial"], facts["primary"]))
         else:

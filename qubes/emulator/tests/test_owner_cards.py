@@ -119,6 +119,11 @@ class FakeCard:
 class Enroll(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        cls.vault = tempfile.mkdtemp()
+        cls.identity, cls.recipient = os.path.join(cls.vault, "bg.key"), os.path.join(cls.vault, "bg.recipient")
+        subprocess.run(["age-keygen", "-pq", "-o", cls.identity], check=True, capture_output=True)
+        with open(cls.recipient, "w") as f:
+            f.write(subprocess.run(["age-keygen", "-y", cls.identity], check=True, capture_output=True, text=True).stdout)
         cls.homes = {}
         for name in ("main", "backup", "other"):
             home = tempfile.mkdtemp(prefix="oc%s" % name[0])        # short: the agent's socket path has a length limit
@@ -130,6 +135,7 @@ class Enroll(unittest.TestCase):
         for home, _ in cls.homes.values():
             subprocess.run(["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
             shutil.rmtree(home, True)
+        shutil.rmtree(cls.vault, True)
 
     def setUp(self):
         self.out = tempfile.mkdtemp()
@@ -158,7 +164,7 @@ class Enroll(unittest.TestCase):
                     (shutil.copytree if os.path.isdir(path) else shutil.copy2)(path, os.path.join(home, entry))
             return fpr
         pins = iter([ADMIN, USER])
-        return oc.enroll(role, serial, "Owner", "owner@example.invalid", out or self.out, replace=typed is not None,
+        return oc.enroll(role, serial, "Owner", "owner@example.invalid", out or self.out, self.recipient, replace=typed is not None,
                          ask=lambda prompt: typed, ask_secret=lambda prompt: next(pins), card=card, build=build)
 
     def test_a_card_enrolled_and_the_facts_it_proves(self):
@@ -176,7 +182,14 @@ class Enroll(unittest.TestCase):
             with open(named[slot], "rb") as f:
                 self.assertEqual(hashlib.sha256(f.read()).hexdigest(), facts["attestation_sha256"][slot])
         self.assertTrue(os.path.exists(named["att"]))
-        self.assertTrue(os.path.getsize(named["rev"]) > 0, "gpg's revocation certificate is kept for the disc")
+        # gpg's revocation certificate: sealed to the break-glass recipient, its plaintext nowhere in --out (d9 on #140)
+        revocation = subprocess.run(["age", "-d", "-i", self.identity, named["rev"]], check=True, capture_output=True).stdout
+        self.assertIn(b"This is a revocation certificate", revocation, "gpg's own revocation file, as gpg wrote it")
+        self.assertEqual(hashlib.sha256(revocation).hexdigest(), facts["revocation_sha256"])
+        for name in os.listdir(self.out):
+            path = os.path.join(self.out, name)
+            if os.path.isfile(path):
+                self.assertNotIn(revocation, open(path, "rb").read(), "%s holds the revocation in the clear" % name)
         self.assertEqual(ok.ssh_ed25519_raw(facts["ssh"], "ssh"), keys["aut"]["point"])
         self.assertFalse(os.path.exists(named["home"]), "the GnuPG home is removed")
         with open(os.path.join(self.out, "owner-card-40000001.json"), "rb") as f:
@@ -237,10 +250,24 @@ class Enroll(unittest.TestCase):
             yield self.card, self.card.firmware
         pins = iter([ADMIN, USER])
         with self.assertRaisesRegex(ok.Refused, "Owner card 40000001 now holds NEW keys: reset its OpenPGP applet"):
-            oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, ask_secret=lambda p: next(pins), card=card, build=broken)
+            oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, self.recipient, ask_secret=lambda p: next(pins), card=card, build=broken)
         self.assertEqual(self.card.generated, set(oc.SLOTS))
         with self.assertRaisesRegex(ok.Refused, "the SIG attestation is not signed by the card's attestation CA.*now holds NEW keys"):
             self.enroll(out=tempfile.mkdtemp(dir=self.out), other_ca=True)
+
+    def test_a_classical_breakglass_recipient_is_refused_before_the_card_changes(self):
+        classical = os.path.join(self.out, "classical.recipient")
+        identity = os.path.join(self.out, "classical.key")
+        subprocess.run(["age-keygen", "-o", identity], check=True, capture_output=True)
+        with open(classical, "w") as f:
+            f.write(subprocess.run(["age-keygen", "-y", identity], check=True, capture_output=True, text=True).stdout)
+        self.recipient, kept = classical, self.recipient
+        try:
+            with self.assertRaisesRegex(ok.Refused, "holds a classical age recipient: the break-glass key is post-quantum"):
+                self.enroll()
+        finally:
+            self.recipient = kept
+        self.assertEqual(self.card.generated, set())
 
     def test_refused_before_the_card_changes(self):
         for kw, reason in (
@@ -257,7 +284,7 @@ class Enroll(unittest.TestCase):
                     self.card = None
         pins = iter([oc.DEFAULT_ADMIN_PIN, USER])
         with self.assertRaisesRegex(ok.Refused, "a PIN typed is the factory default"):
-            oc.enroll("owner-main", "40000001", "Owner", "o@example.invalid", self.out, ask_secret=lambda p: next(pins), card=None)
+            oc.enroll("owner-main", "40000001", "Owner", "o@example.invalid", self.out, self.recipient, ask_secret=lambda p: next(pins), card=None)
 
     def test_a_certificate_over_other_keys_is_refused(self):
         with self.assertRaisesRegex(ok.Refused, "the certificate's SIG key is not the one owner card 40000001 generated"):
