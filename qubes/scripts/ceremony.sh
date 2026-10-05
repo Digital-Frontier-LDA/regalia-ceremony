@@ -2666,6 +2666,21 @@ step_state_readback() {
   [ -n "$disc" ] && [ -d "$disc" ] && [ ! -L "$disc" ] || { err "'$disc' is not the disc's state directory: nothing for the sheet."; return 1; }
   python3 -Es "$HERE/offline-keys.py" state-burned --state-dir "$sd" --disc "$disc" --sealed "$sealed" \
     || { err "the disc's state is NOT this session's (reason above): do NOT write the sheet; burn the disc again."; return 1; }
+  sha256sum < "$sd/signing-record.jsonl" | cut -c1-64 > "$WORK/.state-burned"
+}
+# state_may_leave: quitting shreds the workdir; a signing state changed since its last read-back burn would be lost
+# with it, so leaving then takes a typed "LEAVE WITHOUT BURNING" (d9 on #139)
+state_may_leave() {
+  local sd now burned answer
+  sd="$(state_dir)"
+  [ -f "$sd/signing-record.jsonl" ] || return 0
+  now="$(sha256sum < "$sd/signing-record.jsonl" | cut -c1-64)"
+  burned="$(cat "$WORK/.state-burned" 2>/dev/null)"
+  [ "$now" = "$burned" ] && return 0
+  err "the root's signing state changed since its last burn was read back (step w): quitting shreds it with the workdir."
+  answer="$(state_ask "burn the archive disc and run step w first; or type LEAVE WITHOUT BURNING" STATE_LEAVE)"
+  [ "$answer" = "LEAVE WITHOUT BURNING" ] && { warn "leaving without a burned state: the sheet keeps its last count."; return 0; }
+  return 1
 }
 
 # ---- step a: the KMS hosts' TPM owner authorizations (regalia-kms#242, regalia-ceremony#122) -------------------------
@@ -3245,7 +3260,8 @@ MENU
     printf '   q) quit (workdir is shredded)\n'
     # Break on EOF (Ctrl-D, or an exhausted piped stdin) so the menu never spins forever on
     # empty reads — a non-interactive run must terminate, not hang.
-    read -r -p "   > " choice || break
+    read -r -p "   > " choice || { STATE_LEAVE="" CEREMONY_SIMULATE=1 state_may_leave </dev/null >/dev/null 2>&1 \
+                                       || err "input ended with the signing state NOT burned and read back (step w): it is lost with the workdir."; break; }
     case "$choice" in
       0) step_set_pins;;
       1) step_yubikey_ops;;
@@ -3263,7 +3279,7 @@ MENU
       t|T) step_ownerauth_rotate;;
       w|W) step_state_readback;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
-      q|Q) break;;
+      q|Q) state_may_leave && break;;
       *) warn "pick 1-9 or q";;
     esac
     pause

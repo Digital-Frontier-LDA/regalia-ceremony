@@ -242,6 +242,22 @@ out="$(rotate_disc "$S2" "zero")"
 grep -q "RC=1" <<< "$out" && grep -q "the session count is a number from the sheet" <<< "$out" && [ ! -e "$S2/state" ] \
   && P "a session count that is not a number: refused" || F "typed count: $(tail -3 <<< "$out")"
 
+leave(){ # leave WORK ANSWER: may the session quit?
+  WORKDIR="$1" ANS="$2" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; unset CEREMONY_STATE_DIR; STATE_LEAVE="$ANS"
+    state_may_leave; echo "RC=$?"' 2>&1 < /dev/null
+}
+out="$(leave "$S1" "")"
+grep -q "RC=0" <<< "$out" && P "quit after step w read the state back: allowed" || F "quit after burn: $(tail -3 <<< "$out")"
+printf '{"kind": "anchor-first", "node_id": "a"}\n' >> "$S1/state/signing-record.jsonl"
+out="$(leave "$S1" "")"
+grep -q "RC=1" <<< "$out" && grep -q "changed since its last burn was read back" <<< "$out" && P "quit with a state changed since its burn: refused (d9)" || F "quit unburned: $(tail -3 <<< "$out")"
+out="$(leave "$S1" "LEAVE WITHOUT BURNING")"
+grep -q "RC=0" <<< "$out" && grep -q "leaving without a burned state" <<< "$out" && P "... unless LEAVE WITHOUT BURNING is typed" || F "typed leave: $(tail -3 <<< "$out")"
+out="$(leave "$S2" "")"
+grep -q "RC=0" <<< "$out" && P "a session with no signing state quits freely" || F "no state: $(tail -3 <<< "$out")"
+
 hdr "the preconditions"
 W5="$(new_work)"
 out="$(WORKDIR="$W5" CEREMONY_STATE_DIR="$W5/state" bash -c '
