@@ -49,7 +49,7 @@ class Vectors(unittest.TestCase):
         with open(os.path.join(VECTORS, "root.hex")) as f:
             root = f.read().strip()
         self.assertEqual(sorted(expect), sorted(n for n in os.listdir(VECTORS) if n.endswith(".json") and n not in ("expect.json", "freshness-expect.json")))
-        self.assertEqual(sorted(expect), ["bad-signature.json", "first-supersedes.json", "missing-dev-backup.json", "other-root.json",
+        self.assertEqual(sorted(expect), ["bad-signature.json", "first-supersedes.json", "missing-owner-backup.json", "other-root.json",
                                           "rebuilt-3.json", "release-is-owner.json", "sequence-2.json", "unknown-field.json", "valid.json",
                                           "wrong-domain.json"])
         for name, expected in sorted(expect.items()):
@@ -65,7 +65,7 @@ class Vectors(unittest.TestCase):
     def test_the_content_vectors_are_signed_correctly(self):
         """So they test the content rules, not the signature: each verifies under its root's key."""
         from cryptography.hazmat.primitives.asymmetric import ed25519
-        for name in ("release-is-owner.json", "missing-dev-backup.json", "unknown-field.json", "other-root.json"):
+        for name in ("release-is-owner.json", "missing-owner-backup.json", "unknown-field.json", "other-root.json"):
             with open(os.path.join(VECTORS, name)) as f:
                 document = json.load(f)
             key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(document["record"]["root_entry"]["key"]))
@@ -231,21 +231,21 @@ class Rules(unittest.TestCase):
                                              "bytes, 64 hex"),
             (lambda r: r.update(at="2026-10-04 12:00:00"), "at is YYYY-MM-DDTHH:MM:SSZ"),
             (lambda r: r.update(root_fingerprint="0" * 64), "root_fingerprint is not the SHA-256 of the root key"),
-            (lambda r: r["owner_keys"].append(dict(r["owner_keys"][0])), "owner_keys holds exactly the two developer cards' SIG keys (D30.3)"),
+            (lambda r: r["owner_keys"].append(dict(r["owner_keys"][0])), "owner_keys holds exactly the two owner cards' SIG keys (D30.7)"),
             (lambda r: r["owner_keys"][0].update(serial="040000001"), "owner_keys[0].serial is a decimal YubiKey serial"),
             (lambda r: r["owner_keys"][0].update(alg="ecdsa-p256"), "owner_keys[0] is an Ed25519 key, 64 hex"),
             (lambda r: r["owner_keys"][1].update(attested=False), "owner_keys[1] is not attested: an owner key is generated on its card (D5)"),
-            (lambda r: r["owner_keys"][1].update(role="dev-main"), "owner_keys has the roles dev-main and dev-backup, once each"),
-            (lambda r: r["owner_keys"][1].update(serial="40000001"), "the two developer cards have distinct serials"),
+            (lambda r: r["owner_keys"][1].update(role="owner-main"), "owner_keys has the roles owner-main and owner-backup, once each"),
+            (lambda r: r["owner_keys"][1].update(serial="40000001"), "the two owner cards have distinct serials"),
             (lambda r: r["release_key"].update(fingerprint="c3" * 20), "release_key.fingerprint is 40 upper-case hex"),
             (lambda r: r["release_key"].update(attested=True), "the release key is imported, not attested (D29.2)"),
             (lambda r: r["release_key"].update(cards=["40000003"]), "release_key.cards are the two release cards' serials"),
             (lambda r: r["release_key"].update(cards=["40000001", "40000004"]),
-             "a release card is also a developer card: the developer cards never hold the release key (D30.3)"),
+             "a release card is also an owner card: the owner cards never hold the release key (D30.7)"),
             (lambda r: r["release_key"].update(key=r["owner_keys"][1]["key"]),
-             "the release key is an owner key: the release cards hold no owner key (D30.3)"),
-            (lambda r: r["ownerauth_recipients"].pop(), "ownerauth_recipients has one entry for each developer card"),
-            (lambda r: r["ssh_signers"][1].update(serial="40000003"), "ssh_signers has one entry for each developer card"),
+             "the release key is an owner key: the release cards hold no owner key (D30.7)"),
+            (lambda r: r["ownerauth_recipients"].pop(), "ownerauth_recipients has one entry for each owner card"),
+            (lambda r: r["ssh_signers"][1].update(serial="40000003"), "ssh_signers has one entry for each owner card"),
             (lambda r: r["ownerauth_recipients"][0].update(subkey=r["ownerauth_recipients"][0]["primary"]),
              "ownerauth_recipients[0] names a primary and a different encryption subkey, 40 upper-case hex"),
             (lambda r: r["ssh_signers"][0].update(key="ssh-rsa AAAA"), "ssh_signers[0].key is not an `ssh-ed25519 <base64>` line"),
@@ -259,10 +259,10 @@ class Rules(unittest.TestCase):
              "owner_keys[1].attestation_sha256 gives each certificate's SHA-256, 64 hex"),
             (lambda r: r["owner_keys"][1]["attestation_sha256"].update(sig="d1" * 32), "an attestation certificate is named twice: each key has its own"),
             (lambda r: r["ownerauth_recipients"][1].update(subkey=r["ownerauth_recipients"][0]["subkey"]),
-             "an ownerauth fingerprint is used twice: each developer card has its own primary and its own decryption subkey, or one "
+             "an ownerauth fingerprint is used twice: each owner card has its own primary and its own decryption subkey, or one "
              "card would count twice in the proof (d9 on #121)"),
             (lambda r: r["ownerauth_recipients"][1].update(primary=r["ownerauth_recipients"][0]["primary"]),
-             "an ownerauth fingerprint is used twice: each developer card has its own primary and its own decryption subkey, or one "
+             "an ownerauth fingerprint is used twice: each owner card has its own primary and its own decryption subkey, or one "
              "card would count twice in the proof (d9 on #121)"),
         ]
         for bench in ok.BENCH_YUBIKEYS:

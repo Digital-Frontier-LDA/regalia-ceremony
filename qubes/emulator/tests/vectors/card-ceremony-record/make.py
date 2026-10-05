@@ -48,9 +48,9 @@ def valid_record():
     entry = {"alg": "ed25519", "key": raw(ROOT)}
     return {
         "schema": ok.SCHEMA_CARDS, "event": "card-ceremony", "sequence": 1, "supersedes": "",
-        "owner_keys": [{"role": "dev-main", "serial": "40000001", "alg": "ed25519", "key": raw(MAIN), "attested": True,
+        "owner_keys": [{"role": "owner-main", "serial": "40000001", "alg": "ed25519", "key": raw(MAIN), "attested": True,
                         "attestation_sha256": {"sig": "d1" * 32, "dec": "d2" * 32}},
-                       {"role": "dev-backup", "serial": "40000002", "alg": "ed25519", "key": raw(BACKUP), "attested": True,
+                       {"role": "owner-backup", "serial": "40000002", "alg": "ed25519", "key": raw(BACKUP), "attested": True,
                         "attestation_sha256": {"sig": "e1" * 32, "dec": "e2" * 32}}],
         "ownerauth_recipients": [{"serial": "40000001", "primary": "A1" * 20, "subkey": "B1" * 20},
                                  {"serial": "40000002", "primary": "A2" * 20, "subkey": "B2" * 20}],
@@ -105,10 +105,10 @@ def vectors():
                 "the signature does not verify under the pinned root"))
     r = valid_record()
     r["release_key"]["key"] = r["owner_keys"][0]["key"]
-    out.append(("release-is-owner.json", signed(r), "the release key is an owner key: the release cards hold no owner key (D30.3)"))
+    out.append(("release-is-owner.json", signed(r), "the release key is an owner key: the release cards hold no owner key (D30.7)"))
     r = valid_record()
     del r["owner_keys"][1]
-    out.append(("missing-dev-backup.json", signed(r), "owner_keys holds exactly the two developer cards' SIG keys (D30.3)"))
+    out.append(("missing-owner-backup.json", signed(r), "owner_keys holds exactly the two owner cards' SIG keys (D30.7)"))
     r = valid_record()
     r["owner_keys"][0]["comment"] = "an extra field"
     out.append(("unknown-field.json", signed(r), "owner_keys[0] has an unknown field: comment"))
