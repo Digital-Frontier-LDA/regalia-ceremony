@@ -465,6 +465,18 @@ if "nooutput" not in args:
             ("must carry --signer root", [("pcr-system" if a == "root" else a) for a in manifest]),
             ("not entitled to: {keyfd:root}", self.command("uki", "--extra", "{keyfd:root}")),
             ("not entitled to: {keyfd:pcr-initrd}", manifest + ["{keyfd:pcr-initrd}"]),
+            # argparse's abbreviations and `=` form, the last occurrence winning (51 on regalia-kms#464)
+            ("carries --sig, a prefix of --signer that argparse could take for it", manifest + ["--sig", "pcr-system"]),
+            ("carries --key-f, a prefix of --key-fd that argparse could take for it", manifest + ["--key-f", "0"]),
+            ("gives --key-fd with '='", manifest + ["--key-fd=0"]),
+            ("gives --offline-session with '='", manifest + ["--offline-session=" + "0" * 32]),
+            ("carries --offline, a prefix of --offline-session", manifest + ["--offline", "x"]),
+            ("carries --system-key-f, a prefix of --system-key-fd", self.command("uki") + ["--system-key-f", "0"]),
+            ("must not carry a bare --", manifest + ["--"]),
+            # short options, which allow_abbrev does not touch (d9 on #136): a fabricated -s alias in each form, and -h
+            ("carries -s, a short option", manifest + ["-s", "pcr-system"]),
+            ("carries -spcr-system, a short option", manifest + ["-spcr-system"]),
+            ("carries -h, a short option", manifest + ["-h"]),
         ]
         for reason, command in cases:
             with self.assertRaisesRegex(ok.Refused, re.escape(reason)):
@@ -483,6 +495,14 @@ if "nooutput" not in args:
                    "--proposal", "p.json", "--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}",
                    "--state-dir", "s", "--out", "e1.json", "--chain-out", "c.json"]
         self.assertEqual(ok.check_command(genesis), ("manifest", ("root",)))
+
+    def test_a_tools_own_options_of_a_prefix_name_are_allowed(self):
+        """uki.py sign requires --initrd (the image's input) and has --system-key etc. (file keys): argparse matches each
+        exactly, so the abbreviation guard lets them through; a prefix that is not one of them is still refused."""
+        uki = self.command("uki")
+        self.assertEqual(ok.check_command(uki + ["--initrd", "initrd.img", "--system-key", "k.pem"])[0], "uki")
+        with self.assertRaisesRegex(ok.Refused, "carries --initrd-key-f, a prefix of --initrd-key-fd"):
+            ok.check_command(uki + ["--initrd-key-f", "0"])
 
     def test_the_tree_digest_covers_every_file_under_deploy_and_refuses_links(self):
         with open(os.path.join(self.tree, "deploy", "baremetal", "regalia.service"), "w") as f:
