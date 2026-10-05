@@ -198,6 +198,25 @@ class Rebuild(unittest.TestCase):
         with self.assertRaisesRegex(ok.Refused, "a crashed rebuild left card-record-3.pending.json in OUT: remove it by name and rebuild"):
             self.rebuild(pin=(2, self.d2))
 
+    def test_the_rebuild_record_is_judged_field_by_field(self):
+        """As regalia-kms's verify_rebuild (#444): a validly signed rebuild record with a bad field is still refused."""
+        from cryptography.hazmat.primitives import serialization
+        self.rebuild(pin=(2, self.d2))
+        good = json.load(open(os.path.join(self.state, ok.REBUILD_RECORD)))["record"]
+        sealed = json.load(open(self.sealed))
+        master = ok.combine(self.shares[:2], sealed)[0]
+        root = ok._private_key(ok.unseal(master, sealed)["keys"]["root"])
+        for change, reason in ((lambda r: r["rebuilt"].update(sequence=5), "the rebuild record's rebuilt record is not the one after its baseline"),
+                               (lambda r: r["baseline"].update(sequence=True), "the rebuild record's baseline.sequence is not a count from 1"),
+                               (lambda r: r["baseline"].update(source="memory"), "the rebuild record's baseline.source is not one of"),
+                               (lambda r: r.update(root_fingerprint="0" * 64), "the rebuild record's root_fingerprint is not the root's"),
+                               (lambda r: r.update(disc_record_sha256="xyz"), "the rebuild record's disc_record_sha256 is not a SHA-256")):
+            record = json.loads(json.dumps(good))
+            change(record)
+            document = {"record": record, "signature": root.sign(ok.REBUILD_DOMAIN + ok.canonical(record)).hex()}
+            with self.subTest(reason=reason), self.assertRaisesRegex(ok.Refused, reason):
+                ok.verify_rebuild_record(document, self.root)
+
     def test_the_pin_as_regalia_manifest_prints_it(self):
         digest = "ab" * 32
         self.assertEqual(ok.parse_pin("CARD-RECORD-PIN 7 " + digest), (7, digest))

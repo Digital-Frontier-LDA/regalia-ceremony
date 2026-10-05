@@ -1267,8 +1267,22 @@ def verify_rebuild_record(document, pinned_root):
     _exact(record, ("schema", "event", "baseline", "disc_record_sha256", "rebuilt", "root_entry", "root_fingerprint", "session",
                     "tool", "at"), "the rebuild record")
     require(record["schema"] == SCHEMA_REBUILD and record["event"] == "card-record-rebuild", "not a rebuild record")
+    _ascii(document, "the rebuild record")
     _exact(record["baseline"], ("sequence", "digest", "source"), "the rebuild record's baseline")
-    require(record["root_entry"].get("key") == pinned_root, "the rebuild record names another root than the pinned one")
+    _exact(record["rebuilt"], ("sequence", "digest"), "the rebuild record's rebuilt")
+    require(record["root_entry"] == {"alg": "ed25519", "key": pinned_root}, "the rebuild record names another root than the pinned one")
+    require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "the rebuild record's root_fingerprint is not the root's")
+    # as regalia-kms's verify_rebuild (1e's #444): every field typed, and the rebuilt record the one after the baseline
+    for what in ("baseline", "rebuilt"):
+        entry = record[what]
+        require(isinstance(entry["sequence"], int) and not isinstance(entry["sequence"], bool) and entry["sequence"] >= 1,
+                "the rebuild record's %s.sequence is not a count from 1" % what)
+        require(isinstance(entry["digest"], str) and _HEX64.fullmatch(entry["digest"]) is not None,
+                "the rebuild record's %s.digest is not a SHA-256 (64 lowercase hex)" % what)
+    require(record["baseline"]["source"] in BASELINE_SOURCES, "the rebuild record's baseline.source is not one of chain, sheet")
+    require(record["rebuilt"]["sequence"] == record["baseline"]["sequence"] + 1, "the rebuild record's rebuilt record is not the one after its baseline")
+    require(isinstance(record["disc_record_sha256"], str) and _HEX64.fullmatch(record["disc_record_sha256"]) is not None,
+            "the rebuild record's disc_record_sha256 is not a SHA-256 (64 lowercase hex)")
     try:
         ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
                                                                                       REBUILD_DOMAIN + canonical(record))
