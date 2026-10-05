@@ -147,6 +147,16 @@ if [ "$cl" = 0 ]; then ok "core dumps disabled (ulimit -c 0)."
 elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "core dump limit is '$cl' — real ceremonies fail this control."
 else bad "core dump limit is '$cl' — run ulimit -c 0 before the ceremony."; fi
 
+# Test-only switches: each loosens a control for the emulator suites and is honoured by its tool only under
+# CEREMONY_SIMULATE. A real ceremony must have none of them set (d9 on regalia-ceremony#120).
+set_switches=""
+for v in CEREMONY_ALLOW_NONTMPFS CEREMONY_ALLOW_SWAP CEREMONY_ALLOW_CLASSICAL_BREAKGLASS; do
+  [ -n "${!v:-}" ] && set_switches="$set_switches $v"
+done
+if [ -z "$set_switches" ]; then ok "no test-only switch is set."
+elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "test-only switches set:$set_switches — real ceremonies fail this control."
+else bad "test-only switches set:$set_switches — unset them; a real ceremony runs with none."; fi
+
 hdr "Execution profile"
 if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
   warn "execution-profile proof skipped in explicitly simulated test mode."

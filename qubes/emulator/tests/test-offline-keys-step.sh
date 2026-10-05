@@ -38,7 +38,9 @@ run_step(){ # run_step WORK TYPIST
     }
     step_offline_keys; echo "RC=$?"' 2>&1
 }
-new_work(){ local w; w="$(mktemp -d "$T/work.XXXXXX")"; ( umask 077; age-keygen -o "$w/bg.key" 2>/dev/null; age-keygen -y "$w/bg.key" > "$w/breakglass.recipient" ); printf '%s' "$w"; }
+# the break-glass key is post-quantum (age >= 1.3); on an older age the test-only override stands in
+if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then PQ=(-pq); else PQ=(); export CEREMONY_ALLOW_CLASSICAL_BREAKGLASS=1; fi
+new_work(){ local w; w="$(mktemp -d "$T/work.XXXXXX")"; ( umask 077; age-keygen ${PQ[@]+"${PQ[@]}"} -o "$w/bg.key" 2>/dev/null; age-keygen -y "$w/bg.key" > "$w/breakglass.recipient" ); printf '%s' "$w"; }
 python3 -Es - "$T/foreign" <<'PY'
 import sys
 from shamir_mnemonic import generate_mnemonics
