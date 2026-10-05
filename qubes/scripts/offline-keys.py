@@ -528,7 +528,10 @@ TOOLS = {
                  "required": ("--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}")},
     "uki": {"module": "deploy.baremetal.uki", "keys": ("pcr-initrd", "pcr-system", "secure-boot"),
             "required": ("--initrd-key-fd", "{keyfd:pcr-initrd}", "--system-key-fd", "{keyfd:pcr-system}",
-                         "--secure-boot-key-fd", "{keyfd:secure-boot}", "--offline-session", "{session}")},
+                         "--secure-boot-key-fd", "{keyfd:secure-boot}", "--offline-session", "{session}"),
+            # uki.py sign's own options that are prefixes of a required flag: argparse matches them exactly, never as an
+            # abbreviation of it, so they cannot override it (--initrd is the image's required input)
+            "exact": ("--initrd", "--initrd-key", "--system-key", "--secure-boot-key")},
 }
 PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY")
 SCAN_DIRS = ("/tmp", "/dev/shm")      # beside the session's own directory: where else a tool could write (both RAM there)
@@ -565,6 +568,18 @@ def check_command(command):
     for flag, value in pairs:
         require(rest.count(flag) == 1 and rest.index(flag) + 1 < len(rest) and rest[rest.index(flag) + 1] == value,
                 "the %s command must carry %s %s, once" % (found[0], flag, value))
+    # argparse also takes a unique abbreviation (`--key-f 0`) and `--flag=value`, and the LAST occurrence wins: either
+    # would override a required argument while the count above still saw it once. Refused for every tool, except a
+    # tool's own option of exactly that name (its "exact" list), which argparse matches as itself; a bare `--` (the end
+    # of the options) too, since it would turn the required flags after it into stray positionals.
+    for a in rest:
+        name = a.split("=", 1)[0]
+        require(a != "--", "the %s command must not carry a bare --" % found[0])
+        for flag, _ in pairs:
+            require(not (a.startswith("--") and name == flag and "=" in a),
+                    "the %s command gives %s with '=': each required argument stands alone, once" % (found[0], flag))
+            require(not (a.startswith("--") and len(name) > 2 and name != flag and flag.startswith(name)) or a in tool.get("exact", ()),
+                    "the %s command carries %s, a prefix of %s that argparse could take for it, overriding it" % (found[0], name, flag))
     allowed = {value for _, value in pairs}
     stray = [a for a in rest if "{" in a and a not in allowed]
     require(not stray, "a placeholder this command is not entitled to: %s" % ", ".join(stray))
