@@ -1205,6 +1205,28 @@ def read_signing_state(state_dir, pinned_root):
     whatever JSON each line holds, for card_record_current to judge)."""
     import stat as _stat
     info = os.stat(state_dir)
+    marker_root = _signing_state_root(state_dir, info)
+    require(marker_root == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
+    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
+    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        log_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
+        data = f.read(MAX_SIGNING_RECORD + 1)
+    return _signing_record_lines(data)
+
+
+def _signing_state_root(state_dir, info):
+    """The root the state directory's marker names: O_NOFOLLOW, a regular file of the directory's owner (`info`, its
+    stat), 0600, exactly {schema, root}. A missing marker is refused: an empty or foreign directory cannot be judged."""
+    import stat as _stat
     try:
         fd = os.open(os.path.join(state_dir, SIGNING_STATE), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except FileNotFoundError:
@@ -1221,21 +1243,7 @@ def read_signing_state(state_dir, pinned_root):
             raise Refused("%s is not JSON" % SIGNING_STATE) from None
     _exact(marker, ("schema", "root"), SIGNING_STATE)
     require(marker["schema"] == SCHEMA_SIGNING_STATE, "%s's schema is not %s" % (SIGNING_STATE, SCHEMA_SIGNING_STATE))
-    require(marker["root"] == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
-    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
-    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
-    try:
-        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except FileNotFoundError:
-        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
-    except OSError as error:
-        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
-    with os.fdopen(fd, "rb") as f:
-        log_info = os.fstat(f.fileno())
-        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
-                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
-        data = f.read(MAX_SIGNING_RECORD + 1)
-    return _signing_record_lines(data)
+    return marker["root"]
 
 
 def _signing_record_lines(data):
@@ -1267,6 +1275,10 @@ def append_card_record_line(state_dir, record, now=None):
     info = os.stat(state_dir)
     require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
             "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
+    # the record by every rule the reader applies, under the root the directory's marker names (CodeRabbit on #121)
+    card_record_check(record)
+    root = _signing_state_root(state_dir, info)
+    require(record["root_entry"]["key"] == root, "this card record is signed for another root than %s names: nothing was appended" % SIGNING_STATE)
     line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
             "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
     fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
@@ -1279,6 +1291,7 @@ def append_card_record_line(state_dir, record, now=None):
             chunk = os.pread(fd, MAX_SIGNING_RECORD + 1 - len(existing), len(existing))
             existing += chunk
         before = [old for old in _signing_record_lines(existing) if isinstance(old, dict) and old.get("kind") == "card-record"]
+        require(all(old.get("key") == root for old in before), "the signing record holds a card-record line of another root: nothing was appended")
         expected = (len(before) + 1, before[-1].get("digest") if before else "")
         require((record["sequence"], record["supersedes"]) == expected,
                 "this card record does not follow the signing record (sequence %d superseding %s expected, got %d superseding %s): "
