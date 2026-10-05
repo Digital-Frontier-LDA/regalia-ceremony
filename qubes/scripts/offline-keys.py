@@ -30,7 +30,11 @@ CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when 
   * K_A (anchor-policy, regalia-kms#361) is generated, sealed, split and backed up with the others, and its public key
     is output (ANCHOR-POLICY-ENTRY) for the genesis manifest. The manifest's field name for it is still being settled
     on #361. No tool takes it yet: sign hands it to nothing until regalia-kms's K_A signer (the policy approvals and
-    rotation-counter increments) exists and is added to the allow-list by a reviewed change.
+    rotation-counter increments) exists and is added to the allow-list by a reviewed change. That signer must
+    convert: cryptography's ECDSA sign() returns DER, while the TPM's PolicyAuthorize verification takes r and s as
+    separate parameters, so it needs a conversion with a test vector.
+  * A sealed file made before K_A (four keys) still opens, but holds no K_A, and nothing adds K_A to an existing set:
+    K_A comes only with a new set (generate). No ceremony has run, so no such file is in use.
   * sign hands keys only to regalia-kms's manifest sign and uki.py sign. Any other signing purpose needs a new
     allow-list entry and a reviewed change here.
 
