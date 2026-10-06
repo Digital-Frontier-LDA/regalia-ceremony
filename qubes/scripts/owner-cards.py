@@ -168,10 +168,14 @@ def only_this_reader(names, serial):
 
 
 def aid_serial(aid):
-    """The serial in an OpenPGP card's application ID (RID D276000124, application 01): its four BCD serial bytes, as the
-    YubiKey's decimal serial. Anything else (another applet, a Nitrokey HSM's) is refused."""
+    """The serial in a YubiKey's OpenPGP application ID (OpenPGP card 3.4, 4.2.1: RID D276000124, application 01,
+    version, manufacturer 0006 = Yubico, four serial bytes, RFU). Yubico writes the device's decimal serial there as BCD;
+    that is its practice on YubiKey 4/5, not a guarantee, so the form is checked rather than trusted, and the AID only
+    proves scdaemon reaches the SAME card: the serial that counts is ykman's, checked in open_card (d9 on #140)."""
     aid = aid.strip().upper()
     require(re.fullmatch(r"D27600012401[0-9A-F]{20}", aid) is not None, "the card scdaemon reaches is not an OpenPGP card (%s)" % (aid or "none"))
+    require(aid[16:20] == "0006", "the card scdaemon reaches is not a YubiKey's OpenPGP applet (manufacturer %s in %s)" % (aid[16:20], aid))
+    require(aid[20:28].isdigit(), "the YubiKey's OpenPGP AID %s does not carry a decimal (BCD) serial: refused rather than guessed" % aid)
     return aid[20:28].lstrip("0")
 
 
@@ -363,17 +367,23 @@ def enroll(role, serial, name, email, out, recipient_file, replace=False, ask=_a
                     "(ykman openpgp reset), set its PINs, then retry. Nothing was changed" % (serial, ", ".join(s.upper() for s in fixed)))
             generating = True                    # from here on a failure may leave new keys on the card
             publics = {slot: raw_public(session.generate_ec_key(refs[slot], curves[slot])) for slot in SLOTS}
-    except Exception as error:              # noqa: BLE001 - before any key, the card is unchanged: no leftover blocks a rerun
-        shutil.rmtree(home, True)
+    except BaseException as error:          # noqa: BLE001 - Ctrl-C and SIGTERM too (d9 on #140)
+        shutil.rmtree(home, True)             # before any key the card is unchanged: no leftover blocks a rerun
         if generating:
-            raise Refused("%s. Owner card %s may now hold NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is "
-                          "used again" % (str(error).rstrip("."), serial)) from None
+            said = "Owner card %s may now hold NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used again" % serial
+            if not isinstance(error, Exception):
+                print("owner-cards: interrupted. %s" % said, file=sys.stderr)
+                raise
+            raise Refused("%s. %s" % (str(error).rstrip("."), said)) from None
         raise
     try:
         return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient, seen)
-    except Exception as error:              # noqa: BLE001 - whatever stopped it, the card now holds new keys
-        raise Refused("%s. Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used "
-                      "again" % (str(error).rstrip("."), serial)) from None
+    except BaseException as error:          # noqa: BLE001 - whatever stopped it, Ctrl-C included, the card now holds new keys
+        said = "Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used again" % serial
+        if not isinstance(error, Exception):
+            print("owner-cards: interrupted. %s" % said, file=sys.stderr)
+            raise
+        raise Refused("%s. %s" % (str(error).rstrip("."), said)) from None
 
 
 def _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient, seen):

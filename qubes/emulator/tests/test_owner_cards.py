@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -94,6 +95,8 @@ class FakeCard:
         slot = self.refs[ref]
         self.need("admin")
         if self.lie.get("fail_generate") == slot:
+            if self.lie.get("interrupt"):
+                raise KeyboardInterrupt
             raise RuntimeError("the card stopped answering")
         self.status[ref] = self.KEY_STATUS.GENERATED
         self.generated.add(slot)
@@ -307,6 +310,29 @@ class Enroll(unittest.TestCase):
         self.assertFalse(os.path.exists(oc.outputs(self.out, "40000001")["home"]), "no leftover blocks a rerun")
         self.assertEqual(self.enroll()["serial"], "40000001")
 
+    def test_an_interrupt_after_generation_still_says_the_card_needs_a_reset(self):
+        import io
+        def interrupted(home, name, email, pin):
+            raise KeyboardInterrupt
+        err = io.StringIO()
+        pins = iter([ADMIN, USER])
+        with unittest.mock.patch("sys.stderr", err), self.assertRaises(KeyboardInterrupt):
+            oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, self.recipient, ask_secret=lambda prompt: next(pins),
+                      card=self._card(), build=interrupted, seen=lambda h, s: None)
+        self.assertIn("interrupted. Owner card 40000001 now holds NEW keys", err.getvalue())
+        with unittest.mock.patch("sys.stderr", io.StringIO()) as err, self.assertRaises(KeyboardInterrupt):
+            self.enroll(out=tempfile.mkdtemp(dir=self.out), lie={"fail_generate": "dec", "interrupt": True})
+        self.assertIn("interrupted. Owner card 40000001 may now hold NEW keys", err.getvalue())
+
+    def _card(self):
+        self.card = FakeCard("40000001", self.keys_of("main"))
+
+        @contextlib.contextmanager
+        def card(s):
+            self.card.opened()
+            yield self.card, self.card.firmware
+        return card
+
     def test_a_generation_that_stops_part_way_says_the_card_needs_a_reset(self):
         with self.assertRaisesRegex(ok.Refused, "the card stopped answering. Owner card 40000001 may now hold NEW keys: reset"):
             self.enroll(lie={"fail_generate": "dec"})
@@ -328,6 +354,10 @@ class Enroll(unittest.TestCase):
         for aid in ("44454E4B30343034333830", "D27600012402010400063571862500", ""):      # a Nitrokey HSM's (the bench), another applet, none
             with self.subTest(aid=aid), self.assertRaisesRegex(ok.Refused, "is not an OpenPGP card"):
                 oc.aid_serial(aid)
+        with self.assertRaisesRegex(ok.Refused, "is not a YubiKey's OpenPGP applet \\(manufacturer 000F"):
+            oc.aid_serial("D2760001240103040" + "00F" + "357186250000")
+        with self.assertRaisesRegex(ok.Refused, "does not carry a decimal \\(BCD\\) serial"):
+            oc.aid_serial("D27600012401030400060218A5E10000")
         oc.only_this_reader(["Yubico YubiKey OTP+FIDO+CCID 00 00"], "40000001")
         for names in (["Yubico YubiKey OTP+FIDO+CCID 00 00", "Nitrokey Nitrokey HSM (DENK0404144) 01 00"], [],
                       ["Lenovo Integrated Smart Card Reader 00 00"]):
