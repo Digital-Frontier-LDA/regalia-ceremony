@@ -1321,6 +1321,9 @@ def append_card_record_line(state_dir, record, now=None):
                 "this card record does not follow the signing record (sequence %d superseding %s expected, got %d superseding %s): "
                 "nothing was appended" % (expected[0], expected[1] or "nothing", record["sequence"], record["supersedes"] or "nothing"))
         data = (json.dumps(line, sort_keys=True) + "\n").encode()
+        require(len(existing) + len(data) <= MAX_SIGNING_RECORD,      # or the reader would refuse the whole log (CodeRabbit)
+                "%s would pass %d bytes with this line: nothing was appended; a full log is rebuilt from the disc "
+                "(--rebuild-from-disc)" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
         while data:
             data = data[os.write(fd, data):]
         os.fsync(fd)
