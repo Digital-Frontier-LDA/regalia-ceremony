@@ -1564,6 +1564,9 @@ def _append_line(state_dir, line, follows):
                 "the signing record holds a card-record line of another root: nothing was appended")
         follows(lines)
         data = (json.dumps(line, sort_keys=True) + "\n").encode()
+        require(len(existing) + len(data) <= MAX_SIGNING_RECORD,      # or the reader would refuse the whole log (CodeRabbit)
+                "%s would pass %d bytes with this line: nothing was appended; a full log is rebuilt from the disc "
+                "(--rebuild-from-disc)" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
         while data:
             data = data[os.write(fd, data):]
         os.fsync(fd)
