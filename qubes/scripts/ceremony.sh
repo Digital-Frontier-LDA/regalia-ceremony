@@ -216,7 +216,20 @@ assert_hsm_blank() {
 WORK=""
 RESIDUE_CANARY=""
 MOUNT_BASELINE=""
+# work_agents_stop: the card's session reset (an OpenPGP card keeps PW1 verified for DEC and AUT until reset or power-
+# off), then the gpg-agents of the session's GnuPG homes (steps a and t) stopped: neither the host nor the card keeps a
+# verified PIN after the session, whether its workdir is removed or kept (d9 on #139). No card present: nothing to reset.
+work_agents_stop() {
+  local h
+  for h in "$WORK"/ownerauth-gnupg "$WORK"/ownerauth-rotation-gnupg; do
+    [ -d "$h" ] || continue
+    gpg-connect-agent --homedir "$h" "SCD RESET" /bye >/dev/null 2>&1
+    gpgconf --homedir "$h" --kill all 2>/dev/null
+  done
+  return 0
+}
 cleanup() {
+  [ -n "$WORK" ] && [ -d "$WORK" ] && work_agents_stop
   # NOTE: on tmpfs `shred` is not a secure overwrite (pages aren't rewritten in place);
   # the real guarantee is that tmpfs is RAM-only and the DispVM wipes memory on shutdown.
   # We still rm the files; shred only helps on the non-tmpfs fallback path.
@@ -2600,6 +2613,100 @@ step_offline_keys() {
   offline_commit_list
 }
 
+# ---- the laptop's signing state directory (24, d9, 1e, 2026-10-05) ---------------------------------------------------
+# Every ceremony profile is non-persistent (CEREMONY-PROFILES.md), so the root's signing state (the marker, the signing
+# record, a rebuild's record) lives in this session's RAM, $WORK/state, and travels on the archive disc (state/). The
+# first ceremony creates it (the card record's writer makes the marker): session 0. A later session restores it from
+# the NEWEST disc and opens it with offline-keys.py state-open: the sheet's session count typed (an older disc is
+# refused by name), other discs compared (a newer one or a fork refused), after genesis the chain's pin checked, and
+# session S+1 recorded first. The archive stages it, and the sheet and the disc label take the new count.
+state_dir() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${CEREMONY_STATE_DIR:-}" ]; then printf '%s' "$CEREMONY_STATE_DIR"; else printf '%s' "$WORK/state"; fi
+}
+state_ask() { # state_ask PROMPT SIMULATION_VARIABLE: the operator's answer (a simulation's variable instead)
+  local v="$2"
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${!v+x}" ]; then printf '%s' "${!v}"; return; fi
+  local answer; read -r -p "   $1: " answer; printf '%s' "$answer"
+}
+# state_restore SEALED: this session's state directory restored from the newest disc and opened, unless it is already
+state_restore() {
+  local sealed="$1" sd src typed others chain tool_root tool_digest f args=()
+  sd="$(state_dir)"
+  if [ -e "$sd/regalia-signing-state.json" ]; then info "the signing state is already open in this session ($sd)."; return 0; fi
+  [ ! -e "$sd" ] || { err "$sd exists without its marker: remove it (rm -r -- '$sd') and restore again."; return 1; }
+  info "Restore the root's signing state from the NEWEST archive disc (its state/ directory, mounted read-only)."
+  src="$(state_ask "the disc's state directory (e.g. /mnt/state)" STATE_FROM)"
+  [ -n "$src" ] && [ -d "$src" ] && [ ! -L "$src" ] && [ -f "$src/regalia-signing-state.json" ] && [ -f "$src/signing-record.jsonl" ] \
+    || { err "'$src' is not a disc's state directory (a directory, not a link, with regalia-signing-state.json and signing-record.jsonl)."; return 1; }
+  typed="$(state_ask "the SHEET's newest state session count (a number; 0 after the first ceremony)" STATE_SESSION)"
+  case "$typed" in ''|*[!0-9]*) err "the session count is a number from the sheet: nothing was restored."; return 1;; esac
+  others="$(state_ask "other discs' state directories to compare, separated by spaces (blank if none)" STATE_COMPARE)"
+  chain="$(state_ask "after genesis, the chain file (blank before genesis)" STATE_CHAIN)"
+  ( umask 077; mkdir "$sd" ) || return 1
+  for f in regalia-signing-state.json signing-record.jsonl card-record-rebuild.record.json; do
+    [ -f "$src/$f" ] || continue
+    [ ! -L "$src/$f" ] || { err "$src/$f is a link: nothing was restored."; rm -rf -- "$sd"; return 1; }
+    ( umask 077; cp -- "$src/$f" "$sd/$f" && chmod 600 "$sd/$f" ) || { rm -rf -- "$sd"; return 1; }
+  done
+  for f in $others; do args+=(--compare "$f"); done
+  if [ -n "$chain" ]; then
+    tool_root="$(state_ask "the image's regalia-kms tree" STATE_TOOL_ROOT)"
+    tool_digest="$(state_ask "that tree's digest, from the image's build evidence" STATE_TOOL_DIGEST)"
+    args+=(--chain "$chain" --tool-root "$tool_root" --tool-digest "$tool_digest")
+  fi
+  python3 -Es "$HERE/offline-keys.py" state-open --state-dir "$sd" --sealed "$sealed" --session "$typed" ${args[@]+"${args[@]}"} \
+    || { err "the signing state was NOT opened (reason above): nothing is restored, nothing was signed."; rm -rf -- "$sd"; return 1; }
+  warn "Compare the NEWEST lines above with the sheet before going on."
+}
+# state_commit_note SEALED: what the sheet and the disc label take, at the archive
+state_commit_note() {
+  local sd; sd="$(state_dir)"
+  [ -e "$sd/regalia-signing-state.json" ] || return 0
+  info "the signing state is staged in state/ (its newest lines below):"
+  python3 -Es "$HERE/offline-keys.py" state-status --state-dir "$sd" --sealed "$1" | sed 's/^/     /'
+  warn "Do NOT write the session count on the sheet yet: after the disc's readback, run step w with its state/ mounted."
+  warn "COMMIT it too (hsm-backups/state/): $(cd "$sd" && ls | tr '\n' ' ')"
+}
+# step w: after the archive's readback, the disc's state/ compared with this session's; only then the sheet's count.
+# So the sheet always names a burned, read-back disc, and a session that fails before its burn strands nothing (d9)
+step_state_readback() {
+  b "The disc's signing state, read back: what the sheet and the disc label take"
+  local sd disc sealed
+  sd="$(state_dir)"
+  [ -e "$sd/regalia-signing-state.json" ] || { info "no signing state in this session: nothing for the sheet."; return 0; }
+  sealed="$WORK/offline/offline-keys.sealed.json"; [ -s "$sealed" ] || sealed="$WORK/rotation/offline-keys.sealed.json"
+  disc="$(state_ask "the BURNED disc's state directory, mounted read-only (e.g. /mnt/state)" STATE_READBACK)"
+  [ -n "$disc" ] && [ -d "$disc" ] && [ ! -L "$disc" ] || { err "'$disc' is not the disc's state directory: nothing for the sheet."; return 1; }
+  python3 -Es "$HERE/offline-keys.py" state-burned --state-dir "$sd" --disc "$disc" --sealed "$sealed" \
+    || { err "the disc's state is NOT this session's (reason above): do NOT write the sheet; burn the disc again."; return 1; }
+  sha256sum < "$sd/signing-record.jsonl" | cut -c1-64 > "$WORK/.state-burned"
+}
+# menu_input_ended: the menu's input ended (a closed terminal, an exhausted pipe), so no one can answer. With a signing
+# state not yet burned and read back, the workdir is KEPT (no shred) and the script exits non-zero, so an operator who
+# comes back can still burn it; an abandoned RAM workdir dies with the qube anyway (d9 on #139). Otherwise it returns.
+menu_input_ended() {
+  STATE_LEAVE="" CEREMONY_SIMULATE=1 state_may_leave </dev/null >/dev/null 2>&1 && return 0
+  err "input ended with the root's signing state NOT burned and read back (step w): the workdir is KEPT, not shredded ($WORK)."
+  err "Burn the archive disc and run step w from a new menu on this workdir, or power the qube off to discard it."
+  work_agents_stop                        # what cleanup does besides removing the workdir; its evidence comes at the real quit
+  trap - EXIT INT TERM
+  exit 3
+}
+# state_may_leave: quitting shreds the workdir; a signing state changed since its last read-back burn would be lost
+# with it, so leaving then takes a typed "LEAVE WITHOUT BURNING" (d9 on #139)
+state_may_leave() {
+  local sd now burned answer
+  sd="$(state_dir)"
+  [ -f "$sd/signing-record.jsonl" ] || return 0
+  now="$(sha256sum < "$sd/signing-record.jsonl" | cut -c1-64)"
+  burned="$(cat "$WORK/.state-burned" 2>/dev/null)"
+  [ "$now" = "$burned" ] && return 0
+  err "the root's signing state changed since its last burn was read back (step w): quitting shreds it with the workdir."
+  answer="$(state_ask "burn the archive disc and run step w first; or type LEAVE WITHOUT BURNING" STATE_LEAVE)"
+  [ "$answer" = "LEAVE WITHOUT BURNING" ] && { warn "leaving without a burned state: the sheet keeps its last count."; return 0; }
+  return 1
+}
+
 # ---- step a: the KMS hosts' TPM owner authorizations (regalia-kms#242, regalia-ceremony#122) -------------------------
 # Per node, 32 random bytes encrypted to BOTH owner cards' OpenPGP decryption keys (ADR-0002 D30.7, the card record's
 # ownerauth_recipients) and, as the recovery copy, to the D28 set's recovery identity in a binary SOPS file; the record
@@ -2655,14 +2762,14 @@ ownerauth_make() {
   card="$(oa_card_record)"
   [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (card-record)."; return 1; }
   # only the NEWEST card record the root signed counts (d9 on rc#133), by the laptop's signing state directory
-  [ -n "${CEREMONY_STATE_DIR:-}" ] && [ -d "$CEREMONY_STATE_DIR" ] \
-    || { err "CEREMONY_STATE_DIR does not name the laptop's signing state directory (the card records' log): nothing was made."; return 1; }
+  [ -d "$(state_dir)" ] \
+    || { err "no signing state directory in this session ($(state_dir)): the card record makes it, or a later session restores it from the disc. Nothing was made."; return 1; }
   if [ ! -e "$dir/ownerauth.record.json" ]; then
     [ ! -e "$dir" ] || { err "$dir holds a partial run: remove it (rm -r -- '$dir') and run this step again."; return 1; }
     ( umask 077; mkdir "$dir" ) || return 1
     info "type $(K) shares of the OFFLINE keys' set (the root signs the record), then Ctrl-D:"
     python3 -Es "$HERE/offline-keys.py" ownerauth --sealed "$sealed" --nodes "$nodes" --yk-keys "$keys" \
-        --card-record "$card" --state-dir "$CEREMONY_STATE_DIR" --out "$dir" < "$(oa_shares_in)" \
+        --card-record "$card" --state-dir "$(state_dir)" --out "$dir" < "$(oa_shares_in)" \
       || { err "the owner authorizations were NOT made (reason above); nothing is kept."; rm -rf -- "$dir"; return 1; }
   fi
   [ -e "$dir/ownerauth-verified.record.json" ] && { info "both owner cards were already proven in this session."; return 0; }
@@ -2686,6 +2793,7 @@ ownerauth_make() {
       --sealed "$sealed" < "$(oa_shares_in)" \
     || { err "the proof is not complete (reason above): run this step again."; return 1; }
   info "owner authorizations done: both owner cards open every node's envelope, signed by the root."
+  warn "REMOVE the owner card now: it stays PIN-verified until it is removed or reset (d9 on #139)."
 }
 
 # ---- step t: owner-authorization ROTATION for KMS hosts already enrolled (regalia-ceremony#135) ----------------------
@@ -2719,6 +2827,8 @@ step_ownerauth_rotate() {
     [ -n "$src" ] && [ -f "$src" ] && [ ! -L "$src" ] || { err "'$src' is not the archived sealed file (a regular file, not a link): nothing was made."; return 1; }
     ( umask 077; mkdir -p "$WORK/rotation" && cp -- "$src" "$sealed" ) || { err "the sealed file could not be copied into $WORK/rotation."; return 1; }
   fi
+  # the root's signing state, restored from the newest disc and opened for this session, before anything is made
+  [ -e "$dir/ownerauth.record.json" ] || state_restore "$sealed" || return 1
   # the set it replaces, checked as this root's, and this laptop's clock strictly after it, BEFORE the root signs: each
   # node refuses a record not newer than its current one, so a clock set behind is caught here, not at the nodes (95)
   if [ ! -e "$dir/ownerauth.record.json" ]; then
@@ -2926,6 +3036,13 @@ step_archive() {
       [ -f "$art" ] && cp "$art" "$burn/ownerauth/"
     done
     ownerauth_commit_list
+  fi
+  if [ -e "$(state_dir)/regalia-signing-state.json" ]; then
+    mkdir -p "$burn/state"
+    for art in "$(state_dir)"/regalia-signing-state.json "$(state_dir)"/signing-record.jsonl "$(state_dir)"/card-record-rebuild.record.json; do
+      [ -f "$art" ] && cp "$art" "$burn/state/"
+    done
+    state_commit_note "$( [ -s "$WORK/offline/offline-keys.sealed.json" ] && echo "$WORK/offline/offline-keys.sealed.json" || echo "$WORK/rotation/offline-keys.sealed.json")"
   fi
   if [ -d "$WORK/ownerauth-rotation" ]; then
     mkdir -p "$burn/ownerauth-rotation"
@@ -3161,13 +3278,14 @@ main() {
    6) Print break-glass recovery instruction card (DVD-case sized)
    o) Offline keys: the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
    a) Owner authorizations: each KMS host's TPM owner auth, to both owner cards + its SOPS recovery copy (after o, card record)
+   w) After the archive's readback: the disc's signing state checked, then what the sheet and the disc label take
    t) Owner-auth rotation: new owner auths for enrolled hosts, from the archived sealed set (a later session; card record)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
     printf '   q) quit (workdir is shredded)\n'
     # Break on EOF (Ctrl-D, or an exhausted piped stdin) so the menu never spins forever on
     # empty reads — a non-interactive run must terminate, not hang.
-    read -r -p "   > " choice || break
+    read -r -p "   > " choice || { menu_input_ended; break; }
     case "$choice" in
       0) step_set_pins;;
       1) step_yubikey_ops;;
@@ -3183,8 +3301,9 @@ MENU
       o|O) step_offline_keys;;
       a|A) step_ownerauth;;
       t|T) step_ownerauth_rotate;;
+      w|W) step_state_readback;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
-      q|Q) break;;
+      q|Q) state_may_leave && break;;
       *) warn "pick 1-9 or q";;
     esac
     pause

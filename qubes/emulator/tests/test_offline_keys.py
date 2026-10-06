@@ -15,6 +15,7 @@ import os
 import re
 import shutil
 import subprocess
+import datetime
 import tempfile
 import unittest
 import unittest.mock
@@ -1101,6 +1102,145 @@ class OwnerAuth(Case):
         self.assertEqual(os.listdir(self.oa), [], "no envelope, no partial record and no GnuPG home")
         self.run_oa(nodes=("a",))                                       # and a rerun is not blocked by leftovers
 
+
+
+class StateDir(Case):
+    """The state directory between sessions (24, d9, 1e, 2026-10-05): restored from the newest disc and opened with the
+    sheet's session count; an older disc, a newer one beside it, a fork, a log changed under a session line and a
+    chain pin it does not match are refused before anything is signed."""
+
+    def setUp(self):
+        super().setUp()
+        self.record = self.generate(k=2, n=3)
+        self.all = self.shares()
+        self.sealed = self.path("offline-keys.sealed.json")
+        self.root = ok.root_entry_of(json.load(open(self.sealed)))
+        self.state = os.path.join(self.d, "state")
+        os.mkdir(self.state, 0o700)
+        OwnerAuth.signed_card_record(self, [("A" * 40, "B" * 40), ("C" * 40, "D" * 40)])       # card record 1, logged
+
+    def disc(self, name):
+        """The state directory burned to a disc, as a later session copies it back: a 0700 directory of 0600 files."""
+        copy = os.path.join(self.d, name)
+        shutil.copytree(self.state, copy)
+        return copy
+
+    def at(self, minute):
+        return datetime.datetime(2026, 10, 5, 12, minute, tzinfo=datetime.timezone.utc)
+
+    def test_each_session_opens_with_the_sheets_count_and_an_older_disc_is_refused(self):
+        self.assertEqual(ok.state_status(self.state, self.sealed)[0], 0, "the first ceremony created it: session 0")
+        disc0 = self.disc("disc0")
+        sessions, newest = ok.state_open(self.state, self.sealed, 0, now=self.at(1))
+        self.assertEqual((sessions, newest["card-record"]["sequence"]), (1, 1))
+        disc1 = self.disc("disc1")
+        self.assertEqual(ok.state_open(self.state, self.sealed, 1, now=self.at(2))[0], 2)
+        with self.assertRaisesRegex(ok.Refused, "this disc's state is session 0, and the sheet says 1: an OLDER disc"):
+            ok.state_open(disc0, self.sealed, 1)
+        with self.assertRaisesRegex(ok.Refused, "this disc's state is session 1, and the sheet says 0: a disc newer than the sheet"):
+            ok.state_open(disc1, self.sealed, 0)
+        # the readers do not count session lines: card record 1 is still the current one
+        lines = ok.read_signing_state(self.state, self.root)
+        self.assertEqual([l["sequence"] for l in lines if l["kind"] == "session"], [1, 2])
+        self.assertEqual([l["sequence"] for l in ok.card_lines_of(lines, self.root)], [1])
+
+    def test_a_newer_disc_beside_it_or_a_fork_is_refused(self):
+        ok.state_open(self.state, self.sealed, 0, now=self.at(1))
+        disc1 = self.disc("disc1")                               # session 1's disc
+        ok.state_open(self.state, self.sealed, 1, now=self.at(2))
+        disc2 = self.disc("disc2")                               # session 2's disc
+        copy = lambda src, name: shutil.copytree(src, os.path.join(self.d, name))
+        with self.assertRaisesRegex(ok.Refused, "disc2 holds a NEWER state than this disc: restore that one"):
+            ok.state_open(copy(disc1, "restore1"), self.sealed, 1, others=[disc2])
+        fork = copy(disc1, "fork")                               # disc 1 opened again elsewhere, later: another session 2
+        ok.state_open(fork, self.sealed, 1, now=self.at(3))
+        with self.assertRaisesRegex(ok.Refused, "fork and this disc disagree on their common history: a fork"):
+            ok.state_open(copy(disc2, "restore2"), self.sealed, 2, others=[fork])
+        self.assertEqual(ok.state_open(copy(disc2, "restore3"), self.sealed, 2, others=[disc1])[0], 3, "an older disc beside it is fine")
+
+    def test_after_genesis_the_chains_pin_must_be_its_newest_card_line(self):
+        newest = ok.state_status(self.state, self.sealed)[1]["card-record"]
+        self.assertEqual(ok.state_open(self.disc("a"), self.sealed, 0, pin=(1, newest["digest"]))[0], 1)
+        with self.assertRaisesRegex(ok.Refused, "the chain pins card record 2 .* this disc's newest is 1"):
+            ok.state_open(self.disc("b"), self.sealed, 0, pin=(2, "ab" * 32))
+
+    def test_after_genesis_the_chain_is_required(self):
+        """d9 on #139: once the log holds a verified manifest signature, a restore without the chain's pin is refused;
+        a manifest signature that did not verify made no chain and does not count."""
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+        newest = ok.state_status(self.state, self.sealed)[1]["card-record"]
+        line = {"kind": "manifest", "epoch": 1, "digest": "cd" * 32, "signer": "root", "key": self.root, "verified": False,
+                "reason": "x", "at": 1, "genesis": True}
+        with open(log, "a") as f:
+            f.write(json.dumps(line, sort_keys=True) + "\n")
+        self.assertEqual(ok.state_open(self.disc("unverified"), self.sealed, 0)[0], 1, "an unverified signature: no chain yet")
+        with open(log, "a") as f:
+            f.write(json.dumps(dict(line, verified=True, reason=""), sort_keys=True) + "\n")
+        with self.assertRaisesRegex(ok.Refused, "this log holds a verified manifest signature \\(genesis has run\\): give --chain"):
+            ok.state_open(self.disc("nochain"), self.sealed, 0)
+        self.assertEqual(ok.state_open(self.disc("chain"), self.sealed, 0, pin=(1, newest["digest"]))[0], 1)
+
+    def test_the_sheet_takes_the_count_only_from_a_disc_read_back_equal(self):
+        """d9 on #139: state-burned compares the disc's state/ with this session's, file by file, before the sheet line."""
+        ok.state_open(self.state, self.sealed, 0)
+        disc = self.disc("burned")
+        self.assertEqual(ok.state_burned(self.state, disc, self.sealed)[0], 1)
+        with open(os.path.join(disc, ok.SIGNING_RECORD), "rb") as f:
+            data = f.read()
+        with open(os.path.join(disc, ok.SIGNING_RECORD), "wb") as f:
+            f.write(data[:-1])                               # a disc that lost its last byte
+        with self.assertRaisesRegex(ok.Refused, "the disc's signing-record.jsonl is not this session's: do NOT write the sheet"):
+            ok.state_burned(self.state, disc, self.sealed)
+        os.unlink(os.path.join(disc, ok.SIGNING_RECORD))
+        with self.assertRaisesRegex(ok.Refused, "signing-record.jsonl is missing on the disc but present in this session"):
+            ok.state_burned(self.state, disc, self.sealed)
+        os.symlink(os.path.join(self.state, ok.SIGNING_RECORD), os.path.join(disc, ok.SIGNING_RECORD))
+        with self.assertRaisesRegex(ok.Refused, "the disc's signing-record.jsonl is a link"):
+            ok.state_burned(self.state, disc, self.sealed)
+
+    def test_a_session_line_is_judged_like_the_rest(self):
+        ok.state_open(self.state, self.sealed, 0, now=self.at(1))
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+        lines = open(log).read().splitlines()
+        changed = [lines[0].replace('"at": "', '"at": "1') ] + lines[1:]
+        for given, reason in (
+                (changed, "session line 1 does not follow the log before it"),
+                (lines + [lines[-1]], "the signing record's session lines are not 1..2 without a gap"),
+                (lines[:-1] + [lines[-1].replace(self.root, "00" * 32)], "session line 1 names another root")):
+            with self.subTest(reason=reason):
+                with open(log, "w") as f:
+                    f.write("\n".join(given) + "\n")
+                with self.assertRaisesRegex(ok.Refused, re.escape(reason)):
+                    ok.state_status(self.state, self.sealed)
+
+    def test_a_log_changed_while_it_is_opened_is_not_appended_to(self):
+        real = ok._append_line
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+
+        def meanwhile(state_dir, line, follows):
+            with open(log, "a") as f:                        # another writer, between the judging and the append
+                f.write(json.dumps({"kind": "anchor-first", "node_id": "a"}) + "\n")
+            return real(state_dir, line, follows)
+        size = None
+        with unittest.mock.patch.object(ok, "_append_line", side_effect=meanwhile):
+            with self.assertRaisesRegex(ok.Refused, "the signing record changed while it was opened: nothing was appended"):
+                ok.state_open(self.state, self.sealed, 0)
+        self.assertNotIn('"session"', open(log).read())
+
+    def test_the_sheet_lines(self):
+        import contextlib, io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ok.main(["state-open", "--state-dir", self.state, "--sealed", self.sealed, "--session", "0"]), 0)
+        text = out.getvalue()
+        self.assertIn("SESSION 1 opened (the disc's state was session 0)", text)
+        self.assertIn("Do NOT write session 1 on the sheet yet: only after the archive's readback (ceremony.sh step w)", text)
+        self.assertRegex(text, r"NEWEST card-record sequence=1 [0-9a-f]{16}")
+        self.assertRegex(text, r"NEWEST session sequence=1 [0-9a-f]{16}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ok.main(["state-status", "--state-dir", self.state, "--sealed", self.sealed]), 0)
+        self.assertIn("SESSIONS 1", out.getvalue())
 
 if __name__ == "__main__":
     unittest.main()

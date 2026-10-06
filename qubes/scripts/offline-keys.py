@@ -1439,20 +1439,7 @@ def read_signing_state(state_dir, pinned_root):
     whatever JSON each line holds, for card_record_current to judge)."""
     import stat as _stat
     info = _marker_for(state_dir, pinned_root)
-    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
-    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
-    try:
-        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except FileNotFoundError:
-        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
-    except OSError as error:
-        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
-    with os.fdopen(fd, "rb") as f:
-        log_info = os.fstat(f.fileno())
-        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
-                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
-        data = f.read(MAX_SIGNING_RECORD + 1)
-    lines = _signing_record_lines(data)
+    lines = _signing_record_lines(_signing_record_bytes(state_dir, info))
     baselines = [line for line in lines if isinstance(line, dict) and line.get("kind") == BASELINE_KIND]
     if baselines:                               # a rebuilt log carries the root-signed record of its rebuild (d9 on #406)
         try:
@@ -1473,6 +1460,24 @@ def read_signing_state(state_dir, pinned_root):
         require(all(line.get("digest") == rebuild["rebuilt"].get("digest") for line in after),
                 "the signing record's card record %s is not the one its rebuild record re-signed" % rebuild["rebuilt"].get("sequence"))
     return lines
+
+
+def _signing_record_bytes(state_dir, info):
+    """The signing record's bytes as the marker's directory (`info`, its stat) holds them: never through a link, the
+    owner's 0600 regular file, and whole. A link to an older copy, or a tail cut off at a line boundary, would make an
+    older card record read as the newest (d9 on #126)."""
+    import stat as _stat
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        log_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
+        return f.read(MAX_SIGNING_RECORD + 1)
 
 
 def _signing_record_lines(data):
@@ -1539,7 +1544,7 @@ def append_card_record_line(state_dir, record, now=None):
     line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
             "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
 
-    def follows(existing):
+    def follows(existing, data):
         card = card_lines_of(existing, record["root_entry"]["key"])          # a rebuilt log's baseline counts as line N
         expected = (card[-1]["sequence"] + 1, card[-1]["digest"]) if card else (1, "")
         require((record["sequence"], record["supersedes"]) == expected,
@@ -1558,7 +1563,7 @@ def _append_line(state_dir, line, follows):
     # every line under the root the directory's marker names (CodeRabbit on #121)
     root = _signing_state_root(state_dir, info)
     require(line["key"] == root, "this %s is signed for another root than %s names: nothing was appended"
-            % ("card record" if line["kind"] == "card-record" else "baseline", SIGNING_STATE))
+            % ({"card-record": "card record", "session": "session line"}.get(line["kind"], "baseline"), SIGNING_STATE))
     fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
         log_info = os.fstat(fd)
@@ -1571,7 +1576,7 @@ def _append_line(state_dir, line, follows):
         lines = _signing_record_lines(existing)
         require(all(old.get("key") == root for old in lines if isinstance(old, dict) and old.get("kind") in ("card-record", BASELINE_KIND)),
                 "the signing record holds a card-record line of another root: nothing was appended")
-        follows(lines)
+        follows(lines, existing)
         data = (json.dumps(line, sort_keys=True) + "\n").encode()
         require(len(existing) + len(data) <= MAX_SIGNING_RECORD,      # or the reader would refuse the whole log (CodeRabbit)
                 "%s would pass %d bytes with this line: nothing was appended; a full log is rebuilt from the disc "
@@ -1928,7 +1933,7 @@ def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=No
     write_new(os.path.join(state_dir, REBUILD_RECORD), signed_rebuild, 0o600)
     _fsync_dir(state_dir)
     # no check of its own: this function has refused a state directory that holds a signing record already
-    _append_line(state_dir, {"kind": BASELINE_KIND, "sequence": n, "digest": digest, "key": root_hex, "at": stamp, "source": source}, lambda existing: None)
+    _append_line(state_dir, {"kind": BASELINE_KIND, "sequence": n, "digest": digest, "key": root_hex, "at": stamp, "source": source}, lambda existing, data: None)
     write_new(os.path.join(out, "card-record-rebuild-%d.record.json" % n), signed_rebuild, 0o644)     # for the disc
     append_card_record_line(state_dir, record, now)       # the log names N+1 BEFORE it is released
     _fsync_dir(state_dir)
@@ -1965,6 +1970,118 @@ def parse_pin(text):
             "the pin is 'CARD-RECORD-PIN <sequence> <64 hex>' (regalia-manifest verify's last line) or SEQ:DIGEST; a chain "
             "that prints none has no card_record, and is refused")
     return int(fields[0]), fields[1]
+
+
+# ---- the state directory between sessions (24, d9, 1e on rc#111/#297, 2026-10-05) ---------------------------------
+# Every ceremony profile is non-persistent, so the laptop's state directory lives in the session's RAM ($WORK/state)
+# and travels on the archive disc (state/). A later session restores it from the newest disc and OPENS it: the
+# operator types the session count S from the sheet, the restored log's session lines must count exactly S (an older
+# disc is refused by name, whatever kinds of lines it holds: card records, K_A approvals, authorizations), and a
+# {kind: "session", sequence: S+1, at, prev: SHA-256 of the log before it, key: the root} line is appended first.
+# The first ceremony creates the state: S = 0. After genesis the chain's card_record pin must also be the log's
+# newest card line, a second, independent check. Other discs given are compared byte for byte: a disc whose log is
+# not a prefix of the chosen one's, nor it of theirs, is a fork; a longer one is a newer disc. Both are refused.
+SESSION_KIND = "session"
+
+
+def session_lines_of(data, lines, root):
+    """The log's session lines (`data` its bytes, `lines` their JSON), each judged: exactly {kind, sequence, at, prev,
+    key}, sequences 1..S without a gap, `prev` the SHA-256 of the bytes before that line, `key` the root."""
+    offsets, at = [], 0
+    for text in data.split(b"\n")[:len(lines)]:
+        offsets.append(at)
+        at += len(text) + 1
+    found = []
+    for line, offset in zip(lines, offsets):
+        if not (isinstance(line, dict) and line.get("kind") == SESSION_KIND):
+            continue
+        _exact(line, ("kind", "sequence", "at", "prev", "key"), "a session line of the signing record")
+        require(line["sequence"] == len(found) + 1 and not isinstance(line["sequence"], bool),
+                "the signing record's session lines are not 1..%d without a gap" % (len(found) + 1))
+        require(line["prev"] == hashlib.sha256(data[:offset]).hexdigest(),
+                "session line %d does not follow the log before it: the log was changed under it" % line["sequence"])
+        require(line["key"] == root, "session line %d names another root" % line["sequence"])
+        found.append(line)
+    return found
+
+
+def _newest_by_kind(lines):
+    newest = {}
+    for line in lines:
+        if isinstance(line, dict) and isinstance(line.get("kind"), str):
+            newest[line["kind"]] = line
+    return newest
+
+
+def state_status(state_dir, sealed_path):
+    """The state directory as the sheet records it: (S, the newest line of each kind). Read-only."""
+    with open(sealed_path, "rb") as f:
+        root = root_entry_of(json.loads(f.read(1 << 20)))
+    lines = read_signing_state(state_dir, root)               # the marker, the log whole, a rebuild's record
+    card_lines_of(lines, root)                                # every card line as the readers judge it
+    data = _signing_record_bytes(state_dir, os.stat(state_dir))
+    require(_signing_record_lines(data) == lines, "the signing record changed while it was read")
+    return len(session_lines_of(data, lines, root)), _newest_by_kind(lines)
+
+
+def after_genesis(lines):
+    """Genesis has run when the log holds a manifest signature that verified (regalia-kms manifest.py's line: kind
+    "manifest", verified true). One that did not verify made no chain, so it does not count."""
+    return any(isinstance(line, dict) and line.get("kind") == "manifest" and line.get("verified") is True for line in lines)
+
+
+STATE_FILES = (SIGNING_STATE, SIGNING_RECORD, REBUILD_RECORD)
+
+
+def state_burned(state_dir, disc_dir, sealed_path):
+    """The disc's state/ (mounted read-only) read back equal to this session's state, file by file: only then does the
+    sheet take the session count, so the sheet always names a burned disc (d9 on #139). Returns (S, newest by kind)."""
+    sessions, newest = state_status(state_dir, sealed_path)
+    for name in STATE_FILES:
+        mine, theirs = os.path.join(state_dir, name), os.path.join(disc_dir, name)
+        require(os.path.lexists(mine) == os.path.lexists(theirs), "%s is %s on the disc but %s in this session: not this session's state"
+                % (name, "present" if os.path.lexists(theirs) else "missing", "present" if os.path.lexists(mine) else "missing"))
+        if os.path.lexists(mine):
+            require(not os.path.islink(theirs), "the disc's %s is a link" % name)
+            with open(mine, "rb") as a, open(theirs, "rb") as b:
+                require(a.read(MAX_SIGNING_RECORD + 1) == b.read(MAX_SIGNING_RECORD + 1),
+                        "the disc's %s is not this session's: do NOT write the sheet; burn the disc again" % name)
+    return sessions, newest
+
+
+def state_open(state_dir, sealed_path, typed, others=(), pin=None, now=None):
+    """A restored state directory opened for this session: its session count must be `typed` (the sheet's), every
+    other disc's log given in `others` (their state directories) a prefix of it, and, after genesis, `pin` (the
+    chain's (sequence, digest)) its newest card line; then session S+1 is appended. Returns (S+1, newest by kind)."""
+    with open(sealed_path, "rb") as f:
+        root = root_entry_of(json.loads(f.read(1 << 20)))
+    require(isinstance(typed, int) and not isinstance(typed, bool) and typed >= 0, "the sheet's session count is a whole number")
+    sessions, newest = state_status(state_dir, sealed_path)
+    require(sessions == typed, "this disc's state is session %d, and the sheet says %d: %s. Nothing was signed"
+            % (sessions, typed, "an OLDER disc; restore the newest one" if sessions < typed else "a disc newer than the sheet; find the newer sheet"))
+    data = _signing_record_bytes(state_dir, os.stat(state_dir))
+    # after genesis the chain's pin is the second, independent check, for when the sheet itself is wrong: required (d9)
+    require(pin is not None or not after_genesis(_signing_record_lines(data)),
+            "this log holds a verified manifest signature (genesis has run): give --chain, whose card_record pin is the "
+            "second check after genesis. Nothing was signed")
+    for other in others:
+        theirs = _signing_record_bytes(other, _marker_for(other, root))
+        require(data.startswith(theirs) or theirs.startswith(data),
+                "%s and this disc disagree on their common history: a fork. Nothing was signed; rebuild with --rebuild-from-disc" % other)
+        require(not (theirs.startswith(data) and len(theirs) > len(data)), "%s holds a NEWER state than this disc: restore that one" % other)
+    if pin is not None:
+        card = [line for line in card_lines_of(_signing_record_lines(data), root)]
+        require(card and (card[-1]["sequence"], card[-1]["digest"]) == tuple(pin),
+                "the chain pins card record %d (%s…), and this disc's newest is %s: not the state the chain knows. Nothing was "
+                "signed; rebuild with --rebuild-from-disc" % (pin[0], pin[1][:16], ("%d (%s…)" % (card[-1]["sequence"], card[-1]["digest"][:16])) if card else "none"))
+    line = {"kind": SESSION_KIND, "sequence": sessions + 1, "key": root, "prev": hashlib.sha256(data).hexdigest(),
+            "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+
+    def follows(existing, current):
+        require(current == data, "the signing record changed while it was opened: nothing was appended")
+    _append_line(state_dir, line, follows)
+    newest[SESSION_KIND] = line
+    return sessions + 1, newest
 
 
 def root_entry_of(sealed):
@@ -2027,6 +2144,23 @@ def main(argv=None):
     q.add_argument("--node", required=True)
     q.add_argument("--sealed", required=True, help="the offline set's sealed file: its root must be the record's")
     o.add_argument("--out", required=True, help="a RAM directory for the files and the record")
+    so = sub.add_parser("state-open", help="a state directory restored from the newest disc, opened for this session: the "
+                        "sheet's session count typed, other discs compared, after genesis the chain's pin; session S+1 appended")
+    so.add_argument("--state-dir", required=True)
+    so.add_argument("--sealed", required=True)
+    so.add_argument("--session", type=int, required=True, help="the sheet's newest session count, typed")
+    so.add_argument("--compare", action="append", default=[], help="another disc's state directory: a fork or a newer one is refused")
+    so.add_argument("--chain", help="after genesis: the chain (from any node); its card_record pin is computed by regalia-kms's verifier")
+    so.add_argument("--tool-root", help="with --chain: the image's regalia-kms tree")
+    so.add_argument("--tool-digest", help="with --chain: that tree's digest, from the image's build evidence")
+    sb = sub.add_parser("state-burned", help="after the readback: the disc's state/ equal to this session's, and only then "
+                        "the session count for the sheet")
+    sb.add_argument("--state-dir", required=True)
+    sb.add_argument("--disc", required=True, help="the burned disc's state/ directory, mounted read-only")
+    sb.add_argument("--sealed", required=True)
+    ss = sub.add_parser("state-status", help="the state directory's session count and newest line of each kind, for the sheet")
+    ss.add_argument("--state-dir", required=True)
+    ss.add_argument("--sealed", required=True)
     oc = sub.add_parser("ownerauth-current", help="a rotation's CURRENT owner-authorization record, checked as THIS sealed "
                         "set's root's: prints its at and nodes (ceremony.sh step t refuses a clock not later than that at)")
     oc.add_argument("--record", required=True)
@@ -2074,6 +2208,26 @@ def main(argv=None):
         elif args.command == "ownerauth-check":
             ownerauth_check_value(args.record, args.node, sys.stdin, args.sealed)
             print("OWNERAUTH %s: the value matches the check value of a record this sealed set's root signed" % args.node)
+        elif args.command in ("state-open", "state-status", "state-burned"):
+            if args.command == "state-open":
+                pin = None
+                if args.chain:
+                    require(args.tool_root and args.tool_digest, "--chain takes --tool-root and --tool-digest")
+                    with open(args.sealed, "rb") as f:
+                        pin = chain_pin(args.chain, root_entry_of(json.loads(f.read(1 << 20))), args.tool_root, args.tool_digest)
+                sessions, newest = state_open(args.state_dir, args.sealed, args.session, args.compare, pin)
+                print("SESSION %d opened (the disc's state was session %d%s)" % (sessions, sessions - 1, ", matching the chain's pin" if pin else ""))
+                print("Do NOT write session %d on the sheet yet: only after the archive's readback (ceremony.sh step w)" % sessions)
+            elif args.command == "state-burned":
+                sessions, newest = state_burned(args.state_dir, args.disc, args.sealed)
+                print("STATE READ BACK from the disc, equal to this session's")
+                print("WRITE ON THE SHEET AND ON THE DISC LABEL: SESSIONS %d" % sessions)
+            else:
+                sessions, newest = state_status(args.state_dir, args.sealed)
+                print("SESSIONS %d" % sessions)
+            for kind, line in sorted(newest.items()):      # for the sheet: the newest line of each kind (24 on #297)
+                print("NEWEST %s %s %s" % (kind, " ".join("%s=%s" % (k, line[k]) for k in ("sequence", "epoch") if k in line),
+                                           line.get("digest", line.get("prev", ""))[:16]))
         elif args.command == "ownerauth-current":
             record = ownerauth_record_of(args.record, args.sealed)
             print("CURRENT %s %s" % (record["at"], ",".join(sorted(record["nodes"]))))
