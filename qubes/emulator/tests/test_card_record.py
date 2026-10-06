@@ -405,6 +405,25 @@ class Rules(unittest.TestCase):
         with self.assertRaisesRegex(ok.Refused, "line 2 of the signing record is not JSON"):
             ok.append_card_record_line(d, second)
 
+    def test_an_append_that_would_pass_the_size_limit_is_refused(self):
+        """CodeRabbit on #121: a line that would take the log past MAX_SIGNING_RECORD is refused unwritten, since the
+        reader refuses a larger log whole."""
+        import unittest.mock
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        first, second = make.valid_record(), make.sequence_two()
+        marker(d, first["root_entry"]["key"])
+        ok.append_card_record_line(d, first)
+        log = os.path.join(d, ok.SIGNING_RECORD)
+        size = os.path.getsize(log)
+        with unittest.mock.patch.object(ok, "MAX_SIGNING_RECORD", size + 10):
+            with self.assertRaisesRegex(ok.Refused, "would pass %d bytes with this line: nothing was appended" % (size + 10)):
+                ok.append_card_record_line(d, second)
+        self.assertEqual(os.path.getsize(log), size)
+        with unittest.mock.patch.object(ok, "MAX_SIGNING_RECORD", size * 3):
+            ok.append_card_record_line(d, second)
+
     def test_only_a_valid_record_of_the_markers_root_is_appended(self):
         """CodeRabbit on #121: the appender judges the record by card_record_check, and binds it and every card-record
         line already logged to the root the directory's marker names."""
