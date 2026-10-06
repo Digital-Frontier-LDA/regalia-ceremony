@@ -15,6 +15,9 @@ to the break-glass key.
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary --sealed FILE   (the k shares on standard input:
                                           the entries are authenticated and the root signs ownerauth-verified.record.json)
+    python3 -Es offline-keys.py card-record --sealed FILE --cards FILE --release-import FILE --release-import FILE
+                                     --state-dir DIR --out DIR [--first-card-record]
+                                          (the k shares on standard input; the confirmation from the terminal)
     python3 -Es offline-keys.py verify-record --record FILE
 
 
@@ -28,6 +31,11 @@ CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when 
     That step is gated by the D30.6 bench measurements, which have not run. Until then ownerauth has no real
     --yk-keys (#111 step 2).
   * The release key (D29.2/D30: Shamir developers' set, imported onto two release cards) is not implemented (#124).
+  * card-record signs what --cards and --release-import say. Nothing yet makes --cards from the developer cards
+    (step 2, gated by D30.6), and its attestation digests have no certificates behind them until #127. The record
+    is only as true as those inputs and the operator's typed confirmation of the owner keys shown.
+  * A lost state directory cannot be rebuilt yet (regalia-kms#406). Without it no card record or genesis can be signed
+    on that laptop.
   * K_A (anchor-policy, regalia-kms#361) is generated, sealed, split and backed up with the others, and its public key
     is output (ANCHOR-POLICY-ENTRY) for the genesis manifest. The manifest's field name for it is still being settled
     on #361. No tool takes it yet: sign hands it to nothing until regalia-kms's K_A signer (the policy approvals and
@@ -1222,29 +1230,13 @@ SCHEMA_SIGNING_STATE = "regalia.signing-state/v1"
 MAX_SIGNING_RECORD = 1 << 22             # 4 MiB: a larger signing record is refused, never read in part
 
 
-def read_signing_state(state_dir, pinned_root):
-    """The card-record consumer's view of the laptop's state directory: its marker (O_NOFOLLOW, a regular file of the
-    directory's owner, 0600, exactly {schema, root}, root the PINNED one; a missing marker is refused, since an empty
-    or foreign directory cannot be judged) and then its signing record's lines. Returns the lines (dicts or
-    whatever JSON each line holds, for card_record_current to judge)."""
-    import stat as _stat
+def _marker_for(state_dir, pinned_root):
+    """The state directory's marker, checked (O_NOFOLLOW, a 0600 regular file of the directory's owner, exactly
+    {schema, root}, root the pinned one). Returns the directory's stat."""
     info = os.stat(state_dir)
-    marker_root = _signing_state_root(state_dir, info)
-    require(marker_root == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
-    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
-    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
-    try:
-        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-    except FileNotFoundError:
-        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
-    except OSError as error:
-        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
-    with os.fdopen(fd, "rb") as f:
-        log_info = os.fstat(f.fileno())
-        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
-                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
-        data = f.read(MAX_SIGNING_RECORD + 1)
-    return _signing_record_lines(data)
+    require(_signing_state_root(state_dir, info) == pinned_root,
+            "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
+    return info
 
 
 def _signing_state_root(state_dir, info):
@@ -1268,6 +1260,29 @@ def _signing_state_root(state_dir, info):
     _exact(marker, ("schema", "root"), SIGNING_STATE)
     require(marker["schema"] == SCHEMA_SIGNING_STATE, "%s's schema is not %s" % (SIGNING_STATE, SCHEMA_SIGNING_STATE))
     return marker["root"]
+
+
+def read_signing_state(state_dir, pinned_root):
+    """The card-record consumer's view of the laptop's state directory: its marker (O_NOFOLLOW, a regular file of the
+    directory's owner, 0600, exactly {schema, root}, root the PINNED one; a missing marker is refused, since an empty
+    or foreign directory cannot be judged) and then its signing record's lines. Returns the lines (dicts or
+    whatever JSON each line holds, for card_record_current to judge)."""
+    import stat as _stat
+    info = _marker_for(state_dir, pinned_root)
+    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
+    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        log_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
+        data = f.read(MAX_SIGNING_RECORD + 1)
+    return _signing_record_lines(data)
 
 
 def _signing_record_lines(data):
@@ -1332,17 +1347,15 @@ def append_card_record_line(state_dir, record, now=None):
     return line
 
 
-def card_record_current(document, pinned_root, signing_lines):
-    """A card record that is the NEWEST the pinned root signed (regalia-kms#403): verify_card_record, then the laptop's
-    signing record's card-record lines (dicts, in file order) must run 1..M without a gap, this record must be line M
-    (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
-    refused: after a rotation it would vouch for a retired key. Returns the record."""
-    record = verify_card_record(document, pinned_root)
+def card_lines_of(signing_lines, pinned_root):
+    """The signing record's card-record lines, judged as both the reader (card_record_current) and the writer
+    (card_record) judge them, so the writer never extends a log the reader refuses (d9 on #128): every line an object
+    with a kind; each card-record line exactly {kind, sequence (an integer), digest (64 hex), key, at}; sequences 1..M
+    without a gap; every key the pinned root. Returns the card-record lines, possibly none."""
     for i, line in enumerate(signing_lines):       # every line judged by name, never skipped (d9 on #126, #403 point 6)
         require(isinstance(line, dict) and isinstance(line.get("kind"), str) and line["kind"],
                 "line %d of the signing record is not an object with a kind" % (i + 1))
     lines = [line for line in signing_lines if line["kind"] == "card-record"]
-    require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
     for line in lines:
         _exact(line, ("kind", "sequence", "digest", "key", "at"), "a card-record line of the signing record")
         require(isinstance(line["sequence"], int) and not isinstance(line["sequence"], bool) and isinstance(line["digest"], str)
@@ -1351,6 +1364,26 @@ def card_record_current(document, pinned_root, signing_lines):
     require([line.get("sequence") for line in lines] == list(range(1, len(lines) + 1)),
             "the signing record's card-record lines are not 1..%d without a gap" % len(lines))
     require(all(line.get("key") == pinned_root for line in lines), "a card-record line names another root than the pinned one")
+    return lines
+
+
+def _fsync_dir(path):
+    """The directory entry made durable: a file's own fsync does not make its name survive a power cut (d9 on #128)."""
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def card_record_current(document, pinned_root, signing_lines):
+    """A card record that is the NEWEST the pinned root signed (regalia-kms#403): verify_card_record, then the laptop's
+    signing record's card-record lines (dicts, in file order) must run 1..M without a gap, this record must be line M
+    (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
+    refused: after a rotation it would vouch for a retired key. Returns the record."""
+    record = verify_card_record(document, pinned_root)
+    lines = card_lines_of(signing_lines, pinned_root)
+    require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
     newest = lines[-1]
     require(record["sequence"] == newest["sequence"] and card_record_digest(record) == newest.get("digest"),
             "this card record is not the newest the root signed (sequence %d of %d): an older one is superseded"
@@ -1381,6 +1414,165 @@ def verify_card_record(document, pinned_root):
     return card_record_check(record)
 
 
+SCHEMA_RELEASE_IMPORT = "regalia.release-import/v1"     # developer-keys.py's facts, one per release card (#124)
+CARD_FIELDS = ("owner_keys", "ownerauth_recipients", "ssh_signers")
+
+
+def _tty_ask(prompt):
+    with open("/dev/tty") as tty:
+        sys.stderr.write(prompt)
+        sys.stderr.flush()
+        return tty.readline().strip()
+
+
+def release_from_imports(paths):
+    """The card record's release_key, from the two release cards' import facts (developer-keys.py release-import):
+    one key and one fingerprint on both, imported, not attested."""
+    require(isinstance(paths, list) and len(paths) == 2, "--release-import is given twice: the two release cards' facts")
+    facts = []
+    for path in paths:
+        with open(path, "rb") as f:
+            fact = json.loads(f.read(1 << 16))
+        require(isinstance(fact, dict) and fact.get("schema") == SCHEMA_RELEASE_IMPORT, "%s is not a release card's import facts" % path)
+        require(fact.get("imported") is True and fact.get("attested") is False and fact.get("touch") == "fixed",
+                "%s does not record a key imported with a fixed touch policy" % path)
+        facts.append(fact)
+    require(facts[0].get("serial") != facts[1].get("serial"), "both --release-import files are for card %s: give each release card's"
+            % facts[0].get("serial"))
+    require(facts[0]["key"] == facts[1]["key"] and facts[0]["fingerprint"] == facts[1]["fingerprint"],
+            "the two release cards hold different keys: one release key goes on both")
+    return {"alg": "ed25519", "key": facts[0]["key"], "fingerprint": facts[0]["fingerprint"],
+            "cards": [facts[0]["serial"], facts[1]["serial"]], "imported": True, "attested": False}
+
+
+def _state_dir(path):
+    info = os.stat(path)
+    require(os.path.isdir(path) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            "the state directory %s must be a directory of this user's, mode 0700" % path)
+    return path
+
+
+def card_record(sealed_path, cards_path, release_paths, state_dir, out, stream, first=False, ask=_tty_ask, now=None):
+    """Sign the next card-ceremony record with the root (the k offline shares on `stream`), as regalia-kms#403 and the
+    marker agreed with regalia-kms-1e require (rc#111's writer requirements):
+      * first=True (--first-card-record): the state directory holds no marker and no signing record; the marker
+        {schema, root} is created (O_EXCL, O_NOFOLLOW, 0600) before the first line. manifest sign never creates one,
+        so this is the first signing step of a laptop's state directory;
+      * otherwise the directory is read through its marker (read_signing_state), must hold a card-record line, and the
+        sequence and supersedes continue its log: never from OUT;
+      * card_record_check, then the operator types the sequence and the record's digest, then the root signs;
+      * released crash-safe: the signed record goes to OUT as card-record-<N>.pending.json, the log line is appended,
+        then the file is renamed to card-record-<N>.record.json. A rerun deletes a pending file the log does not name,
+        and releases one it does, before anything else.
+    Returns (the record, the released path, whether it was only the last run's record released)."""
+    import stat as _stat
+    check_place(out)
+    _state_dir(state_dir)
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    root_hex = root_entry_of(sealed)
+    # a release left half-done by an earlier run: finished or discarded first, by its exact name
+    pending = sorted(n for n in os.listdir(out) if re.fullmatch(r"card-record-[0-9]+\.pending\.json", n))
+    require(len(pending) <= 1, "OUT holds more than one pending card record: %s" % ", ".join(pending))
+    marker_path = os.path.join(state_dir, SIGNING_STATE)
+    log_path = os.path.join(state_dir, SIGNING_RECORD)
+    if first:
+        require(not os.path.lexists(log_path), "--first-card-record is for a state directory with no signing record; %s holds one. "
+                "If the first run got as far as the log line, run again WITHOUT --first-card-record to release it" % state_dir)
+        if os.path.lexists(marker_path):        # only a first run that crashed after the marker, before its line, leaves this
+            _marker_for(state_dir, root_hex)
+        card_lines = []
+    else:
+        card_lines = card_lines_of(read_signing_state(state_dir, root_hex), root_hex)    # as strictly as the reader
+        require(card_lines, "%s has a marker but no card-record line: not a state directory this writer made" % state_dir)
+    newest = card_lines[-1]["sequence"] if card_lines else 0
+    for name in pending:
+        path, n = os.path.join(out, name), int(name.split("-")[2].split(".")[0])
+        if n != newest:                         # no line names it (the crash came before the line): never released
+            os.unlink(path)
+            continue
+        try:                                    # the log names it: the last run crashed after the line, before release
+            with open(path, "rb") as f:
+                document = json.loads(f.read(1 << 20))
+            record = verify_card_record(document, root_hex)
+            require(record["sequence"] == n and card_record_digest(record) == card_lines[-1]["digest"], "not the record the log names")
+        except (Refused, ValueError, KeyError, TypeError):
+            kept, k = path.replace(".pending.json", ".damaged.json"), 0
+            while os.path.lexists(kept):        # never over earlier evidence (d9 on #128)
+                k += 1
+                kept = path.replace(".pending.json", ".damaged.%d.json" % k)
+            os.rename(path, kept)               # kept as evidence, out of the way
+            _fsync_dir(out)
+            raise Refused("card record %d is on the log but its file is damaged (kept as %s): run again to sign %d, superseding it"
+                          % (n, os.path.basename(kept), n + 1)) from None
+        final = path.replace(".pending.json", ".record.json")
+        require(not os.path.lexists(final), "%s exists beside its pending copy" % final)
+        os.rename(path, final)
+        _fsync_dir(out)
+        return record, final, True
+    sequence = newest + 1
+    supersedes = card_lines[-1]["digest"] if card_lines else ""
+    with open(cards_path, "rb") as f:
+        cards = json.loads(f.read(1 << 20))
+    _exact(cards, CARD_FIELDS, "--cards")
+    entry = {"alg": "ed25519", "key": root_hex}
+    record = dict({k: cards[k] for k in CARD_FIELDS}, schema=SCHEMA_CARDS, event="card-ceremony", sequence=sequence, supersedes=supersedes,
+                  release_key=release_from_imports(release_paths), session=secrets.token_hex(16), root_entry=entry,
+                  root_fingerprint=root_fingerprint(entry), tool=TOOL,
+                  at=(now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    card_record_check(record)
+    digest = card_record_digest(record)
+    sys.stderr.write("CARD RECORD %d (supersedes %s)\n" % (sequence, supersedes or "nothing"))
+    for k in record["owner_keys"]:
+        sys.stderr.write("  owner key %-10s card %s  %s\n" % (k["role"], k["serial"], k["key"]))
+    sys.stderr.write("  release key %s on cards %s\n" % (record["release_key"]["fingerprint"], ", ".join(record["release_key"]["cards"])))
+    sys.stderr.write("  digest %s\n" % digest)
+    sys.stderr.write("  compare the sequence with the ceremony sheet before typing it\n")
+    typed = ask("Type the sequence and the digest's first 8 hex to sign: ")
+    require(typed == "%d %s" % (sequence, digest[:8]), "the confirmation typed is not \"%d %s\": nothing was signed" % (sequence, digest[:8]))
+    master, indices, identifier = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    root = _private_key(bundle["keys"]["root"])
+    del bundle
+    from cryptography.hazmat.primitives import serialization
+    require(root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex() == root_hex,
+            "the sealed root is not the one its header publishes")
+    signed = canonical({"record": record, "signature": root.sign(RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
+    del root
+    pending_path = os.path.join(out, "card-record-%d.pending.json" % sequence)
+    final_path = os.path.join(out, "card-record-%d.record.json" % sequence)
+    require(not os.path.lexists(final_path), "%s already exists: nothing is overwritten" % final_path)
+    fd = os.open(pending_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "wb") as f:
+        f.write(signed)
+        f.flush()
+        os.fsync(f.fileno())
+    _fsync_dir(out)
+    if first and not os.path.lexists(marker_path):     # the marker before the first line, never over one
+        fd = os.open(marker_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "wb") as f:
+            f.write(canonical({"schema": SCHEMA_SIGNING_STATE, "root": root_hex}) + b"\n")
+            f.flush()
+            os.fsync(f.fileno())
+        _fsync_dir(state_dir)
+    append_card_record_line(state_dir, record, now)       # the log names it BEFORE it is released
+    _fsync_dir(state_dir)
+    os.rename(pending_path, final_path)
+    _fsync_dir(out)
+    return record, final_path, False
+
+
+def root_entry_of(sealed):
+    """The root's raw public key, 64 hex, from the sealed file's public header."""
+    from cryptography.hazmat.primitives import serialization
+    spki = base64.b64decode(sealed["publics"]["root"]["spki"])
+    return serialization.load_der_public_key(spki).public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -1393,6 +1585,13 @@ def main(argv=None):
     w.add_argument("--sealed", required=True)
     w.add_argument("--shares-file", required=True)
     w.add_argument("--partial", action="store_true", help="at least k forms, the rest named as not checked")
+    c = sub.add_parser("card-record", help="sign the next card-ceremony record with the root: the k shares on standard input")
+    c.add_argument("--sealed", required=True)
+    c.add_argument("--cards", required=True, help="the developer cards' facts: {owner_keys, ownerauth_recipients, ssh_signers}")
+    c.add_argument("--release-import", action="append", default=[], help="a release card's import facts (developer-keys.py); twice")
+    c.add_argument("--state-dir", required=True, help="the laptop's signing state directory, shared with manifest sign")
+    c.add_argument("--out", required=True)
+    c.add_argument("--first-card-record", action="store_true", help="the first: creates the state directory's marker")
     s = sub.add_parser("sign", help="a signing session: the k shares on standard input, one per line")
     s.add_argument("--sealed", required=True)
     s.add_argument("--who", required=True, help="the person signing, as recorded")
@@ -1458,6 +1657,16 @@ def main(argv=None):
                 require(args.yubikey_serial, "--yubikey-serial names the inserted YubiKey")
                 proven = ownerauth_verify(args.record, args.dir, args.yubikey_serial, args.gnupghome)
                 print("YubiKey %s opens %s" % (args.yubikey_serial, ", ".join(proven)))
+        elif args.command == "card-record":
+            record, path, recovered = card_record(args.sealed, args.cards, args.release_import, args.state_dir, args.out, sys.stdin,
+                                                  args.first_card_record)
+            if recovered:
+                print("RELEASED card record %d left by the last run (it crashed after the log line): %s. Nothing new was signed; "
+                      "run again to sign the next" % (record["sequence"], path))
+            else:
+                print("CARD RECORD %d SIGNED by the root (%s): %s; digest %s, in %s"
+                      % (record["sequence"], record["root_fingerprint"], path, card_record_digest(record),
+                         os.path.join(args.state_dir, SIGNING_RECORD)))
         elif args.command == "tree-digest":
             print(tree_digest(args.root))
         else:
