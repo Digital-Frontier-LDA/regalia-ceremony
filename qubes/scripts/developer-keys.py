@@ -15,7 +15,8 @@ CURRENT LIMITATIONS (2026-10-04; each removed here when it is lifted):
     keeps a FIXED touch policy set before it (read back either way, below); whether delete_key, which yubikit does by
     rewriting the algorithm attributes, then reads back NONE, and leaves SIG on RSA for the next put_key to set to
     EdDSA again; and a signature from the imported key, which needs a touch.
-  * No ceremony.sh step runs this; it is typed by hand (#124).
+  * ceremony.sh step r runs generate, the forms and both release cards' import. The touch-required test signature
+    from each card (release-check) is not built yet (#124).
   * The developers' set seals the release key only. The other developer secrets (staging, dev/CI) are not sealed yet.
   * Rotation after a stolen release card (D30.4: a new key, a published rotation) is not here.
   * The key is in clear in the laptop's RAM during generate and each import, as the offline keys are. The `del` of a

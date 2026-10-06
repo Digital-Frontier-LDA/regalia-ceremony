@@ -99,7 +99,7 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
   - The card-ceremony record's rules and verifier are in review (#121); no tool writes the record yet.
   - Nothing produces OpenPGP attestation certificates yet, so a record's "attested" has no certificate behind it
     (#127).
-  - The release key's tool is in review (#126), modelled against a stand-in card only.
+  - The release key's tool (#126) and its `ceremony.sh` step r are in review, modelled against a stand-in card only.
 - **Open issues in the existing tooling:**
   - Every emulator suite is now kept off the real pcscd. What remains open is stand-ins for `opensc-tool`,
     `pcsc_scan` and `gpg --card-status`, and a reader with a vendor-specific USB class going unseen by the
