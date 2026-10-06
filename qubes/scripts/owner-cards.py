@@ -41,7 +41,7 @@ CURRENT LIMITATIONS (2026-10-05):
   * The attestation chain to Yubico's root is not checked here, only each leaf's claims and keys: regalia-kms's reader
     (#400) checks the chain at genesis. A card that fails any check is left with its keys; reset its OpenPGP applet
     (ykman openpgp reset) before it is used again.
-  * No ceremony.sh step runs it yet (#111 step 2); card-record has no step either.
+  * ceremony.sh step c runs it for both cards and joins them; card-record has no ceremony step yet (#111).
 """
 import argparse
 import base64
@@ -379,6 +379,9 @@ def enroll(role, serial, name, email, out, recipient_file, replace=False, ask=_a
     try:
         return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient, seen)
     except BaseException as error:          # noqa: BLE001 - whatever stopped it, Ctrl-C included, the card now holds new keys
+        # the GnuPG home goes too: it may hold gpg's revocation certificate in the clear, and would block the rerun
+        _agent_stop(named["home"], run)
+        shutil.rmtree(named["home"], True)
         said = "Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used again" % serial
         if not isinstance(error, Exception):
             print("owner-cards: interrupted. %s" % said, file=sys.stderr)

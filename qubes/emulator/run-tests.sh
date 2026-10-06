@@ -103,6 +103,7 @@ python3 "$HERE/tests/test_offline_keys.py" || suite_failed "test_offline_keys.py
 python3 "$HERE/tests/test_card_record.py" || suite_failed "test_card_record.py"
 python3 "$HERE/tests/test_developer_keys.py" || suite_failed "test_developer_keys.py"
 python3 "$HERE/tests/test_owner_cards.py" || suite_failed "test_owner_cards.py"
+"$HERE/tests/test-owner-cards-step.sh" || suite_failed "test-owner-cards-step.sh"
 "$HERE/tests/test-offline-keys-step.sh" || suite_failed "test-offline-keys-step.sh"
 "$HERE/tests/test-ownerauth-step.sh" || suite_failed "test-ownerauth-step.sh"
 "$HERE/tests/test-release-key-step.sh" || suite_failed "test-release-key-step.sh"

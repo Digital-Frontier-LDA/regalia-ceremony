@@ -282,6 +282,7 @@ class Enroll(unittest.TestCase):
             oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, self.recipient, ask_secret=lambda p: next(pins), card=card,
                       build=broken, seen=lambda home, s: None)
         self.assertEqual(self.card.generated, set(oc.SLOTS))
+        self.assertFalse(os.path.exists(oc.outputs(self.out, "40000001")["home"]), "the GnuPG home (and any revocation in it) is gone")
         with self.assertRaisesRegex(ok.Refused, "the SIG attestation is not signed by the card's attestation CA.*now holds NEW keys"):
             self.enroll(out=tempfile.mkdtemp(dir=self.out), other_ca=True)
 
