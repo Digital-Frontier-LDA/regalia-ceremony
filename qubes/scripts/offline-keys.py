@@ -24,22 +24,15 @@ to the break-glass key.
 
 
 CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):
-  * Tested on the dev qube and in CI only. Software GnuPG homes stand in for the developer cards, and nothing here has
+  * Tested on the dev qube and in CI only. Software GnuPG homes stand in for the owner cards, and nothing here has
     run on the ceremony laptop or against a real card's keys (regalia-ceremony#123).
-  * ownerauth runs as ceremony.sh step a, which needs the developer cards' exported public keys
-    ($WORK/cards/developer-cards.gpg). No step makes that file yet: it comes with the developer cards' step (#111
+  * ownerauth runs as ceremony.sh step a, which needs the OWNER cards' exported public keys (ADR-0002 D30.7)
+    ($WORK/cards/owner-cards.gpg) and the root-signed card record. No step makes the export yet: it comes with the owner cards' step (#111
     step 2, gated by D30.6). Until then the step refuses (#122).
-  * The developer cards' keys (ADR-0002 D30: SIG owner key, DEC owner-auth, AUT SSH) are not made by any tool yet.
+  * The owner cards' keys (ADR-0002 D30.7: SIG owner key, DEC owner-auth, AUT KMS admin SSH) are not made by any tool yet.
     That step is gated by the D30.6 bench measurements, which have not run. Until then ownerauth has no real
     --yk-keys (#111 step 2).
   * The release key (D29.2/D30: Shamir developers' set, imported onto two release cards) is not implemented (#124).
-  * card-record signs what --cards and --release-import say. Nothing yet makes --cards from the developer cards
-    (step 2, gated by D30.6), and its attestation digests have no certificates behind them until #127. The record
-    is only as true as those inputs and the operator's typed confirmation of the owner keys shown.
-  * A lost state directory is rebuilt with --rebuild-from-disc (regalia-kms#406). Before genesis it is bounded only by
-    the sheet's values: nothing arbitrates a fork, and a root reconstructed elsewhere could sign a later record this
-    laptop never sees. After genesis the chain's card_record pin bounds it, and every reader must take that pin. The
-    manifest signatures lost with the directory are evidenced by the chain and the ceremony log, not the laptop.
   * K_A (anchor-policy, regalia-kms#361) is generated, sealed, split and backed up with the others, and its public key
     is output (ANCHOR-POLICY-ENTRY) for the genesis manifest. The manifest's field name for it is still being settled
     on #361. No tool takes it yet: sign hands it to nothing until regalia-kms's K_A signer (the policy approvals and
@@ -48,6 +41,13 @@ CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when 
     separate parameters, so it needs a conversion with a test vector.
   * A sealed file made before K_A (four keys) still opens, but holds no K_A, and nothing adds K_A to an existing set:
     K_A comes only with a new set (generate). No ceremony has run, so no such file is in use.
+  * card-record signs what --cards and --release-import say. Nothing yet makes --cards from the owner cards
+    (step 2, gated by D30.6), and its attestation digests have no certificates behind them until #127. The record
+    is only as true as those inputs and the operator's typed confirmation of the owner keys shown.
+  * A lost state directory is rebuilt with --rebuild-from-disc (regalia-kms#406). Before genesis it is bounded only by
+    the sheet's values: nothing arbitrates a fork, and a root reconstructed elsewhere could sign a later record this
+    laptop never sees. After genesis the chain's card_record pin bounds it, and every reader must take that pin. The
+    manifest signatures lost with the directory are evidenced by the chain and the ceremony log, not the laptop.
   * sign hands keys only to regalia-kms's manifest sign and uki.py sign. Any other signing purpose needs a new
     allow-list entry and a reviewed change here.
 
@@ -130,7 +130,31 @@ SCHEMA_RECORD = "regalia.offline-keys-record/v1"
 RECORD_DOMAIN = b"regalia-ceremony-record/v1\0"
 MEMBERSHIP_DOMAIN = b"regalia-membership/v1\0"       # regalia-kms deploy/baremetal/membership.py DOMAIN
 KEYS = (("root", "ed25519"), ("pcr-initrd", "rsa-2048"), ("pcr-system", "rsa-2048"), ("secure-boot", "rsa-2048"),
-        ("anchor-policy", "ecdsa-p256"))     # K_A, the anchor policy authority (regalia-kms#361, ADR-0002 D28 via regalia#567)
+        ("anchor-policy", "ecdsa-p256"),     # K_A, the anchor policy authority (regalia-kms#361, ADR-0002 D28 via regalia#567)
+        ("ownerauth-recovery", "age-pq"))    # the owner authorizations' SOPS recovery copy (regalia-kms#242, owner 2026-10-05)
+
+
+class AgeIdentity:
+    """An age identity held in the key map: `identity` (AGE-SECRET-KEY-PQ-1…, secret) and `recipient` (age1pq1…)."""
+
+    def __init__(self, identity, recipient):
+        self.identity, self.recipient = identity, recipient
+
+
+def new_age_identity(run=subprocess.run):
+    """age-keygen -pq (age >= 1.3: ML-KEM-768 + X25519), its output captured, never a file. A classical identity is
+    made only in a simulation on an older age (CEREMONY_ALLOW_CLASSICAL_BREAKGLASS, as for the break-glass key)."""
+    done = run(["age-keygen", "-pq"], capture_output=True)
+    if done.returncode != 0:
+        require(os.environ.get("CEREMONY_ALLOW_CLASSICAL_BREAKGLASS") == "1" and os.environ.get("CEREMONY_SIMULATE") == "1",
+                "age-keygen cannot make a post-quantum identity (age >= 1.3 is needed): the recovery identity is post-quantum")
+        done = run(["age-keygen"], capture_output=True)
+        require(done.returncode == 0, "age-keygen did not make an identity")
+    text = done.stdout.decode() if isinstance(done.stdout, bytes) else done.stdout
+    identity = [line for line in text.splitlines() if line.startswith("AGE-SECRET-KEY-")]
+    recipient = [line.split(":", 1)[1].strip() for line in text.splitlines() if line.startswith("# public key:")]
+    require(len(identity) == 1 and len(recipient) == 1, "age-keygen's output holds no single identity and public key")
+    return AgeIdentity(identity[0], breakglass_recipient(recipient[0], "the recovery identity"))
 FILES = ("offline-keys.sealed.json", "offline-shares.txt", "offline-keys.breakglass.age", "offline-keys.record.json")
 MAX_SUBSETS = 200
 TOOL = "offline-keys.py/1"
@@ -196,11 +220,13 @@ def check_place(out):
 
 # ---- the keys ---------------------------------------------------------------------------------------
 
-def new_keys():
+def new_keys(run=subprocess.run):
     from cryptography.hazmat.primitives.asymmetric import ec, ed25519, rsa
     keys = {}
     for name, alg in KEYS:
-        if alg == "ed25519":
+        if alg == "age-pq":
+            keys[name] = new_age_identity(run)
+        elif alg == "ed25519":
             keys[name] = ed25519.Ed25519PrivateKey.generate()
         elif alg == "ecdsa-p256":
             keys[name] = ec.generate_private_key(ec.SECP256R1())
@@ -213,12 +239,31 @@ def publics(keys):
     from cryptography.hazmat.primitives import serialization
     out = {}
     for name, alg in KEYS:
+        if alg == "age-pq":
+            out[name] = {"alg": alg, "recipient": keys[name].recipient}
+            continue
         spki = keys[name].public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
         out[name] = {"alg": alg, "spki": base64.b64encode(spki).decode()}
     return out
 
 
-def operation_proofs(keys):
+def age_round_trip(identity, recipient, run=subprocess.run):
+    """A fresh challenge encrypted to `recipient` and decrypted with `identity`, the identity handed to age through a
+    memfd (never a file). True when the challenge comes back."""
+    challenge = secrets.token_bytes(32)
+    sealed = run(["age", "-r", recipient], input=challenge, capture_output=True)
+    require(sealed.returncode == 0, "age could not encrypt to the recovery recipient")
+    fd = os.memfd_create("age-identity", os.MFD_CLOEXEC)
+    try:
+        os.write(fd, identity.encode() + b"\n")
+        os.lseek(fd, 0, os.SEEK_SET)
+        opened = run(["age", "-d", "-i", "/dev/fd/%d" % fd], input=sealed.stdout, capture_output=True, pass_fds=(fd,))
+    finally:
+        os.close(fd)
+    return opened.returncode == 0 and opened.stdout == challenge
+
+
+def operation_proofs(keys, run=subprocess.run):
     """Each key signs a fresh challenge as it will be used (Ed25519 for the root; RSA PKCS#1 v1.5 with SHA-256, as
     sbsign and systemd-measure sign) and the signature must verify under the public key the sealed header will
     publish: a header that does not match its bundle is found here, not at the first kernel signing (regalia-kms-d9
@@ -228,6 +273,11 @@ def operation_proofs(keys):
     from cryptography.hazmat.primitives.asymmetric import ec, padding
     out, published = {}, publics(keys)
     for name, alg in KEYS:
+        if alg == "age-pq":                     # the recovery identity opens what is sealed to the published recipient
+            require(age_round_trip(keys[name].identity, published[name]["recipient"], run),
+                    "key %s does not open what is sealed to the recipient that would be published" % name)
+            out[name] = "verified"
+            continue
         challenge = secrets.token_bytes(32)
         public = serialization.load_der_public_key(base64.b64decode(published[name]["spki"]))
         try:
@@ -270,6 +320,9 @@ def bundle_bytes(keys):
     from cryptography.hazmat.primitives import serialization
     out = {"schema": SCHEMA_BUNDLE, "keys": {}}
     for name, alg in KEYS:
+        if alg == "age-pq":
+            out["keys"][name] = {"alg": alg, "identity": keys[name].identity}
+            continue
         der = keys[name].private_bytes(serialization.Encoding.DER, serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
         out["keys"][name] = {"alg": alg, "pkcs8": base64.b64encode(der).decode()}
     return bytearray(canonical(out))
@@ -340,8 +393,8 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
     with open(recipient_file) as f:
         recipient = breakglass_recipient(f.readline().strip(), recipient_file)
 
-    keys = new_keys()
-    proofs = operation_proofs(keys)
+    keys = new_keys(run)
+    proofs = operation_proofs(keys, run)
     master = bytearray(secrets.token_bytes(32))
     try:
         mnemonics, identifier = split(master, threshold, shares)
@@ -360,7 +413,8 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
             written = f.read()
         require(written.startswith(b"age-encryption.org/v1"), "age wrote no age file")
         for entry in json.loads(bytes(plain))["keys"].values():
-            require(entry["pkcs8"].encode() not in written and base64.b64decode(entry["pkcs8"]) not in written,
+            secret = entry["identity"].encode() if "identity" in entry else None
+            require(secret not in written if secret else (entry["pkcs8"].encode() not in written and base64.b64decode(entry["pkcs8"]) not in written),
                     "the break-glass file holds a key in the clear")
         os.rename(tmp, os.path.join(out, FILES[2]))
     finally:
@@ -548,7 +602,7 @@ TOOLS = {
             # entry cannot become an abbreviation (d9 on #136)
             "exact": ("--initrd", "--initrd-key", "--system-key", "--secure-boot-key")},
 }
-PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY")
+PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY", b"AGE-SECRET-KEY-")
 SCAN_DIRS = ("/tmp", "/dev/shm")      # beside the session's own directory: where else a tool could write (both RAM there)
 
 
@@ -680,7 +734,7 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
     root = _private_key(bundle["keys"]["root"])
     pems = {n: bytearray(_private_key(bundle["keys"][n]).private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                                                        serialization.NoEncryption())) for n in key_names}
-    ders = [base64.b64decode(entry["pkcs8"]) for entry in bundle["keys"].values()]
+    ders = [entry["identity"].encode() if "identity" in entry else base64.b64decode(entry["pkcs8"]) for entry in bundle["keys"].values()]
     del bundle
     session_id = secrets.token_hex(16)
     at = (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -779,7 +833,7 @@ def _gpg(home, *args, run=subprocess.run, **kw):
 
 
 def yubikey_recipients(keys_path, home, run=subprocess.run):
-    """The developer cards' OpenPGP public keys (ADR-0002 D30: dev-main and dev-backup) (exported from the cards, armoured or binary), imported into `home`, a
+    """The owner cards' OpenPGP public keys (ADR-0002 D30.7: owner-main and owner-backup) (exported from the cards, armoured or binary), imported into `home`, a
     throwaway GnuPG home in the RAM directory: for each key its primary fingerprint and its ONE usable encryption subkey
     (cv25519 on the card's decryption slot; regalia-kms-24's choice after the 2026-10-04 bench). A key with none, or more
     than one, or expired or revoked, is refused. Returns [{"primary", "subkey"}] in the file's order."""
@@ -811,11 +865,14 @@ def yubikey_recipients(keys_path, home, run=subprocess.run):
     return out
 
 
-def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, now=None, run=subprocess.run):
+def ownerauth(sealed_path, nodes, yk_keys, card_record_path, state_dir, out, stream, now=None, run=subprocess.run):
     """Each KMS host's TPM owner authorization (regalia-kms#242: set at enrolment, kept off the host): 32 random bytes per
-    node, as 64 lowercase hex and a newline, encrypted with gpg to both developer cards' OpenPGP decryption subkeys (D30.3: their DEC keys, the card record's ownerauth_recipients)
-    (any one card decrypts) in ownerauth-<node>.yk.gpg, and with age to the break-glass key in ownerauth-<node>.bg.age.
-    The plaintext reaches gpg and age on stdin only, and neither file may hold it in the clear. Both files' SHA-256 and
+    node, as 64 lowercase hex and a newline, encrypted with gpg to both OWNER cards' OpenPGP decryption subkeys (ADR-0002
+    D30.7: the card record's ownerauth_recipients, checked against --yk-keys before anything is encrypted) in
+    ownerauth-<node>.yk.gpg (the day-to-day path: either owner card decrypts), and with sops, as a binary file, to the
+    D28 platform set's recovery identity ("ownerauth-recovery" in the sealed key map) in ownerauth-<node>.bg.sops (the
+    recovery copy, owner decision 2026-10-05: one recovery key opened by the offline set's k shares). The plaintext
+    reaches gpg and sops on stdin only, and neither file may hold it in the clear. Both files' SHA-256 and
     the check value go into ownerauth.record.json, signed by the root, which this session opens from the k shares on
     `stream` for that alone. Returns the record."""
     import shutil
@@ -823,17 +880,27 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
             "--nodes names each node once, by its node ID")
     require(os.path.isdir(out), "--out %s is not a directory" % out)
     check_place(out)
-    names = ["ownerauth-%s.yk.gpg" % n for n in nodes] + ["ownerauth-%s.bg.age" % n for n in nodes] + ["ownerauth.record.json"]
+    names = ["ownerauth-%s.yk.gpg" % n for n in nodes] + ["ownerauth-%s.bg.sops" % n for n in nodes] + ["ownerauth.record.json"]
     for name in names:
         require(not os.path.lexists(os.path.join(out, name)), "%s already exists: nothing is overwritten" % os.path.join(out, name))
-    bg = _age_recipient(breakglass_recipient)
+    with open(sealed_path, "rb") as f:
+        sealed_head = json.loads(f.read(1 << 20))
+    require(sealed_head.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    require(isinstance(sealed_head["publics"].get("ownerauth-recovery"), dict),
+            "this sealed set has no ownerauth-recovery identity (made before regalia-kms#242's recovery copy): generate a new set")
+    bg = breakglass_recipient(sealed_head["publics"]["ownerauth-recovery"]["recipient"], "the recovery identity")
+    owners = owner_card_subkeys(card_record_path, sealed_head, state_dir)
     home = os.path.join(out, ".gnupg-ownerauth")
     require(not os.path.lexists(home), "%s exists: a run before this one did not finish; remove it by that name" % home)
     os.mkdir(home, 0o700)
     try:
         yk = yubikey_recipients(yk_keys, home, run)
-        require(len(yk) == 2, "--yk-keys holds %d keys: the owner authorizations go to exactly the two developer cards' decryption "
-                "subkeys, dev-main and dev-backup (ADR-0002 D30.3)" % len(yk))
+        require(len(yk) == 2, "--yk-keys holds %d keys: the owner authorizations go to exactly the two owner cards' decryption "
+                "subkeys, owner-main and owner-backup (ADR-0002 D30.7)" % len(yk))
+        # the export given is the two owner cards the root-signed card record names, not another pair's (d9, 1e on #451)
+        require(sorted(k["subkey"] for k in yk) == owners, "the keys given (--yk-keys: %s) are not the owner cards the card record "
+                "names (ownerauth_recipients: %s): nothing was encrypted" % (", ".join(sorted(k["subkey"][-16:] for k in yk)),
+                                                                          ", ".join(o[-16:] for o in owners)))
         for k in yk:
             path = os.path.join(out, verify_key_file(k["subkey"]))
             require(not os.path.lexists(path), "%s already exists: nothing is overwritten" % path)
@@ -854,8 +921,8 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
         written, record_nodes = [], {}
 
         def envelope(kind, path, value, to=None):
-            """`value` (bytes, 32) as 64 hex and a newline, encrypted to path (a .yk.gpg to both developer cards, or only to
-            the subkeys in `to`); returns the file's SHA-256."""
+            """`value` (bytes, 32) as 64 hex and a newline, encrypted to path (a .yk.gpg to both owner cards, or only to
+            the subkeys in `to`; a binary .bg.sops to the recovery identity); returns the file's SHA-256."""
             plain = bytearray(bytes(value).hex().encode() + b"\n")
             try:
                 written.append(path)
@@ -865,14 +932,28 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
                     for subkey in to or [k["subkey"] for k in yk]:
                         argv += ["--recipient", subkey + "!"]
                     argv.append("--encrypt")
-                else:
-                    argv = ["age", "-r", bg, "-o", path]
+                else:                           # binary, so sops decrypt gives back "<64 hex>\n" exactly (95's measurement)
+                    argv = ["sops", "encrypt", "--age", bg, "--input-type", "binary", "--output-type", "binary", "/dev/stdin"]
                 done = run(argv, input=bytes(plain), capture_output=True)
                 require(done.returncode == 0, "%s could not encrypt %s: %s" % (argv[0], path, done.stderr.decode(errors="replace").strip()[-200:]))
-                with open(path, "rb") as f:
-                    data = f.read()
-                require(data[:1] and (data[0] & 0x80 if kind == "yk" else data.startswith(b"age-encryption.org/v1")),
-                        "%s is not an %s file" % (path, "OpenPGP" if kind == "yk" else "age"))
+                if kind == "yk":
+                    with open(path, "rb") as f:
+                        data = f.read()
+                else:
+                    data = done.stdout
+                    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(data)
+                        f.flush()
+                        os.fsync(f.fileno())
+                if kind == "yk":
+                    require(data[:1] and data[0] & 0x80, "%s is not an OpenPGP file" % path)
+                else:
+                    try:
+                        sops_ok = isinstance(json.loads(data).get("sops"), dict)
+                    except ValueError:
+                        sops_ok = False
+                    require(sops_ok, "%s is not a SOPS file" % path)
                 require(bytes(plain).strip() not in data and bytes(value) not in data, "%s holds the owner authorization in the clear" % path)
                 return hashlib.sha256(data).hexdigest()
             finally:
@@ -882,7 +963,7 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
                 value = bytearray(secrets.token_bytes(32))
                 try:
                     record_nodes[node] = {"yk_sha256": envelope("yk", os.path.join(out, "ownerauth-%s.yk.gpg" % node), value),
-                                          "bg_sha256": envelope("bg", os.path.join(out, "ownerauth-%s.bg.age" % node), value),
+                                          "bg_sha256": envelope("bg", os.path.join(out, "ownerauth-%s.bg.sops" % node), value),
                                           "check": ownerauth_check(value, node)}
                 finally:
                     zero(value)
@@ -908,7 +989,7 @@ def ownerauth(sealed_path, nodes, yk_keys, breakglass_recipient, out, stream, no
 
 
 VERIFY_LOG = "ownerauth-verify.jsonl"
-# The verify keys (coderabbitai on #120): one per developer card, derived from the master for one ownerauth session and
+# The verify keys (coderabbitai on #120): one per owner card, derived from the master for one ownerauth session and
 # that card's encryption subkey, encrypted to THAT subkey only, and never written in the clear (regalia-kms-d9 on #120:
 # a key shared by every card let one card vouch for another). ownerauth-verify can MAC its log entry only after its card
 # opened its own envelope; the summary re-derives each card's key from the k shares and counts an entry only under the
@@ -929,19 +1010,95 @@ def entry_mac(key, entry):
     return hmac.new(bytes(key), VERIFY_ENTRY_DOMAIN + canonical({k: v for k, v in entry.items() if k != "mac"}), hashlib.sha256).hexdigest()
 
 
+SCHEMA_CARD_RECORD = "regalia.card-ceremony-record/v1"
+
+
+def owner_card_subkeys(card_record_path, sealed, state_dir, pin=None):
+    """The owner cards' decryption subkeys (ownerauth_recipients) of the NEWEST card record the root of THIS sealed set
+    signed, by the laptop's signing record (card_record_current: every rule of card_record_check, then freshness; d9 on
+    rc#133: after an owner-card replacement an older record still verifies, and would send every TPM password to the
+    retired cards). After genesis, `pin` (the chain's card_record) decides instead. Sorted."""
+    root_hex = root_entry_of(sealed)
+    with open(card_record_path, "rb") as f:
+        document = json.loads(f.read(1 << 20))
+    record = card_record_current(document, root_hex, read_signing_state(state_dir, root_hex), pin=pin)
+    return sorted(r["subkey"] for r in record["ownerauth_recipients"])
+
+
+def open_recovery_identity(sealed_path, out_path, stream, run=subprocess.run):
+    """The owner authorizations' recovery identity, from the k shares on `stream`, written to `out_path`: a NEW file
+    (O_EXCL, 0600) on a RAM file system, for `SOPS_AGE_KEY_FILE=<it> sops decrypt …` in a recovery or the rehearsal's
+    drill. The caller shreds it by its exact path afterwards. Returns the recipient it opens."""
+    check_place(os.path.dirname(os.path.abspath(out_path)) or ".")
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED and isinstance(sealed["publics"].get("ownerauth-recovery"), dict),
+            "this sealed set has no ownerauth-recovery identity")
+    master, _, _ = combine(read_shares(stream), sealed)
+    try:
+        bundle = unseal(master, sealed)
+    finally:
+        zero(master)
+    identity = bundle["keys"]["ownerauth-recovery"]["identity"]
+    del bundle
+    # the identity is the one the header publishes (d9 on rc#133): a mismatch refuses here, not as a sops failure later
+    derived = run(["age-keygen", "-y"], input=(identity + "\n").encode(), capture_output=True)
+    require(derived.returncode == 0 and derived.stdout.decode().strip() == sealed["publics"]["ownerauth-recovery"]["recipient"],
+            "the sealed recovery identity is not the one its header publishes: nothing was written")
+    fd = os.open(out_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(identity + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        os.unlink(out_path)                     # never a partial identity left behind (d9 on rc#133)
+        raise
+    return sealed["publics"]["ownerauth-recovery"]["recipient"]
+
+
+def ownerauth_check_value(record_path, node, stream, sealed_path):
+    """A recovered owner authorization ("<64 hex>" and a newline on `stream`) checked against the root-signed record's
+    check value for `node`, without a TPM: the rehearsal's drill, and a recovery's last step before the value is used.
+    The record must be signed by the root of THIS sealed set (its public header), not merely the root the record names
+    itself: a record checked under its own root_entry proves nothing about who signed it (ed and 95 on regalia-kms#447)."""
+    import hmac
+    with open(record_path, "rb") as f:
+        record = verify_record(json.loads(f.read(1 << 20)))
+    require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    require(record["root_entry"] == {"alg": "ed25519", "key": root_entry_of(sealed)},
+            "the record is signed by another root than this sealed set's: its origin is not this ceremony's")
+    require(node in record["nodes"], "the record names no node %s" % node)
+    plain = bytearray(stream.buffer.read(66) if hasattr(stream, "buffer") else stream.read(66))
+    try:
+        require(re.fullmatch(rb"[0-9a-f]{64}\n", bytes(plain)) is not None, "the value given is not 64 hex and a newline")
+        value = bytearray(bytes.fromhex(bytes(plain[:64]).decode()))
+        try:
+            require(hmac.compare_digest(ownerauth_check(value, node), record["nodes"][node]["check"]),
+                    "the value given is not node %s's owner authorization (the record's check value differs)" % node)
+        finally:
+            zero(value)
+    finally:
+        zero(plain)
+    return True
+
+
 def card_serial(gnupghome=None, run=subprocess.run):
     """The serial of the card gpg reaches (`gpg --card-status`'s "Serial number" line, in the C locale): the proof names
     the card that actually opened the envelopes, not a number typed (regalia-kms-d9 on #120)."""
     argv = ["gpg"] + (["--homedir", gnupghome] if gnupghome else []) + ["--batch", "--card-status"]
     done = run(argv, capture_output=True, env=dict(os.environ, LC_ALL="C"))
-    require(done.returncode == 0, "gpg reaches no card (insert ONE developer card)")
+    require(done.returncode == 0, "gpg reaches no card (insert ONE owner card)")
     found = re.findall(rb"^Serial number[ .]*:\s*([0-9]+)\s*$", done.stdout, re.M)
     require(len(found) == 1, "gpg --card-status shows no single serial number")
     return found[0].decode()
 
 
 def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, run=subprocess.run):
-    """With ONE developer card inserted (gpg reaching it through scdaemon, in the operator's GnuPG home or
+    """With ONE owner card inserted (gpg reaching it through scdaemon, in the operator's GnuPG home or
     `gnupghome`): every node's .yk.gpg is decrypted to a pipe, never shown, and must be 64 hex and a newline whose check
     value is the record's, from a file whose SHA-256 is the record's, decrypted by a subkey the record names (gpg's
     DECRYPTION_KEY status line) (regalia-kms-d9 on #120: the envelopes are proven to open, not assumed to). The result,
@@ -1014,7 +1171,7 @@ def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, r
 
 
 def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
-    """Whether both developer cards (each encryption subkey the record names) has opened every node's envelope, by
+    """Whether both owner cards (each encryption subkey the record names) has opened every node's envelope, by
     ownerauth-verify's log. Returns {subkey: serial}; refused, naming what is missing, otherwise. The ceremony does not
     finish without it. It takes the sealed file and the k shares on `stream`: an entry counts only if its MAC holds
     under the verify key, re-derived here from the master, which ownerauth-verify had only from a card (coderabbitai on
@@ -1848,10 +2005,20 @@ def main(argv=None):
     o = sub.add_parser("ownerauth", help="each KMS host's TPM owner authorization, for regalia-kms#242: the k shares on standard input")
     o.add_argument("--sealed", required=True)
     o.add_argument("--nodes", required=True, help="the node IDs, comma-separated (a,b,c)")
-    o.add_argument("--yk-keys", required=True, help="the two developer cards' OpenPGP public keys (D30), exported from the cards")
-    o.add_argument("--breakglass-recipient", required=True)
+    o.add_argument("--yk-keys", required=True, help="the two owner cards' OpenPGP public keys (D30.7), exported from the cards")
+    o.add_argument("--card-record", required=True, help="the newest root-signed card record: --yk-keys must be its ownerauth_recipients")
+    o.add_argument("--state-dir", required=True, help="the laptop's signing state directory: only its newest card record counts")
+    r = sub.add_parser("open-recovery-identity", help="the owner authorizations' recovery identity into a NEW 0600 file in RAM "
+                       "(the k shares on standard input); shred it by its path afterwards")
+    r.add_argument("--sealed", required=True)
+    r.add_argument("--out", required=True)
+    q = sub.add_parser("ownerauth-check", help="a recovered owner authorization on standard input, checked against a record "
+                       "THIS sealed set's root signed (not merely the root the record names)")
+    q.add_argument("--record", required=True)
+    q.add_argument("--node", required=True)
+    q.add_argument("--sealed", required=True, help="the offline set's sealed file: its root must be the record's")
     o.add_argument("--out", required=True, help="a RAM directory for the files and the record")
-    ov = sub.add_parser("ownerauth-verify", help="with one developer card inserted: prove it opens every node's envelope")
+    ov = sub.add_parser("ownerauth-verify", help="with one owner card inserted: prove it opens every node's envelope")
     ov.add_argument("--record", required=True)
     ov.add_argument("--dir", required=True, help="where the envelopes are; the log is appended there")
     ov.add_argument("--gnupghome", help="the GnuPG home that reaches the inserted card (default: the operator's)")
@@ -1869,7 +2036,10 @@ def main(argv=None):
                   % record["root_fingerprint"])
             print("ANCHOR-POLICY-ENTRY %s  (K_A, pinned in the genesis manifest: regalia-kms#361)" % json.dumps(record["anchor_policy_entry"], sort_keys=True))
             for name, pub in sorted(record["publics"].items()):
-                print("KEY %s %s spki-sha256 %s" % (name, pub["alg"], hashlib.sha256(base64.b64decode(pub["spki"])).hexdigest()))
+                if "recipient" in pub:
+                    print("KEY %s %s recipient %s" % (name, pub["alg"], pub["recipient"]))
+                else:
+                    print("KEY %s %s spki-sha256 %s" % (name, pub["alg"], hashlib.sha256(base64.b64decode(pub["spki"])).hexdigest()))
             for name, digest in sorted(record["files"].items()):
                 print("FILE %s sha256 %s" % (name, digest))
             print("SHARES %s: %d-of-%d, SLIP-39 identifier %d. Copy each BY HAND onto its holder's form (D12)"
@@ -1884,8 +2054,15 @@ def main(argv=None):
             session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.exec_argv, args.tool_root, args.tool_digest, args.output)
             print("SIGNED by %s with %s (shares %s), session %s; record %s" % (session["tool"], ", ".join(session["keys"]),
                   ",".join(str(i) for i in session["share_indices"]), session["session"], path))
+        elif args.command == "open-recovery-identity":
+            recipient = open_recovery_identity(args.sealed, args.out, sys.stdin)
+            print("RECOVERY IDENTITY for %s written to %s (0600, RAM). Use it as SOPS_AGE_KEY_FILE, then shred it: shred -u -- %s"
+                  % (recipient, args.out, args.out))
+        elif args.command == "ownerauth-check":
+            ownerauth_check_value(args.record, args.node, sys.stdin, args.sealed)
+            print("OWNERAUTH %s: the value matches the check value of a record this sealed set's root signed" % args.node)
         elif args.command == "ownerauth":
-            record = ownerauth(args.sealed, args.nodes.split(","), args.yk_keys, args.breakglass_recipient, args.out, sys.stdin)
+            record = ownerauth(args.sealed, args.nodes.split(","), args.yk_keys, args.card_record, args.state_dir, args.out, sys.stdin)
             for node, facts in sorted(record["nodes"].items()):
                 print("OWNERAUTH %s yk %s bg %s check %s" % (node, facts["yk_sha256"][:16], facts["bg_sha256"][:16], facts["check"][:16]))
             print("RECORD %s (root %s)" % (os.path.join(args.out, "ownerauth.record.json"), record["root_fingerprint"]))
@@ -1894,7 +2071,7 @@ def main(argv=None):
                 require(args.sealed, "--summary takes --sealed and the k shares: the log's entries are authenticated with them")
                 for subkey, serial in sorted(ownerauth_summary(args.record, args.dir, args.sealed, sys.stdin).items()):
                     print("PROVEN YubiKey %s (subkey …%s) opens every node's envelope" % (serial, subkey[-16:]))
-                print("OWNERAUTH ENVELOPES PROVEN for both developer cards")
+                print("OWNERAUTH ENVELOPES PROVEN for both owner cards")
             else:
                 require(args.yubikey_serial, "--yubikey-serial names the inserted YubiKey")
                 proven = ownerauth_verify(args.record, args.dir, args.yubikey_serial, args.gnupghome)

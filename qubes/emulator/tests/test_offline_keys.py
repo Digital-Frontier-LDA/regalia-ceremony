@@ -28,12 +28,23 @@ _loader.exec_module(ok)
 HAVE_AGE = shutil.which("age") is not None and shutil.which("age-keygen") is not None
 
 
-def fake_age(argv, input=None, capture_output=True):
+FAKE_PQ_RECIPIENT = "age1pq1" + "q" * 60
+FAKE_PQ_IDENTITY = "AGE-SECRET-KEY-PQ-1" + "Q" * 60
+
+
+def fake_age(argv, input=None, capture_output=True, **kw):
     """age stood in for where it is not installed: an 'age file' that is the input XORed with a constant, so the
-    no-plaintext check has something real to look at."""
-    out = argv[argv.index("-o") + 1]
-    with open(out, "wb") as f:
-        f.write(b"age-encryption.org/v1\n" + bytes(b ^ 0x5A for b in input))
+    no-plaintext check has something real to look at; age-keygen makes a fixed post-quantum-shaped identity."""
+    if argv[0] == "age-keygen":
+        return subprocess.CompletedProcess(argv, 0, ("# created: now\n# public key: %s\n%s\n" % (FAKE_PQ_RECIPIENT, FAKE_PQ_IDENTITY)).encode(), b"")
+    if "-d" in argv:
+        body = input[len(b"age-encryption.org/v1\n"):]
+        return subprocess.CompletedProcess(argv, 0, bytes(b ^ 0x5A for b in body), b"")
+    sealed = b"age-encryption.org/v1\n" + bytes(b ^ 0x5A for b in input)
+    if "-o" not in argv:
+        return subprocess.CompletedProcess(argv, 0, sealed, b"")
+    with open(argv[argv.index("-o") + 1], "wb") as f:
+        f.write(sealed)
     return subprocess.CompletedProcess(argv, 0, b"", b"")
 
 
@@ -82,8 +93,11 @@ class Generate(Case):
         for name in ok.FILES:
             self.assertTrue(os.path.exists(self.path(name)), name)
         self.assertEqual(oct(os.stat(self.path("offline-shares.txt")).st_mode & 0o777), "0o600")
-        self.assertEqual(sorted(record["publics"]), ["anchor-policy", "pcr-initrd", "pcr-system", "root", "secure-boot"])
-        self.assertEqual({p["alg"] for n, p in record["publics"].items() if n not in ("root", "anchor-policy")}, {"rsa-2048"})
+        self.assertEqual(sorted(record["publics"]), ["anchor-policy", "ownerauth-recovery", "pcr-initrd", "pcr-system", "root", "secure-boot"])
+        self.assertEqual({p["alg"] for n, p in record["publics"].items() if n not in ("root", "anchor-policy", "ownerauth-recovery")}, {"rsa-2048"})
+        # the owner authorizations' recovery identity (regalia-kms#242): an age recipient, published; post-quantum
+        self.assertEqual(record["publics"]["ownerauth-recovery"]["alg"], "age-pq")
+        self.assertTrue(record["publics"]["ownerauth-recovery"]["recipient"].startswith(("age1pq1", "age1")))
         # K_A (regalia-kms#361): ECDSA P-256, its public key typed as the v4 manifest types one, and the sealed one
         from cryptography.hazmat.primitives import serialization
         self.assertEqual(record["publics"]["anchor-policy"]["alg"], "ecdsa-p256")
@@ -115,13 +129,17 @@ class Generate(Case):
             sealed = json.loads(f.read())
         for subset in itertools.combinations(shares, 3):
             bundle = ok.unseal(combine_mnemonics(list(subset)), sealed)
-            self.assertEqual(sorted(bundle["keys"]), ["anchor-policy", "pcr-initrd", "pcr-system", "root", "secure-boot"])
+            self.assertEqual(sorted(bundle["keys"]), ["anchor-policy", "ownerauth-recovery", "pcr-initrd", "pcr-system", "root", "secure-boot"])
         with self.assertRaises(Exception):
             combine_mnemonics(shares[:2])
         # every key in the bundle is the one the header names
         from cryptography.hazmat.primitives import serialization
         bundle = ok.unseal(combine_mnemonics(shares[:3]), sealed)
         for name, entry in bundle["keys"].items():
+            if "identity" in entry:                 # the recovery identity opens what is sealed to its published recipient
+                run = subprocess.run if HAVE_AGE else fake_age
+                self.assertTrue(ok.age_round_trip(entry["identity"], sealed["publics"][name]["recipient"], run), name)
+                continue
             key = serialization.load_der_private_key(base64.b64decode(entry["pkcs8"]), None)
             spki = key.public_key().public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo)
             self.assertEqual(base64.b64encode(spki).decode(), sealed["publics"][name]["spki"], name)
@@ -150,10 +168,12 @@ class Generate(Case):
         with open(self.path("offline-keys.breakglass.age"), "rb") as f:
             raw = f.read()
         for entry in bundle["keys"].values():
-            self.assertNotIn(entry["pkcs8"].encode(), raw)
+            self.assertNotIn((entry.get("identity") or entry["pkcs8"]).encode(), raw)
 
     def test_a_backup_that_holds_a_key_in_the_clear_is_refused(self):
-        def leaky(argv, input=None, capture_output=True):
+        def leaky(argv, input=None, capture_output=True, **kw):
+            if "-o" not in argv:                         # the recovery identity's making and proof: as usual
+                return (subprocess.run if HAVE_AGE else fake_age)(argv, input=input, capture_output=capture_output, **kw)
             with open(argv[argv.index("-o") + 1], "wb") as f:
                 f.write(b"age-encryption.org/v1\n" + input)
             return subprocess.CompletedProcess(argv, 0, b"", b"")
@@ -589,14 +609,23 @@ if "nooutput" not in args:
         self.assertEqual(record["root_entry"], self.record["root_entry"])
 
 HAVE_GPG = shutil.which("gpg") is not None and shutil.which("gpgconf") is not None
+HAVE_SOPS = shutil.which("sops") is not None
 
 
-@unittest.skipUnless(HAVE_AGE and HAVE_GPG, "age or gpg is not installed here (the emulator job has both)")
+def _load_cards_vectors():
+    loader = importlib.machinery.SourceFileLoader("card_vectors", os.path.join(HERE, "vectors", "card-ceremony-record", "make.py"))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("card_vectors", loader))
+    loader.exec_module(module)
+    return module
+
+
+@unittest.skipUnless(HAVE_AGE and HAVE_GPG and HAVE_SOPS, "age, gpg or sops is not installed here (the emulator job has all three)")
 class OwnerAuth(Case):
     """regalia-kms#242's owner authorizations, in the format #242's reader takes (agreed with regalia-kms-95): per node,
-    64 hex and a newline, with gpg to the two developer cards' OpenPGP decryption subkeys (D30.3) and
-    with age to break-glass, a check value, a record the root signs, and each YubiKey's proof that it opens them. Two
-    GnuPG homes, each holding one software key (Ed25519 primary, cv25519 encryption subkey), stand in for the cards."""
+    64 hex and a newline, with gpg to the two OWNER cards' OpenPGP decryption subkeys (D30.7, the card record's
+    ownerauth_recipients) and, as the recovery copy, a binary SOPS file to the D28 set's recovery identity; a check value,
+    a record the root signs, and each card's proof that it opens them. Two GnuPG homes, each holding one software key
+    (Ed25519 primary, cv25519 encryption subkey), stand in for the cards."""
 
     def setUp(self):
         super().setUp()
@@ -620,13 +649,51 @@ class OwnerAuth(Case):
             subprocess.run(gpg + ["--quick-add-key", fpr, "cv25519", "encr", "never"], check=True, capture_output=True)
             exported += subprocess.run(["gpg", "--homedir", home, "--export", fpr], check=True, capture_output=True).stdout
             self.homes.append(home)
-        self.yk = os.path.join(self.d, "developer-cards.gpg")
+        self.yk = os.path.join(self.d, "owner-cards.gpg")
         with open(self.yk, "wb") as f:
             f.write(exported)
+        self.state = os.path.join(self.d, "state")
+        os.mkdir(self.state, 0o700)
+        self.card_record = self.signed_card_record([self.fprs_of(h) for h in self.homes])
+
+    @staticmethod
+    def fprs_of(home):
+        listing = subprocess.run(["gpg", "--homedir", home, "--with-colons", "--list-keys"], check=True, capture_output=True, text=True).stdout
+        return [line.split(":")[9] for line in listing.splitlines() if line.startswith("fpr")][:2]       # primary, subkey
+
+    @staticmethod
+    def subkey_of(home):
+        return OwnerAuth.fprs_of(home)[1]
+
+    def signed_card_record(self, cards, name="card-record.json"):
+        """A full card record (the shared vectors' valid record) naming `cards` [(primary, subkey)] as the owner cards,
+        signed by THIS set's root and logged as the next in the state directory (created with its marker if new)."""
+        cards_vectors = _load_cards_vectors()
+        sealed = json.load(open(self.sealed))
+        master = ok.combine(self.all[:2], sealed)[0]
+        root = ok._private_key(ok.unseal(master, sealed)["keys"]["root"])
+        record = cards_vectors.valid_record()
+        for i, (primary, subkey) in enumerate(cards):
+            record["ownerauth_recipients"][i].update(primary=primary, subkey=subkey)
+        entry = {"alg": "ed25519", "key": ok.root_entry_of(sealed)}
+        marker = os.path.join(self.state, ok.SIGNING_STATE)
+        lines = ok.card_lines_of(ok.read_signing_state(self.state, entry["key"]), entry["key"]) if os.path.exists(marker) else []
+        record.update(root_entry=entry, root_fingerprint=ok.root_fingerprint(entry), sequence=len(lines) + 1,
+                      supersedes=lines[-1]["digest"] if lines else "")
+        ok.card_record_check(record)
+        if not lines:
+            with open(marker, "w") as f:
+                json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": entry["key"]}, f)
+            os.chmod(marker, 0o600)
+        ok.append_card_record_line(self.state, record)
+        path = os.path.join(self.d, name)
+        with open(path, "w") as f:
+            json.dump({"record": record, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}, f)
+        return path
 
     def run_oa(self, nodes=("a", "b", "c"), shares=None, run=subprocess.run, yk=None):
         import io
-        return ok.ownerauth(self.sealed, list(nodes), yk or self.yk, self.recipient, self.oa,
+        return ok.ownerauth(self.sealed, list(nodes), yk or self.yk, self.card_record, self.state, self.oa,
                             io.StringIO("\n".join(shares or self.all[:2]) + "\n"), run=run)
 
     def summary(self, rec, shares=None):
@@ -647,8 +714,14 @@ class OwnerAuth(Case):
     def gpg_decrypt(self, path, home):
         return subprocess.run(["gpg", "--homedir", home, "--batch", "--decrypt", path], check=True, capture_output=True).stdout
 
-    def age_decrypt(self, path):
-        return subprocess.run(["age", "-d", "-i", self.identity, path], check=True, capture_output=True).stdout
+    def sops_decrypt(self, path):
+        """The recovery copy, opened as a recovery would: the identity from k shares into a 0600 file, then sops."""
+        import io
+        key = os.path.join(self.d, "recovery.key")
+        if not os.path.exists(key):
+            ok.open_recovery_identity(self.sealed, key, io.StringIO("\n".join(self.all[1:3]) + "\n"))
+        return subprocess.run(["sops", "decrypt", "--input-type", "binary", "--output-type", "binary", path], check=True, capture_output=True,
+                              env=dict(os.environ, SOPS_AGE_KEY_FILE=key)).stdout
 
     def test_each_node_gets_a_value_any_yubikey_or_break_glass_opens_and_the_record_checks_it(self):
         import hmac
@@ -662,8 +735,8 @@ class OwnerAuth(Case):
         values = set()
         for node in ("a", "b", "c"):
             yk = os.path.join(self.oa, "ownerauth-%s.yk.gpg" % node)
-            bg = os.path.join(self.oa, "ownerauth-%s.bg.age" % node)
-            plains = {self.gpg_decrypt(yk, home) for home in self.homes} | {self.age_decrypt(bg)}
+            bg = os.path.join(self.oa, "ownerauth-%s.bg.sops" % node)
+            plains = {self.gpg_decrypt(yk, home) for home in self.homes} | {self.sops_decrypt(bg)}
             self.assertEqual(len(plains), 1, "every YubiKey and break-glass open the same value")
             plain = plains.pop()
             self.assertRegex(plain.decode(), r"^[0-9a-f]{64}\n$")
@@ -777,6 +850,109 @@ class OwnerAuth(Case):
         with self.assertRaisesRegex(ok.Refused, "already exists"):
             self.run_oa(nodes=("a",))
 
+    def test_only_the_owner_cards_the_card_record_names(self):
+        """d9 and 1e on #451: an export of other cards (the developer cards', before D30.7) is refused by name before
+        anything is encrypted; so is a card record another root signed."""
+        home = tempfile.mkdtemp(prefix="go")
+        self.addCleanup(shutil.rmtree, home, True)
+        self.addCleanup(subprocess.run, ["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
+        gpg = ["gpg", "--homedir", home, "--batch", "--pinentry-mode", "loopback", "--passphrase", ""]
+        subprocess.run(gpg + ["--quick-gen-key", "Other <other@example.invalid>", "ed25519", "sign", "never"], check=True, capture_output=True)
+        fpr = subprocess.run(["gpg", "--homedir", home, "--with-colons", "--list-keys"], check=True, capture_output=True,
+                             text=True).stdout.split("fpr:::::::::")[1].split(":")[0]
+        subprocess.run(gpg + ["--quick-add-key", fpr, "cv25519", "encr", "never"], check=True, capture_output=True)
+        other = os.path.join(self.d, "other.gpg")
+        with open(other, "wb") as f:
+            f.write(subprocess.run(["gpg", "--homedir", self.homes[0], "--export"], check=True, capture_output=True).stdout
+                    + subprocess.run(["gpg", "--homedir", home, "--export"], check=True, capture_output=True).stdout)
+        with self.assertRaisesRegex(ok.Refused, "the keys given \\(--yk-keys: .*\\) are not the owner cards the card record names"):
+            self.run_oa(yk=other)
+        self.assertEqual(os.listdir(self.oa), [], "nothing was encrypted")
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        forged = json.load(open(self.card_record))
+        forged["signature"] = ed25519.Ed25519PrivateKey.generate().sign(ok.RECORD_DOMAIN + ok.canonical(forged["record"])).hex()
+        with open(self.card_record, "w") as f:
+            json.dump(forged, f)
+        with self.assertRaisesRegex(ok.Refused, "the signature does not verify under the pinned root"):
+            self.run_oa()
+
+    def test_only_the_newest_card_record_counts(self):
+        """d9 on rc#133: after an owner-card replacement (record 2 names other cards), record 1 still verifies but would
+        send every TPM password to the retired cards: refused by name."""
+        first = self.card_record
+        self.signed_card_record([("B" * 40, "C" * 40), ("D" * 40, "E" * 40)], name="card-record-2.json")
+        with self.assertRaisesRegex(ok.Refused, "this card record is not the newest the root signed \\(sequence 1 of 2\\)"):
+            self.run_oa()
+        self.assertEqual(os.listdir(self.oa), [], "nothing was encrypted")
+
+    def test_a_recovery_copy_that_is_not_sops_or_holds_the_value_is_refused(self):
+        def bad_sops(kind):
+            def run(argv, input=None, capture_output=True, **kw):
+                if argv[0] != "sops":
+                    return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
+                out = b"not a sops file" if kind == "garbage" else json.dumps({"data": input.decode(), "sops": {}}).encode()
+                return subprocess.CompletedProcess(argv, 0, out, b"")
+            return run
+        for kind, reason in (("garbage", "ownerauth-a.bg.sops is not a SOPS file"),
+                             ("clear", "ownerauth-a.bg.sops holds the owner authorization in the clear")):
+            with self.subTest(kind=kind), self.assertRaisesRegex(ok.Refused, reason):
+                self.run_oa(nodes=("a",), run=bad_sops(kind))
+            self.assertEqual(os.listdir(self.oa), [], "nothing is left behind")
+
+    def test_a_set_without_the_recovery_identity_is_refused(self):
+        sealed = json.load(open(self.sealed))
+        del sealed["publics"]["ownerauth-recovery"]
+        old = os.path.join(self.d, "old.sealed.json")
+        with open(old, "w") as f:
+            json.dump(sealed, f)
+        import io
+        with self.assertRaisesRegex(ok.Refused, "this sealed set has no ownerauth-recovery identity"):
+            ok.ownerauth(old, ["a"], self.yk, self.card_record, self.state, self.oa, io.StringIO("\n".join(self.all[:2]) + "\n"))
+
+    def test_the_rehearsal_drill_without_a_tpm(self):
+        """The owner decision's drill: the recovery identity from k shares into a 0600 RAM file, one node's value out of
+        its .bg.sops, checked against the root-signed record's check value; the same value as another node's is
+        refused; the identity file then shredded by its path."""
+        import io
+        self.run_oa()
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        value = self.sops_decrypt(os.path.join(self.oa, "ownerauth-a.bg.sops"))
+        key = os.path.join(self.d, "recovery.key")
+        self.assertEqual(oct(os.stat(key).st_mode & 0o777), "0o600")
+        self.assertTrue(ok.ownerauth_check_value(rec, "a", io.BytesIO(value), self.sealed))
+        with self.assertRaisesRegex(ok.Refused, "the value given is not node b's owner authorization"):
+            ok.ownerauth_check_value(rec, "b", io.BytesIO(value), self.sealed)
+        with self.assertRaisesRegex(ok.Refused, "the value given is not 64 hex and a newline"):
+            ok.ownerauth_check_value(rec, "a", io.BytesIO(value.strip()), self.sealed)
+        # 95 and ed on regalia-kms#447: the record must be THIS sealed set's root's, not merely self-consistent
+        other = os.path.join(self.d, "other-root")
+        os.mkdir(other)
+        ok.generate(2, 3, other, self.recipient, run=subprocess.run if HAVE_AGE else fake_age)
+        with self.assertRaisesRegex(ok.Refused, "the record is signed by another root than this sealed set's"):
+            ok.ownerauth_check_value(rec, "a", io.BytesIO(value), os.path.join(other, ok.FILES[0]))
+        with self.assertRaises(FileExistsError):
+            ok.open_recovery_identity(self.sealed, key, io.StringIO("\n".join(self.all[1:3]) + "\n"))
+        subprocess.run(["shred", "-u", "--", key], check=True)
+        self.assertFalse(os.path.exists(key))
+
+    def test_the_recovery_identity_is_checked_and_never_left_partial(self):
+        """d9 on rc#133: an identity that is not its header's is refused before anything is written; a write that fails
+        after the file is created leaves no file."""
+        import io
+        key = os.path.join(self.d, "recovery.key")
+
+        def other_recipient(argv, input=None, capture_output=True, **kw):
+            if argv[:2] == ["age-keygen", "-y"]:
+                return subprocess.CompletedProcess(argv, 0, b"age1pq1" + b"z" * 60 + b"\n", b"")
+            return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
+        with self.assertRaisesRegex(ok.Refused, "the sealed recovery identity is not the one its header publishes: nothing was written"):
+            ok.open_recovery_identity(self.sealed, key, io.StringIO("\n".join(self.all[1:3]) + "\n"), run=other_recipient)
+        self.assertFalse(os.path.exists(key))
+        with unittest.mock.patch.object(ok.os, "fsync", side_effect=OSError("the disc is full")):
+            with self.assertRaisesRegex(OSError, "the disc is full"):
+                ok.open_recovery_identity(self.sealed, key, io.StringIO("\n".join(self.all[1:3]) + "\n"))
+        self.assertFalse(os.path.exists(key), "no partial identity left behind")
+
     def test_the_record_carries_what_the_reader_and_the_proof_need(self):
         record = self.run_oa(nodes=("a",))
         self.assertEqual(sorted(record), sorted(["schema", "event", "nodes", "yk_recipients", "root_entry", "root_fingerprint", "session",
@@ -837,8 +1013,8 @@ class OwnerAuth(Case):
                 f.write(json.dumps(e) + "\n")
         self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
 
-    def test_exactly_the_two_developer_cards(self):
-        """ADR-0002 D30.3: the owner authorizations go to dev-main's and dev-backup's DEC keys, no more and no fewer."""
+    def test_exactly_the_two_owner_cards(self):
+        """ADR-0002 D30.7: the owner authorizations go to owner-main's and owner-backup's DEC keys, no more and no fewer."""
         home = tempfile.mkdtemp(prefix="g3")
         self.addCleanup(shutil.rmtree, home, True)
         self.addCleanup(subprocess.run, ["gpgconf", "--homedir", home, "--kill", "all"], capture_output=True)
@@ -855,7 +1031,7 @@ class OwnerAuth(Case):
             g.write(subprocess.run(["gpg", "--homedir", self.homes[0], "--export"], check=True, capture_output=True).stdout)
         for keys, n in ((three, 3), (one, 1)):
             with self.subTest(keys=n), self.assertRaisesRegex(ok.Refused, "--yk-keys holds %d keys: the owner authorizations go to "
-                                                              "exactly the two developer cards" % n):
+                                                              "exactly the two owner cards" % n):
                 self.run_oa(yk=keys)
         self.assertEqual(os.listdir(self.oa), [], "nothing written")
 

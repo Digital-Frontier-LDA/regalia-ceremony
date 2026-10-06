@@ -2601,67 +2601,84 @@ step_offline_keys() {
 }
 
 # ---- step a: the KMS hosts' TPM owner authorizations (regalia-kms#242, regalia-ceremony#122) -------------------------
-# Per node, 32 random bytes encrypted to BOTH developer cards' OpenPGP decryption keys (ADR-0002 D30.3) and to the
-# break-glass key; the record signed by the root (the offline set's k shares, typed hidden). Each developer card then
+# Per node, 32 random bytes encrypted to BOTH owner cards' OpenPGP decryption keys (ADR-0002 D30.7, the card record's
+# ownerauth_recipients) and, as the recovery copy, to the D28 set's recovery identity in a binary SOPS file; the record
+# signed by the root (the offline set's k shares, typed hidden). Each owner card then
 # proves it opens every node's envelope (ownerauth-verify), and the root signs that both did (--summary). The disc
 # waits for that proof (step_archive). The shares are read from the terminal itself, so their echo is off; a
 # simulation reads them from OA_SHARES_FROM instead (honoured only with CEREMONY_SIMULATE=1).
 oa_shares_in() {
   if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${OA_SHARES_FROM:-}" ]; then printf '%s' "$OA_SHARES_FROM"; else printf '/dev/tty'; fi
 }
-# oa_insert_card N: the operator inserts developer card N (and only it) and types its serial; sets OA_SERIAL.
+# oa_card_record: the session's newest card record ($WORK/cards/card-record-N.record.json, the highest N), or nothing.
+oa_card_record() {
+  local f n best="" top=0
+  for f in "$WORK"/cards/card-record-*.record.json; do
+    [ -e "$f" ] || continue
+    n="${f##*/card-record-}"; n="${n%.record.json}"
+    case "$n" in ''|*[!0-9]*) continue;; esac
+    [ "$n" -gt "$top" ] && { top="$n"; best="$f"; }
+  done
+  printf '%s' "$best"
+}
+# oa_insert_card N: the operator inserts owner card N (and only it) and types its serial; sets OA_SERIAL.
 oa_insert_card() {
-  warn "Insert developer card $1 of 2 ALONE (remove any other YubiKey), then type its serial (printed on the card)."
-  read -r -p "   serial of developer card $1: " OA_SERIAL
+  warn "Insert owner card $1 of 2 ALONE (remove any other YubiKey), then type its serial (printed on the card)."
+  read -r -p "   serial of owner card $1: " OA_SERIAL
 }
 ownerauth_commit_list() {
   local f
   warn "COMMIT after the ceremony, beside the offline keys (hsm-backups/ownerauth/): the envelopes and records below."
-  for f in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.age "$WORK"/ownerauth/*.record.json "$WORK"/ownerauth/ownerauth-verify.jsonl; do
+  for f in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.sops "$WORK"/ownerauth/*.record.json "$WORK"/ownerauth/ownerauth-verify.jsonl; do
     [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
   done
   return 0
 }
 
 step_ownerauth() {
-  b "Owner authorizations — each KMS host's TPM owner auth, to both developer cards and break-glass (regalia-kms#242)"
-  local dir="$WORK/ownerauth" sealed="$WORK/offline/offline-keys.sealed.json" rcp="$WORK/breakglass.recipient"
-  local keys="$WORK/cards/developer-cards.gpg" nodes="a,b,c" home="$WORK/ownerauth-gnupg" n
+  b "Owner authorizations — each KMS host's TPM owner auth, to both OWNER cards, and its SOPS recovery copy (regalia-kms#242)"
+  local dir="$WORK/ownerauth" sealed="$WORK/offline/offline-keys.sealed.json" card
+  local keys="$WORK/cards/owner-cards.gpg" nodes="a,b,c" home="$WORK/ownerauth-gnupg" n
   # the three KMS hosts (ADR-0002 D17) and the session's own exported keys; a simulation may name others (3e on #130)
-  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_DEVELOPER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_OWNER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
   [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made (or removed) outside it."; return 1; }
   [ -s "$sealed" ] || { err "no offline keys in this session ($sealed): run step o first (the root signs these records)."; return 1; }
-  [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
-  [ -s "$keys" ] || { err "no developer cards' public keys ($keys): the developer cards' step exports them (#111 step 2)."; return 1; }
+  [ -s "$keys" ] || { err "no owner cards' public keys ($keys): the owner cards' step exports them (ADR-0002 D30.7, #111 step 2)."; return 1; }
+  # the root-signed card record names the two owner cards: ownerauth refuses an export that is not theirs (d9, 1e on #451)
+  card="$(oa_card_record)"
+  [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (card-record)."; return 1; }
+  # only the NEWEST card record the root signed counts (d9 on rc#133), by the laptop's signing state directory
+  [ -n "${CEREMONY_STATE_DIR:-}" ] && [ -d "$CEREMONY_STATE_DIR" ] \
+    || { err "CEREMONY_STATE_DIR does not name the laptop's signing state directory (the card records' log): nothing was made."; return 1; }
   if [ ! -e "$dir/ownerauth.record.json" ]; then
     [ ! -e "$dir" ] || { err "$dir holds a partial run: remove it (rm -r -- '$dir') and run this step again."; return 1; }
     ( umask 077; mkdir "$dir" ) || return 1
     info "type $(K) shares of the OFFLINE keys' set (the root signs the record), then Ctrl-D:"
     python3 -Es "$HERE/offline-keys.py" ownerauth --sealed "$sealed" --nodes "$nodes" --yk-keys "$keys" \
-        --breakglass-recipient "$rcp" --out "$dir" < "$(oa_shares_in)" \
+        --card-record "$card" --state-dir "$CEREMONY_STATE_DIR" --out "$dir" < "$(oa_shares_in)" \
       || { err "the owner authorizations were NOT made (reason above); nothing is kept."; rm -rf -- "$dir"; return 1; }
   fi
-  [ -e "$dir/ownerauth-verified.record.json" ] && { info "both developer cards were already proven in this session."; ownerauth_commit_list; return 0; }
+  [ -e "$dir/ownerauth-verified.record.json" ] && { info "both owner cards were already proven in this session."; ownerauth_commit_list; return 0; }
   # the cards' public keys in a GnuPG home of this session's own, so gpg reaches each card through its stubs
   if [ ! -d "$home" ]; then
     ( umask 077; mkdir "$home" ) || return 1
-    gpg --homedir "$home" --batch --quiet --import "$keys" 2>/dev/null || { err "the developer cards' keys did not import into $home."; return 1; }
+    gpg --homedir "$home" --batch --quiet --import "$keys" 2>/dev/null || { err "the owner cards' keys did not import into $home."; return 1; }
   fi
   for n in 1 2; do
     oa_insert_card "$n"
     case "$OA_SERIAL" in ''|*[!0-9]*) err "a card's serial is digits: nothing was checked."; return 1;; esac
     # the card's stubs, for the decryption key; a card gpg cannot see is said as such, not as a failed decryption
     gpg --homedir "$home" --batch --card-status >/dev/null 2>&1 \
-      || { err "gpg cannot see a card: is developer card $n inserted, and is pcscd running? Nothing was checked."; return 1; }
+      || { err "gpg cannot see a card: is owner card $n inserted, and is pcscd running? Nothing was checked."; return 1; }
     python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" \
         --yubikey-serial "$OA_SERIAL" --gnupghome "$home" \
-      || { err "developer card $n ($OA_SERIAL) did NOT open every envelope (reason above): run this step again with it."; return 1; }
+      || { err "owner card $n ($OA_SERIAL) did NOT open every envelope (reason above): run this step again with it."; return 1; }
   done
   info "type $(K) shares of the OFFLINE keys' set again (the root signs that both cards opened every envelope), then Ctrl-D:"
   python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" --summary \
       --sealed "$sealed" < "$(oa_shares_in)" \
     || { err "the proof is not complete (reason above): run this step again."; return 1; }
-  info "owner authorizations done: both developer cards open every node's envelope, signed by the root."
+  info "owner authorizations done: both owner cards open every node's envelope, signed by the root."
   ownerauth_commit_list
 }
 
@@ -2728,15 +2745,15 @@ step_archive() {
   fi
   # The owner authorizations (step a, regalia-kms#242): a ceremony that made the offline keys (step o) makes the KMS
   # platform, and no host enrols under v4 without its owner auth set. So, once the offline keys exist, the disc waits
-  # for step a's root-signed proof that both developer cards open every node's envelope, whether step a was skipped,
+  # for step a's root-signed proof that both owner cards open every node's envelope, whether step a was skipped,
   # failed and cleaned up, or left unproven (d9 on #130). A ceremony without the offline keys is not held to it.
   if { [ -e "$WORK/offline/offline-keys.sealed.json" ] || [ -e "$WORK/ownerauth/ownerauth.record.json" ]; } \
      && [ ! -e "$WORK/ownerauth/ownerauth-verified.record.json" ]; then
     if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
-      warn "simulated run: the owner authorizations are not proven by both developer cards; the real ceremony refuses this disc."
+      warn "simulated run: the owner authorizations are not proven by both owner cards; the real ceremony refuses this disc."
     else
-      err "the owner authorizations are not proven by both developer cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
-      err "step a needs the developer cards' exported keys, so the developer cards' step (#111 step 2) comes before this disc."
+      err "the owner authorizations are not proven by both owner cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
+      err "step a needs the owner cards' exported keys and the card record, so the owner cards' step (#111 step 2) and card-record come before this disc."
       return 1
     fi
   fi
@@ -2824,7 +2841,7 @@ step_archive() {
   # the owner authorizations (step a): envelopes are ciphertext, records and the verify log public
   if [ -d "$WORK/ownerauth" ]; then
     mkdir -p "$burn/ownerauth"
-    for art in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.age "$WORK"/ownerauth/*.record.json \
+    for art in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.sops "$WORK"/ownerauth/*.record.json \
                "$WORK"/ownerauth/ownerauth-verify.jsonl "$WORK"/ownerauth/ownerauth-verify-key.*.yk.gpg; do
       [ -f "$art" ] && cp "$art" "$burn/ownerauth/"
     done
@@ -2884,8 +2901,46 @@ step_archive() {
   run "( cd '$burn' && find . -type f ! -name manifest.sha256 -print0 | xargs -0 sha256sum > manifest.sha256 ) && cat '$burn/manifest.sha256'"
 }
 
+# The owner authorizations' recovery drill (owner decision 2026-10-05, regalia-kms#242): the recovery identity opened
+# from k shares of the offline set into a 0600 file in the RAM workdir, one node's recovery copy decrypted with sops and
+# checked against the root-signed record's check value (no TPM), and the identity file shredded by its exact path.
+ownerauth_drill() {
+  local dir="$WORK/ownerauth" key="$WORK/ownerauth-recovery.key" nodes
+  [ -e "$dir/ownerauth.record.json" ] || { info "no owner authorizations in this session: no owner-auth drill."; return 0; }
+  [ ! -e "$key" ] || { err "$key exists: a drill before this one did not finish; shred it (shred -u -- '$key') first."; return 1; }
+  nodes="$(python3 -I -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["record"]["nodes"])))' "$dir/ownerauth.record.json")" \
+    || { err "the owner-authorization record cannot be read."; return 1; }
+  # in a subshell: its EXIT trap removes the identity on every path out (a failed open or decrypt, Ctrl-C), and the
+  # session's own traps are left as they were (d9 on rc#133)
+  # No trap survives SIGKILL or a power cut: the identity is then left on the RAM file system only, and the next
+  # drill refuses to start until it is shredded by hand (the check above).
+  (
+    trap 'shred -u -- "$key" 2>/dev/null || rm -f -- "$key"' EXIT
+    trap 'exit 130' INT TERM
+    rc=0
+    info "Owner-auth recovery drill: type $(K) shares of the OFFLINE keys' set, then Ctrl-D:"
+    python3 -Es "$HERE/offline-keys.py" open-recovery-identity --sealed "$WORK/offline/offline-keys.sealed.json" --out "$key" \
+        < "$(oa_shares_in)" >/dev/null || { err "the recovery identity was NOT opened (reason above)."; exit 1; }
+    for node in $nodes; do
+      if SOPS_AGE_KEY_FILE="$key" sops decrypt --input-type binary --output-type binary "$dir/ownerauth-$node.bg.sops" \
+           | python3 -Es "$HERE/offline-keys.py" ownerauth-check --record "$dir/ownerauth.record.json" --node "$node" \
+               --sealed "$WORK/offline/offline-keys.sealed.json" >/dev/null; then
+        info "owner-auth drill: node $node's recovery copy opens and matches the record the root signed."
+      else
+        err "owner-auth drill FAILED for node $node: its recovery copy does not give the recorded value (reason above)."; rc=1
+      fi
+    done
+    exit "$rc"
+  )
+  local rc=$?
+  [ ! -e "$key" ] || { err "the recovery identity file $key could not be removed: remove it by hand NOW."; return 1; }
+  [ "$rc" = 0 ] && info "owner-auth drill passed for every node ($nodes)."
+  return "$rc"
+}
+
 step_drill() {
   b "Recovery drill (do this BEFORE relying on any share set)"
+  ownerauth_drill || return 1
   info "Reconstruct from exactly k shares on THIS air-gapped qube, prove it works, re-seal."
   info "ssss:        feed any $(K) of the $(N) share lines to:   ssss-combine -t $(K) -q"
   info "SLIP-0039:   shamir recover   (paste any $(K) word-shares)"
@@ -3017,7 +3072,7 @@ main() {
    5) Recovery drill
    6) Print break-glass recovery instruction card (DVD-case sized)
    o) Offline keys: the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
-   a) Owner authorizations: each KMS host's TPM owner auth, to both developer cards + break-glass (after o)
+   a) Owner authorizations: each KMS host's TPM owner auth, to both owner cards + its SOPS recovery copy (after o, card record)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
     printf '   q) quit (workdir is shredded)\n'
