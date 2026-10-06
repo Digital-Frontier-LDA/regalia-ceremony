@@ -58,13 +58,24 @@ class FakeCard:
         self.other_key, self.forgets = other_key, forgets       # an attestation over another key; writes the card drops
         self.other_ca = other_ca                                # a card CA that did not sign the leaves
 
+    # a real card's access rules, per session (a new connection starts unverified): the admin PIN (PW3) for every
+    # change, the user PIN (PW1) to attest (SW 6982 otherwise: regalia-kms-24's second bench run, 2026-10-05)
+    def opened(self):
+        self.verified = set()
+
+    def need(self, which):
+        if which not in self.verified:
+            raise RuntimeError("APDU error: SW=0x6982 (security condition not satisfied: %s PIN)" % which)
+
     def verify_pin(self, pin):
         assert pin == USER, "the user PIN"
         self.pins.append("user")
+        self.verified.add("user")
 
     def verify_admin(self, pin):
         assert pin == ADMIN, "the admin PIN"
         self.pins.append("admin")
+        self.verified.add("admin")
 
     def get_key_information(self):
         return dict(self.status)
@@ -73,6 +84,7 @@ class FakeCard:
         return self.uif[ref]
 
     def set_uif(self, ref, value):
+        self.need("admin")
         assert self.uif[ref] not in (self.UIF.FIXED, self.UIF.CACHED_FIXED), "a fixed touch policy refuses every write"
         if "uif" not in self.forgets:
             self.uif[ref] = value
@@ -80,6 +92,7 @@ class FakeCard:
     def generate_ec_key(self, ref, oid):
         from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
         slot = self.refs[ref]
+        self.need("admin")
         if self.lie.get("fail_generate") == slot:
             raise RuntimeError("the card stopped answering")
         self.status[ref] = self.KEY_STATUS.GENERATED
@@ -88,10 +101,12 @@ class FakeCard:
         return x25519.X25519PublicKey.from_public_bytes(raw) if slot == "dec" else ed25519.Ed25519PublicKey.from_public_bytes(raw)
 
     def set_fingerprint(self, ref, fpr):
+        self.need("admin")
         if "fingerprint" not in self.forgets:
             self.fingerprints[ref] = bytes(fpr)
 
     def set_generation_time(self, ref, ts):
+        self.need("admin")
         self.times[ref] = ts
 
     def get_application_related_data(self):
@@ -99,6 +114,7 @@ class FakeCard:
         return types.SimpleNamespace(discretionary=types.SimpleNamespace(fingerprints=dict(self.fingerprints)))
 
     def attest_key(self, ref):
+        self.need("user")
         from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
         slot = self.refs[ref]
         raw = bytes.fromhex(self.keys[slot]["point"])
@@ -155,6 +171,7 @@ class Enroll(unittest.TestCase):
         @contextlib.contextmanager
         def card(s):
             self.assertEqual(s, serial)
+            self.card.opened()
             yield self.card, self.card.firmware
 
         def build(home, name, email, user_pin):
@@ -255,6 +272,7 @@ class Enroll(unittest.TestCase):
 
         @contextlib.contextmanager
         def card(s):
+            self.card.opened()
             yield self.card, self.card.firmware
         pins = iter([ADMIN, USER])
         with self.assertRaisesRegex(ok.Refused, "Owner card 40000001 now holds NEW keys: reset its OpenPGP applet"):

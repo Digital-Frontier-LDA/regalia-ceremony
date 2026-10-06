@@ -13,7 +13,8 @@ Per card (enroll), in this order, which the D30.6 bench measurements on YubiKey 
      before anything is generated.
   1. SIG Ed25519, DEC X25519 and AUT Ed25519 generated on the card (yubikit), firmware 5.2.3 or later, the PINs typed and
      never the factory defaults; a card that already holds a key is refused unless --replace and its serial typed again.
-  2. The card released, and gpg builds the certificate from the card's own keys ("existing key from card", 14): the
+  2. The card released, and gpg builds the certificate from the card's own keys ("existing key from card", 14), in a
+     GnuPG home of its own that is only for this (its subkeys list as ssb#, without card stubs) and is removed: the
      primary is SIG [SC], DEC an encryption subkey [E], AUT an authentication subkey [A]. The PIN goes only to gpg's
      command fd, never its argv. The exported certificate is then parsed packet by packet: its primary must hold exactly
      the card's SIG key, one subkey exactly its DEC key, one exactly its AUT key, and no other subkey.
@@ -408,6 +409,7 @@ def _after_generation(role, serial, name, email, named, admin, user, publics, re
             require((written.get(refs[slot]) or b"").hex().upper() == keys[slot]["fingerprint"],
                     "owner card %s did not keep the %s fingerprint" % (serial, slot.upper()))
             require(session.get_uif(refs[slot]) == UIF.FIXED, "owner card %s did not take a FIXED touch policy on %s" % (serial, slot.upper()))
+        session.verify_pin(user)                  # attestation needs PW1 too (SW 6982 without it: 24's second bench run)
         for slot in SLOTS:
             attestations[slot] = _der(session.attest_key(refs[slot]))
         card_ca = _der(session.get_certificate(KEY_REF.ATT))
