@@ -7,6 +7,10 @@ certificate built from them, and the facts the root-signed card record names (re
     python3 -Es owner-cards.py cards --main FACTS --backup FACTS --out DIR
 
 Per card (enroll), in this order, which the D30.6 bench measurements on YubiKey 35718625 fixed (regalia-kms-24):
+  0. Only the owner card is attached: pcscd sees exactly one reader, the YubiKey's (a Nitrokey or the laptop's reader is
+     refused), and gpg's own scdaemon, configured for pcscd only (pcsc-shared, disable-ccid: its CCID driver took a
+     Nitrokey on the bench, regalia-kms-24), reaches the OpenPGP card with the typed serial (scd serialno). Checked
+     before anything is generated.
   1. SIG Ed25519, DEC X25519 and AUT Ed25519 generated on the card (yubikit), firmware 5.2.3 or later, the PINs typed and
      never the factory defaults; a card that already holds a key is refused unless --replace and its serial typed again.
   2. The card released, and gpg builds the certificate from the card's own keys ("existing key from card", 14): the
@@ -154,12 +158,40 @@ def ssh_line(point_hex):
 
 # ---- the card ---------------------------------------------------------------------------------------------------------
 
+def only_this_reader(names, serial):
+    """The smart-card readers pcscd sees: exactly one, the YubiKey's. Any other card or CCID reader (a Nitrokey, the
+    laptop's own reader) is refused, since scdaemon may take it instead (regalia-kms-24's bench run, 2026-10-05)."""
+    others = [n for n in names if "yubico" not in n.lower()]
+    require(not others and len(names) == 1, "attach only owner card %s: pcscd also sees %s. Remove every other smart card and "
+            "reader first" % (serial, ", ".join(others or names[1:]) or "nothing"))
+
+
+def aid_serial(aid):
+    """The serial in an OpenPGP card's application ID (RID D276000124, application 01): its four BCD serial bytes, as the
+    YubiKey's decimal serial. Anything else (another applet, a Nitrokey HSM's) is refused."""
+    aid = aid.strip().upper()
+    require(re.fullmatch(r"D27600012401[0-9A-F]{20}", aid) is not None, "the card scdaemon reaches is not an OpenPGP card (%s)" % (aid or "none"))
+    return aid[20:28].lstrip("0")
+
+
+def card_seen_by_gpg(home, serial, run=subprocess.run):
+    """The card gpg's scdaemon reaches, by its own `scd serialno`: the owner card typed, before any dialogue."""
+    done = run(["gpg-connect-agent", "--homedir", home, "scd serialno", "/bye"], capture_output=True, text=True)
+    aids = [line.split()[2] for line in done.stdout.splitlines() if line.startswith("S SERIALNO ")]
+    require(aids, "scdaemon reaches no card (%s): is owner card %s attached, and pcscd running?" % ((done.stdout + done.stderr).strip()[-120:], serial))
+    seen = aid_serial(aids[0])
+    require(seen == serial, "scdaemon reaches card %s, not owner card %s: remove every other card and reader" % (seen, serial))
+
+
 @contextlib.contextmanager
 def open_card(serial):
-    """The one YubiKey attached, which must be `serial`: (its OpenPGP session, its firmware version)."""
+    """The one YubiKey attached, which must be `serial`, and the only smart-card reader pcscd sees: (its OpenPGP session,
+    its firmware version)."""
+    from smartcard.System import readers
     from ykman.device import list_all_devices
     from yubikit.core.smartcard import SmartCardConnection
     from yubikit.openpgp import OpenPgpSession
+    only_this_reader([str(r) for r in readers()], serial)
     devices = list_all_devices()
     require(len(devices) == 1, "%d YubiKeys are attached: attach only owner card %s (scdaemon takes the first card)" % (len(devices), serial))
     device, info = devices[0]
@@ -244,6 +276,9 @@ def build_certificate(home, name, email, user_pin, run=subprocess.Popen):
                     answer = user_pin
                 else:
                     queue = answers.get(question)
+                    if not queue and question in answers:
+                        raise Refused("gpg asked %s again: it did not take the answer, most likely because scdaemon found no key on "
+                                      "the card (another card or reader taken instead?). Nothing more is sent" % question)
                     require(queue, "gpg asked %s, which this dialogue does not answer: nothing more is sent" % question)
                     answer = queue.pop(0)
                 proc.stdin.write(answer + "\n")
@@ -269,7 +304,7 @@ def _agent_stop(home, run=subprocess.run):
 
 
 def enroll(role, serial, name, email, out, recipient_file, replace=False, ask=_ask, ask_secret=_ask_secret, card=open_card,
-           build=build_certificate, run=subprocess.run, now=None):
+           build=build_certificate, run=subprocess.run, now=None, seen=card_seen_by_gpg):
     """One owner card, enrolled (see the docstring): returns its facts."""
     from yubikit.openpgp import KEY_REF, KEY_STATUS, OID, UIF
     serial = str(serial)
@@ -287,42 +322,64 @@ def enroll(role, serial, name, email, out, recipient_file, replace=False, ask=_a
     require(admin != DEFAULT_ADMIN_PIN and user != DEFAULT_USER_PIN,
             "a PIN typed is the factory default: set the card's admin and user PINs first (ykman openpgp access), "
             "or anyone holding it could re-key it")
+    # gpg's own home first, and the card ITS scdaemon reaches checked before anything is generated: through pcscd only,
+    # never scdaemon's own CCID driver, which took a Nitrokey's reader instead on the bench (regalia-kms-24, 2026-10-05)
+    home = named["home"]
+    os.mkdir(home, 0o700)
+    with open(os.path.join(home, "scdaemon.conf"), "w") as f:
+        f.write("pcsc-shared\ndisable-ccid\n")
+    reached = False
+    try:
+        seen(home, serial)
+        reached = True
+    finally:
+        _agent_stop(home, run)                    # the card free again for yubikit
+        if not reached:
+            shutil.rmtree(home, True)             # nothing was generated: no leftover to block a rerun
     refs = {"sig": KEY_REF.SIG, "dec": KEY_REF.DEC, "aut": KEY_REF.AUT}
     curves = {"sig": OID.Ed25519, "dec": OID.X25519, "aut": OID.Ed25519}
     # 1. the keys, generated on the card
-    with card(serial) as (session, firmware):
-        version = tuple(int(x) for x in str(firmware).split(".")[:3])
-        require(version >= MIN_FIRMWARE, "owner card %s runs firmware %s; the owner keys need %s or later: nothing was changed"
-                % (serial, firmware, ".".join(str(x) for x in MIN_FIRMWARE)))
-        try:
-            session.verify_pin(user)
-            session.verify_admin(admin)
-        except Exception as error:          # noqa: BLE001 - a wrong PIN costs a retry: said, never retried here
-            raise Refused("owner card %s refused a PIN (%s): nothing was changed; each failure spends one of its three tries"
-                          % (serial, error)) from None
-        info = session.get_key_information()
-        held = [slot for slot in SLOTS if info[refs[slot]] != KEY_STATUS.NONE]
-        if held:
-            require(replace, "owner card %s already holds %s: refused; replacing them takes --replace" % (serial, ", ".join(s.upper() for s in held)))
-            require(ask("Owner card %s already holds keys. Type its serial to replace them: " % serial) == serial,
-                    "the serial typed is not %s: nothing was changed" % serial)
-        fixed = [slot for slot in SLOTS if session.get_uif(refs[slot]) in (UIF.FIXED, UIF.CACHED_FIXED)]
-        require(not fixed, "owner card %s has a fixed touch policy on %s, which only a reset undoes: reset its OpenPGP applet "
-                "(ykman openpgp reset), set its PINs, then retry. Nothing was changed" % (serial, ", ".join(s.upper() for s in fixed)))
-        publics = {slot: raw_public(session.generate_ec_key(refs[slot], curves[slot])) for slot in SLOTS}
+    generating = False
     try:
-        return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient)
+        with card(serial) as (session, firmware):
+            version = tuple(int(x) for x in str(firmware).split(".")[:3])
+            require(version >= MIN_FIRMWARE, "owner card %s runs firmware %s; the owner keys need %s or later: nothing was changed"
+                    % (serial, firmware, ".".join(str(x) for x in MIN_FIRMWARE)))
+            try:
+                session.verify_pin(user)
+                session.verify_admin(admin)
+            except Exception as error:          # noqa: BLE001 - a wrong PIN costs a retry: said, never retried here
+                raise Refused("owner card %s refused a PIN (%s): nothing was changed; each failure spends one of its three tries"
+                              % (serial, error)) from None
+            info = session.get_key_information()
+            held = [slot for slot in SLOTS if info[refs[slot]] != KEY_STATUS.NONE]
+            if held:
+                require(replace, "owner card %s already holds %s: refused; replacing them takes --replace" % (serial, ", ".join(s.upper() for s in held)))
+                require(ask("Owner card %s already holds keys. Type its serial to replace them: " % serial) == serial,
+                        "the serial typed is not %s: nothing was changed" % serial)
+            fixed = [slot for slot in SLOTS if session.get_uif(refs[slot]) in (UIF.FIXED, UIF.CACHED_FIXED)]
+            require(not fixed, "owner card %s has a fixed touch policy on %s, which only a reset undoes: reset its OpenPGP applet "
+                    "(ykman openpgp reset), set its PINs, then retry. Nothing was changed" % (serial, ", ".join(s.upper() for s in fixed)))
+            generating = True                    # from here on a failure may leave new keys on the card
+            publics = {slot: raw_public(session.generate_ec_key(refs[slot], curves[slot])) for slot in SLOTS}
+    except Exception as error:              # noqa: BLE001 - before any key, the card is unchanged: no leftover blocks a rerun
+        shutil.rmtree(home, True)
+        if generating:
+            raise Refused("%s. Owner card %s may now hold NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is "
+                          "used again" % (str(error).rstrip("."), serial)) from None
+        raise
+    try:
+        return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient, seen)
     except Exception as error:              # noqa: BLE001 - whatever stopped it, the card now holds new keys
         raise Refused("%s. Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used "
                       "again" % (str(error).rstrip("."), serial)) from None
 
 
-def _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient):
+def _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient, seen):
     """Steps 2-4 of enroll, once the card holds its new keys."""
     from yubikit.openpgp import KEY_REF, UIF
     # 2. the certificate, by gpg from the card's own keys, then read back from its packets
     home = named["home"]
-    os.mkdir(home, 0o700)
     try:
         primary = build(home, name, email, user)
         export = run(["gpg", "--homedir", home, "--batch", "--export", primary], capture_output=True, check=True).stdout
@@ -450,7 +507,8 @@ def main(argv=None):
     e.add_argument("--yubikey-serial", required=True)
     e.add_argument("--name", required=True, help="the certificate's user ID name")
     e.add_argument("--email", required=True)
-    e.add_argument("--breakglass-recipient", required=True, help="the break-glass age recipient: gpg's revocation certificate is sealed to it")
+    e.add_argument("--breakglass-recipient", required=True, metavar="FILE",
+                   help="a FILE holding the break-glass age recipient (one age1pq1… line): gpg's revocation certificate is sealed to it")
     e.add_argument("--out", required=True)
     e.add_argument("--replace", action="store_true", help="the card holds keys: replace them (the serial is typed again)")
     c = sub.add_parser("cards")

@@ -80,6 +80,8 @@ class FakeCard:
     def generate_ec_key(self, ref, oid):
         from cryptography.hazmat.primitives.asymmetric import ed25519, x25519
         slot = self.refs[ref]
+        if self.lie.get("fail_generate") == slot:
+            raise RuntimeError("the card stopped answering")
         self.status[ref] = self.KEY_STATUS.GENERATED
         self.generated.add(slot)
         raw = bytes.fromhex(self.keys[slot]["point"])
@@ -147,7 +149,7 @@ class Enroll(unittest.TestCase):
         export = subprocess.run(["gpg", "--homedir", home, "--export", fpr], check=True, capture_output=True).stdout
         return oc.certificate_keys(export, oc.gpg_capabilities(home))
 
-    def enroll(self, which="main", role="owner-main", serial="40000001", build_from=None, out=None, typed=None, **card_kw):
+    def enroll(self, which="main", role="owner-main", serial="40000001", build_from=None, out=None, typed=None, seen=None, **card_kw):
         self.card = FakeCard(serial, self.keys_of(which), **card_kw)
 
         @contextlib.contextmanager
@@ -157,15 +159,21 @@ class Enroll(unittest.TestCase):
 
         def build(home, name, email, user_pin):
             self.assertEqual(user_pin, USER)
+            with open(os.path.join(home, "scdaemon.conf")) as f:     # scdaemon through pcscd only (24's bench run)
+                self.assertEqual(f.read(), "pcsc-shared\ndisable-ccid\n")
             source, fpr = self.homes[build_from or which]
             for entry in os.listdir(source):
                 if not entry.startswith("S."):                    # not the agent's sockets
                     path = os.path.join(source, entry)
-                    (shutil.copytree if os.path.isdir(path) else shutil.copy2)(path, os.path.join(home, entry))
+                    if os.path.isdir(path):
+                        shutil.copytree(path, os.path.join(home, entry), dirs_exist_ok=True)   # the agent may have made it
+                    else:
+                        shutil.copy2(path, os.path.join(home, entry))
             return fpr
         pins = iter([ADMIN, USER])
         return oc.enroll(role, serial, "Owner", "owner@example.invalid", out or self.out, self.recipient, replace=typed is not None,
-                         ask=lambda prompt: typed, ask_secret=lambda prompt: next(pins), card=card, build=build)
+                         ask=lambda prompt: typed, ask_secret=lambda prompt: next(pins), card=card, build=build,
+                         seen=seen or (lambda home, s: self.assertEqual(s, serial)))
 
     def test_a_card_enrolled_and_the_facts_it_proves(self):
         facts = self.enroll()
@@ -250,7 +258,8 @@ class Enroll(unittest.TestCase):
             yield self.card, self.card.firmware
         pins = iter([ADMIN, USER])
         with self.assertRaisesRegex(ok.Refused, "Owner card 40000001 now holds NEW keys: reset its OpenPGP applet"):
-            oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, self.recipient, ask_secret=lambda p: next(pins), card=card, build=broken)
+            oc.enroll("owner-main", "40000001", "O", "o@example.invalid", self.out, self.recipient, ask_secret=lambda p: next(pins), card=card,
+                      build=broken, seen=lambda home, s: None)
         self.assertEqual(self.card.generated, set(oc.SLOTS))
         with self.assertRaisesRegex(ok.Refused, "the SIG attestation is not signed by the card's attestation CA.*now holds NEW keys"):
             self.enroll(out=tempfile.mkdtemp(dir=self.out), other_ca=True)
@@ -268,6 +277,44 @@ class Enroll(unittest.TestCase):
         finally:
             self.recipient = kept
         self.assertEqual(self.card.generated, set())
+
+    def test_the_card_gpg_reaches_is_checked_before_anything_is_generated(self):
+        """regalia-kms-24's bench run: scdaemon's own CCID driver took a Nitrokey. Now its home says pcsc-shared and
+        disable-ccid, and the card ITS scdaemon reaches must be the owner card, before a key is generated."""
+        def other(home, serial):
+            raise ok.Refused("scdaemon reaches card 40000009, not owner card %s" % serial)
+        with self.assertRaisesRegex(ok.Refused, "^scdaemon reaches card 40000009, not owner card 40000001$"):
+            self.enroll(seen=other)
+        self.assertEqual(self.card.generated, set(), "nothing was generated")
+        self.assertFalse(os.path.exists(oc.outputs(self.out, "40000001")["home"]), "no leftover blocks a rerun")
+        self.assertEqual(self.enroll()["serial"], "40000001")
+
+    def test_a_generation_that_stops_part_way_says_the_card_needs_a_reset(self):
+        with self.assertRaisesRegex(ok.Refused, "the card stopped answering. Owner card 40000001 may now hold NEW keys: reset"):
+            self.enroll(lie={"fail_generate": "dec"})
+        self.assertEqual(self.card.generated, {"sig"})
+        self.assertFalse(os.path.exists(oc.outputs(self.out, "40000001")["home"]))
+
+    def test_the_card_gpg_reaches_is_read_from_scd_serialno(self):
+        def answering(text):
+            return lambda argv, **kw: subprocess.CompletedProcess(argv, 0, text, "")
+        oc.card_seen_by_gpg("/h", "40000001", run=answering("S SERIALNO D2760001240103040006400000010000\nOK\n"))
+        for text, reason in (("S SERIALNO D2760001240103040006400000090000\nOK\n", "scdaemon reaches card 40000009, not owner card 40000001"),
+                             ("S SERIALNO 44454E4B30343034333830\nOK\n", "is not an OpenPGP card"),
+                             ("ERR 100696144 No such device\n", "scdaemon reaches no card")):
+            with self.subTest(reason=reason), self.assertRaisesRegex(ok.Refused, reason):
+                oc.card_seen_by_gpg("/h", "40000001", run=answering(text))
+
+    def test_the_aid_and_the_readers(self):
+        self.assertEqual(oc.aid_serial("D2760001240103040006357186250000"), "35718625")
+        for aid in ("44454E4B30343034333830", "D27600012402010400063571862500", ""):      # a Nitrokey HSM's (the bench), another applet, none
+            with self.subTest(aid=aid), self.assertRaisesRegex(ok.Refused, "is not an OpenPGP card"):
+                oc.aid_serial(aid)
+        oc.only_this_reader(["Yubico YubiKey OTP+FIDO+CCID 00 00"], "40000001")
+        for names in (["Yubico YubiKey OTP+FIDO+CCID 00 00", "Nitrokey Nitrokey HSM (DENK0404144) 01 00"], [],
+                      ["Lenovo Integrated Smart Card Reader 00 00"]):
+            with self.subTest(names=names), self.assertRaisesRegex(ok.Refused, "attach only owner card 40000001"):
+                oc.only_this_reader(names, "40000001")
 
     def test_refused_before_the_card_changes(self):
         for kw, reason in (
@@ -398,6 +445,23 @@ class Dialogue(unittest.TestCase):
                 return 2
         with self.assertRaisesRegex(ok.Refused, "gpg asked keygen.size, which this dialogue does not answer"):
             oc.build_certificate("/nonexistent", "O", "o@example.invalid", USER, run=Odd)
+
+    def test_a_question_asked_again_names_the_likely_cause(self):
+        """24's bench run: with no key found on the card, gpg asked keygen.algo again."""
+        class Again:
+            def __init__(self, argv, **kw):
+                self.stdin, self.stdout = self, iter(["[GNUPG:] GET_LINE keygen.algo\n", "[GNUPG:] GET_LINE keygen.algo\n"])
+
+            def write(self, text):
+                pass
+
+            def flush(self):
+                pass
+
+            def wait(self):
+                return 2
+        with self.assertRaisesRegex(ok.Refused, "gpg asked keygen.algo again: .*scdaemon found no key on the card"):
+            oc.build_certificate("/nonexistent", "O", "o@example.invalid", USER, run=Again)
 
 
 if __name__ == "__main__":
