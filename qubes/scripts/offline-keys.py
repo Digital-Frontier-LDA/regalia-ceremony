@@ -107,6 +107,7 @@ import os
 import random
 import re
 import secrets
+import struct
 import subprocess
 import sys
 import time
@@ -1085,6 +1086,299 @@ def verify_record(document):
     except (InvalidSignature, ValueError):
         raise Refused("the record's signature does not verify under its root entry") from None
     return record
+
+
+SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
+CARD_ROLES = ("owner-main", "owner-backup")     # ADR-0002 D30.7: the OWNER pair, not the developer cards
+# The bench's staging YubiKeys (the memory of 2026-10-01; D28.5/D30: never a bench serial in the ceremony). One list,
+# checked once in the record, so neither reader has to keep its own (regalia-kms-d9 on #121).
+BENCH_YUBIKEYS = ("36345471", "36344616", "35718625")
+_SERIAL = re.compile(r"[1-9][0-9]{0,9}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+_FPR = re.compile(r"[0-9A-F]{40}")
+
+
+def _exact(obj, keys, where):
+    require(isinstance(obj, dict), "%s is not an object" % where)
+    unknown, missing = sorted(set(obj) - set(keys)), sorted(set(keys) - set(obj))
+    require(not unknown, "%s has an unknown field: %s" % (where, ", ".join(unknown)))
+    require(not missing, "%s is missing: %s" % (where, ", ".join(missing)))
+
+
+def _ascii(value, where):
+    """Every string in the record is ASCII, so the bytes signed (ensure_ascii=False) are the bytes regalia-kms's
+    membership.canonical (ensure_ascii=True) makes of it: one canonical form on both sides."""
+    if isinstance(value, dict):
+        for k, v in value.items():
+            _ascii(k, where)
+            _ascii(v, "%s.%s" % (where, k))
+    elif isinstance(value, list):
+        for i, v in enumerate(value):
+            _ascii(v, "%s[%d]" % (where, i))
+    elif isinstance(value, str):
+        require(value.isascii(), "%s is not ASCII" % where)
+
+
+def ssh_ed25519_raw(line, where):
+    """The raw 32-byte key of an `ssh-ed25519 <base64>` line, as 64 hex."""
+    fields = line.split(" ") if isinstance(line, str) else []
+    require(len(fields) == 2 and fields[0] == "ssh-ed25519", "%s is not an `ssh-ed25519 <base64>` line" % where)
+    try:
+        blob = base64.b64decode(fields[1], validate=True)
+    except ValueError:
+        raise Refused("%s is not base64" % where) from None
+    parts, at = [], 0
+    while at + 4 <= len(blob) and len(parts) < 3:
+        (size,) = struct.unpack(">I", blob[at:at + 4])
+        parts.append(blob[at + 4:at + 4 + size])
+        at += 4 + size
+    require(at == len(blob) and len(parts) == 2 and parts[0] == b"ssh-ed25519" and len(parts[1]) == 32,
+            "%s does not hold exactly one 32-byte Ed25519 key" % where)
+    return parts[1].hex()
+
+
+def card_record_check(record):
+    """The card-ceremony record's rules (ADR-0002 D30, regalia-ceremony#111 step 2), as the writer enforces them and
+    regalia-kms's verifier mirrors them (the vectors in qubes/emulator/tests/vectors/card-ceremony-record). Returns the
+    record, or Refused naming the first rule broken."""
+    _exact(record, ("schema", "event", "sequence", "supersedes", "owner_keys", "ownerauth_recipients", "ssh_signers", "release_key",
+                    "session", "root_entry", "root_fingerprint", "tool", "at"), "the record")
+    _ascii(record, "the record")
+    require(record["schema"] == SCHEMA_CARDS and record["event"] == "card-ceremony", "schema must be %s, event card-ceremony" % SCHEMA_CARDS)
+    require(isinstance(record["session"], str) and re.fullmatch(r"[0-9a-f]{32}", record["session"]) is not None, "session is 32 hex")
+    # freshness (regalia-kms#403): each card record under a root is one more than the last, and names its digest
+    require(isinstance(record["sequence"], int) and not isinstance(record["sequence"], bool) and record["sequence"] >= 1,
+            "sequence is an integer from 1")
+    if record["sequence"] == 1:
+        require(record["supersedes"] == "", "the first card record (sequence 1) supersedes nothing: supersedes is \"\"")
+    else:
+        require(isinstance(record["supersedes"], str) and _HEX64.fullmatch(record["supersedes"]) is not None,
+                "a card record after the first names the one it supersedes: the SHA-256 of its canonical bytes, 64 hex")
+    require(isinstance(record["tool"], str) and record["tool"], "tool names the writer")
+    require(isinstance(record["at"], str) and re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", record["at"]) is not None,
+            "at is YYYY-MM-DDTHH:MM:SSZ")
+    _exact(record["root_entry"], ("alg", "key"), "root_entry")
+    require(record["root_entry"]["alg"] == "ed25519" and _HEX64.fullmatch(str(record["root_entry"]["key"])), "root_entry is an Ed25519 key, 64 hex")
+    require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "root_fingerprint is not the SHA-256 of the root key")
+    owners = record["owner_keys"]
+    require(isinstance(owners, list) and len(owners) == 2, "owner_keys holds exactly the two owner cards' SIG keys (D30.7)")
+    for i, k in enumerate(owners):
+        _exact(k, ("role", "serial", "alg", "key", "attested", "attestation_sha256"), "owner_keys[%d]" % i)
+        require(k["role"] in CARD_ROLES, "owner_keys[%d].role is owner-main or owner-backup" % i)
+        require(isinstance(k["serial"], str) and _SERIAL.fullmatch(k["serial"]), "owner_keys[%d].serial is a decimal YubiKey serial" % i)
+        require(k["alg"] == "ed25519" and isinstance(k["key"], str) and _HEX64.fullmatch(k["key"]), "owner_keys[%d] is an Ed25519 key, 64 hex" % i)
+        require(k["attested"] is True, "owner_keys[%d] is not attested: an owner key is generated on its card (D5)" % i)
+        # the evidence behind "attested" (d9 on #121): the SHA-256 of the DER of the SIG, DEC and AUT keys' attestation
+        # certificates (all three touch-fixed under D30.7, so all three named: 1e on #400), whose files go on the disc
+        # beside the record, so an auditor re-checks the claim and not only the root's word
+        _exact(k["attestation_sha256"], ("sig", "dec", "aut"), "owner_keys[%d].attestation_sha256" % i)
+        require(all(isinstance(v, str) and _HEX64.fullmatch(v) for v in k["attestation_sha256"].values()),
+                "owner_keys[%d].attestation_sha256 gives each certificate's SHA-256, 64 hex" % i)
+    require(sorted(k["role"] for k in owners) == sorted(CARD_ROLES), "owner_keys has the roles owner-main and owner-backup, once each")
+    serials = {k["serial"] for k in owners}
+    require(len(serials) == 2, "the two owner cards have distinct serials")
+    rel = record["release_key"]
+    _exact(rel, ("alg", "key", "fingerprint", "cards", "imported", "attested"), "release_key")
+    require(rel["alg"] == "ed25519" and isinstance(rel["key"], str) and _HEX64.fullmatch(rel["key"]), "release_key is an Ed25519 key, 64 hex")
+    require(isinstance(rel["fingerprint"], str) and _FPR.fullmatch(rel["fingerprint"]), "release_key.fingerprint is 40 upper-case hex")
+    require(rel["imported"] is True and rel["attested"] is False, "the release key is imported, not attested (D29.2)")
+    require(isinstance(rel["cards"], list) and len(rel["cards"]) == 2 and all(isinstance(c, str) and _SERIAL.fullmatch(c) for c in rel["cards"])
+            and len(set(rel["cards"])) == 2, "release_key.cards are the two release cards' serials")
+    require(not set(rel["cards"]) & serials, "a release card is also an owner card: the owner cards never hold the release key (D30.7)")
+    require(rel["key"] not in {k["key"] for k in owners}, "the release key is an owner key: the release cards hold no owner key (D30.7)")
+    for name, fields in (("ownerauth_recipients", ("serial", "primary", "subkey")), ("ssh_signers", ("serial", "key"))):
+        items = record[name]
+        require(isinstance(items, list), "%s is a list" % name)
+        for i, item in enumerate(items):
+            _exact(item, fields, "%s[%d]" % (name, i))
+            require(isinstance(item["serial"], str) and _SERIAL.fullmatch(item["serial"]), "%s[%d].serial is a decimal YubiKey serial" % (name, i))
+        require(sorted(item["serial"] for item in items) == sorted(serials), "%s has one entry for each owner card" % name)
+    for i, r in enumerate(record["ownerauth_recipients"]):
+        require(all(isinstance(r[f], str) and _FPR.fullmatch(r[f]) for f in ("primary", "subkey")) and r["primary"] != r["subkey"],
+                "ownerauth_recipients[%d] names a primary and a different encryption subkey, 40 upper-case hex" % i)
+    fprs = [r[f] for r in record["ownerauth_recipients"] for f in ("primary", "subkey")]
+    require(len(set(fprs)) == len(fprs), "an ownerauth fingerprint is used twice: each owner card has its own primary and its own "
+            "decryption subkey, or one card would count twice in the proof (d9 on #121)")
+    certs = [v for k in owners for v in k["attestation_sha256"].values()]
+    require(len(set(certs)) == len(certs), "an attestation certificate is named twice: each key has its own")
+    every_serial = sorted(serials | set(rel["cards"]))
+    bench = [x for x in every_serial if x in BENCH_YUBIKEYS]
+    require(not bench, "a bench YubiKey is named (%s): the ceremony never uses a bench serial (D28.5, D30)" % ", ".join(bench))
+    ssh = [ssh_ed25519_raw(s["key"], "ssh_signers[%d].key" % i) for i, s in enumerate(record["ssh_signers"])]
+    every = [record["root_entry"]["key"], rel["key"]] + [k["key"] for k in owners] + ssh
+    require(len(set(every)) == len(every), "a key is used twice among the root, the release key, the owner keys and the SSH keys")
+    return record
+
+
+def card_record_digest(record):
+    """A card record's digest, as `supersedes` and the signing record name it: SHA-256 of its canonical bytes (the form
+    the signature covers, without RECORD_DOMAIN), 64 hex (regalia-kms#403)."""
+    return hashlib.sha256(canonical(record)).hexdigest()
+
+
+SIGNING_RECORD = "signing-record.jsonl"     # regalia-kms manifest.py's RECORD, in the same --state-dir
+SIGNING_STATE = "regalia-signing-state.json"    # the state directory's marker, agreed with regalia-kms-1e (#403 point 7)
+SCHEMA_SIGNING_STATE = "regalia.signing-state/v1"
+MAX_SIGNING_RECORD = 1 << 22             # 4 MiB: a larger signing record is refused, never read in part
+
+
+def read_signing_state(state_dir, pinned_root):
+    """The card-record consumer's view of the laptop's state directory: its marker (O_NOFOLLOW, a regular file of the
+    directory's owner, 0600, exactly {schema, root}, root the PINNED one; a missing marker is refused, since an empty
+    or foreign directory cannot be judged) and then its signing record's lines. Returns the lines (dicts or
+    whatever JSON each line holds, for card_record_current to judge)."""
+    import stat as _stat
+    info = os.stat(state_dir)
+    marker_root = _signing_state_root(state_dir, info)
+    require(marker_root == pinned_root, "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
+    # the log as the marker is: never through a link, the owner's 0600 regular file, and whole. A link to an older
+    # copy, or a tail cut off at a line boundary, would make an older card record read as the newest (d9 on #126)
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s holds no %s" % (state_dir, SIGNING_RECORD)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_RECORD, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        log_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_RECORD)
+        data = f.read(MAX_SIGNING_RECORD + 1)
+    return _signing_record_lines(data)
+
+
+def _signing_state_root(state_dir, info):
+    """The root the state directory's marker names: O_NOFOLLOW, a regular file of the directory's owner (`info`, its
+    stat), 0600, exactly {schema, root}. A missing marker is refused: an empty or foreign directory cannot be judged."""
+    import stat as _stat
+    try:
+        fd = os.open(os.path.join(state_dir, SIGNING_STATE), os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except FileNotFoundError:
+        raise Refused("%s has no %s: not a signing state directory this root's records can be judged in" % (state_dir, SIGNING_STATE)) from None
+    except OSError as error:
+        raise Refused("%s cannot be opened as a regular file (%s)" % (SIGNING_STATE, error)) from None
+    with os.fdopen(fd, "rb") as f:
+        marker_info = os.fstat(f.fileno())
+        require(_stat.S_ISREG(marker_info.st_mode) and marker_info.st_uid == info.st_uid and _stat.S_IMODE(marker_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600" % SIGNING_STATE)
+        try:
+            marker = json.loads(f.read(4096))
+        except ValueError:
+            raise Refused("%s is not JSON" % SIGNING_STATE) from None
+    _exact(marker, ("schema", "root"), SIGNING_STATE)
+    require(marker["schema"] == SCHEMA_SIGNING_STATE, "%s's schema is not %s" % (SIGNING_STATE, SCHEMA_SIGNING_STATE))
+    return marker["root"]
+
+
+def _signing_record_lines(data):
+    """The signing record's bytes as its lines (whatever JSON each holds), by one rule for the reader and the writer:
+    whole (at most MAX_SIGNING_RECORD), UTF-8, each line JSON."""
+    require(len(data) <= MAX_SIGNING_RECORD, "%s is larger than %d bytes: refused whole, never read in part" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
+    try:
+        texts = data.decode("utf-8").splitlines()
+    except UnicodeDecodeError:
+        raise Refused("%s is not UTF-8" % SIGNING_RECORD) from None
+    lines = []
+    for i, text in enumerate(texts):
+        try:
+            lines.append(json.loads(text))
+        except ValueError:
+            raise Refused("line %d of the signing record is not JSON (a torn write?)" % (i + 1)) from None
+    return lines
+
+
+def append_card_record_line(state_dir, record, now=None):
+    """When the root signs a card record: one line in the laptop's root signing record (the file `manifest sign
+    --state-dir` appends to), {kind, sequence, digest, key, at}, appended and synced as manifest.py's _append_record
+    does. regalia-kms's reader (#403) requires these lines gapless from 1, chained by supersedes.
+
+    Nothing is appended that the reader would refuse (CodeRabbit on #121): the log must be the directory owner's 0600
+    regular file, and the record must continue its card-record lines, sequence M+1 superseding line M's digest (1 and
+    "" on an empty log). A duplicate, a gap or a fork is refused before a byte is written."""
+    import stat as _stat
+    info = os.stat(state_dir)
+    require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
+    # the record by every rule the reader applies, under the root the directory's marker names (CodeRabbit on #121)
+    card_record_check(record)
+    root = _signing_state_root(state_dir, info)
+    require(record["root_entry"]["key"] == root, "this card record is signed for another root than %s names: nothing was appended" % SIGNING_STATE)
+    line = {"kind": "card-record", "sequence": record["sequence"], "digest": card_record_digest(record),
+            "key": record["root_entry"]["key"], "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
+    fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+    try:
+        log_info = os.fstat(fd)
+        require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
+                "%s must be a regular file of the directory's owner, mode 0600: nothing was appended" % SIGNING_RECORD)
+        existing, chunk = b"", True
+        while chunk and len(existing) <= MAX_SIGNING_RECORD:
+            chunk = os.pread(fd, MAX_SIGNING_RECORD + 1 - len(existing), len(existing))
+            existing += chunk
+        before = [old for old in _signing_record_lines(existing) if isinstance(old, dict) and old.get("kind") == "card-record"]
+        require(all(old.get("key") == root for old in before), "the signing record holds a card-record line of another root: nothing was appended")
+        expected = (len(before) + 1, before[-1].get("digest") if before else "")
+        require((record["sequence"], record["supersedes"]) == expected,
+                "this card record does not follow the signing record (sequence %d superseding %s expected, got %d superseding %s): "
+                "nothing was appended" % (expected[0], expected[1] or "nothing", record["sequence"], record["supersedes"] or "nothing"))
+        data = (json.dumps(line, sort_keys=True) + "\n").encode()
+        require(len(existing) + len(data) <= MAX_SIGNING_RECORD,      # or the reader would refuse the whole log (CodeRabbit)
+                "%s would pass %d bytes with this line: nothing was appended; a full log is rebuilt from the disc "
+                "(--rebuild-from-disc)" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
+        while data:
+            data = data[os.write(fd, data):]
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    return line
+
+
+def card_record_current(document, pinned_root, signing_lines):
+    """A card record that is the NEWEST the pinned root signed (regalia-kms#403): verify_card_record, then the laptop's
+    signing record's card-record lines (dicts, in file order) must run 1..M without a gap, this record must be line M
+    (its sequence and digest), and its supersedes must be line M-1's digest. An older record, which still verifies, is
+    refused: after a rotation it would vouch for a retired key. Returns the record."""
+    record = verify_card_record(document, pinned_root)
+    for i, line in enumerate(signing_lines):       # every line judged by name, never skipped (d9 on #126, #403 point 6)
+        require(isinstance(line, dict) and isinstance(line.get("kind"), str) and line["kind"],
+                "line %d of the signing record is not an object with a kind" % (i + 1))
+    lines = [line for line in signing_lines if line["kind"] == "card-record"]
+    require(lines, "the signing record holds no card-record line: this card record cannot be shown to be the newest")
+    for line in lines:
+        _exact(line, ("kind", "sequence", "digest", "key", "at"), "a card-record line of the signing record")
+        require(isinstance(line["sequence"], int) and not isinstance(line["sequence"], bool) and isinstance(line["digest"], str)
+                and _HEX64.fullmatch(line["digest"]) is not None and isinstance(line["key"], str),
+                "a card-record line of the signing record is malformed (sequence an integer, digest 64 hex)")
+    require([line.get("sequence") for line in lines] == list(range(1, len(lines) + 1)),
+            "the signing record's card-record lines are not 1..%d without a gap" % len(lines))
+    require(all(line.get("key") == pinned_root for line in lines), "a card-record line names another root than the pinned one")
+    newest = lines[-1]
+    require(record["sequence"] == newest["sequence"] and card_record_digest(record) == newest.get("digest"),
+            "this card record is not the newest the root signed (sequence %d of %d): an older one is superseded"
+            % (record["sequence"], newest["sequence"]))
+    if len(lines) > 1:
+        require(record["supersedes"] == lines[-2].get("digest"), "this card record does not supersede the one before it in the signing record")
+    return record
+
+
+def verify_card_record(document, pinned_root):
+    """A card-ceremony record as regalia-kms reads it: exactly {record, signature}, signed under the PINNED root (the
+    record's root_entry must name it), over RECORD_DOMAIN and the canonical record, and every rule of
+    card_record_check. Returns the record, or Refused."""
+    from cryptography.exceptions import InvalidSignature
+    from cryptography.hazmat.primitives.asymmetric import ed25519
+    require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not a record: exactly record and signature")
+    require(isinstance(document["signature"], str) and re.fullmatch(r"[0-9a-f]{128}", document["signature"]) is not None,
+            "the signature is 128 hex")
+    record = document["record"]
+    require(isinstance(record, dict) and isinstance(record.get("root_entry"), dict) and record["root_entry"].get("key") == pinned_root,
+            "the record names another root than the pinned one")
+    _ascii(record, "the record")
+    try:
+        ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
+                                                                                      RECORD_DOMAIN + canonical(record))
+    except (InvalidSignature, ValueError):
+        raise Refused("the signature does not verify under the pinned root") from None
+    return card_record_check(record)
 
 
 def main(argv=None):
