@@ -909,6 +909,25 @@ class OwnerAuth(Case):
         with self.assertRaisesRegex(ok.Refused, "this sealed set has no ownerauth-recovery identity"):
             ok.ownerauth(old, ["a"], self.yk, self.card_record, self.state, self.oa, io.StringIO("\n".join(self.all[:2]) + "\n"))
 
+    def test_a_rotations_current_record_is_this_roots_with_its_at(self):
+        """ceremony.sh step t (#135, 95 on #137): the CURRENT record must be this sealed set's root's owner-authorization
+        record, its at in the records' form (the step compares it with the laptop's clock as a string)."""
+        import io, contextlib
+        self.run_oa()
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        record = ok.ownerauth_record_of(rec, self.sealed)
+        shown = io.StringIO()
+        with contextlib.redirect_stdout(shown):
+            self.assertEqual(ok.main(["ownerauth-current", "--record", rec, "--sealed", self.sealed]), 0)
+        self.assertEqual(shown.getvalue(), "CURRENT %s a,b,c\n" % record["at"])
+        sealed = json.load(open(self.sealed))
+        root = ok._private_key(ok.unseal(ok.combine(self.all[:2], sealed)[0], sealed)["keys"]["root"])
+        bad = dict(record, at="5 Oct 2026 10:00")
+        with open(os.path.join(self.d, "bad-at.json"), "w") as f:
+            json.dump({"record": bad, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(bad)).hex()}, f)
+        with self.assertRaisesRegex(ok.Refused, "the record's at is not"):
+            ok.ownerauth_record_of(os.path.join(self.d, "bad-at.json"), self.sealed)
+
     def test_the_rehearsal_drill_without_a_tpm(self):
         """The owner decision's drill: the recovery identity from k shares into a 0600 RAM file, one node's value out of
         its .bg.sops, checked against the root-signed record's check value; the same value as another node's is

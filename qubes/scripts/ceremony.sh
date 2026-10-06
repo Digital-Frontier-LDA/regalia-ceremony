@@ -2626,10 +2626,10 @@ oa_insert_card() {
   warn "Insert owner card $1 of 2 ALONE (remove any other YubiKey), then type its serial (printed on the card)."
   read -r -p "   serial of owner card $1: " OA_SERIAL
 }
-ownerauth_commit_list() {
-  local f
-  warn "COMMIT after the ceremony, beside the offline keys (hsm-backups/ownerauth/): the envelopes and records below."
-  for f in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.sops "$WORK"/ownerauth/*.record.json "$WORK"/ownerauth/ownerauth-verify.jsonl; do
+ownerauth_commit_list() { # [DIR [WHERE]]: the set in DIR (default step a's), to be committed under WHERE
+  local f dir="${1:-$WORK/ownerauth}" where="${2:-hsm-backups/ownerauth/}"
+  warn "COMMIT after the ceremony, beside the offline keys ($where): the envelopes and records below."
+  for f in "$dir"/ownerauth-*.yk.gpg "$dir"/ownerauth-*.bg.sops "$dir"/*.record.json "$dir"/ownerauth-verify.jsonl; do
     [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
   done
   return 0
@@ -2637,12 +2637,19 @@ ownerauth_commit_list() {
 
 step_ownerauth() {
   b "Owner authorizations — each KMS host's TPM owner auth, to both OWNER cards, and its SOPS recovery copy (regalia-kms#242)"
-  local dir="$WORK/ownerauth" sealed="$WORK/offline/offline-keys.sealed.json" card
-  local keys="$WORK/cards/owner-cards.gpg" nodes="a,b,c" home="$WORK/ownerauth-gnupg" n
-  # the three KMS hosts (ADR-0002 D17) and the session's own exported keys; a simulation may name others (3e on #130)
-  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_OWNER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
+  local sealed="$WORK/offline/offline-keys.sealed.json"
   [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made (or removed) outside it."; return 1; }
   [ -s "$sealed" ] || { err "no offline keys in this session ($sealed): run step o first (the root signs these records)."; return 1; }
+  ownerauth_make "$WORK/ownerauth" "$sealed" "$WORK/ownerauth-gnupg" || return 1
+  ownerauth_commit_list
+}
+
+# ownerauth_make DIR SEALED HOME: the owner authorizations made into DIR under the sealed set SEALED, and both owner
+# cards' proof (GnuPG home HOME), signed by the root. Step a and the rotation run (step t) share it.
+ownerauth_make() {
+  local dir="$1" sealed="$2" home="$3" card keys="$WORK/cards/owner-cards.gpg" nodes="a,b,c" n
+  # the three KMS hosts (ADR-0002 D17) and the session's own exported keys; a simulation may name others (3e on #130)
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_OWNER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
   [ -s "$keys" ] || { err "no owner cards' public keys ($keys): the owner cards' step exports them (ADR-0002 D30.7, #111 step 2)."; return 1; }
   # the root-signed card record names the two owner cards: ownerauth refuses an export that is not theirs (d9, 1e on #451)
   card="$(oa_card_record)"
@@ -2658,7 +2665,7 @@ step_ownerauth() {
         --card-record "$card" --state-dir "$CEREMONY_STATE_DIR" --out "$dir" < "$(oa_shares_in)" \
       || { err "the owner authorizations were NOT made (reason above); nothing is kept."; rm -rf -- "$dir"; return 1; }
   fi
-  [ -e "$dir/ownerauth-verified.record.json" ] && { info "both owner cards were already proven in this session."; ownerauth_commit_list; return 0; }
+  [ -e "$dir/ownerauth-verified.record.json" ] && { info "both owner cards were already proven in this session."; return 0; }
   # the cards' public keys in a GnuPG home of this session's own, so gpg reaches each card through its stubs
   if [ ! -d "$home" ]; then
     ( umask 077; mkdir "$home" ) || return 1
@@ -2679,7 +2686,71 @@ step_ownerauth() {
       --sealed "$sealed" < "$(oa_shares_in)" \
     || { err "the proof is not complete (reason above): run this step again."; return 1; }
   info "owner authorizations done: both owner cards open every node's envelope, signed by the root."
-  ownerauth_commit_list
+}
+
+# ---- step t: owner-authorization ROTATION for KMS hosts already enrolled (regalia-ceremony#135) ----------------------
+# A later session, after the first ceremony: fresh values for every node, made exactly as step a makes them, to the
+# owner cards the NEWEST card record names (so a retired or lost card is cut out), under the sealed set the first
+# ceremony archived (its disc, or hsm-backups/offline/). That file is authenticated by the shares opening it: AES-GCM
+# covers its header, so an altered copy is refused there. Its copy lives in $WORK/rotation, never in $WORK/offline, so
+# this session is not taken for one that made the offline keys. Each node then runs regalia-kms's
+# `enrol ownerauth --rotate-from <its current record> --record <this one>`, which refuses a record not newer than the
+# current one (agreed with regalia-kms-95). The drill opens the new recovery copies; the disc waits for both.
+oa_rotate_sealed_in() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${OA_ROTATE_SEALED:-}" ]; then printf '%s' "$OA_ROTATE_SEALED"; return; fi
+  read -r -p "   the archived offline-keys.sealed.json (the disc mounted read-only, e.g. /mnt/offline/offline-keys.sealed.json): " OA_ROTATE_PATH
+  printf '%s' "$OA_ROTATE_PATH"
+}
+oa_rotate_current_in() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${OA_ROTATE_CURRENT:-}" ]; then printf '%s' "$OA_ROTATE_CURRENT"; return; fi
+  read -r -p "   the nodes' CURRENT ownerauth.record.json (the newest archived set, from hsm-backups/ownerauth/): " OA_ROTATE_PATH
+  printf '%s' "$OA_ROTATE_PATH"
+}
+# oa_utc_now: this laptop's clock, in the records' form (a stand-in in the tests)
+oa_utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+step_ownerauth_rotate() {
+  b "Owner-authorization ROTATION — new TPM owner auths for the enrolled KMS hosts, to the current owner cards (#135)"
+  local dir="$WORK/ownerauth-rotation" sealed="$WORK/rotation/offline-keys.sealed.json" src
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made (or removed) outside it."; return 1; }
+  [ ! -e "$WORK/offline/offline-keys.sealed.json" ] \
+    || { err "this session made the offline keys (step o): step a makes their owner authorizations; a rotation is a later session."; return 1; }
+  if [ ! -s "$sealed" ]; then
+    src="$(oa_rotate_sealed_in)"
+    [ -n "$src" ] && [ -f "$src" ] && [ ! -L "$src" ] || { err "'$src' is not the archived sealed file (a regular file, not a link): nothing was made."; return 1; }
+    ( umask 077; mkdir -p "$WORK/rotation" && cp -- "$src" "$sealed" ) || { err "the sealed file could not be copied into $WORK/rotation."; return 1; }
+  fi
+  # the set it replaces, checked as this root's, and this laptop's clock strictly after it, BEFORE the root signs: each
+  # node refuses a record not newer than its current one, so a clock set behind is caught here, not at the nodes (95)
+  if [ ! -e "$dir/ownerauth.record.json" ]; then
+    if [ ! -s "$WORK/rotation/current.record.json" ]; then
+      src="$(oa_rotate_current_in)"
+      [ -n "$src" ] && [ -f "$src" ] && [ ! -L "$src" ] || { err "'$src' is not the current record (a regular file, not a link): nothing was made."; return 1; }
+      ( umask 077; cp -- "$src" "$WORK/rotation/current.record.json" ) || { err "the current record could not be copied into $WORK/rotation."; return 1; }
+    fi
+    local current now
+    current="$(python3 -Es "$HERE/offline-keys.py" ownerauth-current --record "$WORK/rotation/current.record.json" --sealed "$sealed")" \
+      || { rm -f -- "$WORK/rotation/current.record.json"; err "the current record is not this root's owner-authorization record (reason above): nothing was made."; return 1; }
+    current="${current#CURRENT }"; current="${current%% *}"; now="$(oa_utc_now)"
+    [[ "$now" > "$current" ]] \
+      || { err "this laptop's clock ($now) is not later than the current record's ($current): every node would refuse the new record. Set the clock; nothing was made."; return 1; }
+  fi
+  ownerauth_make "$dir" "$sealed" "$WORK/ownerauth-rotation-gnupg" || return 1
+  if [ ! -e "$dir/drill-passed" ]; then
+    ownerauth_drill "$dir" "$sealed" || { err "the new recovery copies did NOT pass the drill: this rotation is not to be used or burned."; return 1; }
+    : > "$dir/drill-passed"
+  fi
+  info "rotation made and proven. On EACH node <n>, from a copy of both sets, the CURRENT value first and then the NEW one on stdin"
+  info "(regalia-kms#456; the owner card decrypts each envelope):"
+  # isolation-exempt: printed for the operator to run ON A NODE, where -m finds the package from /usr/lib/regalia-kms (as the units' WorkingDirectory)
+  show "cd /usr/lib/regalia-kms && (gpg --decrypt <current set>/ownerauth-<n>.yk.gpg; gpg --decrypt ownerauth-<n>.yk.gpg) | sudo python3 -Es -m deploy.baremetal.enrol ownerauth --rotate-from <current set>/ownerauth.record.json --record ownerauth.record.json --node-id <n> --root-key <root>"
+  info "A node set or checked before regalia-kms#456 knows no current record: once, before its rotation, with the CURRENT value on stdin:"
+  # isolation-exempt: printed for the operator to run ON A NODE, where -m finds the package from /usr/lib/regalia-kms (as the units' WorkingDirectory)
+  show "cd /usr/lib/regalia-kms && gpg --decrypt <current set>/ownerauth-<n>.yk.gpg | sudo python3 -Es -m deploy.baremetal.enrol ownerauth --check --adopt --record <current set>/ownerauth.record.json --node-id <n> --root-key <root>"
+  ownerauth_commit_list "$dir" "hsm-backups/ownerauth/rotation-$(oa_record_at "$dir")/, beside the set it replaces, never over it"
+}
+# oa_record_at DIR: the root-signed record's `at`, as the rotation's directory name (colons left out)
+oa_record_at() {
+  python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["record"]["at"].replace(":", ""))' "$1/ownerauth.record.json"
 }
 
 step_archive() {
@@ -2754,6 +2825,15 @@ step_archive() {
     else
       err "the owner authorizations are not proven by both owner cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
       err "step a needs the owner cards' exported keys and the card record, so the owner cards' step (#111 step 2) and card-record come before this disc."
+      return 1
+    fi
+  fi
+  # a rotation (step t): the disc waits for both owner cards' proof and the drill of the new recovery copies (#135)
+  if [ -e "$WORK/ownerauth-rotation" ] && { [ ! -e "$WORK/ownerauth-rotation/ownerauth-verified.record.json" ] || [ ! -e "$WORK/ownerauth-rotation/drill-passed" ]; }; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the rotation is not proven by both owner cards and the drill; the real ceremony refuses this disc."
+    else
+      err "the rotation is not proven by both owner cards and its drill (step t unfinished). Run step t; nothing was burned."
       return 1
     fi
   fi
@@ -2847,6 +2927,14 @@ step_archive() {
     done
     ownerauth_commit_list
   fi
+  if [ -d "$WORK/ownerauth-rotation" ]; then
+    mkdir -p "$burn/ownerauth-rotation"
+    for art in "$WORK"/ownerauth-rotation/ownerauth-*.yk.gpg "$WORK"/ownerauth-rotation/ownerauth-*.bg.sops "$WORK"/ownerauth-rotation/*.record.json \
+               "$WORK"/ownerauth-rotation/ownerauth-verify.jsonl "$WORK"/ownerauth-rotation/ownerauth-verify-key.*.yk.gpg; do
+      [ -f "$art" ] && cp "$art" "$burn/ownerauth-rotation/"
+    done
+    ownerauth_commit_list "$WORK/ownerauth-rotation" "hsm-backups/ownerauth/rotation-$(oa_record_at "$WORK/ownerauth-rotation")/"
+  fi
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then
     info "Staged recovery kit for the archive disc (RECOVERY-START-HERE.txt + RECOVERY-TECHNICAL.md + toolkit): $kit"
   else
@@ -2904,8 +2992,8 @@ step_archive() {
 # The owner authorizations' recovery drill (owner decision 2026-10-05, regalia-kms#242): the recovery identity opened
 # from k shares of the offline set into a 0600 file in the RAM workdir, one node's recovery copy decrypted with sops and
 # checked against the root-signed record's check value (no TPM), and the identity file shredded by its exact path.
-ownerauth_drill() {
-  local dir="$WORK/ownerauth" key="$WORK/ownerauth-recovery.key" nodes
+ownerauth_drill() { # [DIR SEALED]: step a's set by default; the rotation's (step t) when named
+  local dir="${1:-$WORK/ownerauth}" sealed="${2:-$WORK/offline/offline-keys.sealed.json}" key="$WORK/ownerauth-recovery.key" nodes
   [ -e "$dir/ownerauth.record.json" ] || { info "no owner authorizations in this session: no owner-auth drill."; return 0; }
   [ ! -e "$key" ] || { err "$key exists: a drill before this one did not finish; shred it (shred -u -- '$key') first."; return 1; }
   nodes="$(python3 -I -c 'import json,sys; print(" ".join(sorted(json.load(open(sys.argv[1]))["record"]["nodes"])))' "$dir/ownerauth.record.json")" \
@@ -2919,12 +3007,12 @@ ownerauth_drill() {
     trap 'exit 130' INT TERM
     rc=0
     info "Owner-auth recovery drill: type $(K) shares of the OFFLINE keys' set, then Ctrl-D:"
-    python3 -Es "$HERE/offline-keys.py" open-recovery-identity --sealed "$WORK/offline/offline-keys.sealed.json" --out "$key" \
+    python3 -Es "$HERE/offline-keys.py" open-recovery-identity --sealed "$sealed" --out "$key" \
         < "$(oa_shares_in)" >/dev/null || { err "the recovery identity was NOT opened (reason above)."; exit 1; }
     for node in $nodes; do
       if SOPS_AGE_KEY_FILE="$key" sops decrypt --input-type binary --output-type binary "$dir/ownerauth-$node.bg.sops" \
            | python3 -Es "$HERE/offline-keys.py" ownerauth-check --record "$dir/ownerauth.record.json" --node "$node" \
-               --sealed "$WORK/offline/offline-keys.sealed.json" >/dev/null; then
+               --sealed "$sealed" >/dev/null; then
         info "owner-auth drill: node $node's recovery copy opens and matches the record the root signed."
       else
         err "owner-auth drill FAILED for node $node: its recovery copy does not give the recorded value (reason above)."; rc=1
@@ -3073,6 +3161,7 @@ main() {
    6) Print break-glass recovery instruction card (DVD-case sized)
    o) Offline keys: the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
    a) Owner authorizations: each KMS host's TPM owner auth, to both owner cards + its SOPS recovery copy (after o, card record)
+   t) Owner-auth rotation: new owner auths for enrolled hosts, from the archived sealed set (a later session; card record)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
     printf '   q) quit (workdir is shredded)\n'
@@ -3093,6 +3182,7 @@ MENU
       9) step_hsm_import;;
       o|O) step_offline_keys;;
       a|A) step_ownerauth;;
+      t|T) step_ownerauth_rotate;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
       q|Q) break;;
       *) warn "pick 1-9 or q";;

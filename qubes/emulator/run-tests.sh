@@ -105,6 +105,7 @@ python3 "$HERE/tests/test_card_record_writer.py" || suite_failed "test_card_reco
 python3 "$HERE/tests/test_card_record_rebuild.py" || suite_failed "test_card_record_rebuild.py"
 "$HERE/tests/test-offline-keys-step.sh" || suite_failed "test-offline-keys-step.sh"
 "$HERE/tests/test-ownerauth-step.sh" || suite_failed "test-ownerauth-step.sh"
+"$HERE/tests/test-ownerauth-rotation-step.sh" || suite_failed "test-ownerauth-rotation-step.sh"
 python3 "$HERE/tests/test_metal_stamp.py" || suite_failed "test_metal_stamp.py"
 python3 "$HERE/tests/test_recovery_procedure.py" || suite_failed "test_recovery_procedure.py"
 python3 "$HERE/tests/test_payload_qr.py" || suite_failed "test_payload_qr.py"

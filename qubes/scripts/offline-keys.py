@@ -1057,12 +1057,9 @@ def open_recovery_identity(sealed_path, out_path, stream, run=subprocess.run):
     return sealed["publics"]["ownerauth-recovery"]["recipient"]
 
 
-def ownerauth_check_value(record_path, node, stream, sealed_path):
-    """A recovered owner authorization ("<64 hex>" and a newline on `stream`) checked against the root-signed record's
-    check value for `node`, without a TPM: the rehearsal's drill, and a recovery's last step before the value is used.
-    The record must be signed by the root of THIS sealed set (its public header), not merely the root the record names
-    itself: a record checked under its own root_entry proves nothing about who signed it (ed and 95 on regalia-kms#447)."""
-    import hmac
+def ownerauth_record_of(record_path, sealed_path):
+    """An owner-authorization record signed by the root of THIS sealed set (its public header), not merely by the root
+    the record names itself (ed and 95 on regalia-kms#447), its `at` in the records' form. Returns the record."""
     with open(record_path, "rb") as f:
         record = verify_record(json.loads(f.read(1 << 20)))
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
@@ -1071,6 +1068,18 @@ def ownerauth_check_value(record_path, node, stream, sealed_path):
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
     require(record["root_entry"] == {"alg": "ed25519", "key": root_entry_of(sealed)},
             "the record is signed by another root than this sealed set's: its origin is not this ceremony's")
+    require(isinstance(record.get("at"), str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record["at"]) is not None,
+            "the record's at is not %Y-%m-%dT%H:%M:%SZ")
+    return record
+
+
+def ownerauth_check_value(record_path, node, stream, sealed_path):
+    """A recovered owner authorization ("<64 hex>" and a newline on `stream`) checked against the root-signed record's
+    check value for `node`, without a TPM: the rehearsal's drill, and a recovery's last step before the value is used.
+    The record must be signed by the root of THIS sealed set (its public header), not merely the root the record names
+    itself: a record checked under its own root_entry proves nothing about who signed it (ed and 95 on regalia-kms#447)."""
+    import hmac
+    record = ownerauth_record_of(record_path, sealed_path)
     require(node in record["nodes"], "the record names no node %s" % node)
     plain = bytearray(stream.buffer.read(66) if hasattr(stream, "buffer") else stream.read(66))
     try:
@@ -2018,6 +2027,10 @@ def main(argv=None):
     q.add_argument("--node", required=True)
     q.add_argument("--sealed", required=True, help="the offline set's sealed file: its root must be the record's")
     o.add_argument("--out", required=True, help="a RAM directory for the files and the record")
+    oc = sub.add_parser("ownerauth-current", help="a rotation's CURRENT owner-authorization record, checked as THIS sealed "
+                        "set's root's: prints its at and nodes (ceremony.sh step t refuses a clock not later than that at)")
+    oc.add_argument("--record", required=True)
+    oc.add_argument("--sealed", required=True)
     ov = sub.add_parser("ownerauth-verify", help="with one owner card inserted: prove it opens every node's envelope")
     ov.add_argument("--record", required=True)
     ov.add_argument("--dir", required=True, help="where the envelopes are; the log is appended there")
@@ -2061,6 +2074,9 @@ def main(argv=None):
         elif args.command == "ownerauth-check":
             ownerauth_check_value(args.record, args.node, sys.stdin, args.sealed)
             print("OWNERAUTH %s: the value matches the check value of a record this sealed set's root signed" % args.node)
+        elif args.command == "ownerauth-current":
+            record = ownerauth_record_of(args.record, args.sealed)
+            print("CURRENT %s %s" % (record["at"], ",".join(sorted(record["nodes"]))))
         elif args.command == "ownerauth":
             record = ownerauth(args.sealed, args.nodes.split(","), args.yk_keys, args.card_record, args.state_dir, args.out, sys.stdin)
             for node, facts in sorted(record["nodes"].items()):
