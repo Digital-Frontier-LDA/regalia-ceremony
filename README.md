@@ -95,9 +95,9 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
 - **The laptop-side YubiKeys (D30):**
   - The owner cards' keys (ADR-0002 D30.7): `qubes/scripts/owner-cards.py` generates SIG, DEC and AUT on each card,
     has gpg build the certificate from them, writes the fingerprints back, sets touch fixed on all three and checks
-    each attestation, then joins both cards into the card record's input. It is tested against a stand-in card and a
-    stand-in gpg dialogue only; its run on a staging YubiKey has not happened yet, and no `ceremony.sh` step runs it
-    (#111). The D30.6 bench measurements it follows passed on 2026-10-05.
+    each attestation, then joins both cards into the card record's input. It enrolled staging YubiKey 35718625
+    on 2026-10-05 (regalia-kms-24's bench, #111), after two runs that found and fixed real-card faults; not yet run on
+    the ceremony laptop or a production card, and no `ceremony.sh` step runs it (#111).
   - The release key's import onto the release cards is not implemented (#124).
   - The card-ceremony record's rules and verifier are in review (#121); no tool writes the record yet.
   - The owner cards' attestation certificates are produced and checked by `owner-cards.py` (each claim and key), and

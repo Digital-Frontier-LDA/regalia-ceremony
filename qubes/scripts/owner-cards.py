@@ -35,9 +35,9 @@ the files beside its facts (each attestation's digest recomputed, each leaf veri
 claims re-read against the facts), so a hand-edited facts file carries nothing (d9 on #140).
 
 CURRENT LIMITATIONS (2026-10-05):
-  * Built and tested against a stand-in card and a stand-in for gpg's card dialogue only. The real dialogue (the
-    command-fd answers) is the one regalia-kms-24 measured on the bench, but this script's run of it on a real card is
-    not yet proven: a bench run on a staging YubiKey comes before any ceremony.
+  * Proven once on a real card: regalia-kms-24 enrolled staging YubiKey 35718625 (firmware 5.7.4, gpg 2.4.7) as
+    owner-main at ba2c450 on 2026-10-05 (the facts complete, OpenSC sees the keys, touch fixed on all three; the card
+    reset afterwards; rc#111). Not yet run for owner-backup, on the ceremony laptop, or on a production card.
   * The attestation chain to Yubico's root is not checked here, only each leaf's claims and keys: regalia-kms's reader
     (#400) checks the chain at genesis. A card that fails any check is left with its keys; reset its OpenPGP applet
     (ykman openpgp reset) before it is used again.
