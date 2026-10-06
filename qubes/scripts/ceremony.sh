@@ -2767,13 +2767,25 @@ oc_insert_card() {
   warn "Insert the $1 card ALONE: unplug every other YubiKey, Nitrokey and card reader (owner-cards refuses any), then type its serial."
   read -r -p "   serial of the $1 card: " OC_SERIAL
 }
+# oc_files: each FINISHED owner card's files (a card's facts .json is written last, and a failed card's outputs are
+# removed), by their exact names, then cards.json and owner-cards.gpg: never a glob that a partial card could match (d9)
+oc_files() {
+  local facts serial base x
+  for facts in "$WORK"/cards/owner-card-*.json; do
+    [ -f "$facts" ] || continue
+    serial="${facts##*/owner-card-}"; serial="${serial%.json}"
+    case "$serial" in ''|*[!0-9]*) continue;; esac
+    base="$WORK/cards/owner-card-$serial"
+    for x in .json .gpg .rev.age .att.der .sig.attest.der .dec.attest.der .aut.attest.der; do printf '%s\n' "$base$x"; done
+  done
+  printf '%s\n' "$WORK/cards/cards.json" "$WORK/cards/owner-cards.gpg"
+}
 owner_cards_commit_list() {
   local f
   warn "COMMIT after the ceremony (hsm-backups/cards/): both owner cards' certificates, attestations and facts."
-  for f in "$WORK"/cards/owner-card-*.gpg "$WORK"/cards/owner-card-*.json "$WORK"/cards/owner-card-*.der "$WORK"/cards/owner-card-*.rev.age \
-           "$WORK"/cards/cards.json "$WORK"/cards/owner-cards.gpg; do
+  while IFS= read -r f; do
     [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
-  done
+  done < <(oc_files)
   return 0
 }
 
@@ -2983,10 +2995,9 @@ step_archive() {
   # the owner cards (step c): certificates, attestations and facts public, each revocation sealed to the break-glass key
   if ls "$WORK"/cards/owner-card-*.json >/dev/null 2>&1; then
     mkdir -p "$burn/cards"
-    for art in "$WORK"/cards/owner-card-*.gpg "$WORK"/cards/owner-card-*.json "$WORK"/cards/owner-card-*.der "$WORK"/cards/owner-card-*.rev.age \
-               "$WORK"/cards/cards.json "$WORK"/cards/owner-cards.gpg; do
+    while IFS= read -r art; do
       [ -f "$art" ] && cp "$art" "$burn/cards/"
-    done
+    done < <(oc_files)
     owner_cards_commit_list
   fi
   # the developers' set (step r): its sealed file and break-glass copy are ciphertext, its record and the cards' facts public

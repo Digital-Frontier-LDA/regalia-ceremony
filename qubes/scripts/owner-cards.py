@@ -379,9 +379,13 @@ def enroll(role, serial, name, email, out, recipient_file, replace=False, ask=_a
     try:
         return _after_generation(role, serial, name, email, named, admin, user, publics, refs, card, build, run, now, recipient, seen)
     except BaseException as error:          # noqa: BLE001 - whatever stopped it, Ctrl-C included, the card now holds new keys
-        # the GnuPG home goes too: it may hold gpg's revocation certificate in the clear, and would block the rerun
+        # the GnuPG home goes too: it may hold gpg's revocation certificate in the clear, and would block the rerun; and so do
+        # this card's own outputs, by their exact names, so a facts file alone means "this card finished" (d9 on #140)
         _agent_stop(named["home"], run)
         shutil.rmtree(named["home"], True)
+        for key, path in named.items():
+            if key != "home" and os.path.lexists(path):
+                os.unlink(path)
         said = "Owner card %s now holds NEW keys: reset its OpenPGP applet (ykman openpgp reset) before it is used again" % serial
         if not isinstance(error, Exception):
             print("owner-cards: interrupted. %s" % said, file=sys.stderr)

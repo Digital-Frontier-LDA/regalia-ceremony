@@ -110,7 +110,10 @@ grep -q "RC=1" <<< "$out" && grep -q "card 40000001 is already enrolled as the o
   || F "same card: $(tail -4 <<< "$out")"
 
 hdr "the archive stages both cards' public files"
+printf 'partial\n' > "$W/cards/owner-card-40000009.gpg"; printf 'partial\n' > "$W/cards/owner-card-40000009.sig.attest.der"   # a stray, unfinished card
 arch "$W" 1 > "$T/arch.out"
+partial=("$W"/mdisc/cards/*40000009*); [ ! -e "${partial[0]}" ] && ! grep -q 40000009 "$T/arch.out" && P "an unfinished card's files (no facts) are neither staged nor listed (d9)" \
+  || F "partial staged: $(ls "$W/mdisc/cards" | tr '\n' ' ')"
 burned="$(ls "$W/mdisc/cards" 2>/dev/null | tr '\n' ' ')"
 for f in cards.json owner-cards.gpg owner-card-40000001.json owner-card-40000002.aut.attest.der owner-card-40000002.rev.age; do
   grep -q "$f" <<< "$burned" || F "$f is not staged (staged: $burned)"

@@ -334,6 +334,24 @@ class Enroll(unittest.TestCase):
             yield self.card, self.card.firmware
         return card
 
+    def test_a_failure_part_way_through_the_writes_leaves_none_of_the_cards_files(self):
+        """d9 on #140: ENOSPC after the certificate is written: no owner-card-<serial>.* is left, and after the card's
+        reset the rerun proceeds."""
+        real = oc._write_new
+        written = []
+
+        def full(path, data):
+            if written:
+                raise OSError(28, "No space left on device")
+            written.append(path)
+            return real(path, data)
+        with unittest.mock.patch.object(oc, "_write_new", side_effect=full):
+            with self.assertRaisesRegex(ok.Refused, "No space left on device.*now holds NEW keys"):
+                self.enroll()
+        self.assertTrue(written, "one file was written before the failure")
+        self.assertEqual([n for n in os.listdir(self.out) if n.startswith("owner-card-40000001")], [], "no file of the failed card")
+        self.assertEqual(self.enroll()["serial"], "40000001", "the rerun (after a reset) proceeds")
+
     def test_a_generation_that_stops_part_way_says_the_card_needs_a_reset(self):
         with self.assertRaisesRegex(ok.Refused, "the card stopped answering. Owner card 40000001 may now hold NEW keys: reset"):
             self.enroll(lie={"fail_generate": "dec"})
