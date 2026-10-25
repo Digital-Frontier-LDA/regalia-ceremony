@@ -3,6 +3,8 @@
 # ("No smart card readers found." — which the old grep for "reader" counted as a reader), a
 # Nitrokey HSM, and only a YubiKey. Owner's first disposable, 2026-09-25: no HSM attached, and
 # preflight said "a PC/SC reader is visible" with no HSM warning.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PF="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"

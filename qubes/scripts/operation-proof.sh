@@ -162,7 +162,7 @@ case "$OPERATION" in
   decrypt)       prep=(--challenge-out "$W/challenge" --ciphertext-out "$W/ciphertext"); expect="RSA-PKCS-OAEP";;
   key-agreement) prep=(--ephemeral-out "$W/ephemeral.pem" --peer-out "$W/peer.der");    expect="ECDH1-DERIVE";;
 esac
-mechanism="$(python3 "$MANIFEST_TOOL" proof-prepare --operation "$OPERATION" --public-key "$W/pub.der" "${prep[@]}")" \
+mechanism="$(python3 -Es "$MANIFEST_TOOL" proof-prepare --operation "$OPERATION" --public-key "$W/pub.der" "${prep[@]}")" \
   || exit 1
 case " $expect " in *" $mechanism "*) ;; *) die "unexpected mechanism '$mechanism' for --operation $OPERATION";; esac
 
@@ -212,4 +212,4 @@ case "$OPERATION" in
   key-agreement) proof_args+=(--ephemeral-key "$W/ephemeral.pem" --token-output "$W/answer");;
 esac
 [ -n "$DEVICE_ID" ] && proof_args+=(--device-id "$DEVICE_ID")
-python3 "$MANIFEST_TOOL" operation-proof "${proof_args[@]}"
+python3 -Es "$MANIFEST_TOOL" operation-proof "${proof_args[@]}"

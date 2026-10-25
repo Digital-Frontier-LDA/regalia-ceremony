@@ -216,7 +216,7 @@ repository's copy:
 ```sh
 # the key goes straight from the payload into the verifier: never into a file of its own
 rm -f /dev/shm/pins.age      # a stale copy must never be what gets decrypted
-sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
+sed -n 's/^escrow_mac_key: *//p' payload.txt | python3 -Es bin/pin_escrow_mac.py select <repository checkout> /dev/shm/pins.age
 case $? in
   0) bin/age -d -i breakglass.key /dev/shm/pins.age ;;               # the verified escrow
   3) echo "no escrow verifies: use the payload's PINs" ;;
@@ -230,6 +230,24 @@ verified escrow, not the payload. It matters more here than for a PIN: typed at 
 is a **wrong attempt**, and after one wrong attempt that TPM refuses the right value too for its
 lockout-recovery time (24 hours under the KMS policy). An escrow written before these lines existed
 has none; then, and only then, the payload's values are the ones to use.
+
+The escrow holds each KMS host's **disk recovery key** too, as `luks_a=`, `luks_b=` and `luks_c=` lines
+(the payload has them as `luks_{a,b,c}_recovery_key`). It is what opens a KMS host's encrypted disk
+when nothing else can: all three sites down, or a host whose TPM no longer releases its disk. Type
+it at that host's boot prompt **exactly as written, lower case, dashes included** (8 groups of 8
+letters); without the dashes it does not open the disk. Use the newest verified escrow, not the
+payload: a key is replaced after every use, and the replaced key opens nothing. Once the host is
+back, replace the key again: it has now been typed at a console. In this order, because the newest
+verified escrow must never hold a key that opens nothing:
+
+1. `bin/pin-escrow.sh --new-recovery-key` on the offline machine prints one new key (never invent
+   one by hand); write it on a new KMS host recovery card.
+2. At the host: `recovery-key.sh --replace` (KMS repository) with the used key and the new one, then
+   `--check` with the key read from the new card.
+3. Only then escrow it (`bin/pin-escrow.sh`).
+
+An escrow written before these lines existed has no `luks_` lines; then, and only then, the payload's
+keys are the ones to use.
 
 `select` searches the repository's whole git history (use a full clone) and prints the escrow it
 chose. Every `SKIPPED` or `NOTE` line is an incident to record. Only exit status **3** means no

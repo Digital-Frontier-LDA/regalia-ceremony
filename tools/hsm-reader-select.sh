@@ -416,7 +416,7 @@ hsm_role_of() {
         printf 'hsm_role_of: python3 is required to read %s — every card is PROTECTED\n' "$f" >&2
         printf 'protected\n'; return 0
     fi
-    role="$(python3 -c '
+    role="$(python3 -I -c '
 import json, sys
 # NO `assert` HERE: python3 -O (or PYTHONOPTIMIZE in the environment) strips assert statements, and
 # these are the checks that keep an unrecognised registry from naming a card wipeable.
@@ -489,7 +489,7 @@ $(printf '%s' "${HSM_DEVAUT_MAP:-}" | tr ' \t' '\n\n')
 EOF
     f="$(_hsm_roles_path 2>/dev/null)" || f=""
     [ -n "$f" ] && [ -r "$f" ] && command -v python3 >/dev/null 2>&1 || return 1
-    python3 -c '
+    python3 -I -c '
 import json, re, sys
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))

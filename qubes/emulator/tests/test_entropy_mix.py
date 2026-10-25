@@ -12,6 +12,9 @@ from a failed read, a short source, an empty file, a single source dressed up as
 Also asserts the mixed value is NEVER printed: it is the master secret, and this tool runs on
 a terminal that may be photographed or recorded during the ceremony.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import hashlib
 import os
 import stat

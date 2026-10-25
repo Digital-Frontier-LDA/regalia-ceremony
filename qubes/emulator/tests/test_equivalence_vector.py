@@ -9,6 +9,9 @@ that was not actually perturbed, or that differs somewhere other than where the 
 reaches; and expected.json is anchored to values published elsewhere in the repository, not only
 to the run that wrote it.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import contextlib
 import copy
 import importlib.util

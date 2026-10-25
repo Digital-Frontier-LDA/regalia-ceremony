@@ -94,7 +94,7 @@ _valid_utf8() {
   if command -v iconv >/dev/null 2>&1; then
     printf '%s' "$1" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
   elif command -v python3 >/dev/null 2>&1; then
-    printf '%s' "$1" | python3 -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' >/dev/null 2>&1
+    printf '%s' "$1" | python3 -I -c 'import sys; sys.stdin.buffer.read().decode("utf-8")' >/dev/null 2>&1
   else
     return 2     # cannot evaluate: the caller refuses rather than guessing
   fi

@@ -27,7 +27,7 @@
 _ceremony_python_imports() {
   local py="$1"; shift
   [ "$#" -eq 0 ] && return 0
-  "$py" -c 'import importlib,sys
+  "$py" -I -c 'import importlib,sys
 for m in sys.argv[1:]: importlib.import_module(m)' "$@" >/dev/null 2>&1
 }
 
@@ -89,9 +89,12 @@ REFUSING: no interpreter here can import the ceremony's pinned dependencies ($*)
   ~/.local/share/regalia-ceremony-venv, ~/.venvs/regalia-qual (for both \$HOME and \$SUDO_USER),
   and at the system python3.
 
+  A copy installed with "pip install --user" does not count: the ceremony runs Python isolated,
+  without the user's site-packages, so that a file planted there cannot replace a module.
+
   Build the venv the way the dev image does:
 
-      python3 -m venv /opt/dev-bin/regalia-venv
+      python3 -I -m venv /opt/dev-bin/regalia-venv
       /opt/dev-bin/regalia-venv/bin/pip install --require-hashes -r qubes/requirements.txt
 
   or point CEREMONY_VENV at one you already have. Running the suites against an interpreter

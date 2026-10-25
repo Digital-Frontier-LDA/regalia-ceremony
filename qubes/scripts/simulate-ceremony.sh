@@ -61,7 +61,7 @@ mk pkcs11-tool <<'S'
 prev=""; out=""; for a in "$@"; do [ "$prev" = "-o" ] && out="$a"; prev="$a"; done
 DER=3056301006072a8648ce3d020106052b8104000a034200047f41ffa6c0c377ce7660dfd2716ab96f18f9dbd7de5a6d360b3e89efbbae906cd5188e7d696b936777d5383256af1246980098dd9a16826a4f4984a136fbeab6
 case "$*" in
-  *--read-object*pubkey*) [ -n "$out" ] && python3 -c "import binascii;open('$out','wb').write(binascii.unhexlify('$DER'))";;
+  *--read-object*pubkey*) [ -n "$out" ] && python3 -I -c "import binascii;open('$out','wb').write(binascii.unhexlify('$DER'))";;
 esac
 echo "[SIMULATED] pkcs11-tool $*" >&2
 S

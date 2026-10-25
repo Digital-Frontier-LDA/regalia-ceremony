@@ -160,8 +160,8 @@ for d in $DELAYS; do
     c="$(grep -acE 'BACK in' "$OUT/$tag.soak.log")"
     w="$(grep -acE 'DID NOT COME BACK' "$OUT/$tag.soak.log")"
     tot=$((c + w))
-    rate="$(python3 -c "print(f'{100*$w/$tot:.1f}' if $tot else 'n/a')")"
-    boot="$(python3 -c "
+    rate="$(python3 -I -c "print(f'{100*$w/$tot:.1f}' if $tot else 'n/a')")"
+    boot="$(python3 -I -c "
 import re,statistics
 v=[int(m) for m in re.findall(r'BACK in\s+(\d+)s', open('$OUT/$tag.soak.log',errors='ignore').read())]
 print(f'{statistics.mean(v):.2f}' if v else 'n/a')")"

@@ -14,6 +14,8 @@
 #
 # Runs natively. pkcs11-tool is stubbed with a model that can be told to hold the right key, a
 # wrong key, or a key it cannot sign with. Real openssl + the real derivation are used.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 # The step is gated until the import is proven on real hardware for secp256k1; the suite opts in

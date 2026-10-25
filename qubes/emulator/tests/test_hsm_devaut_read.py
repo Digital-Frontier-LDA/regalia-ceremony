@@ -12,6 +12,9 @@ anything but 9000 as an error, kept the first 255 bytes, and printed a confident
 PREFIX of the certificate. Commissioning pins that digest, so the failure mode was a card that
 could never be commissioned — with no hint that the reader, not the card, was wrong.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import hashlib
 import os
 import subprocess

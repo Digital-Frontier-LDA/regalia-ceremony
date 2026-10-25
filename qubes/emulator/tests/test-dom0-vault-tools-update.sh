@@ -2,6 +2,8 @@
 # qubes/dom0/vault-tools-update.sh — the one-command template update run in dom0. dom0 tools are
 # stand-ins here: qvm-run -p "downloads" a tarball built from this checkout, qubesctl prints a Salt
 # summary, sudo runs the command, /srv/salt is a scratch directory.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 QUBES="$(cd "$HERE/../.." && pwd)"

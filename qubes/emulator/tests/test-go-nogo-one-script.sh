@@ -5,6 +5,8 @@
 # Asserts: preflight.sh is gone and nothing calls it; --env-only is the environment gate ceremony.sh
 # runs; a full run runs every self-test; a broken tool is a FAIL and a NO-GO; every item line reads
 # OK, WARN or FAIL, and the last line is GO or NO-GO.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPTS="${CEREMONY_SCRIPTS:-$HERE/../../scripts}"
@@ -27,7 +29,7 @@ callers="$(grep -rnE --exclude=test-go-nogo-one-script.sh '(\$HERE|\$SCRIPTS|/op
 grep -q '"$HERE/go-nogo.sh" --env-only' "$SCRIPTS/ceremony.sh" \
   && P "ceremony.sh gates on go-nogo.sh --env-only before any secret" || F "ceremony.sh does not run the environment gate"
 
-grep -q 'timeout 60 python3 "$HERE/hsm-random.py"' "$SCRIPTS/go-nogo.sh" \
+grep -q 'timeout 60 python3 -Es "$HERE/hsm-random.py"' "$SCRIPTS/go-nogo.sh" \
   && P "the HSM RNG read is bounded (60 s, as in ceremony.sh)" || F "the HSM RNG read has no timeout: a hung token stalls the report"
 
 hdr "--env-only: the environment alone, in preflight's words"

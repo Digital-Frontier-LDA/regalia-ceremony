@@ -147,6 +147,16 @@ if [ "$cl" = 0 ]; then ok "core dumps disabled (ulimit -c 0)."
 elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "core dump limit is '$cl' — real ceremonies fail this control."
 else bad "core dump limit is '$cl' — run ulimit -c 0 before the ceremony."; fi
 
+# Test-only switches: each loosens a control for the emulator suites and is honoured by its tool only under
+# CEREMONY_SIMULATE. A real ceremony must have none of them set (d9 on regalia-ceremony#120).
+set_switches=""
+for v in CEREMONY_ALLOW_NONTMPFS CEREMONY_ALLOW_SWAP CEREMONY_ALLOW_CLASSICAL_BREAKGLASS; do
+  [ -n "${!v:-}" ] && set_switches="$set_switches $v"
+done
+if [ -z "$set_switches" ]; then ok "no test-only switch is set."
+elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then warn "test-only switches set:$set_switches — real ceremonies fail this control."
+else bad "test-only switches set:$set_switches — unset them; a real ceremony runs with none."; fi
+
 hdr "Execution profile"
 if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
   warn "execution-profile proof skipped in explicitly simulated test mode."
@@ -154,7 +164,7 @@ elif [ ! -x "$HERE/preflight-environment.py" ]; then
   bad "preflight-environment.py is missing or not executable — cannot prove a supported disposable profile."
 elif [ ! -x "$HERE/ceremony-teardown.py" ]; then
   bad "ceremony-teardown.py is missing or not executable — cannot prove cleanup after secret exposure."
-elif ! profile_out="$("$HERE/preflight-environment.py" 2>&1)"; then
+elif ! profile_out="$(python3 -Es "$HERE/preflight-environment.py" 2>&1)"; then
   bad "execution profile is unsafe or unsupported:"
   printf '%s\n' "$profile_out" | sed 's/^/       /'
 else
@@ -191,7 +201,7 @@ done
 # HERE, before keys are in RAM — not mid-ceremony after the money is exposed.
 if command -v python3 >/dev/null 2>&1; then
   for m in mnemonic shamir_mnemonic; do
-    if python3 -c "import $m" >/dev/null 2>&1; then ok "python3 module '$m'"
+    if python3 -I -c "import $m" >/dev/null 2>&1; then ok "python3 module '$m'"
     else bad "python3 cannot import '$m' — the BIP39<->SLIP-39 seed backup (step 3c) will fail; bake the wheel into the vault-tools image (no pip on the air-gapped qube)."; fi
   done
 fi
@@ -257,7 +267,7 @@ else warn "no /dev/sr* optical drive seen — attach the internal/external DVD w
 hdr "Chip cards (SLE-4442)"
 # The chip-card step needs the manager AND pyscard; the manager exits at import without pyscard,
 # which would surface only at the step, with a share already in RAM.
-if command -v sle4442-manager >/dev/null 2>&1 && python3 -c "import smartcard" >/dev/null 2>&1; then
+if command -v sle4442-manager >/dev/null 2>&1 && python3 -I -c "import smartcard" >/dev/null 2>&1; then
   ok "sle4442-manager + pyscard"
 else bad "sle4442-manager or python3-pyscard missing — the SLE-4442 chip-card step cannot run; rebuild the template."; fi
 
@@ -300,10 +310,10 @@ selftest() { # <label> <expected line> <command...>
     printf '%s\n' "$out" | tail -5 | sed 's/^/       /'
   fi
 }
-selftest "dice-entropy"   "selftest: OK" python3 "$HERE/dice-entropy.py" --selftest
-selftest "entropy-mix"    "selftest: OK" python3 "$HERE/entropy-mix.py" --selftest
-selftest "payload-qr"     "selftest: OK" python3 "$HERE/payload-qr.py" --selftest
-selftest "seed-to-pkcs12" "selftest: OK" python3 "$HERE/seed-to-pkcs12.py" --selftest
+selftest "dice-entropy"   "selftest: OK" python3 -Es "$HERE/dice-entropy.py" --selftest
+selftest "entropy-mix"    "selftest: OK" python3 -Es "$HERE/entropy-mix.py" --selftest
+selftest "payload-qr"     "selftest: OK" python3 -Es "$HERE/payload-qr.py" --selftest
+selftest "seed-to-pkcs12" "selftest: OK" python3 -Es "$HERE/seed-to-pkcs12.py" --selftest
 # The breakglass key is born in the ceremony as a post-quantum age key (age >= 1.3, -pq). A throwaway
 # key is captured in memory and discarded unread (a here-string, not a pipe: pipefail + grep -q).
 if grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
@@ -314,7 +324,7 @@ fi
 # The printed forms: each must produce a PostScript file with at least one page.
 render() { # <label> <script> <args...>
   local label="$1" script="$2" out f="$st_dir/$2.ps"; shift 2
-  if out="$(timeout 60 python3 "$HERE/$script" "$@" -o "$f" 2>&1)" && [ "$(grep -c '^showpage' "$f" 2>/dev/null)" -ge 1 ]; then
+  if out="$(timeout 60 python3 -Es "$HERE/$script" "$@" -o "$f" 2>&1)" && [ "$(grep -c '^showpage' "$f" 2>/dev/null)" -ge 1 ]; then
     ok "$label renders ($(grep -c '^showpage' "$f") page(s))"
   else
     bad "$label does NOT render — the ceremony would stop at the print step:"
@@ -327,7 +337,7 @@ render "PIN card"            pin-card-form.py
 # The HSM's random generator (ceremony step 1 mixes it in). Reading random bytes touches no key;
 # a FAIL only when --need hsm, since a bench run may have no HSM attached. The same 60 s bound as
 # ceremony.sh: a token that hangs mid-exchange must not stall the report before its verdict.
-if timeout 60 python3 "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin" 2>/dev/null)" = 32 ]; then
+if timeout 60 python3 -Es "$HERE/hsm-random.py" --out "$st_dir/h.bin" >"$st_dir/h.out" 2>&1 && [ "$(wc -c < "$st_dir/h.bin" 2>/dev/null)" = 32 ]; then
   ok "$(head -1 "$st_dir/h.out")"
 elif [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
   # The emulator's HSM is a PKCS#11 software token with no card reader; there is nothing to read.
@@ -591,7 +601,7 @@ if needs supplies; then
     supply "At least $((n + 2)) BLANK archive discs (Verbatim AZO DVD-R or M-DISC): one per case, two spare?"
     supply "$n holographic seal stickers, with their serials written in the seal registry BEFORE today?"
     supply "Two six-sided dice (for 25 throws of two)?"
-    supply "A black pen, one blank paper PIN card and one tamper-evident envelope for it?"
+    supply "A black pen, one blank paper PIN card (three pages), and THREE tamper-evident envelopes: one per page (the KMS host recovery card is sealed apart)?"
     supply "A FULL paper tray (50 sheets or more) in the printer, and toner that does not report low?"
   elif [ "$n" -gt 0 ]; then
     bad "supplies must be confirmed at a terminal (no /dev/tty): run go-nogo.sh interactively"

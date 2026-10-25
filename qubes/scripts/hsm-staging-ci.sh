@@ -717,7 +717,7 @@ if tier_admits unit_models; then
       continue
     fi
     log="$RUN_DIR/unit_models.$suite.log"
-    python3 "$src" 2>&1 | "$REDACT" > "$log"
+    python3 "$src" 2>&1 | "$REDACT" > "$log"   # isolation-exempt: runs a test suite of the repository
     rc=$?
     ran="$(grep -aoE 'Ran [0-9]+ tests?|[0-9]+ passed' "$log" | tail -1)"
     if [ "$rc" = 0 ]; then
@@ -754,11 +754,11 @@ fi
 if tier_admits unit_cvc; then
   hdr "unit_cvc — $(step_desc unit_cvc)"
   t0="$(now)"
-  if ! python3 -c 'import cvc' 2>/dev/null; then
+  if ! python3 -c 'import cvc' 2>/dev/null; then   # isolation-exempt: its harness supplies cvc through PYTHONPATH
     fail unit_cvc "pycvc is not importable — the offline C.DevAut parse cannot be evaluated. Install: pip install --require-hashes -r $QUBES/requirements.txt"
   else
     log="$RUN_DIR/unit_cvc.log"
-    CEREMONY_SCRIPTS="$HERE" python3 "$QUBES/emulator/tests/test_cvc_devaut_verify.py" 2>&1 | "$REDACT" > "$log"
+    CEREMONY_SCRIPTS="$HERE" python3 "$QUBES/emulator/tests/test_cvc_devaut_verify.py" 2>&1 | "$REDACT" > "$log"   # isolation-exempt: runs a test suite of the repository
     rc=$?
     ran="$(grep -aoE 'Ran [0-9]+ tests?' "$log" | tail -1)"
     [ "$rc" = 0 ] && pass unit_cvc "${ran:-tests passed}" "$(( $(now) - t0 ))" \
@@ -1063,7 +1063,7 @@ if tier_admits hw_devaut; then
           cvcargs+=(--expect-chr "${EXPECT_SERIAL}00001")
         fi
         [ -n "${HSM_CI_EXPECT_DEVAUT_SHA:-}" ] && cvcargs+=(--expect-sha256 "$HSM_CI_EXPECT_DEVAUT_SHA")
-        cvcout="$(python3 "$HERE/cvc-devaut-verify.py" "${cvcargs[@]}" 2>&1)"; cvcrc=$?
+        cvcout="$(python3 "$HERE/cvc-devaut-verify.py" "${cvcargs[@]}" 2>&1)"; cvcrc=$?   # isolation-exempt: its harness supplies cvc through PYTHONPATH
         printf '%s\n' "$cvcout" > "$RUN_DIR/cvc-verify.log"
         if [ "$cvcrc" = 0 ]; then
           chr="$(printf '%s' "$cvcout" | grep -a '^CVC_CHR=' | cut -d= -f2-)"
@@ -1125,7 +1125,7 @@ if tier_admits hw_sign; then
       elif REGALIA_PIN="$USER_PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign \
            --mechanism ECDSA --id "${HSM_CI_KEY_ID:-31}" \
            --input-file "$w/d.bin" --output-file "$w/s.bin" 2>&1 | "$REDACT" >"$w/sign.log" \
-         && python3 "$VERIFY" --der "$PUB" --digest "$w/d.bin" --sig "$w/s.bin" 2>&1 | "$REDACT" >>"$w/sign.log"; then
+         && python3 -Es "$VERIFY" --der "$PUB" --digest "$w/d.bin" --sig "$w/s.bin" 2>&1 | "$REDACT" >>"$w/sign.log"; then
         pass hw_sign "signed a fresh random digest; it verifies against the pinned public key" "$(( $(now) - t0 ))"
       else
         cp "$w/sign.log" "$RUN_DIR/hw_sign.log" 2>/dev/null

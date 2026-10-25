@@ -15,10 +15,11 @@ records nothing.
 ## PINs, SO PINs, PUKs and management keys
 
 **1. Every credential the ceremony escrows is its own value.** The fleet is three HSMs and three
-YubiKeys (ADR-0002 D17), and three KMS hosts, so step 0 has nineteen fields: `hsm_{a,b,c}_user_pin`,
+YubiKeys (ADR-0002 D17), and three KMS hosts, so step 0 has twenty-two fields: `hsm_{a,b,c}_user_pin`,
 `hsm_{a,b,c}_so_pin`, `yubikey_{a,b,c}_piv_pin`, `yubikey_{a,b,c}_piv_puk`,
 `yubikey_{a,b,c}_mgmt_key`, `escrow_mac_key` (the key that authenticates later PIN escrows;
-always generated), and `tpm_{a,b,c}_lockout_auth` (each KMS host's TPM lockout authorization; always
+always generated), `tpm_{a,b,c}_lockout_auth` (each KMS host's TPM lockout authorization; always
+generated, see below), and `luks_{a,b,c}_recovery_key` (each KMS host's disk recovery key; always
 generated, see below). The list is `PIN_FIELDS` in ceremony.sh. All are required. No two may
 be equal, compared case-insensitively. Card A's PIN is not card B's; a user PIN is not its own SO
 PIN; YubiKey A's PIN is not YubiKey B's, nor its own PUK, nor any HSM PIN.
@@ -46,6 +47,40 @@ the card or from the escrow and never guessed, and the host tool asks for it onc
 *Verified by:* `test-step0-generated-credentials.sh` (generated, shown once, distinct per host),
 `test-ceremony-credential-separation.sh` (shape, distinctness), `test-escrow-tools.sh` (required at
 every escrow, never in the tool's output), `test-pin-card-form.sh` (page 2 and its rules).
+
+**Each KMS host's disk recovery key** (`luks_{a,b,c}_recovery_key`) opens that host's encrypted root
+by itself: no TPM, no peer, no running KMS (regalia-kms#77; the KMS repository's
+`deploy/baremetal/recovery-key.sh`). It exists for a total outage, or a host that can no longer
+unlock its own disk. It is the one value here that is enough **alone**: a PIN needs its token and a
+lockout authorization changes a TPM's settings, but this key gives a host's disk to whoever types it.
+It adds to the k-of-n recovery and replaces none of it: the shares still guard the HSM keys and this
+payload; the recovery key opens one disk.
+
+- The ceremony generates one per host in systemd's recovery-key format: 256 random bits as 8 groups
+  of 8 letters from `cbdefghijklnrtuv`, with a dash between groups. Those letters are on the same
+  keys of the common keyboard layouts, which matters at a boot prompt. **The dashes are part of the
+  key**, and it is lower case: step 0 requires it typed back exactly, dashes included, and the
+  escrow tool and the host tool refuse any other shape.
+- It rides in the tier-0 payload, and every later escrow repeats it (`escrow/pin-escrow.sh` asks for
+  all three each time). After a total outage, recovery reads the newest verified escrow: a key that
+  was replaced since the ceremony exists nowhere else.
+- It is shown once in step 0 and written by hand on the **KMS host recovery card**, page 3 of the
+  PIN card form. That page is sealed in an envelope **of its own**, apart from the servers and apart
+  from pages 1 and 2.
+- **Using it spends it.** Once typed at a host outside the ceremony, a rehearsal included, that host
+  gets a new key, a new card and a new escrow, in that order: the archive disc's
+  `pin-escrow.sh --new-recovery-key` prints the new key (it is never invented by hand: the host
+  enrols it on the assumption of 256 random bits); `recovery-key.sh --replace` and `--check` at the
+  host; and only then the escrow, so that the newest verified escrow never holds a key that opens
+  nothing.
+- A hand-made PIN file must hold keys made the same way. The shape check cannot tell a random key
+  from a chosen one.
+
+*Verified by:* `test-step0-generated-credentials.sh` (generated in that format, shown once, distinct
+per host; a copy without dashes or in capitals is refused), `test-ceremony-credential-separation.sh`
+(shape, distinctness), `test-escrow-tools.sh` (required at every escrow, never in the tool's output),
+`test-pin-card-form.sh` (page 3, its printed dashes and its rules). That the key opens a disk alone
+is tested in the KMS repository (`e2e/luks-recovery-key.sh`), on a loop device and not on a KMS host.
 
 **2. Each credential has the shape its device accepts.**
 - SmartCard-HSM user PIN: 10–15 digits (a 10-try counter needs a 10-digit PIN; ADR-0002 D15).
@@ -103,6 +138,21 @@ correctly, about 1 time in 256, so the key check value is compared. Test: `test-
 
 **10. YubiKeys have no DKEK.** A PIV key cannot be exported or imported under a key-encryption key.
 Continuity is multi-enrollment (rule 5, ADR-0002 D5). Nothing in this ceremony wraps a YubiKey key.
+
+**10a. The offline keys are Shamir-held software keys, in a share set of their own** (ADR-0002 D28,
+regalia#559; superseding regalia#554's signing HSM and regalia-kms#156's root HSM, 2026-10-04). The
+membership root (Ed25519) and the three keys that sign the KMS hosts' boot image are generated on the
+offline signing laptop, in RAM with swap off. They are sealed under a 256-bit master secret split k-of-n
+with SLIP-39: a new set, separate from break-glass, so a routine signing session never reconstructs the key
+that opens the vault. They are also encrypted to the break-glass key, so a lost offline set never strands
+the fleet. A signing session takes exactly k shares and hands each key only to the regalia-kms tool that
+checks what it signs: the root to `manifest sign`, the boot keys to `uki.py sign`, each as a sealed memfd.
+Every session is recorded and signed by the root. ADR-0002 D29's developers' set (the release signing key,
+regalia#530) follows the same offline-key pattern and gets a rule of its own when it is built.
+*Verified by:* `offline-keys.py` (`generate`, `verify-forms`, `sign`). Test: `test_offline_keys.py`
+(k shares open the keys and k-1 don't; another set is refused; the hand-copied forms are proven before
+the shares are shredded; no raw signing; the key is never a file; a key left behind is found).
+*Prose only:* no ceremony has run it yet.
 
 ## Transport artifacts
 

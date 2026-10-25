@@ -24,6 +24,9 @@ in SLOT ORDER. Slot order is allocation order, not dependency order. So:
 drains the link first. If power is lost between the two, the chain references a record whose
 sector was never written.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import json, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))

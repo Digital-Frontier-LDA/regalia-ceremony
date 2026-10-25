@@ -38,15 +38,15 @@ say(){ printf '%s\n' "$*"; }
 # is ample against the seconds-scale difference being tested for.
 time_to_answer(){
     local t0 out
-    t0=$(python3 -c 'import time;print(f"{time.time():.4f}")')
+    t0=$(python3 -I -c 'import time;print(f"{time.time():.4f}")')
     while :; do
         out="$(perl -e 'alarm 20; exec @ARGV' -- sc-hsm-tool 2>&1)"
         if grep -qi '^Version' <<< "$out"; then
-            python3 -c "import time;print(f'{time.time()-$t0:.2f}')"
+            python3 -I -c "import time;print(f'{time.time()-$t0:.2f}')"
             return 0
         fi
         # Give up rather than hang forever; the caller prints this as a failure.
-        if [ "$(python3 -c "import time;print(int(time.time()-$t0))")" -ge 60 ]; then
+        if [ "$(python3 -I -c "import time;print(int(time.time()-$t0))")" -ge 60 ]; then
             echo "TIMEOUT"; return 1
         fi
     done
@@ -94,7 +94,7 @@ for i in $(seq 1 "$REPS"); do
 done
 
 say ""
-python3 - "${reboot_apdu[*]}" "${vbus[*]}" <<'EOP'
+python3 -I - "${reboot_apdu[*]}" "${vbus[*]}" <<'EOP'
 import sys, statistics
 def parse(s): return [float(x) for x in s.split() if x != "TIMEOUT"]
 reb, vb = parse(sys.argv[1]), parse(sys.argv[2])

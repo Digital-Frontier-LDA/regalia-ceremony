@@ -13,6 +13,9 @@ Second class of failure: the tool handles the funding seed in plaintext. It must
 mnemonic or the container password reach argv (visible in ps / /proc/<pid>/cmdline / history),
 never print them, and never leave the raw key behind in a temp file after a crash.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import os
 import re
 import stat

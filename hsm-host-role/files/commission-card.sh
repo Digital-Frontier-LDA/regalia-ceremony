@@ -186,7 +186,7 @@ elif [ -z "$_cc_reg" ] || [ ! -r "$_cc_reg" ]; then
 elif ! command -v python3 >/dev/null; then
   F "a staging registry is present but python3 is not — the wipeable interlock CANNOT BE EVALUATED"
 else
-  _cc_role="$(python3 - "$_cc_reg" "$EXPECT_SERIAL" <<'PYREG'
+  _cc_role="$(python3 -I - "$_cc_reg" "$EXPECT_SERIAL" <<'PYREG'
 import json, sys
 try:
     data = json.load(open(sys.argv[1], encoding="utf-8"))
@@ -364,7 +364,7 @@ else
       0441*) point="${point#0441}";;
       0421*) point="${point#0421}";;
     esac
-    got="$(perl -e 'alarm 30; exec @ARGV' -- python3 "$DERIVE_PY" --hex "$point" 2>/dev/null | tr -d '[:space:]')"
+    got="$(perl -e 'alarm 30; exec @ARGV' -- python3 -Es "$DERIVE_PY" --hex "$point" 2>/dev/null | tr -d '[:space:]')"
     if [ -z "$got" ]; then
       F "could not derive an address from the key on this card — CANNOT BE EVALUATED"
     elif [ "$got" = "$EXPECT_ADDR" ]; then
@@ -453,7 +453,10 @@ else
   # C.DevAut must be the bytes whose digest B7 compared against the ceremony's pin. Recomputed here
   # from DEVAUT_HEX rather than trusting the reader's DEVAUT_SHA256 field, which is a separate line
   # a reader could get wrong independently of the bytes.
-  printf '%s' "$devaut_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+  # Every "$KEK_PY" below runs isolated (-I, or -Es for the verifier by path): the interpreter is the
+  # one the resolver found able to import pycvc and cryptography UNDER -I, so nothing in the
+  # caller's PYTHON* variables or under ~/.local is part of this verdict.
+  printf '%s' "$devaut_hex" | "$KEK_PY" -I -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
     > "$kek_tmp/devaut.bin" 2>/dev/null
   devaut_recomputed="$(sha256sum < "$kek_tmp/devaut.bin" | awk '{print $1}')"
   if [ ! -s "$kek_tmp/devaut.bin" ] || [ "$devaut_recomputed" != "$EXPECT_DEVAUT_SHA" ]; then
@@ -464,7 +467,7 @@ else
     # What kind of key the token holds at --kek-id: rsa, ec, another type's name, or nothing when the
     # bytes are not a SubjectPublicKeyInfo. Only to NAME the failure for the last two — the verifier
     # compares the key itself, so this answer never decides a pass.
-    kek_type="$( [ -s "$kek_tmp/kek.der" ] && "$KEK_PY" - "$kek_tmp/kek.der" 2>/dev/null <<'PYTYPE'
+    kek_type="$( [ -s "$kek_tmp/kek.der" ] && "$KEK_PY" -I - "$kek_tmp/kek.der" 2>/dev/null <<'PYTYPE'
 import sys
 from cryptography.hazmat.primitives.asymmetric import ec, rsa
 from cryptography.hazmat.primitives.serialization import load_der_public_key
@@ -491,9 +494,10 @@ PYTYPE
       [ -n "$att_why" ] || att_why="$(grep -v '^[[:space:]]*$' "$kek_tmp/att.err" | tail -3)"
       printf '%s\n' "$att_why" | sed 's/^/     /'
     else
-      printf '%s' "$att_hex" | "$KEK_PY" -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
+      printf '%s' "$att_hex" | "$KEK_PY" -I -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.stdin.read()))' \
         > "$kek_tmp/attest.bin" 2>/dev/null
-      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
+      # THE ATTESTATION VERDICT, isolated; the verifier starts its chain walker with -I itself.
+      ver_out="$(perl -e 'alarm 60; exec @ARGV' -- "$KEK_PY" -Es "$ATTEST_PY" --devaut "$kek_tmp/devaut.bin" \
                    --attestation "$kek_tmp/attest.bin" --trust-dir "$TRUST_DIR" \
                    --expect-spki "$kek_tmp/kek.der" 2>&1)"; ver_rc=$?
       # THE EXIT CODE AND THE THREE VERDICT LINES, ALL OF THEM. A zero exit alone would accept a
@@ -508,6 +512,11 @@ PYTYPE
         P "C.DevAut chains to the CardContact root in $TRUST_DIR"
         P "EF $(printf 'CE%02X' "$KEK_REF") is signed by this device and attests the $(tr a-z A-Z <<< "$kek_type") key at ID $KEK_ID — generated on this card"
         P "KEK public_key_sha256 = $kek_pin (SubjectPublicKeyInfo of ID $KEK_ID)"
+      elif [ "$ver_rc" -ge 128 ]; then
+        # KILLED: by the 60 s alarm (exit 142) or by any other signal. The verifier never reached a
+        # verdict, so this is not one on the card either; worded as "not a genuine card" it would get
+        # a good card thrown away on a ceremony day.
+        F "the KEK attestation verifier was stopped by signal $((ver_rc - 128))$([ "$ver_rc" -eq 142 ] && printf ' (its 60 s limit)') — CANNOT BE EVALUATED (not a verdict on the card); run it again"
       elif grep -q '^DEPENDENCY_MISSING=' <<< "$ver_out"; then
         # The resolver said this interpreter imports the deps; the verifier disagrees. Still not a
         # verdict on the card, so not worded as one.

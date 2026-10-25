@@ -9,6 +9,8 @@
 # preflight reports OK while the money's backup would fail mid-ceremony on the air-gapped
 # (no-pip) qube. This is the regression guard: preflight must import the modules and FAIL
 # CLOSED when a package is missing. Runs natively, no daemons needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PRE="${CEREMONY_SCRIPTS:-$HERE/../../scripts}/go-nogo.sh"
@@ -35,12 +37,17 @@ done
 # fails to import). Any other invocation is a no-op success.
 cat > "$SBOX/python3" <<'PY'
 #!/usr/bin/env bash
-# emulate `python3 -c '...'`: fail if the snippet imports the "missing" module
-if [ "${1:-}" = "-c" ]; then
-  case "$2" in
-    *import*"${EMU_PY_MISSING:-__none__}"*) exit 1;;
-  esac
-fi
+# emulate `python3 [-I] -c '...'`: fail if the snippet imports the "missing" module. The program is
+# the argument after -c, wherever -c stands (the scripts pass -I before it: isolated mode).
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-c" ]; then
+    case "${2:-}" in
+      *import*"${EMU_PY_MISSING:-__none__}"*) exit 1;;
+    esac
+    break
+  fi
+  shift
+done
 exit 0
 PY
 chmod +x "$SBOX/python3"

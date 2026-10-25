@@ -211,7 +211,7 @@ for i in $(seq 1 "$N"); do
     #
     # Writing the reset timestamp beside the samples makes every offset recomputable against the
     # event that matters, instead of against when a helper happened to finish starting up.
-    [ -n "${_watch_pid:-}" ] && python3 -c 'import time,sys;open(sys.argv[1],"w").write(f"{time.time():.4f}\n")' \
+    [ -n "${_watch_pid:-}" ] && python3 -I -c 'import time,sys;open(sys.argv[1],"w").write(f"{time.time():.4f}\n")' \
         "${_watch_log%.jsonl}.reset" 2>/dev/null
     reboot_card
 

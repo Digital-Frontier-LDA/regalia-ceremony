@@ -7,6 +7,9 @@ SLIP-39 shares, then recover from a file of 4 shares (one per line) — and lock
 passphrase footgun guard (a non-empty passphrase must warn; a wrong passphrase yields a
 different seed, so it must never be used silently).
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import importlib.machinery
 import importlib.util
 import os

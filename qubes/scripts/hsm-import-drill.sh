@@ -58,7 +58,7 @@ identify() {
     show "opensc-tool --list-readers"
     return 1
   fi
-  ascii="$(printf '%s' "$atr" | python3 -c "
+  ascii="$(printf '%s' "$atr" | python3 -I -c "
 import sys
 raw = bytes.fromhex(sys.stdin.read().strip())
 print(''.join(chr(b) if 32 <= b < 127 else '.' for b in raw))
@@ -108,7 +108,7 @@ cmd_prepare() {
   printf '%s' "$DRILL_MNEMONIC" > "$MNF"; chmod 600 "$MNF"
   head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$PWF"; chmod 600 "$PWF"
   local out
-  out="$(python3 "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" --out "$P12" 2>&1)" || {
+  out="$(python3 -Es "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" --out "$P12" 2>&1)" || {
     err "container build failed:"; printf '%s\n' "$out" | sed 's/^/     /'; return 1; }
   printf '%s\n' "$out" | sed 's/^/   /'
   printf '%s' "$out" | grep -oE 'akash1[a-z0-9]+' | head -1 > "$ADDRF"
@@ -155,7 +155,7 @@ cmd_verify() {
   [ -s "$pub" ] || { err "empty public key read from the card."; return 1; }
 
   local oncard
-  oncard="$(python3 "$HERE/derive-akash-address.py" --der "$pub" 2>/dev/null || true)"
+  oncard="$(python3 -Es "$HERE/derive-akash-address.py" --der "$pub" 2>/dev/null || true)"
   if [ -z "$oncard" ]; then
     err "the card's public key did not parse as secp256k1."
     err "THIS IS THE ANSWER TO THE DRILL: the import path mangled the curve. Do not open the gate."
@@ -177,7 +177,7 @@ cmd_verify() {
     err "The object exists but is unusable. Do NOT open the gate."
     rm -f "$dig" "$sig"; return 1
   fi
-  if ! python3 "$HERE/verify-hsm-control.py" --der "$pub" --digest "$dig" --sig "$sig" >/dev/null 2>&1; then
+  if ! python3 -Es "$HERE/verify-hsm-control.py" --der "$pub" --digest "$dig" --sig "$sig" >/dev/null 2>&1; then
     err "the signature did NOT verify against the card's own public key."
     err "Do NOT open the gate."
     rm -f "$dig" "$sig"; return 1

@@ -5,6 +5,17 @@
 # card open.
 #
 #   /media/<archive disc>/bin/pin-escrow.sh        # from the checkout's top directory
+#   /media/<archive disc>/bin/pin-escrow.sh --new-recovery-key    # print ONE new disk recovery key
+#
+# --new-recovery-key is for the day a KMS host's disk recovery key has been USED (a real recovery or
+# a rehearsal) or its envelope seal is broken. It prints one new key, generated here from the
+# system's random source, and writes nothing. A recovery key is never invented by hand: the host
+# enrols it on the assumption that it holds 256 random bits. THE ORDER MATTERS:
+#   1. write the new key on a new KMS host recovery card;
+#   2. at the host: regalia-kms recovery-key.sh --replace (the used key, then the new one), then
+#      --check with the key read from the new card;
+#   3. ONLY THEN escrow it, with this tool and no argument. An escrow written before step 2 has
+#      succeeded would hold, as the newest verified escrow, a key that opens nothing on that host.
 #
 # Run the ARCHIVE DISC's copy (checked with its SHA256SUMS), never this repository's: anyone who can
 # write here could change this script to skip a check or send the PINs elsewhere. It refuses to run
@@ -23,6 +34,11 @@
 #     not, so that the newest escrow is always whole: recovery reads one file, and a value left out
 #     here would send it back to the ceremony's copy, which at the host is a WRONG attempt if the
 #     value changed since, and one wrong attempt blocks that TPM's lockout hierarchy for a day;
+#   - every one of the three KMS hosts' disk recovery keys is typed twice as well, from the KMS HOST
+#     RECOVERY CARD (8 groups of 8 lower-case letters with a dash between groups; the dashes are part
+#     of the key), at EVERY escrow for the same reason: after a total outage recovery reads one file,
+#     and a key that was replaced since the ceremony (regalia-kms recovery-key.sh --replace, after
+#     any use) exists nowhere else;
 # and it:
 #   - keeps the plaintext in tmpfs (/dev/shm) only, removed after encryption, and stops on any write
 #     failure (a full tmpfs must not yield a truncated escrow);
@@ -35,8 +51,31 @@
 # files test-pins-NNNN.age, which recovery never selects.
 set -uo pipefail
 die(){ printf 'pin-escrow: %s\n' "$*" >&2; exit 1; }
-[ $# -eq 0 ] || { sed -n '2,30p' "$0"; [ "$1" = -h ] || [ "$1" = --help ]; exit; }
-DEVICES="hsm_a hsm_b hsm_c yubikey_a yubikey_b yubikey_c tpm_a tpm_b tpm_c"; PREFIX=pins
+# One definition of a disk recovery key's shape (systemd's recovery-key format, dashes included).
+RECOVERY_KEY_RE='^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$'
+if [ "${1:-}" = --new-recovery-key ] && [ $# -eq 1 ]; then
+  # 32 bytes from the kernel's random source, each half-byte as one letter: what systemd-cryptenroll
+  # writes and what step 0 generates (ceremony.sh gen_secret recovery:256).
+  # python3 -I (isolated): without it the CURRENT DIRECTORY is first on the module path, and this tool
+  # is run from the top of the repository checkout. A secrets.py planted there by anyone who can
+  # write to the repository would choose the key (measured: it printed cccccccc-…-cccccccc).
+  key="$(python3 -I -c 'import secrets
+letters = "".join("cbdefghijklnrtuv"[b >> 4] + "cbdefghijklnrtuv"[b & 15] for b in secrets.token_bytes(32))
+print("-".join(letters[i:i + 8] for i in range(0, 64, 8)))')" || die "could not generate a key (python3)"
+  [[ "$key" =~ $RECOVERY_KEY_RE ]] || die "the generator produced something that is not a recovery key; nothing shown"
+  printf '%s\n' "$key"; key=""
+  cat >&2 <<'NEXT'
+A NEW DISK RECOVERY KEY, shown once and stored nowhere. The dashes are part of the key.
+  1. Write it on a NEW KMS host recovery card, by hand, and check your copy letter by letter.
+  2. At the host: recovery-key.sh --replace (the used key, then this one), then --check from the card.
+  3. Only then run this tool with no argument to escrow it.
+Clear this screen when it is written down.
+NEXT
+  exit 0
+fi
+# The header above, up to the first line that is not a comment: no line count to keep in step.
+[ $# -eq 0 ] || { sed -n '2,/^set -uo pipefail$/{/^set -uo pipefail$/!p}' "$0"; [ "$1" = -h ] || [ "$1" = --help ]; exit; }
+DEVICES="hsm_a hsm_b hsm_c yubikey_a yubikey_b yubikey_c tpm_a tpm_b tpm_c luks_a luks_b luks_c"; PREFIX=pins
 if [ -n "${PIN_ESCROW_TEST_DEVICES:-}" ]; then
   DEVICES="$PIN_ESCROW_TEST_DEVICES"; PREFIX=test-pins
   printf 'pin-escrow: TEST MODE (%s): writes test-pins-NNNN.age, which recovery ignores\n' "$DEVICES" >&2
@@ -72,7 +111,7 @@ typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
 key="$(ask "Escrow MAC key (32 hex), from the PIN card: ")"
 # The key reaches Python through a pipe from the printf BUILTIN: never argv, and never a here-string,
 # which some bash versions back with a temporary file on disk.
-kcv="$(printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" kcv)" || die "that is not a 32-hex escrow MAC key; nothing written"
+kcv="$(printf '%s\n' "$key" | python3 -Es "$HERE/pin_escrow_mac.py" kcv)" || die "that is not a 32-hex escrow MAC key; nothing written"
 [ "$kcv" = "$(tr -d '[:space:]' < "$KCV")" ] || die "the escrow MAC key does not match $KCV (mistyped?); nothing written"
 
 declare -A pin
@@ -82,7 +121,9 @@ for d in $DEVICES; do
     yubikey_[abc]) re='^[[:print:]]{6,8}$'; what="6-8 printable single-byte characters"; kind="PIN"; from="the PIN card";;
     # A KMS host's TPM lockout authorization: what regalia-kms tpm-lockout.sh --set accepts.
     tpm_[abc]) re='^[[:graph:]]{16,32}$'; what="16-32 printable characters with no space"; kind="lockout authorization"; from="the KMS host card";;
-    *) die "unknown device id '$d' (hsm_a..c, yubikey_a..c, tpm_a..c)";;
+    # A KMS host's disk recovery key: what regalia-kms recovery-key.sh accepts, dashes included.
+    luks_[abc]) re="$RECOVERY_KEY_RE"; what="8 groups of 8 letters from cbdefghijklnrtuv with a dash between groups, lower case (the dashes are part of the key)"; kind="disk recovery key"; from="the KMS host recovery card";;
+    *) die "unknown device id '$d' (hsm_a..c, yubikey_a..c, tpm_a..c, luks_a..c)";;
   esac
   a="$(ask "$d $kind, from $from: ")"; b="$(ask "$d $kind again: ")"
   [ "$a" = "$b" ] || die "the two entries for $d differ; nothing written"
@@ -90,8 +131,9 @@ for d in $DEVICES; do
   # Each KMS host has its own lockout authorization (step 0 generates three, and credential separation
   # refuses a repeat). The same value for two hosts here is a row of the card typed twice, and the
   # escrow would then hold a WRONG value for one of them: at that host, a wrong attempt.
-  case "$d" in tpm_*) for o in "${!pin[@]}"; do
-    case "$o" in tpm_*) [ "${pin[$o]}" != "$a" ] || die "the $d $kind is the same as $o's: each KMS host has its own (the same row typed twice?); nothing written";; esac
+  # The same holds for the disk recovery keys: a key escrowed under the wrong host opens nothing there.
+  case "$d" in tpm_*|luks_*) for o in "${!pin[@]}"; do
+    case "$o" in "${d%%_*}"_*) [ "${pin[$o]}" != "$a" ] || die "the $d $kind is the same as $o's: each KMS host has its own (the same row typed twice?); nothing written";; esac
   done;; esac
   pin[$d]="$a"; a=""; b=""
 done
@@ -99,7 +141,7 @@ done
 # From the whole history, as recovery reads it, and from VERIFIED escrows only: a deleted escrow must not
 # let the numbering restart below one recovery would still prefer, and a forged high-numbered file must
 # not push the numbering up (or exhaust it).
-last="$(printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX")" || die "cannot read the escrow history"
+last="$(printf '%s\n' "$key" | python3 -Es "$HERE/pin_escrow_mac.py" highest "$TOP" "$PREFIX")" || die "cannot read the escrow history"
 [ "$last" -lt 9999 ] || die "the escrow sequence is exhausted at 9999 (recovery reads four digits); nothing written"
 next="$(printf '%04d' $((last + 1)))"
 out="escrow/$PREFIX-$next.age"
@@ -119,19 +161,19 @@ fi
 
 tmp="$(mktemp /dev/shm/pin-escrow.XXXXXX)" || die "cannot create a file in /dev/shm"
 trap 'rm -f "$tmp"' EXIT
-( printf '# PIN escrow %s, written %s by tools/pin-escrow.sh; one device=PIN per line, and tpm_<host>=<TPM lockout authorization>\n' "$next" "$(date -u +%FT%TZ)" \
+( printf '# PIN escrow %s, written %s by tools/pin-escrow.sh; one device=PIN per line, tpm_<host>=<TPM lockout authorization> and luks_<host>=<disk recovery key>\n' "$next" "$(date -u +%FT%TZ)" \
   && for d in $DEVICES; do printf '%s=%s\n' "$d" "${pin[$d]}" || exit 1; done ) > "$tmp" \
   || die "could not write the plaintext to /dev/shm (full?); nothing written"
-n="$(grep -cE '^(hsm|yubikey|tpm)_[abc]=' "$tmp")"
+n="$(grep -cE '^(hsm|yubikey|tpm|luks)_[abc]=' "$tmp")"
 [ "$n" -eq "$(wc -w <<< "$DEVICES")" ] || die "the plaintext holds $n of $(wc -w <<< "$DEVICES") values; nothing written"
-pins="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"; tpms="$(grep -cE '^tpm_[abc]=' "$tmp")"
+pins="$(grep -cE '^(hsm|yubikey)_[abc]=' "$tmp")"; tpms="$(grep -cE '^tpm_[abc]=' "$tmp")"; luks="$(grep -cE '^luks_[abc]=' "$tmp")"
 "$AGE" -R "$RCP" -o "$out" "$tmp" || { rm -f "$out"; die "encryption failed; nothing written"; }
 rm -f "$tmp"
-printf '%s\n' "$key" | python3 "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \
+printf '%s\n' "$key" | python3 -Es "$HERE/pin_escrow_mac.py" mac "$out" > "$out.mac" && [ -s "$out.mac" ] \
   || { rm -f "$out" "$out.mac"; die "could not write the MAC; nothing written"; }
 key=""
 cat <<REC
-ESCROWED: $out and $out.mac (sequence $next: $pins device PIN(s), $tpms TPM lockout authorization(s)), encrypted to the recipient on the PIN card.
+ESCROWED: $out and $out.mac (sequence $next: $pins device PIN(s), $tpms TPM lockout authorization(s), $luks disk recovery key(s)), encrypted to the recipient on the PIN card.
 Commit both:
   git add $out $out.mac && git commit -m "escrow: PIN escrow $next"
 REC

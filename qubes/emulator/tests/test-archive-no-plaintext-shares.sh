@@ -14,6 +14,8 @@
 #   2) the manifest does not checksum any share file
 #   3) the encrypted artifacts + recovery-kit ARE present (we still burn the real backup)
 # Runs natively (bash + coreutils); no hardware, printer, or python needed.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -56,6 +58,7 @@ printf 'DKEK-wrapped-private-key-blob' > "$WORK/funding-wrapped.bin"
 printf 'PUBLIC-funding-key-der'        > "$WORK/funding-pub.der"
 printf 'age1pq1publicrecipientfixture' > "$WORK/breakglass.recipient"   # public (step 3, option g)
 printf '0123456789abcdef\n' > "$WORK/escrow-mac.kcv"                      # public check value (step 0)
+printf 'bc6de92b2eabac3e\n' > "$WORK/dkek.kcv"                            # public: the DKEK domain's key check value
 printf 'AGE-SECRET-KEY-PQ-1%s' "$MARK" > "$WORK/breakglass.key"             # SECRET: must never be burned
 chmod 600 "$WORK/breakglass.key"
 
@@ -113,6 +116,8 @@ hdr "the breakglass key: its public recipient is burned, its secret half never"
   && P "breakglass.recipient (public) is on the disc, for the SOPS re-key" || F "breakglass.recipient is missing from the disc"
 [ -n "$(find "$burn_dir" -name escrow-mac.kcv -print -quit 2>/dev/null)" ] \
   && P "escrow-mac.kcv (public) is on the disc, for later PIN escrows" || F "escrow-mac.kcv is missing from the disc"
+[ -n "$(find "$burn_dir" -name dkek.kcv -print -quit 2>/dev/null)" ] \
+  && P "dkek.kcv (public) is on the disc, for the token ceremony's disjointness proof" || F "dkek.kcv is missing from the disc"
 [ -z "$(find "$burn_dir" -name breakglass.key -print -quit 2>/dev/null)" ] \
   && P "breakglass.key (secret) is not on the disc" || F "the breakglass SECRET key was staged for the burn"
 

@@ -177,7 +177,7 @@ assert_expected_device() {
     info "   ATR matches the pinned device ($what)."
     return 0
   fi
-  ascii="$(printf '%s' "$atr" | python3 -c "
+  ascii="$(printf '%s' "$atr" | python3 -I -c "
 import sys
 raw = bytes.fromhex(sys.stdin.read().strip())
 print(''.join(chr(b) if 32 <= b < 127 else '.' for b in raw))
@@ -227,7 +227,7 @@ cleanup() {
     if [ -n "${CEREMONY_EVIDENCE_DIR:-}" ]; then
       report_args=(--report "$CEREMONY_EVIDENCE_DIR/teardown-$(date -u +%Y%m%dT%H%M%SZ)-$$.json")
     fi
-    if ! "$HERE/ceremony-teardown.py" --workdir "$WORK" --canary "$RESIDUE_CANARY" \
+    if ! python3 -Es "$HERE/ceremony-teardown.py" --workdir "$WORK" --canary "$RESIDUE_CANARY" \
       --mount-baseline "$MOUNT_BASELINE" --scan-root "${HOME:?}" --scan-root /tmp \
       --scan-root /var/tmp --scan-root /var/spool/cups "${report_args[@]}"; then
       err "teardown evidence FAILED — retain the report, power off, and treat the environment as contaminated"
@@ -407,7 +407,7 @@ scan_back_payload() {
     return 2
   fi
   ask "scan the PRINTED QR sheet back with the camera now (strongly recommended)?" || return 2
-  python3 "$HERE/payload-qr.py" --verify-scan "$enc" --device "$SCAN_DEVICE"
+  python3 -Es "$HERE/payload-qr.py" --verify-scan "$enc" --device "$SCAN_DEVICE"
 }
 
 # Scan ONE printed share symbol back and compare it with the file it was printed from, without
@@ -434,7 +434,9 @@ scan_back_share() {
 # are cleared; the operator types the share back from the paper, which must match exactly.
 # Returns 1 if the copy could not be verified — the share must not be sealed then.
 record_share() {
-  local label="$1" secret_file="$2" share kind count form typed want
+  # $3 (optional): a file in the RAM workdir that each copy typed back and MATCHED is appended to, one per line,
+  # so a later step can prove the paper copies themselves (offline-keys.py verify-forms) without a second typing
+  local label="$1" secret_file="$2" sink="${3:-}" share kind count form typed want
   share="$(cat "$secret_file")"
   if [[ "$share" =~ ^[a-z]+([[:space:]]+[a-z]+)+$ ]]; then
     kind=words; count="$(wc -w <<< "$share")"
@@ -442,7 +444,7 @@ record_share() {
     kind=chars; count="${#share}"
   fi
   form="$WORK/form-$(printf '%s' "$label" | tr -c 'A-Za-z0-9' '_').ps"
-  python3 "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" \
+  python3 -Es "$HERE/share-form.py" --label "$label" --kind "$kind" --count "$count" \
     --threshold "$(K)" --total "$(N)" -o "$form" \
     || { err "could not build the blank form for '$label'"; return 1; }
   # EVERY prompt here reads /dev/tty, never stdin: step 3 calls this inside
@@ -489,6 +491,7 @@ record_share() {
       want="$share"; typed="$(tr -d '[:space:]' <<< "$typed")"
     fi
     if [ "$typed" = "$want" ]; then
+      [ -z "$sink" ] || ( umask 077; printf '%s\n' "$typed" >> "$sink" )
       typed=""; want=""; info "   '$label': your copy MATCHES. Tick 'Checked' on the form."; return 0
     fi
     typed=""; want=""; tries=$((tries+1))
@@ -732,7 +735,7 @@ step_yubikey_ops() {
 #   CEREMONY_MANIFEST_BACKEND       restrict plan/record to one backend, e.g. yubikey-piv when the
 #                                   Nitrokeys are commissioned later at the rack
 CEREMONY_MANIFEST="${CEREMONY_MANIFEST:-}"
-manifest_tool(){ python3 "$HERE/ceremony-manifest.py" "$@"; }
+manifest_tool(){ python3 -Es "$HERE/ceremony-manifest.py" "$@"; }
 manifest_scope() {
   MANIFEST_SCOPE=()
   [ -n "${CEREMONY_MANIFEST_SITE:-}" ] && MANIFEST_SCOPE+=(--site "$CEREMONY_MANIFEST_SITE")
@@ -987,6 +990,9 @@ step_hsm_funding() {
   # Teed into the RAM-only workdir (umask 077) because step 2 feeds the shares straight back into
   # the import (#464). The capture holds all six shares, so it never leaves $WORK: the M-DISC
   # stage copies an allowlist and refuses any *share*.txt, and the workdir is shredded on exit.
+  # A key check value from an earlier attempt names THAT attempt's DKEK: gone before a new one exists, and
+  # written again only after this one's import (coderabbitai on #112).
+  rm -f "$WORK/dkek.kcv"
   run_tee "$WORK/dkek-shares.txt" "sc-hsm-tool --create-dkek-share '$WORK/dkek.pbe' --pwd-shares-threshold $(K) --pwd-shares-total $(N)" \
     || { rm -f "$WORK/dkek-shares.txt"; \
          err "DKEK share creation was skipped or failed — aborting the HSM step."; \
@@ -1045,6 +1051,19 @@ step_hsm_funding() {
     rm -f "$WORK/dkek.pbe" "$WORK/dkek-shares.txt"
     return 1
   fi
+  # The domain's key check value, kept as dkek.kcv: public, burned with the disc and committed beside
+  # breakglass.recipient. It is the identity of this ceremony's DKEK domain (the funding HSM's, and
+  # step 9's import), which the token ceremony (regalia-ceremony#111) proves its own three domains are
+  # not. A card that reports no value (a Pico: all zeros, which kcv_of rejects) leaves no file, and the
+  # real archive step then refuses the disc.
+  rm -f "$WORK/dkek.kcv"
+  local domain_kcv; domain_kcv="$(kcv_of "$WORK/kcv-a.log" || true)"
+  if [ -n "$domain_kcv" ]; then
+    printf '%s\n' "$domain_kcv" > "$WORK/dkek.kcv"
+    info "   DKEK key check value of this ceremony's domain: $domain_kcv (kept as dkek.kcv, public)"
+  else
+    warn "the card reported no DKEK key check value: dkek.kcv is not written, and a real ceremony's archive step refuses the disc"
+  fi
   info "3) Generate the funding key ON the device (non-exportable), secp256k1:"
   run "pkcs11-tool --login --keypairgen --key-type EC:secp256k1 --label akash-funding --id 01" \
     || { err "funding key generation was skipped or failed — aborting the HSM step."; return 1; }
@@ -1065,7 +1084,7 @@ step_hsm_funding() {
   local proven=0
   if run "pkcs11-tool --login --sign --id 01 -m ECDSA -i '$WORK/kat.digest' -o '$WORK/kat.sig'" \
      && [ -s "$WORK/kat.sig" ] \
-     && python3 "$HERE/verify-hsm-control.py" --der "$WORK/funding-pub.der" \
+     && python3 -Es "$HERE/verify-hsm-control.py" --der "$WORK/funding-pub.der" \
           --digest "$WORK/kat.digest" --sig "$WORK/kat.sig" >/dev/null 2>&1; then
     proven=1
   fi
@@ -1078,7 +1097,7 @@ step_hsm_funding() {
     return 1
   fi
   info "   keypair-control proof PASSED — the HSM holds the private key for this public key."
-  local addr; addr=$(python3 "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null || true)
+  local addr; addr=$(python3 -Es "$HERE/derive-akash-address.py" --der "$WORK/funding-pub.der" 2>/dev/null || true)
   if [ -z "$addr" ]; then
     err "address derivation failed after a passing key-control proof — derive manually and DO NOT"
     err "fund until you have an address: derive-akash-address.py --der funding-pub.der"
@@ -1288,13 +1307,13 @@ step_entropy_seed() {
   info "     and the OS, so 128 bits is the target). Throw 2 dice at a time: 25 throws."
   info "     For each throw type both values, left die first (e.g. 5 2), press Enter; repeat until the"
   info "     counter reaches 50. Typing is hidden. A mistyped line is discarded whole — just retype it."
-  python3 "$HERE/dice-entropy.py" --out "$d" || { err "dice entropy not collected — no seed generated."; return 1; }
+  python3 -Es "$HERE/dice-entropy.py" --out "$d" || { err "dice entropy not collected — no seed generated."; return 1; }
 
   info "2/3  HSM — 32 bytes from the Nitrokey HSM / Pico HSM hardware random generator (no PIN)."
   # Direct PC/SC (SELECT + GET CHALLENGE), not pkcs11-tool: OpenSC enumeration wedged a Pico HSM
   # on the bench while the direct commands answered on both devices (2026-09-25).
   local hout
-  if ! hout="$(timeout 60 python3 "$HERE/hsm-random.py" --out "$h" 2>&1)" || [ "$(wc -c < "$h" 2>/dev/null)" != 32 ]; then
+  if ! hout="$(timeout 60 python3 -Es "$HERE/hsm-random.py" --out "$h" 2>&1)" || [ "$(wc -c < "$h" 2>/dev/null)" != 32 ]; then
     printf '%s\n' "$hout" | sed 's/^/     /' >&2
     err "no random bytes from an HSM — attach the Nitrokey HSM or Pico HSM with 'qvm-usb attach'"
     err "and run this step again. The seed is never generated without them (dice + HSM, both required)."
@@ -1305,9 +1324,9 @@ step_entropy_seed() {
   info "3/3  OPERATING SYSTEM — 32 bytes from /dev/urandom."
   head -c 32 /dev/urandom > "$o" && chmod 600 "$o"
 
-  python3 "$HERE/entropy-mix.py" --out "$m" "$d" "$h" "$o" \
+  python3 -Es "$HERE/entropy-mix.py" --out "$m" "$d" "$h" "$o" \
     || { err "mixing refused the sources (identical or empty) — no seed generated."; return 1; }
-  if ! python3 "$HERE/bip39-slip39-backup.py" --from-entropy --in "$m" --out "$staged" 2>"$WORK/seed.err"; then
+  if ! python3 -Es "$HERE/bip39-slip39-backup.py" --from-entropy --in "$m" --out "$staged" 2>"$WORK/seed.err"; then
     sed 's/^/     /' "$WORK/seed.err" >&2; err "could not encode the mixed entropy as a mnemonic."; return 1
   fi
   chmod 600 "$staged" && mv -f "$staged" "$f" || { err "could not install the new mnemonic; the existing seed was preserved."; return 1; }
@@ -1436,7 +1455,7 @@ step_shamir() {
       # (it would land in the shares file) and does no reconstruct-verify. The minter never
       # emits the master secret and proves every k-of-n subset recovers before writing.
       show "slip39-mint.py --threshold $(K) --shares $(N) --out slip39.txt"
-      if python3 "$HERE/slip39-mint.py" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
+      if python3 -Es "$HERE/slip39-mint.py" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/mint.err"; then
         info "Minted + reconstruct-verified (every $(K)-of-$(N) subset recovers). Copy each share BY HAND onto its form:"
       else
         err "mint/verify FAILED — refusing to distribute:"; sed 's/^/     /' "$WORK/mint.err" >&2; rm -f "$WORK/slip39.txt"; return 1
@@ -1455,7 +1474,7 @@ step_shamir() {
       # Surface the tool's stderr to the operator (do NOT swallow it): if a passphrase is somehow
       # still in effect it WARNS that recovery requires the EXACT passphrase — that safeguard must
       # reach the operator, not vanish into /dev/null. Mirror option b (capture then echo).
-      if python3 "$HERE/bip39-slip39-backup.py" --in "$f" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
+      if python3 -Es "$HERE/bip39-slip39-backup.py" --in "$f" --threshold "$(K)" --shares "$(N)" --out "$WORK/slip39.txt" 2>"$WORK/bkp.err"; then
         [ -s "$WORK/bkp.err" ] && sed 's/^/     /' "$WORK/bkp.err" >&2
         info "BIP39 mnemonic split into $(N) SLIP-39 word-shares (any $(K) recover the EXACT mnemonic)."
         local n=0; while IFS= read -r line; do
@@ -1470,7 +1489,7 @@ step_shamir() {
         # the sealed sheet, else STOP") needs the funding ADDRESS recorded NOW. Without it a
         # wrong-share / wrong-passphrase / tampered recovery cannot be caught before funds move.
         # The address is PUBLIC; derive it from the source mnemonic file (never printed) and show it.
-        local caddr; caddr=$(python3 "$HERE/derive-akash-address.py" --mnemonic-file "$f" 2>/dev/null || true)
+        local caddr; caddr=$(python3 -Es "$HERE/derive-akash-address.py" --mnemonic-file "$f" 2>/dev/null || true)
         if [ -n "$caddr" ]; then
           info "FUNDING ADDRESS (public; derived from this seed at m/44'/118'/0'/0/0): $caddr"
           warn "RECORD this address on the sealed custodian-contact sheet / seal registry NOW. It is"
@@ -1605,6 +1624,7 @@ check_credential_separation() {
       yubikey_?_mgmt_key) [[ "$v" =~ ^[0-9A-Fa-f]{48}$|^[0-9A-Fa-f]{32}$|^[0-9A-Fa-f]{64}$ ]] || problems="$problems|$k: a PIV management key is 32, 48 or 64 hex digits" ;;
       escrow_mac_key) [[ "$v" =~ ^[0-9A-Fa-f]{32}$ ]] || problems="$problems|$k: the escrow MAC key is exactly 32 hex digits (128 bits)" ;;
       tpm_?_lockout_auth) [[ "$v" =~ ^[[:graph:]]{16,32}$ ]] || problems="$problems|$k: a TPM lockout authorization is 16-32 printable characters with no space (what the KMS host's tpm-lockout.sh accepts)" ;;
+      luks_?_recovery_key) [[ "$v" =~ ^([cbdefghijklnrtuv]{8}-){7}[cbdefghijklnrtuv]{8}$ ]] || problems="$problems|$k: a disk recovery key is 8 groups of 8 letters from cbdefghijklnrtuv with a dash between groups, lower case (what the KMS host's recovery-key.sh accepts)" ;;
     esac
     for other in $fields; do
       [[ "$other" > "$k" ]] || continue
@@ -1665,28 +1685,51 @@ KMS_HOSTS="a b c"
 TPM_AUTHS="$(for t in $KMS_HOSTS; do printf 'tpm_%s_lockout_auth ' "$t"; done)"
 TPM_AUTHS="${TPM_AUTHS% }"
 PIN_FIELDS="$PIN_FIELDS $TPM_AUTHS"
+# Each KMS host's DISK RECOVERY KEY (regalia-kms#77; regalia-kms deploy/baremetal/recovery-key.sh): a
+# LUKS2 keyslot of its own that opens that host's encrypted root with no TPM and no peer, after a
+# total outage. One per host, always generated, never chosen, in systemd's recovery-key format: 256
+# bits as 8 groups of 8 letters with a dash between groups. THE DASHES ARE PART OF THE KEY. It rides
+# in the tier-0 payload and is carried forward by every later escrow, like the lockout
+# authorizations; it is shown once for the KMS HOST RECOVERY CARD, because it reaches the host by
+# being typed at its console. Unlike everything else here, this one value is enough for a host's
+# disk by itself: its card is sealed and kept apart from the servers and from the other cards.
+LUKS_KEYS="$(for t in $KMS_HOSTS; do printf 'luks_%s_recovery_key ' "$t"; done)"
+LUKS_KEYS="${LUKS_KEYS% }"
+PIN_FIELDS="$PIN_FIELDS $LUKS_KEYS"
 DAY_PINS="$(for h in $HSMS; do printf 'hsm_%s_user_pin ' "$h"; done; for y in $YUBIKEYS; do printf 'yubikey_%s_piv_pin ' "$y"; done)"
 DAY_PINS="${DAY_PINS% }"
-gen_secret() {   # $1 = digits:N | hex:N | paper:N
+gen_secret() {   # $1 = digits:N | hex:N | paper:N | recovery:256
   # paper: N characters a person copies by hand and types on another machine, exactly. Upper-case
   # letters and digits without the pairs that read alike on paper (0/O, 1/I/L): 31 symbols, so 20 of
   # them carry 99 bits.
-  python3 -c 'import secrets,sys
+  # recovery: a disk recovery key as systemd-cryptenroll writes one: 256 random bits, each half-byte
+  # as one letter of "cbdefghijklnrtuv" (letters that sit on the same keys of a QWERTY, QWERTZ and
+  # AZERTY keyboard: it is typed at a boot prompt), in 8 groups of 8 with a dash between groups.
+  # -I (isolated): the current directory and PYTHONPATH are not on the module path, so a secrets.py
+  # lying beside the ceremony cannot be what generates every PIN and key.
+  python3 -I -c 'import secrets,sys
 kind,n=sys.argv[1].split(":"); n=int(n)
 if kind=="digits": print("".join(secrets.choice("0123456789") for _ in range(n)))
 elif kind=="paper": print("".join(secrets.choice("ABCDEFGHJKMNPQRSTUVWXYZ23456789") for _ in range(n)))
+elif kind=="recovery":
+    if n!=256: sys.exit("a recovery key is 256 bits")
+    letters="".join("cbdefghijklnrtuv"[b>>4]+"cbdefghijklnrtuv"[b&15] for b in secrets.token_bytes(32))
+    print("-".join(letters[i:i+8] for i in range(0,64,8)))
 else: print(secrets.token_hex(n//2).upper())' "$1"
 }
 
 # Show one generated day-to-day PIN on the terminal, clear it, and require it typed back from the
 # paper (three tries). Reads and writes /dev/tty only. Returns 1 if the copy was not verified.
-#   show_day_pin <name> <value> [where it is written, default "your PIN card"] [exact]
+#   show_day_pin <name> <value> [where it is written, default "your PIN card"] [exact] [what it is made of]
 # "exact": letter case counts. A hex key or a digit PIN means the same in either case, so by default
 # case is ignored; a TPM lockout authorization does not. Typed at the host in the wrong case it is a
 # WRONG value, and there one wrong attempt costs a day, so a copy that matches only when case is
-# ignored must be caught here, where it costs nothing.
+# ignored must be caught here, where it costs nothing. The fifth argument says what the value is made
+# of, for the hint given when only the letter case is wrong ("CAPITALS and digits" by default).
+# A dash is an ordinary character here: a disk recovery key is shown with its dashes and must be
+# typed with them, because at the host the dashes are part of the key.
 show_day_pin() {
-  local name="$1" value="$2" where="${3:-your PIN card}" exact="${4:-}" typed tries=0
+  local name="$1" value="$2" where="${3:-your PIN card}" exact="${4:-}" made_of="${5:-CAPITALS and digits}" typed tries=0
   while :; do
     read -r -p "   press Enter to SHOW the $name for copying onto $where… " _ </dev/tty
     clear
@@ -1700,7 +1743,7 @@ show_day_pin() {
     typed="${typed//[[:space:]]/}"
     if [ "$exact" = exact ]; then
       [ "$typed" = "$value" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
-      [ "${typed^^}" = "${value^^}" ] && err "your copy has the right characters in the wrong letter case: this value is CAPITALS and digits, and it must be written and typed exactly so."
+      [ "${typed^^}" = "${value^^}" ] && err "your copy has the right characters in the wrong letter case: this value is $made_of, and it must be written and typed exactly so."
     else
       [ "${typed^^}" = "${value^^}" ] && { typed=""; info "   $name: your copy MATCHES."; return 0; }
     fi
@@ -1717,7 +1760,7 @@ show_day_pin() {
 weak_pin_reason() {
   # The PIN reaches Python on file descriptor 3, never as an argument: argv is readable by any local
   # process (/proc/<pid>/cmdline). The reason printed never repeats any digit of the PIN.
-  python3 -c '
+  python3 -I -c '
 import datetime, os
 p = os.read(3, 64).decode().strip()
 def date_ok(d, m, y):
@@ -1801,6 +1844,35 @@ offer_pin_blobs() {
   done
 }
 
+# sle4442-manager is a Python program started through its "#!" line, so nothing on its command line
+# says how Python is to run: PYTHONPATH and the user's site-packages would reach a process that holds a
+# share and the card's PSC. It is therefore started through its own interpreter with -Es (no PYTHON*
+# variables, no user site-packages). A stand-in that is not Python (the test suites' model) runs as is.
+#   sle4442_command   prints the command words to run it (for a command line built as text)
+#   sle4442 <args>    runs it
+sle4442_command() {
+  local tool first interp word
+  tool="$(command -v sle4442-manager)" || { printf 'sle4442-manager'; return 1; }
+  IFS= read -r first < "$tool" || first=""
+  interp=""
+  if [ "${first:0:2}" = '#!' ]; then
+    # The words of the "#!" line. Through env (with or without -S), the interpreter is the word after
+    # it. It counts as Python only if its NAME is python, python3 or python3.N: a shell whose path or
+    # arguments merely contain those letters must not be handed -Es.
+    local -a words; read -r -a words <<< "${first:2}"
+    set -- "${words[@]}"
+    case "${1:-}" in */env|env) shift; [ "${1:-}" = -S ] && shift;; esac
+    word="${1:-}"
+    [[ "${word##*/}" =~ ^python(3(\.[0-9]+)?)?$ ]] && interp="$word"
+  fi
+  if [ -n "$interp" ]; then printf '%q -Es %q' "$interp" "$tool"; else printf '%q' "$tool"; fi
+}
+sle4442() { local cmd; cmd="$(sle4442_command)" || return 127; eval "$cmd \"\$@\""; }
+
+# The tier-0 payload's credential lines: one "name: value" per field of PIN_FIELDS, from the variables
+# step 0 loaded. A function so that a test can call it with known values and see every field come out.
+payload_pin_lines() { local k; for k in $PIN_FIELDS; do printf '%s: %s\n' "$k" "${!k-}"; done; }
+
 # Write $WORK/pins.env from generated values (and, if the operator chooses, typed day-to-day PINs).
 generate_pins() {
   local pfile="$1" tty=/dev/tty k v v2 typed_day=0
@@ -1811,14 +1883,14 @@ generate_pins() {
   local -A val
   local h; for h in $HSMS; do val[hsm_${h}_so_pin]="$(gen_secret hex:16)"; done
   val[escrow_mac_key]="$(gen_secret hex:32)"
-  local t; for t in $KMS_HOSTS; do val[tpm_${t}_lockout_auth]="$(gen_secret paper:20)"; done
+  local t; for t in $KMS_HOSTS; do val[tpm_${t}_lockout_auth]="$(gen_secret paper:20)"; val[luks_${t}_recovery_key]="$(gen_secret recovery:256)"; done
   local y; for y in $YUBIKEYS; do
     val[yubikey_${y}_piv_puk]="$(gen_secret digits:8)"; val[yubikey_${y}_mgmt_key]="$(gen_secret hex:48)"
   done
   info "Generated: every HSM SO-PIN and every YubiKey PUK and management key. They are NOT shown: they go"
   info "only into the encrypted tier-0 payload (any $(K) of the $(N) shares open it)."
-  info "Generated too, and shown once each at the end of this step: the escrow MAC key and each KMS"
-  info "host's TPM lockout authorization."
+  info "Generated too, and shown once each at the end of this step: the escrow MAC key, each KMS"
+  info "host's TPM lockout authorization, and each KMS host's disk recovery key."
   info "Day-to-day PINs (every HSM and every YubiKey): GENERATED (random, shown once for the PIN card),"
   info "or CHOSEN by you, typed hidden. A chosen PIN must be 10-15 digits for an HSM and 8 for a YubiKey,"
   info "different on every device, and not guessable: no repeated digit, run, short pattern or date."
@@ -1862,7 +1934,7 @@ generate_pins() {
   # an HSM's user PIN cannot be reset (PIN reset is disabled, D15), so a forgotten one costs a key
   # restore from the k-of-n shares.
   local card="$WORK/pin-card.ps"
-  if python3 "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")" --yubikeys "$(tr ' ' ',' <<< "$YUBIKEYS")" \
+  if python3 -Es "$HERE/pin-card-form.py" -o "$card" --hsms "$(tr ' ' ',' <<< "$HSMS")" --yubikeys "$(tr ' ' ',' <<< "$YUBIKEYS")" \
        --hosts "$(tr ' ' ',' <<< "$KMS_HOSTS")"; then
     if [ -n "${PRINTER:-}" ]; then
       run "lp -d '$PRINTER' '$card'" <"$tty" && info "blank PIN card sent to $PRINTER (it holds no PIN)"
@@ -1890,6 +1962,12 @@ generate_pins() {
   warn "commissioned (regalia-kms tpm-lockout.sh --set). Copy it EXACTLY: at the host, ONE wrong attempt"
   warn "blocks that TPM's lockout hierarchy for a day, the right value included."
   for k in $TPM_AUTHS; do show_day_pin "$k" "${val[$k]}" "the KMS HOST CARD (page 2)" exact || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
+  # And each KMS host's disk recovery key, for the third page: a card of its own, sealed apart.
+  warn "Each KMS host's DISK RECOVERY KEY is shown ONCE: write it on the KMS HOST RECOVERY CARD (page 3),"
+  warn "8 groups of 8 lower-case letters. THE DASHES ARE PART OF THE KEY: type them back, and type them"
+  warn "at the host. It opens that host's disk BY ITSELF, with no TPM and no other site: seal this page"
+  warn "in its own envelope, apart from the servers and from the other cards."
+  for k in $LUKS_KEYS; do show_day_pin "$k" "${val[$k]}" "the KMS HOST RECOVERY CARD (page 3)" exact "lower-case letters and dashes" || { rm -f "$pfile"; err "no PIN file kept — run step 0 again."; return 1; }; done
   for k in "${!val[@]}"; do val[$k]=""; done
   info "PIN file written (0600, RAM-only workdir)."
 }
@@ -1924,7 +2002,11 @@ step_set_pins() {
 #   escrow_mac_key (32 hex: generate it with `openssl rand -hex 16`, write it on the PIN card's
 #   ESCROW MAC KEY rows; it authenticates every later PIN escrow),
 #   tpm_{a,b,c}_lockout_auth (each KMS host's TPM lockout authorization: 16-32 printable characters,
-#   no space; write each on the KMS HOST CARD. At the host, one wrong attempt blocks it for a day)
+#   no space; write each on the KMS HOST CARD. At the host, one wrong attempt blocks it for a day),
+#   luks_{a,b,c}_recovery_key (each KMS host's disk recovery key, in systemd's format: 8 groups of 8
+#   letters from cbdefghijklnrtuv with a dash between groups, lower case; write each on the KMS HOST
+#   RECOVERY CARD. It opens that host's disk by itself. NEVER invent one by hand: the host enrols it
+#   on the assumption of 256 random bits. Generate each with: escrow/pin-escrow.sh --new-recovery-key)
 # HSM user PINs are 10-15 digits (a 10-try counter), SO-PINs exactly 16 hex digits.
   #
   # DEVICES A, B AND C ARE THE THREE PRODUCTION NITROKEYS (ADR-0002 D17). The staging Pico is NOT
@@ -1959,7 +2041,7 @@ EOF
   # The escrow MAC key's check value (not secret) for the archive disc: escrow/pin-escrow.sh compares
   # the key typed from the PIN card with it, so a mistyped key cannot produce an escrow file that
   # recovery would then reject. The key reaches Python on standard input, never argv.
-  python3 "$HERE/escrow/pin_escrow_mac.py" kcv <<< "${escrow_mac_key:-}" > "$WORK/escrow-mac.kcv" 2>/dev/null \
+  python3 -Es "$HERE/escrow/pin_escrow_mac.py" kcv <<< "${escrow_mac_key:-}" > "$WORK/escrow-mac.kcv" 2>/dev/null \
     || { rm -f "$WORK/escrow-mac.kcv"; err "cannot compute the escrow MAC key's check value"; return 1; }
   # TPM import blobs, from whichever source the PINs came (needs a terminal: every key is
   # authenticated by a typed fingerprint).
@@ -2054,7 +2136,7 @@ derivation_wallet_mnemonic_v2:
 funding_wallet_mnemonic_v2:
 ops_age_key:
 API_KEY_HASH_SECRET:
-$(for k in $PIN_FIELDS; do printf '%s: %s\n' "$k" "${!k-}"; done)
+$(payload_pin_lines)
 $(for y in $YUBIKEYS; do s=""; for k in "${!YK_SET_OF[@]}"; do [ "${YK_SET_OF[$k]}" = "$y" ] && s="$k"; done; printf 'yubikey_%s_serial: %s\n' "$y" "$s"; done)
 sle4442_psc:
 TPL
@@ -2094,7 +2176,7 @@ TPL
     || { err "encryption failed or was skipped — nothing was archived."; return 1; }
   [ -s "$enc" ] || { err "age produced an empty file — do NOT proceed."; return 1; }
 
-  run "python3 '$HERE/payload-qr.py' --split '$enc' --outdir '$qrdir' --threshold $(K) --shares $(N)" \
+  run "python3 -Es '$HERE/payload-qr.py' --split '$enc' --outdir '$qrdir' --threshold $(K) --shares $(N)" \
     || { err "QR emission failed — the payload has no paper copy."; return 1; }
 
   # ROUND-TRIP PROOF. An encrypted payload nobody has ever decrypted is not a backup. If the
@@ -2102,7 +2184,7 @@ TPL
   # drill), prove the whole chain rebuilds the exact plaintext before anything is printed.
   if [ -s "$WORK/breakglass.key" ]; then
     info "Verifying the full chain: QR chunks -> payload.age -> decrypt -> original…"
-    if python3 "$HERE/payload-qr.py" --join "$qrdir/chunks.txt" --out "$WORK/rebuilt.age" >/dev/null 2>&1 \
+    if python3 -Es "$HERE/payload-qr.py" --join "$qrdir/chunks.txt" --out "$WORK/rebuilt.age" >/dev/null 2>&1 \
        && age -d -i "$WORK/breakglass.key" "$WORK/rebuilt.age" > "$WORK/rebuilt.txt" 2>/dev/null \
        && cmp -s "$plain" "$WORK/rebuilt.txt"; then
       info "   ROUND-TRIP PROVEN — the QR codes rebuild and decrypt to the exact payload."
@@ -2204,7 +2286,7 @@ step_hsm_import() {
   [ -s "$pwfile" ] || { head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$pwfile"; chmod 600 "$pwfile"; }
 
   local derived
-  derived="$(python3 "$HERE/seed-to-pkcs12.py" --mnemonic-file "$mfile" \
+  derived="$(python3 -Es "$HERE/seed-to-pkcs12.py" --mnemonic-file "$mfile" \
                --password-file "$pwfile" --out "$p12" 2>&1 | tee /dev/stderr \
                | grep -oE 'akash1[a-z0-9]+' | head -1)"
   [ -s "$p12" ] || { err "no PKCS#12 container was produced — aborting."; return 1; }
@@ -2288,7 +2370,7 @@ step_hsm_import() {
     || { err "could not read the imported public key from the card — import unproven."; return 1; }
   [ -s "$WORK/imported-pub.der" ] || { err "empty public key read from the card — do NOT fund."; return 1; }
   local oncard
-  oncard="$(python3 "$HERE/derive-akash-address.py" --der "$WORK/imported-pub.der" 2>/dev/null || true)"
+  oncard="$(python3 -Es "$HERE/derive-akash-address.py" --der "$WORK/imported-pub.der" 2>/dev/null || true)"
   if [ -z "$oncard" ]; then
     err "could not derive an address from the card's public key — import unproven; do NOT fund."
     return 1
@@ -2311,7 +2393,7 @@ step_hsm_import() {
   local proven=0
   if run "pkcs11-tool ${p11sel[*]} --login --sign --label '$klabel' -m ECDSA -i '$WORK/imp.digest' -o '$WORK/imp.sig'" \
      && [ -s "$WORK/imp.sig" ] \
-     && python3 "$HERE/verify-hsm-control.py" --der "$WORK/imported-pub.der" \
+     && python3 -Es "$HERE/verify-hsm-control.py" --der "$WORK/imported-pub.der" \
           --digest "$WORK/imp.digest" --sig "$WORK/imp.sig" >/dev/null 2>&1; then
     proven=1
   fi
@@ -2425,7 +2507,7 @@ step_chipcard() {
   local infout attempts
   # On failure show the manager's own last line (which reader, mute card, no SLE-4442 found).
   # Safe to print: `info` never outputs card memory.
-  infout="$(sle4442-manager info 2>&1)" || {
+  infout="$(sle4442 info 2>&1)" || {
     err "could not read the card: $(printf '%s\n' "$infout" | tail -1)"
     err "Is it inserted chip-up and is pcscd running? With several readers attached, set"
     err "SLE4442_READER to a substring of the chip-card reader's name."
@@ -2446,7 +2528,7 @@ step_chipcard() {
   # that subcommand PRINTS the stored bytes, which would put the share on the terminal.
   # env -u: an ambient SLE4442_PSC / SLE4442_NEW_PSC would take precedence over the files (resolve_psc),
   # and the step would then record a PSC the card was not given.
-  run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
+  run "env -u SLE4442_PSC -u SLE4442_NEW_PSC $(sle4442_command) store --addr 32 --text-file '$share' --psc-file '$pscfile'" \
     || { err "store failed or was skipped — the card does NOT hold the share."; \
          err "If the PSC was wrong, one of the three attempts has been spent."; return 1; }
   info "Share stored AND verify-read back by the card (a write that ACKs but does not persist"
@@ -2458,7 +2540,7 @@ step_chipcard() {
   if [ "$cur_psc" != FFFFFF ]; then
     info "This card was written with a non-factory PSC; it keeps it."
   elif [ -s "$WORK/sle4442.newpsc" ]; then
-    run "env -u SLE4442_PSC -u SLE4442_NEW_PSC sle4442-manager change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
+    run "env -u SLE4442_PSC -u SLE4442_NEW_PSC $(sle4442_command) change-psc --psc-file '$pscfile' --new-psc-file '$WORK/sle4442.newpsc'" \
       || { err "the PSC change failed or was skipped: this card may still have the factory PSC. Run"
            err "'sle4442-manager info' before anything else; do not seal it as commissioned."; return 1; }
     # The verified PSC is now this card's current one: a later run against the same card must not
@@ -2475,6 +2557,129 @@ step_chipcard() {
   fi
   warn "Seal this card with its case. Do NOT run 'sle4442-manager read' to double-check: that"
   warn "prints the share to the terminal. The store already proved the bytes are on the card."
+}
+
+# ---- Offline keys (ADR-0002 D28, regalia-ceremony#111) ---------------------------------------------------------
+# The membership root and the three boot-image keys, generated here as software keys (offline-keys.py generate): one
+# master secret split $(K)-of-$(N) with SLIP-39, a set of its own beside break-glass; the keys sealed under it; a copy
+# encrypted to the break-glass recipient (made by step 3, option g, in this session). Each share is copied BY HAND
+# and typed back (record_share); the copies typed back are then proven together against the sealed file
+# (offline-keys.py verify-forms), which writes a root-signed record and shreds the shares file. Re-running this step
+# resumes at the shares when the keys were already generated in this session.
+# D19: a backup that is ciphertext is stored openly and redundantly, never on one medium (regalia-kms-d9 on #117).
+offline_commit_list() {
+  local f
+  warn "COMMIT after the ceremony, beside the DKEK blobs (the private repo's hsm-backups/offline/, with MANIFEST.yaml),"
+  warn "and keep a copy at each datacenter, so the offline keys never depend on the archive disc alone:"
+  for f in "$WORK"/offline/offline-keys.sealed.json "$WORK"/offline/offline-keys.breakglass.age "$WORK"/offline/*.record.json; do
+    [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
+  done
+  return 0
+}
+
+step_offline_keys() {
+  check_scheme || return 1
+  b "Offline keys — the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28)"
+  local dir="$WORK/offline" rcp="$WORK/breakglass.recipient" typed="$WORK/offline-typed.txt" unverified="" i line
+  if [ ! -e "$dir/offline-keys.sealed.json" ]; then
+    [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
+    [ ! -e "$dir" ] || { err "$dir holds a partial generation: remove it (rm -r -- '$dir') and run this step again."; return 1; }
+    ( umask 077; mkdir "$dir" ) || return 1
+    python3 -Es "$HERE/offline-keys.py" generate --threshold "$(K)" --shares "$(N)" --out "$dir" --breakglass-recipient "$rcp" \
+      || { err "the offline keys were NOT generated (reason above)."; return 1; }
+    warn "ROOT-ENTRY above is the membership root's pin for regalia-kms root-key.json; it goes on the disc in the record."
+    warn "ANCHOR-POLICY-ENTRY above is K_A's public key, the genesis manifest's anchor_policy_key (regalia-kms#361)."
+    warn "WRITE ROOT-FINGERPRINT (above, 64 hex) BY HAND on the ceremony sheet: the first manifest's signing"
+    warn "(manifest sign --genesis) and every host's enrol check ask for it typed, from that sheet, never from a screen."
+  fi
+  [ -s "$dir/offline-shares.txt" ] || { info "the offline keys' forms were already proven in this session."; return 0; }
+  rm -f "$typed"
+  i=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    i=$((i+1)); ( umask 077; printf '%s' "$line" > "$WORK/osh$i" )
+    record_share "Offline keys — SLIP-39 share $i of $(N) (need $(K))" "$WORK/osh$i" "$typed" || unverified="$unverified $i"
+    shred -u "$WORK/osh$i" 2>/dev/null || rm -f "$WORK/osh$i"
+  done < "$dir/offline-shares.txt"
+  if [ -n "$unverified" ]; then
+    rm -f "$typed"
+    err "forms$unverified were not verified: run this step again (the keys are kept; only the forms are redone)."
+    return 1
+  fi
+  if ! python3 -Es "$HERE/offline-keys.py" verify-forms --sealed "$dir/offline-keys.sealed.json" --shares-file "$dir/offline-shares.txt" < "$typed"; then
+    shred -u "$typed" 2>/dev/null || rm -f "$typed"
+    err "the copies typed back do NOT open the sealed keys (reason above): the forms are not proven. Run this step again."
+    return 1
+  fi
+  shred -u "$typed" 2>/dev/null || rm -f "$typed"
+  info "offline keys done: the forms are proven and the shares file is shredded. The disc (step 4) carries $dir's"
+  info "sealed file, break-glass copy and records; the shares exist only on the holders' forms."
+  offline_commit_list
+}
+
+# ---- step a: the KMS hosts' TPM owner authorizations (regalia-kms#242, regalia-ceremony#122) -------------------------
+# Per node, 32 random bytes encrypted to BOTH developer cards' OpenPGP decryption keys (ADR-0002 D30.3) and to the
+# break-glass key; the record signed by the root (the offline set's k shares, typed hidden). Each developer card then
+# proves it opens every node's envelope (ownerauth-verify), and the root signs that both did (--summary). The disc
+# waits for that proof (step_archive). The shares are read from the terminal itself, so their echo is off; a
+# simulation reads them from OA_SHARES_FROM instead (honoured only with CEREMONY_SIMULATE=1).
+oa_shares_in() {
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ] && [ -n "${OA_SHARES_FROM:-}" ]; then printf '%s' "$OA_SHARES_FROM"; else printf '/dev/tty'; fi
+}
+# oa_insert_card N: the operator inserts developer card N (and only it) and types its serial; sets OA_SERIAL.
+oa_insert_card() {
+  warn "Insert developer card $1 of 2 ALONE (remove any other YubiKey), then type its serial (printed on the card)."
+  read -r -p "   serial of developer card $1: " OA_SERIAL
+}
+ownerauth_commit_list() {
+  local f
+  warn "COMMIT after the ceremony, beside the offline keys (hsm-backups/ownerauth/): the envelopes and records below."
+  for f in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.age "$WORK"/ownerauth/*.record.json "$WORK"/ownerauth/ownerauth-verify.jsonl; do
+    [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
+  done
+  return 0
+}
+
+step_ownerauth() {
+  b "Owner authorizations — each KMS host's TPM owner auth, to both developer cards and break-glass (regalia-kms#242)"
+  local dir="$WORK/ownerauth" sealed="$WORK/offline/offline-keys.sealed.json" rcp="$WORK/breakglass.recipient"
+  local keys="$WORK/cards/developer-cards.gpg" nodes="a,b,c" home="$WORK/ownerauth-gnupg" n
+  # the three KMS hosts (ADR-0002 D17) and the session's own exported keys; a simulation may name others (3e on #130)
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_DEVELOPER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made (or removed) outside it."; return 1; }
+  [ -s "$sealed" ] || { err "no offline keys in this session ($sealed): run step o first (the root signs these records)."; return 1; }
+  [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
+  [ -s "$keys" ] || { err "no developer cards' public keys ($keys): the developer cards' step exports them (#111 step 2)."; return 1; }
+  if [ ! -e "$dir/ownerauth.record.json" ]; then
+    [ ! -e "$dir" ] || { err "$dir holds a partial run: remove it (rm -r -- '$dir') and run this step again."; return 1; }
+    ( umask 077; mkdir "$dir" ) || return 1
+    info "type $(K) shares of the OFFLINE keys' set (the root signs the record), then Ctrl-D:"
+    python3 -Es "$HERE/offline-keys.py" ownerauth --sealed "$sealed" --nodes "$nodes" --yk-keys "$keys" \
+        --breakglass-recipient "$rcp" --out "$dir" < "$(oa_shares_in)" \
+      || { err "the owner authorizations were NOT made (reason above); nothing is kept."; rm -rf -- "$dir"; return 1; }
+  fi
+  [ -e "$dir/ownerauth-verified.record.json" ] && { info "both developer cards were already proven in this session."; ownerauth_commit_list; return 0; }
+  # the cards' public keys in a GnuPG home of this session's own, so gpg reaches each card through its stubs
+  if [ ! -d "$home" ]; then
+    ( umask 077; mkdir "$home" ) || return 1
+    gpg --homedir "$home" --batch --quiet --import "$keys" 2>/dev/null || { err "the developer cards' keys did not import into $home."; return 1; }
+  fi
+  for n in 1 2; do
+    oa_insert_card "$n"
+    case "$OA_SERIAL" in ''|*[!0-9]*) err "a card's serial is digits: nothing was checked."; return 1;; esac
+    # the card's stubs, for the decryption key; a card gpg cannot see is said as such, not as a failed decryption
+    gpg --homedir "$home" --batch --card-status >/dev/null 2>&1 \
+      || { err "gpg cannot see a card: is developer card $n inserted, and is pcscd running? Nothing was checked."; return 1; }
+    python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" \
+        --yubikey-serial "$OA_SERIAL" --gnupghome "$home" \
+      || { err "developer card $n ($OA_SERIAL) did NOT open every envelope (reason above): run this step again with it."; return 1; }
+  done
+  info "type $(K) shares of the OFFLINE keys' set again (the root signs that both cards opened every envelope), then Ctrl-D:"
+  python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" --summary \
+      --sealed "$sealed" < "$(oa_shares_in)" \
+    || { err "the proof is not complete (reason above): run this step again."; return 1; }
+  info "owner authorizations done: both developer cards open every node's envelope, signed by the root."
+  ownerauth_commit_list
 }
 
 step_archive() {
@@ -2514,6 +2719,41 @@ step_archive() {
     else
       err "escrow-mac.kcv (step 0) is missing or malformed: later PIN escrows could not check their key."
       err "Run step 0 again in this session; nothing was burned."
+      return 1
+    fi
+  fi
+  # The DKEK domain's key check value (the DKEK step): the token ceremony needs it to prove its domains
+  # are not this one. A ceremony that made a DKEK (dkek.pbe exists) and has no valid value is refused.
+  if [ -e "$WORK/dkek.pbe" ] && ! grep -qxE '[0-9a-f]{16}' "$WORK/dkek.kcv" 2>/dev/null; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: no valid dkek.kcv from the DKEK step; the real ceremony refuses this disc."
+    else
+      err "dkek.kcv (the DKEK step) is missing or malformed: this ceremony's DKEK domain would have no recorded identity."
+      err "Read the card's key check value (sc-hsm-tool) and re-run the DKEK step's import; nothing was burned."
+      return 1
+    fi
+  fi
+  # The offline keys' shares are on paper only: a shares file still in the workdir means step o never proved the
+  # forms, and the disc waits for that (ADR-0002 D28).
+  if [ -e "$WORK/offline/offline-shares.txt" ]; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the offline keys' forms were not proven (offline-shares.txt is still here); the real ceremony refuses this disc."
+    else
+      err "the offline keys' forms were not proven: $WORK/offline/offline-shares.txt is still here. Finish step o; nothing was burned."
+      return 1
+    fi
+  fi
+  # The owner authorizations (step a, regalia-kms#242): a ceremony that made the offline keys (step o) makes the KMS
+  # platform, and no host enrols under v4 without its owner auth set. So, once the offline keys exist, the disc waits
+  # for step a's root-signed proof that both developer cards open every node's envelope, whether step a was skipped,
+  # failed and cleaned up, or left unproven (d9 on #130). A ceremony without the offline keys is not held to it.
+  if { [ -e "$WORK/offline/offline-keys.sealed.json" ] || [ -e "$WORK/ownerauth/ownerauth.record.json" ]; } \
+     && [ ! -e "$WORK/ownerauth/ownerauth-verified.record.json" ]; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the owner authorizations are not proven by both developer cards; the real ceremony refuses this disc."
+    else
+      err "the owner authorizations are not proven by both developer cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
+      err "step a needs the developer cards' exported keys, so the developer cards' step (#111 step 2) comes before this disc."
       return 1
     fi
   fi
@@ -2585,9 +2825,28 @@ step_archive() {
   # (df-cicd sops-breakglass.yml) and any later encryption to it need it, and it is not secret.
   # escrow-mac.kcv is the escrow MAC key's check value (step 0): not secret, committed with
   # breakglass.recipient to the private tracker's escrow/ after the ceremony.
-  local art; for art in dkek.pbe funding-wrapped.bin funding-pub.der payload.age breakglass.recipient escrow-mac.kcv; do
+  # dkek.kcv is the DKEK domain's key check value: public, committed with them (regalia-ceremony#111).
+  local art; for art in dkek.pbe dkek.kcv funding-wrapped.bin funding-pub.der payload.age breakglass.recipient escrow-mac.kcv; do
     [ -e "$WORK/$art" ] && cp "$WORK/$art" "$burn/" 2>/dev/null || true
   done
+  # The offline keys (step o, ADR-0002 D28): their sealed file and break-glass copy are ciphertext, their records
+  # public; all four go on the disc, in offline/ (their shares are on paper only, checked above).
+  if [ -d "$WORK/offline" ]; then
+    mkdir -p "$burn/offline"
+    for art in "$WORK"/offline/offline-keys.sealed.json "$WORK"/offline/offline-keys.breakglass.age "$WORK"/offline/*.record.json; do
+      [ -f "$art" ] && cp "$art" "$burn/offline/"
+    done
+  fi
+  [ -d "$WORK/offline" ] && offline_commit_list
+  # the owner authorizations (step a): envelopes are ciphertext, records and the verify log public
+  if [ -d "$WORK/ownerauth" ]; then
+    mkdir -p "$burn/ownerauth"
+    for art in "$WORK"/ownerauth/ownerauth-*.yk.gpg "$WORK"/ownerauth/ownerauth-*.bg.age "$WORK"/ownerauth/*.record.json \
+               "$WORK"/ownerauth/ownerauth-verify.jsonl "$WORK"/ownerauth/ownerauth-verify-key.*.yk.gpg; do
+      [ -f "$art" ] && cp "$art" "$burn/ownerauth/"
+    done
+    ownerauth_commit_list
+  fi
   if [ -e "$kit/recovery" ] || ls "$kit"/*.py >/dev/null 2>&1; then
     info "Staged recovery kit for the archive disc (RECOVERY-START-HERE.txt + RECOVERY-TECHNICAL.md + toolkit): $kit"
   else
@@ -2698,7 +2957,7 @@ step_recovery_card() {
     info "card will carry the default SLIP-39 funding-seed recovery procedure."
   fi
   show "make-recovery-card.py -o recovery-card.ps --case-id '$cid' --seal-serial '$serial' --threshold $(K) --shares $(N) $hsm_flag"
-  if python3 "$HERE/make-recovery-card.py" -o "$ps" --date "$(date +%F)" --case-id "$cid" --seal-serial "$serial" \
+  if python3 -Es "$HERE/make-recovery-card.py" -o "$ps" --date "$(date +%F)" --case-id "$cid" --seal-serial "$serial" \
        --threshold "$(K)" --shares "$(N)" $hsm_flag >/dev/null 2>&1; then
     info "card written: $ps"
   else
@@ -2713,7 +2972,7 @@ step_recovery_card() {
   # check them, and refuse, without breaking the seal. It says nothing about what is inside, and the
   # distress answer itself is never printed: only what to do when it is given.
   local label="$WORK/case-label.ps"
-  if python3 "$HERE/case-label.py" -o "$label"; then
+  if python3 -Es "$HERE/case-label.py" -o "$label"; then
     if [ -n "$PRINTER" ]; then
       run "lp -d '$PRINTER' '$label'" && info "sent the outer case label to $PRINTER: write the case ID and seal serial on it, stick it OUTSIDE the case" || warn "label print skipped"
     else
@@ -2774,6 +3033,8 @@ main() {
    9) Import the seed-derived funding key into the HSM (supported custody path)
    5) Recovery drill
    6) Print break-glass recovery instruction card (DVD-case sized)
+   o) Offline keys: the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
+   a) Owner authorizations: each KMS host's TPM owner auth, to both developer cards + break-glass (after o)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
     printf '   q) quit (workdir is shredded)\n'
@@ -2792,6 +3053,8 @@ MENU
       7) step_payload;;
       8) step_chipcard;;
       9) step_hsm_import;;
+      o|O) step_offline_keys;;
+      a|A) step_ownerauth;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
       q|Q) break;;
       *) warn "pick 1-9 or q";;

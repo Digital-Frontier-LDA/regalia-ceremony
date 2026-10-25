@@ -11,6 +11,8 @@
 #
 # No hardware: the token tools and qvm-* are replaced by stubs that say they were reached and fail.
 # REQUIRE_UTF8_LOCALE=1 (CI) turns a missing en_US.UTF-8 into a failure instead of a skip.
+export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
+PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
@@ -88,6 +90,7 @@ hdr "5  every script whose ranges check caller input pins the collation, before 
 for s in qubes/scripts/ceremony.sh qubes/scripts/go-nogo.sh qubes/scripts/hsm-fleet-drill.sh qubes/scripts/hsm-init-hardened.sh \
          qubes/scripts/hsm-recovery-drill.sh qubes/scripts/hsm-staging-e2e.sh qubes/scripts/nitrokey-acceptance.sh \
          qubes/scripts/operation-proof.sh qubes/scripts/hsm-import-key.sh qubes/scripts/hsm-unwrap-key.sh \
+         qubes/scripts/hsm-signing-key.sh \
          qubes/scripts/dev-image-bootstrap.sh qubes/scripts/hsm-key-attestation-read.sh qubes/scripts/hsm-staging-ci.sh \
          qubes/dom0/vault-tools-update.sh hsm-host-role/files/commission-card.sh tools/hsm-dkek-refusal-probe.sh \
          tools/hsm-capacity-check.sh debian/offline-bundle/build.sh debian/offline-bundle/verify-release.sh; do

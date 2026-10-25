@@ -412,13 +412,13 @@ confirm_wipe || exit 1
 
 # The oracle: the address the test-vector seed derives to with NO device involved (A2).
 MNF="$WORK/drill.mnemonic"; printf '%s' "$DRILL_MNEMONIC" > "$MNF"; chmod 600 "$MNF"
-EXPECT="$(python3 "$DERIVE" --mnemonic-file "$MNF" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
+EXPECT="$(python3 -Es "$DERIVE" --mnemonic-file "$MNF" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
 [ -n "$EXPECT" ] && P "seed derives offline to $EXPECT" || { F "offline derivation produced nothing"; exit 1; }
 
 # The throwaway key container, built once (seed -> PKCS#12 + certificate).
 P12="$WORK/drill.p12"; PWF="$WORK/drill.pw"; CERT="$WORK/drill.crt"
 head -c 24 /dev/urandom | base64 | tr -d '\n=/+' > "$PWF"; chmod 600 "$PWF"
-python3 "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" --out "$P12" >/dev/null 2>&1 \
+python3 -Es "$HERE/seed-to-pkcs12.py" --mnemonic-file "$MNF" --password-file "$PWF" --out "$P12" >/dev/null 2>&1 \
   && openssl req -x509 -new -key <(openssl pkcs12 -in "$P12" -nocerts -nodes -passin "file:$PWF" 2>/dev/null) \
      -subj "/CN=$DRILL_LABEL" -days 1 -out "$CERT" 2>/dev/null \
   && P "throwaway PKCS#12 + certificate built" || { F "container build failed"; exit 1; }
@@ -535,7 +535,7 @@ card_address(){ # read the pubkey back and derive the address; echo nothing on f
       --label "$DRILL_LABEL" --output-file "$der" >/dev/null 2>&1 \
   || REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --read-object --type pubkey \
       --id 31 --output-file "$der" >/dev/null 2>&1 || { rm -f "$der"; return 1; }
-  python3 "$DERIVE" --der "$der" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1
+  python3 -Es "$DERIVE" --der "$der" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1
   rm -f "$der"
 }
 
@@ -549,8 +549,8 @@ sign_proof(){ # sign on the card, verify against $1 (pubkey DER), with a wrong-d
       --label "$DRILL_LABEL" --input-file "$d" --output-file "$s" >/dev/null 2>&1 \
   || REGALIA_PIN="$PIN" pkcs11-tool --module "$P11" --slot "$SLOTID" --login --pin env:REGALIA_PIN --sign --mechanism ECDSA \
       --id 31 --input-file "$d" --output-file "$s" >/dev/null 2>&1 || { rm -f "$d" "$s" "$w"; return 1; }
-  python3 "$VERIFY" --der "$pub" --digest "$d" --sig "$s" >/dev/null 2>&1 || { rm -f "$d" "$s" "$w"; return 1; }
-  if python3 "$VERIFY" --der "$pub" --digest "$w" --sig "$s" >/dev/null 2>&1; then
+  python3 -Es "$VERIFY" --der "$pub" --digest "$d" --sig "$s" >/dev/null 2>&1 || { rm -f "$d" "$s" "$w"; return 1; }
+  if python3 -Es "$VERIFY" --der "$pub" --digest "$w" --sig "$s" >/dev/null 2>&1; then
     rm -f "$d" "$s" "$w"; return 2   # the verifier accepted a WRONG digest — blind control
   fi
   rm -f "$d" "$s" "$w"; return 0
@@ -1002,15 +1002,15 @@ fi
 hdr "STEP 3 — SLIP-39 SEED RECOVERY round-trip (host-only; no card)"
 printf '  FAILURE CONDITION: a recovered mnemonic differs from the minted one, a recovered address\n'
 printf '  differs from the original, or 3 shares RECOVER (B5: no sub-threshold reconstruction).\n'
-if ! python3 -c "import mnemonic, shamir_mnemonic" 2>/dev/null; then
+if ! python3 -I -c "import mnemonic, shamir_mnemonic" 2>/dev/null; then
   U "python 'mnemonic'/'shamir-mnemonic' packages missing — SLIP-39 arm skipped"
 else
   head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$WORK/entropy.hex"
-  python3 "$SLIP39" --from-entropy --in "$WORK/entropy.hex" --out "$WORK/seed.mnemonic" 2>/dev/null \
+  python3 -Es "$SLIP39" --from-entropy --in "$WORK/entropy.hex" --out "$WORK/seed.mnemonic" 2>/dev/null \
     && P "throwaway seed minted from /dev/urandom entropy" || F "seed mint failed"
-  ADDR_ORIG="$(python3 "$DERIVE" --mnemonic-file "$WORK/seed.mnemonic" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
+  ADDR_ORIG="$(python3 -Es "$DERIVE" --mnemonic-file "$WORK/seed.mnemonic" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
   [ -n "$ADDR_ORIG" ] && P "original address: $ADDR_ORIG" || F "no address from the minted seed"
-  python3 "$SLIP39" --in "$WORK/seed.mnemonic" --threshold "$KK" --shares "$NN" --out "$WORK/slip39.txt" 2>/dev/null \
+  python3 -Es "$SLIP39" --in "$WORK/seed.mnemonic" --threshold "$KK" --shares "$NN" --out "$WORK/slip39.txt" 2>/dev/null \
     && P "split $KK-of-$NN (reconstruct-verified by the tool itself)" || F "SLIP-39 split failed"
   grep -v '^#' "$WORK/slip39.txt" | grep . > "$WORK/shares.txt"
   n=0; : > "$WORK/q1.txt"; : > "$WORK/q2.txt"
@@ -1020,11 +1020,11 @@ else
     [ "$n" -ge "$((NN - KK + 1))" ] && printf '%s\n' "$line" >> "$WORK/q2.txt"
   done < "$WORK/shares.txt"
   for q in q1 q2; do
-    if ! python3 "$SLIP39" --recover --in "$WORK/$q.txt" --out "$WORK/$q.mnemonic" 2>/dev/null; then
+    if ! python3 -Es "$SLIP39" --recover --in "$WORK/$q.txt" --out "$WORK/$q.mnemonic" 2>/dev/null; then
       F "recovery from quorum $q failed"; continue
     fi
     if [ "$(tr -d '[:space:]' < "$WORK/$q.mnemonic")" = "$(tr -d '[:space:]' < "$WORK/seed.mnemonic")" ]; then
-      ADDR_RT="$(python3 "$DERIVE" --mnemonic-file "$WORK/$q.mnemonic" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
+      ADDR_RT="$(python3 -Es "$DERIVE" --mnemonic-file "$WORK/$q.mnemonic" 2>/dev/null | grep -oE 'akash1[a-z0-9]+' | head -1)"
       [ "$ADDR_RT" = "$ADDR_ORIG" ] && P "quorum $q recovers the EXACT seed; address matches ($ADDR_RT)" \
                                    || F "quorum $q recovered a seed deriving ${ADDR_RT:-none} != $ADDR_ORIG"
     else
@@ -1032,7 +1032,7 @@ else
     fi
   done
   head -n "$((KK - 1))" "$WORK/shares.txt" > "$WORK/three.txt"   # one share short of the threshold
-  if python3 "$SLIP39" --recover --in "$WORK/three.txt" --out "$WORK/three.mnemonic" 2>/dev/null; then
+  if python3 -Es "$SLIP39" --recover --in "$WORK/three.txt" --out "$WORK/three.mnemonic" 2>/dev/null; then
     if [ "$(tr -d '[:space:]' < "$WORK/three.mnemonic")" = "$(tr -d '[:space:]' < "$WORK/seed.mnemonic")" ]; then
       F "$((KK - 1)) of $NN shares RECOVERED the seed — the $KK-of-$NN threshold is not enforced (B5 fails)"
     else

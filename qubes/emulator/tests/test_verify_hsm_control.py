@@ -14,6 +14,9 @@ So this pins the property that matters in both directions: it must ACCEPT a genu
 r or s, malformed lengths, out-of-range scalars, and the classic identity/zero edge cases that
 naive ECDSA implementations wave through.
 """
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import importlib.machinery
 import importlib.util
 import os

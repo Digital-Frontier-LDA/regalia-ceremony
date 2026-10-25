@@ -78,6 +78,36 @@ cd qubes/emulator
 
 Individual checks live under `qubes/emulator/tests/` and can be run directly.
 
+## Current limitations
+
+Kept current as work lands; each item names the issue that tracks it, and is removed when it is lifted.
+What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](qubes/PROOF-OF-WORKS.md).
+
+- **No ceremony has run yet.** Nothing this tooling generates is in use. The tooling is exercised by the emulator
+  suite, the dev environment and the staging bench only.
+- **The offline keys (`qubes/scripts/offline-keys.py`, ADR-0002 D28):**
+  - They have run in CI and on a development machine only, never on the ceremony laptop or against real developer
+    cards (#123).
+  - The owner authorizations run as `ceremony.sh` step a, and the disc waits for both developer cards' proof. The
+    step needs the developer cards' exported keys, which no step makes yet (#122, #111 step 2). So no real disc that
+    holds the offline keys can be burned until the developer cards' step exists: the cards come first.
+  - The tool's own docstring lists its limitations in full.
+- **The laptop-side YubiKeys (D30):**
+  - No tool makes the developer cards' keys yet. That step waits on the D30.6 bench measurements, which have not
+    run (#111).
+  - The release key's import onto the release cards is not implemented (#124).
+  - The card-ceremony record's rules and verifier are in review (#121); no tool writes the record yet.
+  - Nothing produces OpenPGP attestation certificates yet, so a record's "attested" has no certificate behind it
+    (#127).
+  - The release key's tool is in review (#126), modelled against a stand-in card only.
+- **Open issues in the existing tooling:**
+  - Every emulator suite is now kept off the real pcscd. What remains open is stand-ins for `opensc-tool`,
+    `pcsc_scan` and `gpg --card-status`, and a reader with a vendor-specific USB class going unseen by the
+    daemon-tier refusal (#104).
+  - YubiKey PINs and PUKs are passed to `ykman` on the command line (#98).
+- **Older documents predate the ratified design** (see Precedence above). Where they describe HSM-held root or
+  revocation keys or approval YubiKeys, D28/D30 supersede them.
+
 ## Security
 
 - **No secrets in this repository.** Age keys that appear in tests are `AGE-SECRET-KEY-1EXAMPLE…`

@@ -44,6 +44,18 @@ export EMU_RUN="${EMU_RUN:-/run/vault-emu}"
 export PATH="$EMU_BIN:$CEREMONY_SCRIPTS:$PATH"
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1
 
+# NO SUITE OF THE MODEL TIER MAY REACH A REAL CARD (regalia-ceremony#104). The emulator shadows
+# pkcs11-tool, sc-hsm-tool and ykman, but go-nogo.sh also runs the real opensc-tool, and
+# hsm-random.py talks to pcscd through pyscard, which no stub on PATH can catch. Both find pcscd
+# through PCSCLITE_CSOCK_NAME: pointed at a socket that does not exist, every one of them sees no
+# daemon, exactly as on a CI runner with no reader. On a bench machine this run reached the real
+# tokens three times on 2026-10-02 (#104). The daemon tier below boots its OWN pcscd and lifts this.
+# LIMIT: sudo (env_reset), `env -i` and systemd-run units drop this variable. No model-tier suite or
+# script it calls runs a card tool that way (audited 2026-10-02; test-emulator-hermetic.sh keeps it
+# so). A suite started BY HAND outside this runner is not covered either: export the variable first.
+PCSC_NOWHERE="$(mktemp -d)/no-pcscd.comm"
+export PCSCLITE_CSOCK_NAME="$PCSC_NOWHERE"
+
 INSTALL=0; MODELS_ONLY=0
 for a in "$@"; do case "$a" in
   --install-deps) INSTALL=1;;
@@ -87,6 +99,9 @@ python3 "$HERE/tests/test_schsm_crypto.py" || suite_failed "test_schsm_crypto.py
 python3 "$HERE/tests/test_derive_address.py" || suite_failed "test_derive_address.py"
 python3 "$HERE/tests/test_yubikey_attestation_verify.py" || suite_failed "test_yubikey_attestation_verify.py"
 python3 "$HERE/tests/test_slip39_mint.py" || suite_failed "test_slip39_mint.py"
+python3 "$HERE/tests/test_offline_keys.py" || suite_failed "test_offline_keys.py"
+"$HERE/tests/test-offline-keys-step.sh" || suite_failed "test-offline-keys-step.sh"
+"$HERE/tests/test-ownerauth-step.sh" || suite_failed "test-ownerauth-step.sh"
 python3 "$HERE/tests/test_metal_stamp.py" || suite_failed "test_metal_stamp.py"
 python3 "$HERE/tests/test_recovery_procedure.py" || suite_failed "test_recovery_procedure.py"
 python3 "$HERE/tests/test_payload_qr.py" || suite_failed "test_payload_qr.py"
@@ -366,6 +381,8 @@ say "LOCALE (a bracket range in a validator means ASCII, under a UTF-8 locale to
 "$HERE/tests/test-locale-ranges.sh" || suite_failed "test-locale-ranges.sh"
 say "NO PIN ON ARGV (the fleet drill against recording stubs; every script passes secrets as env:NAME)"
 "$HERE/tests/test-no-pin-on-argv.sh" || suite_failed "test-no-pin-on-argv.sh"
+"$HERE/tests/test-python-isolation.sh" || suite_failed "test-python-isolation.sh"
+"$HERE/tests/test-emulator-hermetic.sh" || suite_failed "test-emulator-hermetic.sh"
 say "GO/NO-GO one script (preflight merged in, every self-test run, one output style)"
 "$HERE/tests/test-go-nogo-one-script.sh" || suite_failed "test-go-nogo-one-script.sh"
 
@@ -387,6 +404,9 @@ python3 "$HERE/tests/test_ceremony_manifest.py" || suite_failed "test_ceremony_m
 
 say "OPERATION PROOF (regalia#28 criterion 3): each new key signs a fresh challenge with its PIN — by serial, PIN never on argv, one retry at most"
 "$HERE/tests/test-operation-proof.sh" || suite_failed "test-operation-proof.sh"
+
+say "SIGNING KEYS GENERATED ON AN OFFLINE HSM (regalia#554): certificate signed by the card, DKEK-wrapped backup, restore on the spare, a KMS-domain card refuses the blob"
+"$HERE/tests/test-hsm-signing-key.sh" || suite_failed "test-hsm-signing-key.sh"
 
 say "OFFLINE BUNDLE metadata, complete hash coverage, and centralized release signature verification"
 python3 "$HERE/../../debian/offline-bundle/test_bundle.py" || suite_failed "test_bundle.py"
@@ -415,15 +435,20 @@ if [ "$(id -u)" != 0 ]; then
   exit 1
 fi
 
+# THE DAEMON TIER KILLS AND RESTARTS pcscd AND TURNS SWAP OFF: refused on a machine with a real
+# reader or token attached (emu-boot.sh, emu_refuse_on_real_readers).
+# shellcheck disable=SC1090
+source "$EMU_BIN/emu-boot.sh"
+emu_refuse_on_real_readers || exit 2
+unset PCSCLITE_CSOCK_NAME
+
 # The ceremony preflight (run by the dress-rehearsal + go/no-go suites) fails closed if
 # swap is active — correct for a real vault qube, but CI runners/dev boxes have swap. In
 # this TEST context turn it off so preflight genuinely passes (faithful, not faked).
 swapoff -a 2>/dev/null || true
 
 say "booting emulator daemons natively (pcscd + vpcd + SLE-4442 + SoftHSM2 + cups-pdf)"
-# shellcheck disable=SC1090
-source "$EMU_BIN/emu-boot.sh"
-boot_all
+boot_all || exit 2
 trap 'stop_all' EXIT
 
 # THE DAEMON-BACKED SUITES DRIVE REAL TOOLS. Without them, route-coverage.sh reports seven route
