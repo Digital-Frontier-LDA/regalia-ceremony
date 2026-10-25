@@ -1,21 +1,30 @@
 #!/usr/bin/env bash
 # gpg stand-in — the emulator suite reaches no real OpenPGP card (regalia-ceremony#104).
 #
-# gpg's card commands go through scdaemon, which tries its OWN CCID driver (libusb) before pcscd: the suite's
-# PCSCLITE_CSOCK_NAME guard (run-tests.sh) cannot stop it, so `gpg --card-status` would reach a developer card or
-# YubiKey attached to the bench. Card commands are therefore refused here, with status 2. A suite that drives a card
-# step puts its own gpg shim first on PATH (test-ownerauth-step.sh) or injects `run` (test_offline_keys.py), and never
-# gets this far. Every other gpg call is the real gpg's, its arguments as given: found on PATH, skipping this
-# directory, so the stand-in never runs itself.
-# LIMIT: gpg-agent also starts scdaemon to decrypt with a CARD STUB key. Stubs are made only by a card command that saw a
-# card (--card-status, --card-edit's fetch or learn), all refused here, and the suite's GnuPG homes hold the developer
-# cards' public keys only. Nothing on the emulator path runs gpg-connect-agent, gpg-card or scdaemon itself (checked
-# for #104, 2026-10-25): a new caller of those needs its own stand-in, or `disable-ccid` in that home's scdaemon.conf.
+# gpg reaches a card through scdaemon, which tries its OWN CCID driver (libusb) before pcscd: the suite's
+# PCSCLITE_CSOCK_NAME guard (run-tests.sh) cannot stop it. Two layers here:
+#
+#   1. THE CONTROL. Every gpg call is the real gpg's, with its agent started as `gpg-agent --disable-scdaemon`
+#      (--agent-program): that agent never starts scdaemon, so no gpg path reaches a card, whatever the option
+#      or its abbreviation (gpg accepts any unambiguous prefix: --card-stat is --card-status), --change-pin,
+#      --edit-key's keytocard or bkuptocard, or a decryption with a card stub key. Measured on gpg 2.5.18: the agent
+#      answers "scd serialno" with "Not supported" and no scdaemon runs for the home.
+#   2. DEFENCE IN DEPTH. A card command, or any abbreviation of one gpg would take (--car*, --edit-c*, --change-pi*;
+#      gpg 2.5.18's --dump-options: --card-status, --card-edit, --edit-card, --change-pin), is refused here with status 2
+#      before gpg runs. --change-passphrase and --change-recipients are not card commands: --change-p alone is
+#      ambiguous to gpg and refused by it.
+#
+# A suite that drives a card step puts its own gpg shim first on PATH (test-ownerauth-step.sh) or injects `run`
+# (test_offline_keys.py), and never gets this far. The real gpg and gpg-agent are found on PATH past this directory,
+# so the stand-in never runs itself.
+# LIMIT: --agent-program applies when gpg STARTS the agent. An agent already running for a home (started some other
+# way) keeps its own options; nothing on the emulator path starts one other than through gpg (checked for #104,
+# 2026-10-25), and every suite's GnuPG home is its own fresh directory.
 set -euo pipefail
 
 for a in "$@"; do
   case "$a" in
-    --card-status|--card-edit|--edit-card)
+    --car*|--edit-c*|--change-pi*)
       echo "gpg (emulator stand-in): refused $a: a card command reaches a real card through scdaemon's own CCID driver," \
            "whatever the pcscd socket says (regalia-ceremony#104). Shim gpg's card commands in the test instead." >&2
       exit 2 ;;
@@ -23,11 +32,16 @@ for a in "$@"; do
 done
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-IFS=: read -r -a dirs <<< "${PATH:-}"
-for d in "${dirs[@]}"; do
-  [ -n "$d" ] && [ -d "$d" ] || continue
-  [ "$(cd "$d" && pwd -P)" = "$here" ] && continue
-  [ -x "$d/gpg" ] && exec "$d/gpg" "$@"
-done
-echo "gpg (emulator stand-in): no real gpg on PATH" >&2
-exit 127
+real() {                                          # $1 on PATH, past this directory
+  local d
+  IFS=: read -r -a dirs <<< "${PATH:-}"
+  for d in "${dirs[@]}"; do
+    [ -n "$d" ] && [ -d "$d" ] || continue
+    [ "$(cd "$d" && pwd -P)" = "$here" ] && continue
+    [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
+  done
+  return 1
+}
+gpg="$(real gpg)" || { echo "gpg (emulator stand-in): no real gpg on PATH" >&2; exit 127; }
+agent="$(real gpg-agent)" || { echo "gpg (emulator stand-in): no gpg-agent on PATH: refusing to run gpg with an agent that could start scdaemon" >&2; exit 127; }
+exec "$gpg" --agent-program "$agent|--disable-scdaemon" "$@"
