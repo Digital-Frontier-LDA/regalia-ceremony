@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# gpg stand-in — the emulator suite reaches no real OpenPGP card (regalia-ceremony#104).
+#
+# gpg's card commands go through scdaemon, which tries its OWN CCID driver (libusb) before pcscd: the suite's
+# PCSCLITE_CSOCK_NAME guard (run-tests.sh) cannot stop it, so `gpg --card-status` would reach a developer card or
+# YubiKey attached to the bench. Card commands are therefore refused here, with status 2. A suite that drives a card
+# step puts its own gpg shim first on PATH (test-ownerauth-step.sh) or injects `run` (test_offline_keys.py), and never
+# gets this far. Every other gpg call is the real gpg's, its arguments as given: found on PATH, skipping this
+# directory, so the stand-in never runs itself.
+set -euo pipefail
+
+for a in "$@"; do
+  case "$a" in
+    --card-status|--card-edit|--edit-card)
+      echo "gpg (emulator stand-in): refused $a: a card command reaches a real card through scdaemon's own CCID driver," \
+           "whatever the pcscd socket says (regalia-ceremony#104). Shim gpg's card commands in the test instead." >&2
+      exit 2 ;;
+  esac
+done
+
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+IFS=: read -r -a dirs <<< "${PATH:-}"
+for d in "${dirs[@]}"; do
+  [ -n "$d" ] && [ -d "$d" ] || continue
+  [ "$(cd "$d" && pwd -P)" = "$here" ] && continue
+  [ -x "$d/gpg" ] && exec "$d/gpg" "$@"
+done
+echo "gpg (emulator stand-in): no real gpg on PATH" >&2
+exit 127

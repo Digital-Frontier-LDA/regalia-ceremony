@@ -92,6 +92,7 @@ emulator/
     sc-hsm-tool           # model: DKEK 4-of-6 + key wrap/unwrap round-trip
     age-plugin-yubikey    # shim: software age identity behind the plugin interface
     ykman                 # shim: emulated YubiKey 5 management / PIV info
+    gpg                   # guard: refuses gpg's card commands (scdaemon's own CCID driver needs no pcscd, #104); the rest is the real gpg
     growisofs             # shim: burn an M-DISC image with xorriso
     optical-verify        # cross-drive read-back + checksum (with fault injection)
     emu-entrypoint.sh     # OPTIONAL Docker entrypoint (thin wrapper over emu-boot.sh)

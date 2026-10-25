@@ -76,6 +76,44 @@ if python3 -I -c 'import smartcard' 2>/dev/null; then
   grep -q 'Service not available\|EstablishContext' <<< "$out" && P "pyscard: no context (hsm-random.py's path)" || F "pyscard reached a daemon: $out"
 else P "pyscard is not installed here (nothing to reach)"; fi
 
+hdr "gpg's card commands are refused: scdaemon's own CCID driver reaches a card with no pcscd at all"
+# PCSCLITE_CSOCK_NAME stops what goes through pcscd. GnuPG's scdaemon tries its built-in CCID driver (libusb) FIRST, so
+# `gpg --card-status` (ceremony.sh step_ownerauth, offline-keys.py card_serial) could reach a real developer card on the
+# bench with no daemon. The emulator's gpg stand-in refuses gpg's card commands and hands everything else to the real gpg.
+# The canary: a "real" gpg behind the stand-in that records every call; a card command must never reach it.
+mkdir -p "$T/realgpg"
+cat > "$T/realgpg/gpg" <<'CANARY'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${GPG_CANARY_LOG:?}"
+exit 0
+CANARY
+chmod +x "$T/realgpg/gpg"
+export GPG_CANARY_LOG="$T/gpg-calls"
+for card in "--card-status" "--card-edit" "--edit-card" "--homedir $T/h --batch --card-status"; do
+  : > "$GPG_CANARY_LOG"
+  # shellcheck disable=SC2086  # the option list is words on purpose
+  out="$(PATH="$EMU/bin:$T/realgpg:/usr/bin:/bin" gpg $card 2>&1)"; rc=$?
+  [ "$rc" = 2 ] && [ ! -s "$GPG_CANARY_LOG" ] && grep -q 'regalia-ceremony#104' <<< "$out" \
+    && P "gpg $card: refused (status 2), the real gpg never ran" || F "gpg $card reached the real gpg (status $rc): $(cat "$GPG_CANARY_LOG") $out"
+done
+: > "$GPG_CANARY_LOG"
+# bounded: a stand-in that found itself would exec itself for ever, and must fail here, not hang the suite
+bound="$(command -v timeout)"                                     # resolved before PATH narrows to the test's own
+PATH="$EMU/bin:$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list-keys x >/dev/null 2>&1
+[ "$(cat "$GPG_CANARY_LOG")" = "--batch --list-keys x" ] && P "anything else is the real gpg's, with its arguments as given (and the stand-in never finds itself)" \
+  || F "a non-card gpg call did not reach the real gpg as given: '$(cat "$GPG_CANARY_LOG")'"
+unset GPG_CANARY_LOG
+# #104's step 2: every card tool go-nogo.sh and ceremony.sh can run either has a stand-in in the emulator's bin, or speaks
+# only PC/SC, which the socket above already stops
+QUBES_SCRIPTS="$(cd "$EMU/../scripts" && pwd)"
+for tool in ykman pkcs11-tool sc-hsm-tool gpg; do
+  [ -x "$EMU/bin/$tool" ] && P "$tool has an emulator stand-in" || F "$tool has no stand-in in $EMU/bin"
+done
+for tool in opensc-tool pkcs15-tool pcsc_scan; do
+  grep -qw "$tool" "$QUBES_SCRIPTS/go-nogo.sh" "$QUBES_SCRIPTS/ceremony.sh" 2>/dev/null || continue
+  [ ! -e "$EMU/bin/$tool" ] && P "$tool speaks PC/SC only: stopped by the socket, no stand-in needed" || P "$tool has a stand-in"
+done
+
 hdr "emu-boot.sh refuses to restart pcscd under a real reader"
 fake(){ rm -rf "$T/sys"; mkdir -p "$T/sys"; local n=0 c; for c in "$@"; do n=$((n+1)); mkdir -p "$T/sys/1-$n:1.0"; echo "$c" > "$T/sys/1-$n:1.0/bInterfaceClass"; done; }
 refuses(){ ( export EMU_SYSFS_USB="$T/sys" EMU_RUN="$T/run"; unset REGALIA_BENCH; [ -n "${1:-}" ] && export REGALIA_BENCH="$1"
