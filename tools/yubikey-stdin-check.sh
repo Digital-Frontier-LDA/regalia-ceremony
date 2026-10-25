@@ -18,6 +18,7 @@
 # (xtrace is off before it is read, whatever the caller set), never in a core dump (ulimit -c 0), and unset on every
 # exit. The record printed at the end is for #98, a shared issue: the serial's last four digits only.
 set +x                                   # before anything: `bash -x` or an exported SHELLOPTS=xtrace prints nothing here
+set +e                                   # and an inherited errexit cannot cut the run short before the record (CodeRabbit on #153)
 ulimit -c 0 2>/dev/null || true
 set -uo pipefail
 # the collation pin of every script here whose ranges check caller input (test-locale-ranges.sh section 5): LC_ALL,
@@ -48,6 +49,7 @@ done
 last4="…${SERIAL: -4}"
 command -v ykman >/dev/null || die "ykman is not installed"
 BOUND="${YK_CHECK_TIMEOUT:-30}"
+[[ "$BOUND" =~ ^[1-9][0-9]{0,2}$ ]] || die "YK_CHECK_TIMEOUT must be 1 to 999 seconds (got '$BOUND'): timeout 0 would not bound the attempt"
 TTY="${YK_CHECK_TTY:-/dev/tty}"          # (the tests point it at a file; nothing else should)
 if [ -z "$PIN_STDIN" ]; then
   { exec 3<"$TTY"; } 2>/dev/null || die "no terminal to read the PIN from ($TTY): run this at the console, or pass --pin-stdin to read it from standard input on purpose"
@@ -64,7 +66,10 @@ tries(){ local out n max
   n="$(sed -nE 's/^PIN tries remaining: *([0-9]+)(\/([0-9]+))?.*/\1/p' <<< "$out" | head -1)"
   max="$(sed -nE 's/^PIN tries remaining: *([0-9]+)\/([0-9]+).*/\2/p' <<< "$out" | head -1)"
   [ -n "$n" ] || { echo "ERR: no 'PIN tries remaining' line in ykman piv info"; return 1; }
-  echo "$n ${max:-3}"; }
+  # without the maximum (ykman 4.x prints a bare count) "the tries are full" cannot be proven: a card set to more
+  # than 3 retries would pass with tries already spent (CodeRabbit on #153)
+  [ -n "$max" ] || { echo "ERR: ykman piv info does not report the maximum ('PIN tries remaining: $n', no '/N'): use ykman 5"; return 1; }
+  echo "$n $max"; }
 t="$(tries)" || die "cannot read the PIN tries of $last4: ${t#ERR: }"
 read -r before max <<< "$t"
 [ "$before" = "$max" ] || die "YubiKey $last4 has $before of $max PIN tries left, not all: a wrong PIN here would bring it closer to a lockout. Not started; restore the counter first (a correct PIN resets it) and decide."
@@ -86,7 +91,8 @@ fi
 
 # 3. ONE attempt: both values on stdin from a builtin, stdin not a terminal, bounded
 echo "ATTEMPT: ykman --device $last4 piv access change-pin, the PIN to itself, values on standard input (bounded at ${BOUND}s)"
-printf '%s\n%s\n' "$P" "$P" | timeout "$BOUND" ykman --device "$SERIAL" piv access change-pin >/dev/null 2>&1; rc=$?
+rc=0
+printf '%s\n%s\n' "$P" "$P" | timeout "$BOUND" ykman --device "$SERIAL" piv access change-pin >/dev/null 2>&1 || rc=$?
 unset P
 if t="$(tries)"; then read -r after max2 <<< "$t"; else after="?"; max2="$max"; fi
 when="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
