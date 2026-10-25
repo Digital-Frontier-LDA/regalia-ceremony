@@ -9,6 +9,14 @@
 # ranges check what a caller supplies now pins the collation; this runs several of them under
 # en_US.UTF-8 and checks the pin is in all of them.
 #
+# WHAT CATCHES A MISSING PIN (b9 on #151). bash's globasciiranges (on by default since bash 5.0; measured
+# on bash 5.3.9) keeps a glob's or a case pattern's range ASCII under any locale, but not a regex's
+# (=~). So on such a bash, sections 1, 2 and 4, which run the real scripts, check their behaviour and
+# would stay green with a script's pin deleted: the default saves its globs. Two sections catch a
+# missing pin: section 3, which runs a decision with globasciiranges OFF (the shell the pin is for:
+# a bash before 5.0, or one that turned it off), and section 5's static guard, which requires every
+# such script to pin before its first pattern. Do not read sections 1, 2 and 4 as pin coverage.
+#
 # No hardware: the token tools and qvm-* are replaced by stubs that say they were reached and fail.
 # REQUIRE_UTF8_LOCALE=1 (CI) turns a missing en_US.UTF-8 into a failure instead of a skip.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
