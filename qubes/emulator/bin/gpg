@@ -16,7 +16,9 @@
 #
 # A suite that drives a card step puts its own gpg shim first on PATH (test-ownerauth-step.sh) or injects `run`
 # (test_offline_keys.py), and never gets this far. The real gpg and gpg-agent are found on PATH past this directory,
-# so the stand-in never runs itself.
+# so the stand-in never runs itself: the next ones AFTER this directory, since a gpg before it on PATH is a caller (a
+# test's shim that exec's this stand-in by path) and taking it would loop (#150's hung emulator suite). A loop that
+# still forms, through a wrapper after this directory that calls back, is refused (REGALIA_EMU_GPG_ACTIVE).
 # LIMIT: --agent-program applies when gpg STARTS the agent. An agent already running for a home (started some other
 # way) keeps its own options; nothing on the emulator path starts one other than through gpg (checked for #104,
 # 2026-10-25), and every suite's GnuPG home is its own fresh directory.
@@ -31,14 +33,23 @@ for a in "$@"; do
   esac
 done
 
+# Reached again from inside itself (a wrapper that calls back into it): refused at once, not exec'd for ever.
+if [ -n "${REGALIA_EMU_GPG_ACTIVE:-}" ]; then
+  echo "gpg (emulator stand-in): reached itself again through another gpg on PATH (a wrapper calling back into the" \
+       "stand-in): refused rather than looping. PATH=$PATH" >&2
+  exit 2
+fi
+export REGALIA_EMU_GPG_ACTIVE=1
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-real() {                                          # $1 on PATH, past this directory
-  local d
+real() {                                          # $1 on PATH AFTER this directory: what is before it is a caller
+  local d after= mine=
   IFS=: read -r -a dirs <<< "${PATH:-}"
+  for d in "${dirs[@]}"; do [ -n "$d" ] && [ -d "$d" ] && [ "$(cd "$d" && pwd -P)" = "$here" ] && mine=1; done
+  [ -n "$mine" ] || after=1                       # run by path with its directory not on PATH: anything but itself
   for d in "${dirs[@]}"; do
     [ -n "$d" ] && [ -d "$d" ] || continue
-    [ "$(cd "$d" && pwd -P)" = "$here" ] && continue
-    [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
+    if [ "$(cd "$d" && pwd -P)" = "$here" ]; then after=1; continue; fi
+    [ -n "$after" ] && [ -x "$d/$1" ] && { printf '%s\n' "$d/$1"; return 0; }
   done
   return 1
 }

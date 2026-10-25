@@ -110,6 +110,25 @@ PATH="$EMU/bin:$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list
 [ "$(cat "$GPG_CANARY_LOG")" = "gpg --agent-program $T/realgpg/gpg-agent|--disable-scdaemon --batch --list-keys x" ] \
   && P "anything else is the real gpg's, its arguments as given, its agent started with --disable-scdaemon (never itself)" \
   || F "a non-card gpg call did not reach the real gpg as expected: '$(cat "$GPG_CANARY_LOG")'"
+# A wrapper AHEAD of the stand-in that execs it by path (test-ownerauth-step.sh's shim, with REAL_GPG resolved under
+# run-tests.sh's PATH): the stand-in takes the next gpg on PATH after its own directory, never one before it, which is
+# its caller. Before this, "any gpg but my own directory" found the shim again and the two exec'd each other for ever,
+# hanging the emulator suite on #150 (2 h+ in CI, the ownerauth step).
+mkdir -p "$T/ahead"
+printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$EMU/bin/gpg" > "$T/ahead/gpg"; chmod +x "$T/ahead/gpg"
+: > "$GPG_CANARY_LOG"
+PATH="$T/ahead:$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list-keys y >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$GPG_CANARY_LOG")" = "gpg --agent-program $T/realgpg/gpg-agent|--disable-scdaemon --batch --list-keys y" ] \
+  && P "a wrapper ahead of the stand-in that calls it reaches the real gpg once (the next one after the stand-in's directory)" \
+  || F "a wrapper ahead of the stand-in did not reach the real gpg once (status $rc, 124 = it looped): '$(cat "$GPG_CANARY_LOG")'"
+# and a loop that still forms (a wrapper AFTER the stand-in that calls it back) is refused at once, not run for ever
+mkdir -p "$T/behind"
+printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$EMU/bin/gpg" > "$T/behind/gpg"; chmod +x "$T/behind/gpg"
+: > "$GPG_CANARY_LOG"
+out="$(PATH="$EMU/bin:$T/behind:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list-keys z 2>&1)"; rc=$?
+[ "$rc" = 2 ] && [ ! -s "$GPG_CANARY_LOG" ] && grep -q 'reached itself again' <<< "$out" \
+  && P "a wrapper behind the stand-in that calls it back is refused at once (status 2), the real gpg never ran" \
+  || F "a loop through the stand-in was not refused (status $rc, 124 = it looped): $out"
 unset GPG_CANARY_LOG
 
 # Layer 1, against the real gpg where it is installed: a fresh home, every card path the denylist does NOT see
