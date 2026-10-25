@@ -25,7 +25,8 @@ dev="$2"; shift 2
 grep -qx "$dev" <<< "$(tr ' ' '\n' <<< "$YK_SERIALS")" || { echo "ERROR: no YubiKey with serial $dev" >&2; exit 2; }
 case "$*" in
   info) printf 'Device type: YubiKey 5 NFC\nSerial number: %s\nFirmware version: 5.7.4\n' "$dev" ;;
-  "piv info") printf 'PIV version: 5.7.4\nPIN tries remaining: %s/3\n' "$(cat "$YK_STATE")" ;;
+  "piv info") if [ "${YK_BARE:-}" = 1 ]; then printf 'PIN tries remaining: %s\n' "$(cat "$YK_STATE")"   # ykman 4.x: no maximum
+              else printf 'PIV version: 5.7.4\nPIN tries remaining: %s/3\n' "$(cat "$YK_STATE")"; fi ;;
   "piv access change-pin")
     [ "${YK_MODE:-}" = wait ] && { sleep 60; exit 1; }      # a ykman that waits on the terminal
     IFS= read -r cur; IFS= read -r new; printf '%s|%s\n' "$cur" "$new" >> "$YK_LOG.stdin"
@@ -38,7 +39,7 @@ chmod +x "$T/bin/ykman"
 run(){ # run TRIES STDIN ARGS...: one run of the tool against a fresh fake; out, err, rc, the log
   : > "$T/log"; : > "$T/log.stdin"; echo "$1" > "$T/state"; local input="$2"; shift 2
   printf '%s\n' "$input" | env PATH="$T/bin:$PATH" YK_LOG="$T/log" YK_STATE="$T/state" YK_SERIALS="${SERIALS:-35718625}" \
-    YK_PIN="$PIN" YK_MODE="${MODE:-}" YK_CHECK_TIMEOUT=3 YK_CHECK_TTY="${TTYFILE:-/nonexistent/tty}" YK_CHECK_TEST="${TESTMARK-1}" ${XTRACE:+SHELLOPTS=xtrace} \
+    YK_PIN="$PIN" YK_MODE="${MODE:-}" YK_BARE="${BARE:-}" YK_CHECK_TIMEOUT="${BOUNDS:-3}" YK_CHECK_TTY="${TTYFILE:-/nonexistent/tty}" YK_CHECK_TEST="${TESTMARK-1}" ${XTRACE:+SHELLOPTS=xtrace} ${ERREXIT:+SHELLOPTS=errexit} \
     bash ${BASHX:+-x} "$TOOL" ${STDIN_PIN---pin-stdin} "$@" >"$T/out" 2>"$T/err"
   rc=$?; }
 changed(){ grep -c 'piv access change-pin' "$T/log"; }
@@ -94,6 +95,21 @@ MODE='wait' run 3 "$PIN" --device 35718625
 [ "$rc" = 1 ] && grep -q "rc=124 (timed out: ykman waited" "$T/out" && P "a ykman that waits on the terminal: bounded, FAIL, said as such" || F "wait: rc=$rc $(cat "$T/out")"
 grep -q "no try was spent" "$T/err" && ! grep -q "STOP: do not run this again" "$T/err" \
   && P "a FAIL with the tries unchanged says no try was spent (not STOP)" || F "unchanged-tries FAIL text: $(cat "$T/err")"
+
+hdr "CodeRabbit on #153: a bound that is a bound, a maximum that is known, a record under errexit"
+for b in 0 -1 abc 1000; do
+  BOUNDS="$b" run 3 "$PIN" --device 35718625
+  [ "$rc" = 2 ] && [ ! -s "$T/log" ] && grep -q "YK_CHECK_TIMEOUT must be" "$T/err" && P "YK_CHECK_TIMEOUT=$b: refused before ykman runs (timeout 0 would not bound the attempt)" \
+    || F "YK_CHECK_TIMEOUT=$b: rc=$rc $(cat "$T/err")"
+done
+BARE=1 run 3 "$PIN" --device 35718625
+[ "$rc" = 2 ] && [ "$(changed)" = 0 ] && grep -q "does not report the maximum" "$T/err" \
+  && P "piv info without a maximum (ykman 4.x's bare count): 'tries full' cannot be proven, refused" || F "bare count: rc=$rc $(cat "$T/err")"
+ERREXIT=1 run 3 'wrongPIN' --device 35718625
+[ "$rc" = 1 ] && grep -q "yubikey-stdin-check: FAIL" "$T/out" && grep -q "PIN tries: 3 of 3 before, 2 of 3 after" "$T/out" && grep -q "2 of 3 PIN tries remain" "$T/err" \
+  && P "SHELLOPTS=errexit from the caller: a failing ykman still gives the FAIL record and the tries after" || F "errexit: rc=$rc out: $(cat "$T/out") err: $(cat "$T/err")"
+ERREXIT=1 run 3 "$PIN" --device 35718625
+[ "$rc" = 0 ] && grep -q "yubikey-stdin-check: PASS" "$T/out" && P "and under errexit a PASS is still a PASS" || F "errexit pass: rc=$rc $(cat "$T/err")"
 
 hdr "never traced, never dumped"
 BASHX=1 run 3 "$PIN" --device 35718625
