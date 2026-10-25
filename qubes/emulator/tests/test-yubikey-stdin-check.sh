@@ -77,10 +77,10 @@ STDIN_PIN='' TTYFILE="$T/tty" run 3 'wrongPIN' --device 35718625
 [ "$rc" = 0 ] && [ "$(cat "$T/log.stdin")" = "$PIN|$PIN" ] \
   && P "with a terminal, the PIN is the terminal's: a wrong PIN on stdin (a stray pipe) is ignored, no try spent" || F "tty read: rc=$rc $(cat "$T/log.stdin")"
 
-TESTMARK= STDIN_PIN= TTYFILE="$T/tty" run 3 "$PIN" --device 35718625
+TESTMARK='' STDIN_PIN='' TTYFILE="$T/tty" run 3 "$PIN" --device 35718625
 [ "$rc" = 2 ] && [ ! -s "$T/log" ] && grep -q "YK_CHECK_TTY is set .* without YK_CHECK_TEST=1" "$T/err" \
   && P "the tests' PIN-source override without their marker: refused, nothing run" || F "override without marker: rc=$rc $(cat "$T/err")"
-STDIN_PIN= TTYFILE="$T/tty" run 3 "$PIN" --device 35718625
+STDIN_PIN='' TTYFILE="$T/tty" run 3 "$PIN" --device 35718625
 grep -q "PIN read from: $T/tty" "$T/out" && P "the record says where the PIN was read from" || F "no 'PIN read from' line: $(cat "$T/out")"
 run 3 "$PIN" --device 35718625
 grep -q "PIN read from: standard input (--pin-stdin)" "$T/out" && P "and says so for --pin-stdin" || F "--pin-stdin not named in the record"
