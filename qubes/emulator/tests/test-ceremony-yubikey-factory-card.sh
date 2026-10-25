@@ -98,6 +98,32 @@ out2="$(yk_piv_change 36345471 change-pin 123456 "" 2>&1)"; rc2=$?
 [ "$rc2" != 0 ] && [ ! -s "$CALLS" ] && P "an empty new value is refused before ykman is run" || F "empty value sent (rc=$rc2): $(cat "$CALLS")"
 out2="$(yk_piv_change 36345471 change-pin $'123456\n999999' 24681357 2>&1)"; rc2=$?
 [ "$rc2" != 0 ] && [ ! -s "$CALLS" ] && ! grep -q 999999 <<< "$out2" && P "a value holding a line break is refused before ykman is run, and not printed" || F "line break sent (rc=$rc2): $(cat "$CALLS")"
+# A value the operator could not type back is refused before ykman runs (b9 on #100): six spaces is a valid PIN to the
+# card, so a blank-looking, space-padded, short, long or non-ASCII value would set a PIN nobody can reproduce. Each
+# case is refused on either side (current or new), sends nothing, and never prints the value.
+while IFS='|' read -r label bad; do
+  for side in cur new; do
+    : > "$CALLS"
+    if [ "$side" = cur ]; then out2="$(yk_piv_change 36345471 change-pin "$bad" 24681357 2>&1)"; rc2=$?
+    else out2="$(yk_piv_change 36345471 change-pin 123456 "$bad" 2>&1)"; rc2=$?; fi
+    [ "$rc2" != 0 ] && [ ! -s "$CALLS" ] && ! grep -qF -- "$bad" <<< "$out2" && grep -q "6 to 8 printable ASCII characters" <<< "$out2" \
+      && P "a $label value ($side) is refused before ykman is run, and not printed" || F "$label value ($side) not refused (rc=$rc2): $(cat "$CALLS") / $out2"
+  done
+done <<'CASES'
+whitespace-only|      
+leading-space| 1234567
+trailing-space|1234567 
+inner-space|1234 567
+tab|1234	567
+too-short|12345
+too-long|123456789
+non-ASCII|12345é7
+CASES
+# the bounds themselves are accepted: 6 and 8 characters, digits or not (the card takes any byte; ykman any ASCII)
+: > "$CALLS"
+yk_piv_change 36345471 change-pin 123456 'a1!B2@c3' >/dev/null 2>&1 && yk_piv_change 36345471 change-puk 12345678 654321 >/dev/null 2>&1 \
+  && [ "$(grep -c 'change-p' "$CALLS")" = 2 ] && P "6- and 8-character printable values are accepted" || F "a valid value was refused: $(cat "$CALLS")"
+: > "$CALLS"
 out2="$(yk_piv_change 36345471 change-management-key 1 2 2>&1)"; rc2=$?
 [ "$rc2" != 0 ] && [ ! -s "$CALLS" ] && P "only change-pin and change-puk are accepted" || F "another verb was run (rc=$rc2)"
 

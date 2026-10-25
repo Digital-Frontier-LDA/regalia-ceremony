@@ -594,6 +594,16 @@ yk_piv_change() {
   case "$verb" in change-pin|change-puk) ;; *) err "yk_piv_change: unknown verb $verb"; return 1;; esac
   [ -n "$cur" ] && [ -n "$new" ] || { err "yk_piv_change: an empty value was given for $verb; nothing was sent to the card"; return 1; }
   case "$cur$new" in *$'\n'*|*$'\r'*) err "yk_piv_change: a value for $verb holds a line break; nothing was sent to the card"; return 1;; esac
+  # a value the operator can type back: 6 to 8 printable ASCII characters, no space anywhere (b9 on #100). The card
+  # takes any 6-8 bytes, so six spaces or a pasted trailing space would set a PIN nobody can reproduce: a lockout.
+  # Checked in a C-locale subshell (bytes, and [[:graph:]] = 0x21-0x7e); builtins only, so no value reaches an argv.
+  local which v
+  for which in current new; do
+    [ "$which" = current ] && v="$cur" || v="$new"
+    ( export LC_ALL=C; [ "${#v}" -ge 6 ] && [ "${#v}" -le 8 ] && [[ "$v" =~ ^[[:graph:]]+$ ]] ) || {
+      err "yk_piv_change: the $which value for $verb is not 6 to 8 printable ASCII characters with no spaces (blank, space-padded, too short, too long or non-ASCII); nothing was sent to the card"
+      return 1; }
+  done
   printf '%s\n%s\n' "$cur" "$new" | ykman --device "$serial" piv access "$verb"
 }
 
