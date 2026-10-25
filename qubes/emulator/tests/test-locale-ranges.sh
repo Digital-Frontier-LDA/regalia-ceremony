@@ -105,7 +105,7 @@ for s in qubes/scripts/ceremony.sh qubes/scripts/go-nogo.sh qubes/scripts/hsm-fl
          qubes/scripts/hsm-signing-key.sh \
          qubes/scripts/dev-image-bootstrap.sh qubes/scripts/hsm-key-attestation-read.sh qubes/scripts/hsm-staging-ci.sh \
          qubes/dom0/vault-tools-update.sh hsm-host-role/files/commission-card.sh tools/hsm-dkek-refusal-probe.sh \
-         tools/hsm-capacity-check.sh debian/offline-bundle/build.sh debian/offline-bundle/verify-release.sh; do
+         tools/hsm-capacity-check.sh tools/yubikey-stdin-check.sh debian/offline-bundle/build.sh debian/offline-bundle/verify-release.sh; do
   f="$ROOT/$s"
   pin="$(grep -n '^export LC_COLLATE=C$' "$f" | head -1 | cut -d: -f1)"
   move="$(grep -n '^  unset LC_ALL _lc$' "$f" | head -1 | cut -d: -f1)"
