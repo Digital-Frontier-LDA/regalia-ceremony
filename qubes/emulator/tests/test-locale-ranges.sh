@@ -9,6 +9,14 @@
 # ranges check what a caller supplies now pins the collation; this runs several of them under
 # en_US.UTF-8 and checks the pin is in all of them.
 #
+# WHAT CATCHES A MISSING PIN (b9 on #151). bash's globasciiranges (on by default since bash 5.0; measured
+# on bash 5.3.9) keeps a glob's or a case pattern's range ASCII under any locale, but not a regex's
+# (=~). So on such a bash, sections 1, 2 and 4, which run the real scripts, check their behaviour and
+# would stay green with a script's pin deleted: the default saves its globs. Two sections catch a
+# missing pin: section 3, which runs a decision with globasciiranges OFF (the shell the pin is for:
+# a bash before 5.0, or one that turned it off), and section 5's static guard, which requires every
+# such script to pin before its first pattern. Do not read sections 1, 2 and 4 as pin coverage.
+#
 # No hardware: the token tools and qvm-* are replaced by stubs that say they were reached and fail.
 # REQUIRE_UTF8_LOCALE=1 (CI) turns a missing en_US.UTF-8 into a failure instead of a skip.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
@@ -72,7 +80,11 @@ hdr "3  dev-image-bootstrap.sh: what counts as a commit id for the file root ins
 DECISION="$(sed -n '/^  pinned_by_ref=0$/,/^  esac$/p' "$SCRIPTS/dev-image-bootstrap.sh")"
 grep -q 'pinned_by_ref=1' <<< "$DECISION" || F "cannot find the REQ_REF decision in dev-image-bootstrap.sh"
 WIDE40="$(printf '７%.0s' {1..40})"
-decide(){ LC_ALL=$LOC REQ_REF="$1" bash -c "$2"$'\n'"$DECISION"$'\n''echo "$pinned_by_ref"' 2>/dev/null; }
+# The decision is a `case` glob. Since bash 5.0 globasciiranges is on by default, which keeps a glob's [0-9] ASCII
+# under any locale (bash 5.3.9 on ubuntu-26.04: the unpinned decision is already right there), so the instrument
+# would see no bug to undo. The script cannot rely on that default (a bash before 5.0, or a shell that turned it
+# off), so the decision runs with it OFF: the configuration the pin defends against, on every bash.
+decide(){ LC_ALL=$LOC REQ_REF="$1" bash -c 'shopt -u globasciiranges'$'\n'"$2"$'\n'"$DECISION"$'\n''echo "$pinned_by_ref"' 2>/dev/null; }
 [ "$(decide "$WIDE40" "")" = 1 ] && P "the instrument: unpinned, forty full-width digits pass as a commit id" || F "unpinned, forty full-width digits were not taken as a commit id: this locale does not reproduce the bug"
 [ "$(decide "$WIDE40" "$PIN_SNIPPET")" = 0 ] && P "with the script's pin, forty full-width digits are NOT a commit id (the install is refused)" || F "forty full-width digits still pass as a commit id"
 [ "$(decide 0123456789abcdef0123456789ABCDEF01234567 "$PIN_SNIPPET")" = 1 ] && P "control: forty hex digits are a commit id" || F "a real commit id is refused"
