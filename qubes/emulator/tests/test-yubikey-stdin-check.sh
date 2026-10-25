@@ -38,7 +38,8 @@ chmod +x "$T/bin/ykman"
 run(){ # run TRIES STDIN ARGS...: one run of the tool against a fresh fake; out, err, rc, the log
   : > "$T/log"; : > "$T/log.stdin"; echo "$1" > "$T/state"; local input="$2"; shift 2
   printf '%s\n' "$input" | env PATH="$T/bin:$PATH" YK_LOG="$T/log" YK_STATE="$T/state" YK_SERIALS="${SERIALS:-35718625}" \
-    YK_PIN="$PIN" YK_MODE="${MODE:-}" YK_CHECK_TIMEOUT=3 ${XTRACE:+SHELLOPTS=xtrace} bash ${BASHX:+-x} "$TOOL" "$@" >"$T/out" 2>"$T/err"
+    YK_PIN="$PIN" YK_MODE="${MODE:-}" YK_CHECK_TIMEOUT=3 YK_CHECK_TTY="${TTYFILE:-/nonexistent/tty}" ${XTRACE:+SHELLOPTS=xtrace} \
+    bash ${BASHX:+-x} "$TOOL" ${STDIN_PIN---pin-stdin} "$@" >"$T/out" 2>"$T/err"
   rc=$?; }
 changed(){ grep -c 'piv access change-pin' "$T/log"; }
 
@@ -67,6 +68,15 @@ done
 run 3 "$PIN" --device 3571-8625
 [ "$rc" = 2 ] && [ ! -s "$T/log" ] && P "a malformed serial: refused before ykman runs" || F "malformed serial: rc=$rc"
 
+hdr "the PIN comes from the terminal unless --pin-stdin is given (b9 on #153)"
+STDIN_PIN= run 3 "$PIN" --device 35718625
+[ "$rc" = 2 ] && [ ! -s "$T/log" ] && grep -q "no terminal to read the PIN from" "$T/err" \
+  && P "no terminal and no --pin-stdin: refused before ykman runs" || F "no tty: rc=$rc $(cat "$T/err") log: $(cat "$T/log")"
+printf '%s\n' "$PIN" > "$T/tty"
+STDIN_PIN= TTYFILE="$T/tty" run 3 'wrongPIN' --device 35718625
+[ "$rc" = 0 ] && [ "$(cat "$T/log.stdin")" = "$PIN|$PIN" ] \
+  && P "with a terminal, the PIN is the terminal's: a wrong PIN on stdin (a stray pipe) is ignored, no try spent" || F "tty read: rc=$rc $(cat "$T/log.stdin")"
+
 hdr "a FAIL says how many tries remain, and to stop"
 run 3 'wrongPIN' --device 35718625
 [ "$rc" = 1 ] && grep -q "yubikey-stdin-check: FAIL" "$T/out" && grep -q "2 of 3 PIN tries remain on …8625. STOP: do not run this again" "$T/err" \
@@ -74,6 +84,8 @@ run 3 'wrongPIN' --device 35718625
 [ "$(changed)" = 1 ] && P "and exactly one attempt was made" || F "attempts: $(changed)"
 MODE=wait run 3 "$PIN" --device 35718625
 [ "$rc" = 1 ] && grep -q "rc=124 (timed out: ykman waited" "$T/out" && P "a ykman that waits on the terminal: bounded, FAIL, said as such" || F "wait: rc=$rc $(cat "$T/out")"
+grep -q "no try was spent" "$T/err" && ! grep -q "STOP: do not run this again" "$T/err" \
+  && P "a FAIL with the tries unchanged says no try was spent (not STOP)" || F "unchanged-tries FAIL text: $(cat "$T/err")"
 
 hdr "never traced, never dumped"
 BASHX=1 run 3 "$PIN" --device 35718625

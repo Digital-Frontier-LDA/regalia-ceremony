@@ -10,6 +10,10 @@
 #   tools/yubikey-stdin-check.sh --device 35718625 --dry-run   # reads the card, asks the PIN, changes nothing
 #   tools/yubikey-stdin-check.sh --device 35718625             # the check
 #
+# The PIN is read from the terminal (/dev/tty), not from standard input: a stray `< file` or a pipe from an earlier
+# command would otherwise feed a wrong PIN and spend a try (b9 on #153). --pin-stdin reads it from stdin instead, for
+# a deliberate caller only.
+#
 # The PIN is read without echo, never on a command line (it reaches ykman through printf, a builtin), never traced
 # (xtrace is off before it is read, whatever the caller set), never in a core dump (ulimit -c 0), and unset on every
 # exit. The record printed at the end is for #98, a shared issue: the serial's last four digits only.
@@ -22,19 +26,26 @@ trap 'unset P' EXIT
 trap 'unset P; echo; echo "yubikey-stdin-check: interrupted: nothing was sent to the card unless ATTEMPT was printed" >&2; exit 130' INT TERM
 
 die(){ echo "yubikey-stdin-check: $*" >&2; exit 2; }
-SERIAL=""; DRY=""
+SERIAL=""; DRY=""; PIN_STDIN=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --device) SERIAL="${2:-}"; shift 2 || die "--device needs a serial" ;;
     --dry-run) DRY=1; shift ;;
+    --pin-stdin) PIN_STDIN=1; shift ;;
     -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
-    *) die "unknown argument: $1 (only --device SERIAL and --dry-run)" ;;
+    *) die "unknown argument: $1 (only --device SERIAL, --dry-run and --pin-stdin)" ;;
   esac
 done
 [[ "$SERIAL" =~ ^[0-9]{6,10}$ ]] || die "--device must name the YubiKey's serial (6 to 10 digits), as ykman list --serials prints it"
 last4="…${SERIAL: -4}"
 command -v ykman >/dev/null || die "ykman is not installed"
 BOUND="${YK_CHECK_TIMEOUT:-30}"
+TTY="${YK_CHECK_TTY:-/dev/tty}"          # (the tests point it at a file; nothing else should)
+if [ -z "$PIN_STDIN" ]; then
+  { exec 3<"$TTY"; } 2>/dev/null || die "no terminal to read the PIN from ($TTY): run this at the console, or pass --pin-stdin to read it from standard input on purpose"
+else
+  exec 3<&0
+fi
 command -v timeout >/dev/null || die "timeout (coreutils) is not installed: the attempt must be bounded"
 
 # 1. the card: present, the one named, and its tries full
@@ -54,7 +65,9 @@ ykv="$(timeout 20 ykman --version 2>/dev/null | sed -nE 's/.*version:? *([0-9][0
 echo "YubiKey $last4: firmware ${firmware:-unknown}, ykman ${ykv:-unknown}, PIN tries $before of $max"
 
 # 2. the PIN: no echo, the rule ceremony.sh's yk_piv_change holds it to
-IFS= read -rs -p "PIV PIN of $last4 (not shown): " P; echo     # IFS=: a leading or trailing space is kept, then refused
+printf 'PIV PIN of %s (not shown): ' "$last4" >&2
+IFS= read -rs -u 3 P; echo >&2           # IFS=: a leading or trailing space is kept, then refused
+exec 3<&-
 [ "${#P}" -ge 6 ] && [ "${#P}" -le 8 ] && [[ "$P" =~ ^[[:graph:]]+$ ]] \
   || die "the PIN is not 6 to 8 printable ASCII characters with no spaces (the ceremony's rule): nothing was sent to the card"
 
@@ -82,7 +95,13 @@ echo "  at $when"
 echo "-----------------------------------------------------------------------------------"
 if [ "$verdict" = FAIL ]; then
   echo >&2
-  echo "  >>> $after of $max2 PIN tries remain on $last4. STOP: do not run this again. The next attempt needs a decision. <<<" >&2
+  if [ "$after" = "$before" ]; then
+    # ykman stopped before the card counted a try (b9 on #153: e.g. a version asking a third line, stdin at EOF)
+    echo "  >>> ykman failed (rc=$rc) but the tries are unchanged ($after of $max2 on $last4): no try was spent. The stdin" >&2
+    echo "      mechanism #100 relies on did not work as measured. Report this on #98; do not change ceremony.sh's use of it. <<<" >&2
+  else
+    echo "  >>> $after of $max2 PIN tries remain on $last4. STOP: do not run this again. The next attempt needs a decision. <<<" >&2
+  fi
   exit 1
 fi
 exit 0
