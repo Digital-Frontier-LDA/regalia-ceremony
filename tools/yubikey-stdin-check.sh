@@ -20,7 +20,15 @@
 set +x                                   # before anything: `bash -x` or an exported SHELLOPTS=xtrace prints nothing here
 ulimit -c 0 2>/dev/null || true
 set -uo pipefail
-export LC_ALL=C                          # ykman's output parsed as bytes; the PIN rule's [[:graph:]] is 0x21-0x7e
+# the collation pin of every script here whose ranges check caller input (test-locale-ranges.sh section 5): LC_ALL,
+# which would override it, is moved into the other categories first
+if [ -n "${LC_ALL:-}" ]; then
+  for _lc in LANG LC_CTYPE LC_NUMERIC LC_TIME LC_MONETARY LC_MESSAGES LC_PAPER LC_NAME LC_ADDRESS \
+             LC_TELEPHONE LC_MEASUREMENT LC_IDENTIFICATION; do export "$_lc=$LC_ALL"; done
+  unset LC_ALL _lc
+fi
+export LC_COLLATE=C
+export LC_CTYPE=C                        # bytes: the PIN's length, [[:graph:]] = 0x21-0x7e, ykman's output parsed as bytes
 P=""
 trap 'unset P' EXIT
 trap 'unset P; echo; echo "yubikey-stdin-check: interrupted: nothing was sent to the card unless ATTEMPT was printed" >&2; exit 130' INT TERM
