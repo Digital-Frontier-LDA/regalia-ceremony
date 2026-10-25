@@ -40,7 +40,12 @@ done
 last4="…${SERIAL: -4}"
 command -v ykman >/dev/null || die "ykman is not installed"
 BOUND="${YK_CHECK_TIMEOUT:-30}"
-TTY="${YK_CHECK_TTY:-/dev/tty}"          # (the tests point it at a file; nothing else should)
+TTY=/dev/tty
+if [ -n "${YK_CHECK_TTY:-}" ]; then       # the tests point it at a file; honoured only with their marker (b9 on #153)
+  [ "${YK_CHECK_TEST:-}" = 1 ] || die "YK_CHECK_TTY is set ($YK_CHECK_TTY) without YK_CHECK_TEST=1: it is the test suite's PIN source, not a console's. Unset it."
+  TTY="$YK_CHECK_TTY"
+fi
+FROM="$([ -n "$PIN_STDIN" ] && echo 'standard input (--pin-stdin)' || echo "$TTY")"
 if [ -z "$PIN_STDIN" ]; then
   { exec 3<"$TTY"; } 2>/dev/null || die "no terminal to read the PIN from ($TTY): run this at the console, or pass --pin-stdin to read it from standard input on purpose"
 else
@@ -91,6 +96,7 @@ echo "yubikey-stdin-check: $verdict"
 echo "  YubiKey $last4, firmware ${firmware:-unknown}, ykman ${ykv:-unknown}"
 echo "  change-pin with both values on stdin: rc=$rc$([ "$rc" = 124 ] && echo ' (timed out: ykman waited, probably on the terminal)')"
 echo "  PIN tries: $before of $max before, $after of $max2 after"
+echo "  PIN read from: $FROM"
 echo "  at $when"
 echo "-----------------------------------------------------------------------------------"
 if [ "$verdict" = FAIL ]; then
