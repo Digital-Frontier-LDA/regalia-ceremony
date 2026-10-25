@@ -7,6 +7,10 @@
 # step puts its own gpg shim first on PATH (test-ownerauth-step.sh) or injects `run` (test_offline_keys.py), and never
 # gets this far. Every other gpg call is the real gpg's, its arguments as given: found on PATH, skipping this
 # directory, so the stand-in never runs itself.
+# LIMIT: gpg-agent also starts scdaemon to decrypt with a CARD STUB key. Stubs are made only by a card command that saw a
+# card (--card-status, --card-edit's fetch or learn), all refused here, and the suite's GnuPG homes hold the developer
+# cards' public keys only. Nothing on the emulator path runs gpg-connect-agent, gpg-card or scdaemon itself (checked
+# for #104, 2026-10-25): a new caller of those needs its own stand-in, or `disable-ccid` in that home's scdaemon.conf.
 set -euo pipefail
 
 for a in "$@"; do
