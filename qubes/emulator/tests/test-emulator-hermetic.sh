@@ -125,8 +125,9 @@ if command -v gpg >/dev/null 2>&1 && command -v gpg-agent >/dev/null 2>&1 && com
   grep -q 'Not supported' <<< "$serialno" && [ "$running" != OK ] \
     && P "the real agent the stand-in started refuses scdaemon ('scd serialno': Not supported) and none ever ran, after keytocard and a decryption" \
     || F "the agent reached scdaemon: scd serialno '$serialno', scd_running '$running'"
-  emu_gpg --list-secret-keys canary@e2e 2>/dev/null | grep -q '^sec ' \
-    && P "keytocard moved nothing: the secret key is still this home's, not a card stub" || F "keytocard changed the key: $(emu_gpg --list-secret-keys canary@e2e 2>&1)"
+  keys="$(emu_gpg --list-secret-keys canary@e2e 2>&1)"          # captured, then matched: no producer to SIGPIPE under pipefail
+  grep -q '^sec ' <<< "$keys" \
+    && P "keytocard moved nothing: the secret key is still this home's, not a card stub" || F "keytocard changed the key: $keys"
   gpgconf --homedir "$H" --kill all 2>/dev/null || true
 else P "gpg, gpg-agent or gpg-connect-agent is not installed here (nothing to reach)"; fi
 # #104's step 2: every card tool go-nogo.sh and ceremony.sh can run either has a stand-in in the emulator's bin, or speaks
