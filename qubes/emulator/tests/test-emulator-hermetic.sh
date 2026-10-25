@@ -76,6 +76,90 @@ if python3 -I -c 'import smartcard' 2>/dev/null; then
   grep -q 'Service not available\|EstablishContext' <<< "$out" && P "pyscard: no context (hsm-random.py's path)" || F "pyscard reached a daemon: $out"
 else P "pyscard is not installed here (nothing to reach)"; fi
 
+hdr "gpg cannot reach a card: its agent never starts scdaemon, and card commands are refused before it runs"
+# PCSCLITE_CSOCK_NAME stops what goes through pcscd. GnuPG's scdaemon tries its built-in CCID driver (libusb) FIRST, so
+# a gpg card path (ceremony.sh step_ownerauth's --card-status, offline-keys.py card_serial, --change-pin, --edit-key's
+# keytocard, a card stub's decryption) could reach a real developer card on the bench with no daemon. The emulator's gpg
+# stand-in starts gpg's agent with --disable-scdaemon (the control) and refuses card commands and their abbreviations
+# (defence in depth; b9 on #150: gpg takes any unambiguous prefix, --card-stat reached the card path).
+# Layer 2, with a canary: a "real" gpg and gpg-agent behind the stand-in that record every call.
+# EVERY call to the stand-in is bounded: one that found itself would exec itself for ever, and a regressed control could
+# wait on a real card; either must fail here, not hang the suite. `timeout` is resolved before PATH narrows.
+bound="$(command -v timeout)"
+mkdir -p "$T/realgpg"
+for tool in gpg gpg-agent; do
+  printf '#!/usr/bin/env bash\nprintf "%%s %%s\\n" "%s" "$*" >> "${GPG_CANARY_LOG:?}"\nexit 0\n' "$tool" > "$T/realgpg/$tool"
+  chmod +x "$T/realgpg/$tool"
+done
+export GPG_CANARY_LOG="$T/gpg-calls"
+for card in --card-status --card-edit --edit-card --change-pin --card-stat --card-s --car-st --edit-c --change-pi "--homedir $T/h --batch --card-status"; do
+  : > "$GPG_CANARY_LOG"
+  # shellcheck disable=SC2086  # the option list is words on purpose
+  out="$(PATH="$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg $card 2>&1)"; rc=$?
+  [ "$rc" = 2 ] && [ ! -s "$GPG_CANARY_LOG" ] && grep -q 'regalia-ceremony#104' <<< "$out" \
+    && P "gpg $card: refused (status 2), the real gpg never ran" || F "gpg $card reached the real gpg (status $rc): $(cat "$GPG_CANARY_LOG") $out"
+done
+for fine in --change-passphrase --change-recipients --edit-key; do
+  : > "$GPG_CANARY_LOG"
+  PATH="$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg "$fine" x >/dev/null 2>&1
+  [ -s "$GPG_CANARY_LOG" ] && P "gpg $fine is not a card command: it reaches the real gpg (the control stops what it may do with a card)" \
+    || F "gpg $fine was refused, and it is not a card command"
+done
+: > "$GPG_CANARY_LOG"
+PATH="$EMU/bin:$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list-keys x >/dev/null 2>&1
+[ "$(cat "$GPG_CANARY_LOG")" = "gpg --agent-program $T/realgpg/gpg-agent|--disable-scdaemon --batch --list-keys x" ] \
+  && P "anything else is the real gpg's, its arguments as given, its agent started with --disable-scdaemon (never itself)" \
+  || F "a non-card gpg call did not reach the real gpg as expected: '$(cat "$GPG_CANARY_LOG")'"
+# A wrapper AHEAD of the stand-in that execs it by path (test-ownerauth-step.sh's shim, with REAL_GPG resolved under
+# run-tests.sh's PATH): the stand-in takes the next gpg on PATH after its own directory, never one before it, which is
+# its caller. Before this, "any gpg but my own directory" found the shim again and the two exec'd each other for ever,
+# hanging the emulator suite on #150 (2 h+ in CI, the ownerauth step).
+mkdir -p "$T/ahead"
+printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$EMU/bin/gpg" > "$T/ahead/gpg"; chmod +x "$T/ahead/gpg"
+: > "$GPG_CANARY_LOG"
+PATH="$T/ahead:$EMU/bin:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list-keys y >/dev/null 2>&1; rc=$?
+[ "$rc" = 0 ] && [ "$(cat "$GPG_CANARY_LOG")" = "gpg --agent-program $T/realgpg/gpg-agent|--disable-scdaemon --batch --list-keys y" ] \
+  && P "a wrapper ahead of the stand-in that calls it reaches the real gpg once (the next one after the stand-in's directory)" \
+  || F "a wrapper ahead of the stand-in did not reach the real gpg once (status $rc, 124 = it looped): '$(cat "$GPG_CANARY_LOG")'"
+# and a loop that still forms (a wrapper AFTER the stand-in that calls it back) is refused at once, not run for ever
+mkdir -p "$T/behind"
+printf '#!/usr/bin/env bash\nexec "%s" "$@"\n' "$EMU/bin/gpg" > "$T/behind/gpg"; chmod +x "$T/behind/gpg"
+: > "$GPG_CANARY_LOG"
+out="$(PATH="$EMU/bin:$T/behind:$T/realgpg:/usr/bin:/bin" "$bound" 10 gpg --batch --list-keys z 2>&1)"; rc=$?
+[ "$rc" = 2 ] && [ ! -s "$GPG_CANARY_LOG" ] && grep -q 'reached itself again' <<< "$out" \
+  && P "a wrapper behind the stand-in that calls it back is refused at once (status 2), the real gpg never ran" \
+  || F "a loop through the stand-in was not refused (status $rc, 124 = it looped): $out"
+unset GPG_CANARY_LOG
+
+# Layer 1, against the real gpg where it is installed: a fresh home, every card path the denylist does NOT see
+# (keytocard inside --edit-key, a decryption), and then the agent itself is asked whether scdaemon ever ran.
+if command -v gpg >/dev/null 2>&1 && command -v gpg-agent >/dev/null 2>&1 && command -v gpg-connect-agent >/dev/null 2>&1; then
+  H="$T/gnupg"; mkdir -m 700 "$H"
+  emu_gpg(){ PATH="$EMU/bin:$PATH" "$bound" 60 gpg --homedir "$H" --batch "$@"; }
+  emu_gpg --passphrase '' --quick-gen-key canary@e2e ed25519 default never >/dev/null 2>&1
+  printf 'keytocard\ny\n1\nsave\n' | emu_gpg --command-fd 0 --edit-key canary@e2e >/dev/null 2>&1
+  printf 'x' | emu_gpg -r canary@e2e -e | emu_gpg -d >/dev/null 2>&1
+  serialno="$("$bound" 20 gpg-connect-agent --homedir "$H" --no-autostart "scd serialno" /bye 2>&1)"
+  running="$("$bound" 20 gpg-connect-agent --homedir "$H" --no-autostart "getinfo scd_running" /bye 2>&1 | head -1)"
+  grep -q 'Not supported' <<< "$serialno" && [ "$running" != OK ] \
+    && P "the real agent the stand-in started refuses scdaemon ('scd serialno': Not supported) and none ever ran, after keytocard and a decryption" \
+    || F "the agent reached scdaemon: scd serialno '$serialno', scd_running '$running'"
+  keys="$(emu_gpg --list-secret-keys canary@e2e 2>&1)"          # captured, then matched: no producer to SIGPIPE under pipefail
+  grep -q '^sec ' <<< "$keys" \
+    && P "keytocard moved nothing: the secret key is still this home's, not a card stub" || F "keytocard changed the key: $keys"
+  gpgconf --homedir "$H" --kill all 2>/dev/null || true
+else P "gpg, gpg-agent or gpg-connect-agent is not installed here (nothing to reach)"; fi
+# #104's step 2: every card tool go-nogo.sh and ceremony.sh can run either has a stand-in in the emulator's bin, or speaks
+# only PC/SC, which the socket above already stops
+QUBES_SCRIPTS="$(cd "$EMU/../scripts" && pwd)"
+for tool in ykman pkcs11-tool sc-hsm-tool gpg; do
+  [ -x "$EMU/bin/$tool" ] && P "$tool has an emulator stand-in" || F "$tool has no stand-in in $EMU/bin"
+done
+for tool in opensc-tool pkcs15-tool pcsc_scan; do
+  grep -qw "$tool" "$QUBES_SCRIPTS/go-nogo.sh" "$QUBES_SCRIPTS/ceremony.sh" 2>/dev/null || continue
+  [ ! -e "$EMU/bin/$tool" ] && P "$tool speaks PC/SC only: stopped by the socket, no stand-in needed" || P "$tool has a stand-in"
+done
+
 hdr "emu-boot.sh refuses to restart pcscd under a real reader"
 fake(){ rm -rf "$T/sys"; mkdir -p "$T/sys"; local n=0 c; for c in "$@"; do n=$((n+1)); mkdir -p "$T/sys/1-$n:1.0"; echo "$c" > "$T/sys/1-$n:1.0/bInterfaceClass"; done; }
 refuses(){ ( export EMU_SYSFS_USB="$T/sys" EMU_RUN="$T/run"; unset REGALIA_BENCH; [ -n "${1:-}" ] && export REGALIA_BENCH="$1"
