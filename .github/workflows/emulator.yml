@@ -54,6 +54,9 @@ jobs:
   emulator-suite:
     name: Emulator route coverage + wizard dress rehearsal
     runs-on: ubuntu-latest
+    # A full run takes ~10 min (regalia-ceremony#100, 2026-10-25). With no bound, #150's hung suite (two gpg
+    # stand-ins exec'ing each other) held a runner for the 6 h default; a hang now fails within the hour.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
