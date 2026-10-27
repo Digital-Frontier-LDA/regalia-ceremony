@@ -106,7 +106,7 @@ emu_refuse_on_real_readers() {
       why="libccid's reader list $plist could not be parsed (its vendor and product arrays), so the attached USB devices cannot be cleared"
     else
       for d in $devs; do
-        printf '%s\n' "$pairs" | grep -qx "${d#*=}" && listed="$listed ${d%%=*} (${d#*=})"
+        grep -qx "${d#*=}" <<< "$pairs" && listed="$listed ${d%%=*} (${d#*=})"   # no pipe: under pipefail, grep -q's early exit fails the producer
       done
     fi
   fi
