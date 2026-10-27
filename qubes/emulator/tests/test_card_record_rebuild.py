@@ -231,5 +231,50 @@ class Rebuild(unittest.TestCase):
                 ok.parse_pin(bad)
 
 
+
+class WhichBound(unittest.TestCase):
+    """7e on #131: the sheet-only bound cannot refuse a rollback to an older disc copy, so it is never the default. A
+    rebuild names --chain (after genesis) or --before-genesis, never neither and never both."""
+
+    BASE = ["card-record", "--sealed", "S", "--rebuild-from-disc", "D", "--state-dir", "E", "--out", "O"]
+    CHAIN = ["--chain", "C", "--tool-root", "T", "--tool-digest", "ab" * 32]
+
+    def run_main(self, extra):
+        calls, err = [], io.StringIO()
+        rebuild = lambda *a, **k: (calls.append(("rebuild", a[5] if len(a) > 5 else k.get("pin"))) or ({"sequence": 2}, "O/x", "sheet"))
+        with unittest.mock.patch.object(ok, "card_record_rebuild", rebuild), \
+             unittest.mock.patch.object(ok, "chain_pin", lambda *a, **k: (calls.append(("pin",)) or (1, "ab" * 32))), \
+             unittest.mock.patch.object(ok, "root_entry_of", lambda doc: "R"), \
+             unittest.mock.patch("builtins.open", unittest.mock.mock_open(read_data="{}")), \
+             unittest.mock.patch("sys.stderr", err), unittest.mock.patch("sys.stdout", io.StringIO()):
+            rc = ok.main(self.BASE + extra)
+        return rc, calls, err.getvalue()
+
+    def test_neither_is_refused_before_anything(self):
+        rc, calls, err = self.run_main([])
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("needs --chain (after genesis: the chain bounds it) or --before-genesis", err)
+
+    def test_both_are_refused_before_anything(self):
+        rc, calls, err = self.run_main(self.CHAIN + ["--before-genesis"])
+        self.assertEqual((rc, calls), (1, []))
+        self.assertIn("--chain and --before-genesis are the two cases: one, not both", err)
+
+    def test_part_of_the_chain_arguments_is_refused_never_a_sheet_rebuild(self):
+        # --tool-root or --tool-digest without --chain still means "after genesis": refused, never rebuilt with no pin
+        for extra in (["--tool-root", "T"], ["--tool-digest", "ab" * 32], ["--chain", "C"], ["--tool-root", "T", "--tool-digest", "ab" * 32]):
+            with self.subTest(extra=extra):
+                rc, calls, err = self.run_main(extra)
+                self.assertEqual((rc, calls), (1, []))
+                self.assertIn("--chain takes --tool-root and --tool-digest", err)
+
+    def test_before_genesis_rebuilds_with_no_pin(self):
+        rc, calls, _ = self.run_main(["--before-genesis"])
+        self.assertEqual((rc, calls), (0, [("rebuild", None)]))
+
+    def test_the_chain_rebuilds_with_its_pin(self):
+        rc, calls, _ = self.run_main(self.CHAIN)
+        self.assertEqual((rc, calls), (0, [("pin",), ("rebuild", (1, "ab" * 32))]))
+
 if __name__ == "__main__":
     unittest.main()
