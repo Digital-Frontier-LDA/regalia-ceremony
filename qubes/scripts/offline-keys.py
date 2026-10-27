@@ -18,7 +18,8 @@ to the break-glass key.
     python3 -Es offline-keys.py card-record --sealed FILE --cards FILE --release-import FILE --release-import FILE
                                      --state-dir DIR --out DIR [--first-card-record]
     python3 -Es offline-keys.py card-record --sealed FILE --rebuild-from-disc DISC/card-record-N.record.json
-                                     --state-dir EMPTY --out DIR [--chain C --tool-root DIR --tool-digest HEX]   (a lost state dir)
+                                     --state-dir EMPTY --out DIR (--chain C --tool-root DIR --tool-digest HEX | --before-genesis)
+                                          (a lost state dir; after genesis the chain bounds it, before it only the sheet)
                                           (the k shares on standard input; the confirmation from the terminal)
     python3 -Es offline-keys.py verify-record --record FILE
 
@@ -1862,6 +1863,9 @@ def main(argv=None):
                    "record, re-signed as the next into an EMPTY --state-dir")
     c.add_argument("--chain", help="with --rebuild-from-disc, after genesis: the chain (from any node); its card_record pin is "
                    "computed by regalia-kms's verifier from --tool-root, never typed")
+    c.add_argument("--before-genesis", action="store_true", help="with --rebuild-from-disc, ONLY before genesis (no chain "
+                   "exists yet): the sheet's values are the only bound, which cannot refuse an older disc copy. Never the default: "
+                   "a rebuild names --chain or this")
     c.add_argument("--tool-root", help="with --chain: the image's regalia-kms tree")
     c.add_argument("--tool-digest", help="with --chain: the ceremony kit's pinned digest for the reviewed regalia-kms commit, typed "
                    "from that evidence; never computed from the tree it checks")
@@ -1938,7 +1942,13 @@ def main(argv=None):
             require(not args.first_card_record, "--rebuild-from-disc and --first-card-record are different first steps: one, not both")
             require(not args.cards and not args.release_import, "--rebuild-from-disc re-signs the disc's record: no --cards, no --release-import")
             pin = None
-            if args.chain is not None or args.tool_root is not None or args.tool_digest is not None:
+            chained = args.chain is not None or args.tool_root is not None or args.tool_digest is not None
+            # the sheet-only bound cannot refuse a rollback to an older disc copy: it is taken only when asked for by name,
+            # never because --chain was forgotten after genesis
+            require(chained or args.before_genesis, "--rebuild-from-disc needs --chain (after genesis: the chain bounds it) or "
+                    "--before-genesis (no chain exists yet: only the sheet bounds it); neither was given")
+            require(not (chained and args.before_genesis), "--chain and --before-genesis are the two cases: one, not both")
+            if chained:
                 require(args.chain and args.tool_root and args.tool_digest, "--chain takes --tool-root and --tool-digest")
                 with open(args.sealed, "rb") as f:
                     pin = chain_pin(args.chain, root_entry_of(json.loads(f.read(1 << 20))), args.tool_root, args.tool_digest)
