@@ -952,6 +952,58 @@ class OwnerAuth(Case):
                 self.run_oa(nodes=("a",), run=bad_sops(kind))
             self.assertEqual(os.listdir(self.oa), [], "nothing is left behind")
 
+    def recovery_recipient(self):
+        return json.load(open(self.sealed))["publics"]["ownerauth-recovery"]["recipient"]
+
+    def test_a_recovery_copy_with_any_other_recipient_is_refused(self):
+        # 7e on rc#133: whatever adds a recipient (an environment, a .sops.yaml, a sops that does more than asked), a copy of
+        # every node's TPM owner authorization that someone else can open is refused, and nothing is left behind
+        bg = self.recovery_recipient()
+        mine = {"recipient": bg, "enc": "x"}
+        def sops_writing(meta):
+            def run(argv, input=None, capture_output=True, **kw):
+                if argv[0] != "sops":
+                    return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
+                return subprocess.CompletedProcess(argv, 0, json.dumps({"data": "ENC[AES256_GCM,data:x]", "sops": meta}).encode(), b"")
+            return run
+        for name, meta, reason in (
+                ("a second age recipient", {"age": [mine, {"recipient": "age1" + "q" * 58, "enc": "y"}]}, "2 age recipient"),
+                ("another age recipient instead", {"age": [{"recipient": "age1" + "q" * 58, "enc": "y"}]}, "1 age recipient"),
+                ("no age recipient", {"age": []}, "0 age recipient"),
+                ("a pgp key beside it", {"age": [mine], "pgp": [{"fp": "F" * 40}]}, "also names pgp"),
+                ("a cloud KMS beside it", {"age": [mine], "kms": [{"arn": "arn:x"}]}, "also names kms"),
+                ("an hc_vault beside it", {"age": [mine], "hc_vault": [{"vault_address": "https://v"}]}, "also names hc_vault"),
+                ("key groups beside it", {"age": [mine], "key_groups": [{"age": ["age1other"]}]}, "also names key_groups")):
+            with self.subTest(name), self.assertRaisesRegex(ok.Refused, "ownerauth-a.bg.sops " + reason):
+                self.run_oa(nodes=("a",), run=sops_writing(meta))
+            self.assertEqual(os.listdir(self.oa), [], "nothing is left behind")
+
+    def test_sops_runs_with_path_alone_from_the_root_directory(self):
+        seen = []
+        def run(argv, input=None, capture_output=True, **kw):
+            if argv[0] == "sops":
+                seen.append(kw)
+            return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
+        with unittest.mock.patch.dict(os.environ, {"SOPS_AGE_RECIPIENTS": "age1" + "q" * 58, "SOPS_PGP_FP": "F" * 40}):
+            self.run_oa(nodes=("a",), run=run)
+        self.assertEqual(seen, [{"env": {"PATH": os.environ["PATH"]}, "cwd": "/"}])
+
+    def test_a_sops_environment_or_configuration_adds_no_recipient(self):
+        # the real sops, given every way the caller could add a recipient: the copy is still the recovery identity's alone
+        key = subprocess.run(["age-keygen"], capture_output=True, text=True, check=True).stdout
+        other = next(line.split(": ", 1)[1].strip() for line in key.splitlines() if line.startswith("# public key: "))
+        cwd = os.path.join(self.d, "with-config")
+        os.makedirs(cwd)
+        with open(os.path.join(cwd, ".sops.yaml"), "w") as f:
+            f.write("creation_rules:\n  - age: %s\n" % other)
+        before = os.getcwd()
+        os.chdir(cwd)
+        self.addCleanup(os.chdir, before)
+        with unittest.mock.patch.dict(os.environ, {"SOPS_AGE_RECIPIENTS": other}):
+            self.run_oa(nodes=("a",))
+        meta = json.load(open(os.path.join(self.oa, "ownerauth-a.bg.sops")))["sops"]
+        self.assertEqual([entry["recipient"] for entry in meta["age"]], [self.recovery_recipient()])
+
     def test_a_set_without_the_recovery_identity_is_refused(self):
         sealed = json.load(open(self.sealed))
         del sealed["publics"]["ownerauth-recovery"]

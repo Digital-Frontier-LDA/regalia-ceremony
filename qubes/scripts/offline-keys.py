@@ -897,6 +897,29 @@ def yubikey_recipients(keys_path, home, run=subprocess.run):
     return out
 
 
+SOPS_KEY_SOURCES = ("pgp", "kms", "gcp_kms", "azure_kv", "hc_vault", "key_groups")   # every recipient source but age
+
+
+def sops_isolated():
+    """sops's environment for the recovery copy: PATH alone, run from /. No SOPS_* variable, no cloud or PGP setting and no
+    .sops.yaml found from the caller's directory can add a recipient (7e on rc#133); sops_recipients_only checks the result."""
+    return {"env": {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}, "cwd": "/"}
+
+
+def sops_recipients_only(data, recipient, path):
+    """The SOPS file `data` is encrypted to the age `recipient` alone: one age entry, that recipient, and every other key
+    source absent or empty. Whatever added one (an environment, a configuration, a sops that does more than asked), a
+    copy of every node's TPM owner authorization readable by anyone else is refused."""
+    meta = json.loads(data).get("sops")
+    require(isinstance(meta, dict), "%s is not a SOPS file" % path)
+    ages = meta.get("age") or []
+    named = [entry.get("recipient") if isinstance(entry, dict) else None for entry in ages] if isinstance(ages, list) else [None]
+    require(named == [recipient], "%s is encrypted to %d age recipient(s) (%s), not to the recovery identity alone" % (
+        path, len(named), ", ".join(str(n)[:24] for n in named)))
+    others = [source for source in SOPS_KEY_SOURCES if meta.get(source)]
+    require(not others, "%s also names %s: only the recovery identity may open it" % (path, ", ".join(others)))
+
+
 def ownerauth(sealed_path, nodes, yk_keys, card_record_path, state_dir, out, stream, now=None, run=subprocess.run):
     """Each KMS host's TPM owner authorization (regalia-kms#242: set at enrolment, kept off the host): 32 random bytes per
     node, as 64 lowercase hex and a newline, encrypted with gpg to both OWNER cards' OpenPGP decryption subkeys (ADR-0002
@@ -966,7 +989,7 @@ def ownerauth(sealed_path, nodes, yk_keys, card_record_path, state_dir, out, str
                     argv.append("--encrypt")
                 else:                           # binary, so sops decrypt gives back "<64 hex>\n" exactly (95's measurement)
                     argv = ["sops", "encrypt", "--age", bg, "--input-type", "binary", "--output-type", "binary", "/dev/stdin"]
-                done = run(argv, input=bytes(plain), capture_output=True)
+                done = run(argv, input=bytes(plain), capture_output=True, **({} if kind == "yk" else sops_isolated()))
                 require(done.returncode == 0, "%s could not encrypt %s: %s" % (argv[0], path, done.stderr.decode(errors="replace").strip()[-200:]))
                 if kind == "yk":
                     with open(path, "rb") as f:
@@ -987,6 +1010,8 @@ def ownerauth(sealed_path, nodes, yk_keys, card_record_path, state_dir, out, str
                         sops_ok = False
                     require(sops_ok, "%s is not a SOPS file" % path)
                 require(bytes(plain).strip() not in data and bytes(value) not in data, "%s holds the owner authorization in the clear" % path)
+                if kind != "yk":
+                    sops_recipients_only(data, bg, path)
                 return hashlib.sha256(data).hexdigest()
             finally:
                 zero(plain)
