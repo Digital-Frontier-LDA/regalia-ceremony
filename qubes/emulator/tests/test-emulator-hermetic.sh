@@ -170,6 +170,38 @@ fake 09 03 0b; refuses 1; [ $? = 0 ] && P "REGALIA_BENCH=1: the bench is this ru
 fake 09 03 0b; refuses 0; [ $? = 1 ] && P "REGALIA_BENCH set to anything but 1: still refused" || F "REGALIA_BENCH=0 allowed the boot"
 fake 09 03 08; refuses; [ $? = 0 ] && P "no smart-card interface (a hub, a keyboard, a disk): allowed" || F "a machine without readers was refused"
 fake; refuses; [ $? = 0 ] && P "no USB at all (a container): allowed" || F "an empty sysfs was refused"
+# regalia-hfz: a reader pcscd drives by its VID:PID, whatever class it declares, and the list failing closed
+# fakedev vvvv:pppp:class ... : a USB device (idVendor/idProduct) with one interface of that class
+fakedev(){ rm -rf "$T/sys"; mkdir -p "$T/sys"; local n=0 x; for x in "$@"; do n=$((n+1)); mkdir -p "$T/sys/1-$n" "$T/sys/1-$n:1.0"
+  echo "${x%%:*}" > "$T/sys/1-$n/idVendor"; x="${x#*:}"; echo "${x%%:*}" > "$T/sys/1-$n/idProduct"; echo "${x#*:}" > "$T/sys/1-$n:1.0/bInterfaceClass"; done; }
+# plist <vendor strings> -- <product strings>: libccid's layout, parallel arrays
+plist(){ local v="" p="" s=v x; for x in "$@"; do [ "$x" = -- ] && { s=p; continue; }; [ $s = v ] && v="$v		<string>$x</string>
+" || p="$p		<string>$x</string>
+"; done
+  printf '<plist version="1.0">\n<dict>\n\t<key>ifdVendorID</key>\n\t<array>\n%s\t</array>\n\t<key>ifdProductID</key>\n\t<array>\n%s\t</array>\n\t<key>ifdFriendlyName</key>\n\t<array>\n\t\t<string>r</string>\n\t</array>\n</dict>\n</plist>\n' "$v" "$p" > "$T/Info.plist"; }
+listrefuses(){ ( export EMU_CCID_PLIST="${PL:-$T/Info.plist}"; unset EMU_CCID_LIST_UNCHECKED; [ -n "${UNCHECKED:-}" ] && export EMU_CCID_LIST_UNCHECKED="$UNCHECKED"; refuses "${1:-}" ); }
+plist 0x20A0 0x1050 -- 0x4230 0x0407
+fakedev 20a0:4230:ff; listrefuses; [ $? = 1 ] && grep -q 'a reader libccid drives is attached' "$T/out" && grep -q '20a0:4230' "$T/out" \
+  && P "a listed VID:PID with a vendor-specific class (ff): refused, naming the device" || F "a listed reader with class ff did not stop the boot: $(cat "$T/out")"
+fakedev 1d6b:0002:09 2e8a:000a:ff; listrefuses; [ $? = 0 ] && P "unlisted devices (a hub, a class-ff gadget): allowed" || F "unlisted devices were refused: $(cat "$T/out")"
+fakedev 1d6b:0002:09 1050:0407:ff; listrefuses; [ $? = 1 ] && grep -q '1050:0407' "$T/out" && P "the second pair in the list is matched too (the arrays are read in step)" || F "the second listed reader was missed: $(cat "$T/out")"
+fakedev 20A0:4230:ff; listrefuses; [ $? = 1 ] && P "sysfs in upper case is still matched" || F "an upper-case idVendor slipped past"
+fakedev 20a0:4230:ff; listrefuses 1; [ $? = 0 ] && P "REGALIA_BENCH=1 allows a listed reader too" || F "REGALIA_BENCH=1 was not honoured for a listed reader"
+fakedev 1d6b:0002:09; PL="$T/absent.plist" listrefuses; [ $? = 1 ] && grep -q 'no readable libccid reader list' "$T/out" && grep -q 'EMU_CCID_LIST_UNCHECKED=1' "$T/out" \
+  && P "a USB device attached and no readable list: refused (fails closed), naming the override" || F "an unreadable list let the boot through: $(cat "$T/out")"
+fakedev 1d6b:0002:09; PL="$T/absent.plist" UNCHECKED=1 listrefuses; [ $? = 0 ] && P "EMU_CCID_LIST_UNCHECKED=1: boots without the list" || F "EMU_CCID_LIST_UNCHECKED=1 was not honoured: $(cat "$T/out")"
+fakedev 1d6b:0002:0b; PL="$T/absent.plist" UNCHECKED=1 listrefuses; [ $? = 1 ] && P "EMU_CCID_LIST_UNCHECKED=1 still refuses a class-0b interface" || F "EMU_CCID_LIST_UNCHECKED=1 also skipped the class-0b check"
+fakedev 1d6b:0002:09; PL="$T/absent.plist" UNCHECKED=0 listrefuses; [ $? = 1 ] && P "EMU_CCID_LIST_UNCHECKED set to anything but 1: still refused" || F "EMU_CCID_LIST_UNCHECKED=0 skipped the list"
+plist 0x20A0 0x1050 -- 0x4230; fakedev 1d6b:0002:09; listrefuses; [ $? = 1 ] && grep -q 'could not be parsed' "$T/out" && P "a list whose arrays differ in length: refused, not read as no readers" || F "a malformed list let the boot through: $(cat "$T/out")"
+printf '<plist><dict></dict></plist>\n' > "$T/Info.plist"; fakedev 1d6b:0002:09; listrefuses; [ $? = 1 ] && P "a list with no reader arrays: refused" || F "an empty list let the boot through: $(cat "$T/out")"
+fakedev; PL="$T/absent.plist" listrefuses; [ $? = 0 ] && P "no USB device at all (a container) and no list: allowed, nothing to clear" || F "an empty sysfs without a list was refused"
+# the parser on this machine's real list (CI's job installs libccid): every reader, the Nitrokey HSM among them
+real="$( ( unset EMU_CCID_PLIST; source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_plist ) )"
+if [ -n "$real" ]; then
+  n="$( ( source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_pairs "$real" ) | tee "$T/pairs" | wc -l | tr -d ' ')"
+  [ "$n" -ge 100 ] && grep -qx 20a0:4230 "$T/pairs" && P "this machine's libccid list ($real) reads as $n readers, the Nitrokey HSM 20a0:4230 among them" \
+    || F "this machine's libccid list ($real) read as $n readers, or without 20a0:4230"
+else P "no libccid reader list on this machine (the case above covers its absence)"; fi
 grep -q '^  emu_refuse_on_real_readers || return 1' "$EMU/bin/emu-boot.sh" \
   && [ "$(grep -n 'emu_refuse_on_real_readers || return 1' "$EMU/bin/emu-boot.sh" | cut -d: -f1)" -lt "$(grep -n '^  start_pcsc$' "$EMU/bin/emu-boot.sh" | cut -d: -f1)" ] \
   && P "boot_all checks before start_pcsc (every caller is covered, the container entrypoint too)" || F "boot_all can restart pcscd without the check"
