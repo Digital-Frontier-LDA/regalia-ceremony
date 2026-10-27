@@ -4,6 +4,9 @@ OpenPgpSession as the owner-card enrolment uses it: it "generates" the keys of a
 for gpg's card dialogue can hand over a real certificate over exactly those keys; it keeps what is written to it
 (fingerprints, times, touch policies) and attests each slot under the card-record vectors' stand-in Yubico hierarchy,
 with the extensions a real card writes, or with the lie a test asks for."""
+import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
+_hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
+_hermetic_os.environ["PATH"] = _hermetic_os.path.join(_hermetic_os.path.dirname(_hermetic_os.path.abspath(__file__)), "..", "bin") + _hermetic_os.pathsep + _hermetic_os.environ.get("PATH", "")
 import contextlib
 import hashlib
 import importlib.machinery
