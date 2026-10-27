@@ -38,8 +38,11 @@ emu_warn(){ printf '\033[33m[emu] %s\033[0m\n' "$*"; }
 #   - a USB interface of class 0b (CCID): readers, YubiKeys, Nitrokeys;
 #   - a device whose idVendor:idProduct is in libccid's reader list, whatever its class: pcscd drives
 #     those too, and some declare a vendor-specific class (ff) that the first check cannot see.
-# The list fails closed (regalia-hfz): when a USB device is attached and the list cannot be read or
-# parsed, the boot is refused, since nothing then says the device is not a reader.
+# Both fail closed (regalia-hfz). Zero devices must be a measurement, not a failure to look: when the
+# sysfs directory is absent or unlistable (a Mac, a container without /sys), or a device's idVendor /
+# idProduct or an interface's bInterfaceClass cannot be read as hex, the boot is refused;
+# EMU_USB_UNCHECKED=1 boots anyway. And when a USB device is attached and libccid's list cannot be
+# read or parsed, the boot is refused, since nothing then says the device is not a reader;
 # EMU_CCID_LIST_UNCHECKED=1 boots without the list check (the class-0b check still runs).
 # REGALIA_BENCH=1 says the bench belongs to this run. EMU_SYSFS_USB and EMU_CCID_PLIST exist for the test.
 emu_ccid_plist() {
@@ -72,35 +75,51 @@ emu_ccid_pairs() {
     END { if (!sv || !sp || nv == 0 || nv != np) exit 1; for (i = 0; i < nv; i++) print v[i] ":" p[i] }
   ' "$1"
 }
+# emu_hex <file> <digits>: the file's value in lower case, when it is exactly that many hex digits
+emu_hex() {
+  local v
+  v="$(tr 'A-F' 'a-f' < "$1" 2>/dev/null)" || return 1
+  case "$v" in *[!0-9a-f]*|"") return 1;; esac
+  [ "${#v}" = "$2" ] && printf '%s\n' "$v"
+}
 emu_refuse_on_real_readers() {
-  local sys="${EMU_SYSFS_USB:-/sys/bus/usb/devices}" f d id ccid="" listed="" devs="" plist pairs why=""
-  for f in "$sys"/*/bInterfaceClass; do
-    [ -r "$f" ] && [ "$(cat "$f" 2>/dev/null)" = 0b ] && ccid="$ccid ${f%/bInterfaceClass}"
-  done
-  for d in "$sys"/*/; do
-    d="${d%/}"
-    [ -r "$d/idVendor" ] && [ -r "$d/idProduct" ] || continue
-    devs="$devs $d=$(tr 'A-F' 'a-f' < "$d/idVendor"):$(tr 'A-F' 'a-f' < "$d/idProduct")"
-  done
+  local sys="${EMU_SYSFS_USB:-/sys/bus/usb/devices}" d c v p ccid="" listed="" devs="" unread="" plist pairs why="" enum=""
+  if [ ! -d "$sys" ] || ! ls "$sys" >/dev/null 2>&1; then
+    enum="$sys is absent or cannot be listed, so whether a reader is attached cannot be told (no sysfs: a Mac, a container without /sys)"
+  else
+    for d in "$sys"/*; do
+      [ -e "$d" ] || [ -L "$d" ] || continue   # the glob matched nothing: an empty directory, zero devices
+      case "${d##*/}" in
+        *:*) c="$(emu_hex "$d/bInterfaceClass" 2)" || { unread="$unread ${d##*/}"; continue; }
+             [ "$c" = 0b ] && ccid="$ccid $d";;
+        *)   v="$(emu_hex "$d/idVendor" 4)" && p="$(emu_hex "$d/idProduct" 4)" || { unread="$unread ${d##*/}"; continue; }
+             devs="$devs $d=$v:$p";;
+      esac
+    done
+    [ -z "$unread" ] || enum="these USB entries could not be read (idVendor/idProduct or bInterfaceClass):${unread}"
+  fi
+  [ "${EMU_USB_UNCHECKED:-}" = 1 ] && enum=""
   if [ -n "$devs" ] && [ "${EMU_CCID_LIST_UNCHECKED:-}" != 1 ]; then
     if ! plist="$(emu_ccid_plist)"; then
       why="no readable libccid reader list (EMU_CCID_PLIST, /etc/libccid_Info.plist, ifd-ccid.bundle), so the attached USB devices cannot be cleared"
     elif ! pairs="$(emu_ccid_pairs "$plist")"; then
       why="libccid's reader list $plist could not be parsed (its vendor and product arrays), so the attached USB devices cannot be cleared"
     else
-      for id in $devs; do
-        printf '%s\n' "$pairs" | grep -qx "${id#*=}" && listed="$listed ${id%%=*} (${id#*=})"
+      for d in $devs; do
+        printf '%s\n' "$pairs" | grep -qx "${d#*=}" && listed="$listed ${d%%=*} (${d#*=})"
       done
     fi
   fi
-  [ -z "$ccid$listed$why" ] || [ "${REGALIA_BENCH:-}" = 1 ] && return 0
+  [ -z "$ccid$listed$why$enum" ] || [ "${REGALIA_BENCH:-}" = 1 ] && return 0
+  [ -z "$enum" ] || echo ">> REFUSING to boot the emulator daemons: $enum."
   [ -z "$ccid" ] || echo ">> REFUSING to boot the emulator daemons: a smart-card interface is attached here (${ccid# })."
   [ -z "$listed" ] || echo ">> REFUSING to boot the emulator daemons: a reader libccid drives is attached here (${listed# })."
   [ -z "$why" ] || echo ">> REFUSING to boot the emulator daemons: $why."
   echo "   Booting KILLS this machine's pcscd and starts the emulator's own: every session using a token"
   echo "   here loses it. Use the emulator container or a machine without readers. REGALIA_BENCH=1 does"
   echo "   that kill anyway; set it only when the whole bench is yours. --models-only is safe."
-  [ -n "$why" ] && echo "   EMU_CCID_LIST_UNCHECKED=1 boots without the reader list (the class-0b check still runs)."
+  [ -z "$enum" ] || echo "   EMU_USB_UNCHECKED=1 boots without enumerating USB: nothing is then checked, so only where no token can be."
+  [ -z "$why" ] || echo "   EMU_CCID_LIST_UNCHECKED=1 boots without the reader list (the class-0b check still runs)."
   return 1
 }
 

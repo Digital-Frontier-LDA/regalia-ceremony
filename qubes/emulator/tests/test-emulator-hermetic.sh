@@ -162,7 +162,8 @@ done
 
 hdr "emu-boot.sh refuses to restart pcscd under a real reader"
 fake(){ rm -rf "$T/sys"; mkdir -p "$T/sys"; local n=0 c; for c in "$@"; do n=$((n+1)); mkdir -p "$T/sys/1-$n:1.0"; echo "$c" > "$T/sys/1-$n:1.0/bInterfaceClass"; done; }
-refuses(){ ( export EMU_SYSFS_USB="$T/sys" EMU_RUN="$T/run"; unset REGALIA_BENCH; [ -n "${1:-}" ] && export REGALIA_BENCH="$1"
+refuses(){ ( export EMU_SYSFS_USB="${SYS:-$T/sys}" EMU_RUN="$T/run"; unset REGALIA_BENCH EMU_USB_UNCHECKED; [ -n "${1:-}" ] && export REGALIA_BENCH="$1"
+  [ -n "${USBUN:-}" ] && export EMU_USB_UNCHECKED="$USBUN"
   # shellcheck disable=SC1091
   source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_refuse_on_real_readers ) >"$T/out" 2>&1; }
 fake 09 03 0b; refuses; [ $? = 1 ] && grep -q 'REFUSING to boot' "$T/out" && P "a CCID interface (class 0b) attached: refused, with the reason" || F "a CCID interface did not stop the boot: $(cat "$T/out")"
@@ -195,6 +196,22 @@ fakedev 1d6b:0002:09; PL="$T/absent.plist" UNCHECKED=0 listrefuses; [ $? = 1 ] &
 plist 0x20A0 0x1050 -- 0x4230; fakedev 1d6b:0002:09; listrefuses; [ $? = 1 ] && grep -q 'could not be parsed' "$T/out" && P "a list whose arrays differ in length: refused, not read as no readers" || F "a malformed list let the boot through: $(cat "$T/out")"
 printf '<plist><dict></dict></plist>\n' > "$T/Info.plist"; fakedev 1d6b:0002:09; listrefuses; [ $? = 1 ] && P "a list with no reader arrays: refused" || F "an empty list let the boot through: $(cat "$T/out")"
 fakedev; PL="$T/absent.plist" listrefuses; [ $? = 0 ] && P "no USB device at all (a container) and no list: allowed, nothing to clear" || F "an empty sysfs without a list was refused"
+# zero devices must be measured, not inferred from a failure to look (TEAMLEAD-grafana, df-grafana-7e)
+SYS="$T/nosys" refuses; [ $? = 1 ] && grep -q 'absent or cannot be listed' "$T/out" && grep -q 'EMU_USB_UNCHECKED=1' "$T/out" \
+  && P "no sysfs at all (a Mac, a container without /sys): refused, naming the override" || F "a missing sysfs read as zero devices: $(cat "$T/out")"
+SYS="$T/nosys" USBUN=1 refuses; [ $? = 0 ] && P "EMU_USB_UNCHECKED=1: boots without enumerating" || F "EMU_USB_UNCHECKED=1 was not honoured: $(cat "$T/out")"
+SYS="$T/nosys" USBUN=0 refuses; [ $? = 1 ] && P "EMU_USB_UNCHECKED set to anything but 1: still refused" || F "EMU_USB_UNCHECKED=0 skipped the enumeration"
+SYS="$T/nosys" refuses 1; [ $? = 0 ] && P "REGALIA_BENCH=1 boots without sysfs too (the bench is this run's)" || F "REGALIA_BENCH=1 was not honoured without sysfs"
+plist 0x20A0 -- 0x4230
+fakedev 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-1/idVendor"; listrefuses; [ $? = 1 ] && grep -q 'could not be read' "$T/out" && grep -q '1-1' "$T/out" \
+  && P "a device whose idVendor cannot be read: refused, naming the entry (not skipped as absent)" || F "an unreadable idVendor was skipped: $(cat "$T/out")"
+fakedev 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-1/idProduct"; listrefuses; [ $? = 1 ] && P "a device whose idProduct cannot be read: refused" || F "an unreadable idProduct was skipped: $(cat "$T/out")"
+fakedev 1d6b:0002:09; echo zz6b > "$T/sys/1-1/idVendor"; listrefuses; [ $? = 1 ] && P "an idVendor that is not 4 hex digits: refused" || F "a malformed idVendor was accepted: $(cat "$T/out")"
+fakedev 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-1:1.0/bInterfaceClass"; listrefuses; [ $? = 1 ] && grep -q '1-1:1.0' "$T/out" \
+  && P "an interface whose bInterfaceClass cannot be read: refused, naming it" || F "an unreadable bInterfaceClass was skipped: $(cat "$T/out")"
+fakedev 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-1/idVendor"; USBUN=1 listrefuses; [ $? = 0 ] && P "EMU_USB_UNCHECKED=1 also covers an unreadable entry" || F "EMU_USB_UNCHECKED=1 did not cover an unreadable entry: $(cat "$T/out")"
+fakedev 20a0:4230:ff 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-2/idVendor"; USBUN=1 listrefuses; [ $? = 1 ] && grep -q '20a0:4230' "$T/out" \
+  && P "EMU_USB_UNCHECKED=1 still refuses the readable listed reader beside an unreadable entry" || F "EMU_USB_UNCHECKED=1 hid a listed reader: $(cat "$T/out")"
 # the parser on this machine's real list (CI's job installs libccid): every reader, the Nitrokey HSM among them
 real="$( ( unset EMU_CCID_PLIST; source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_plist ) )"
 if [ -n "$real" ]; then
