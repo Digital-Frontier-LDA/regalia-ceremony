@@ -2676,10 +2676,31 @@ release_import_card() {
   python3 -Es "$HERE/developer-keys.py" release-import --sealed "$WORK/developers/developers.sealed.json" --yubikey-serial "$2" \
       --out "$WORK/cards" < /dev/tty
 }
-rk_imported() { # how many release cards' import facts this session holds
-  local f c=0
-  for f in "$WORK"/cards/release-import-*.json; do [ -e "$f" ] && c=$((c+1)); done
-  printf '%d' "$c"
+rk_facts() { # rk_facts match|stale: the release-import facts in $WORK/cards that are (or are not) of THIS developers' set
+  # A fact names its set (master_id, slip39_identifier) and its key; a set regenerated with old facts left behind must not
+  # count them, or the step skips a card and the disc accepts.
+  python3 -I -c '
+import glob, json, os, sys
+mode, work = sys.argv[1], sys.argv[2]
+try:
+    with open(os.path.join(work, "developers", "developers.sealed.json")) as f:
+        sealed = json.load(f)
+    want = (sealed["master_id"], sealed["slip39_identifier"], sealed["publics"]["release"]["key"])
+except (OSError, ValueError, KeyError, TypeError):
+    want = None
+for p in sorted(glob.glob(os.path.join(work, "cards", "release-import-*.json"))):
+    try:
+        with open(p) as f:
+            fact = json.load(f)
+        ok = want is not None and (fact["master_id"], fact["slip39_identifier"], fact["key"]) == want
+    except (OSError, ValueError, KeyError, TypeError):
+        ok = False
+    if ok == (mode == "match"):
+        print(p)
+' "$1" "$WORK"
+}
+rk_imported() { # how many release cards hold THIS developers' set (facts of another set do not count)
+  rk_facts match | grep -c . || true
 }
 rk_insert_card() {
   warn "Insert release card $1 of 2 ALONE (remove any other YubiKey), then type its serial (printed on the card)."
@@ -2698,7 +2719,7 @@ release_commit_list() {
 step_release_key() {
   check_scheme || return 1
   b "Release key — the developers' set, Shamir $(K)-of-$(N), imported onto both release cards (ADR-0002 D29.2, D30)"
-  local dir="$WORK/developers" rcp="$WORK/breakglass.recipient" typed="$WORK/developers-typed.txt" unverified="" i line n done_cards=0
+  local dir="$WORK/developers" rcp="$WORK/breakglass.recipient" typed="$WORK/developers-typed.txt" unverified="" i line n done_cards=0 stale
   [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made outside it."; return 1; }
   if [ ! -e "$dir/developers.sealed.json" ]; then
     [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
@@ -2730,6 +2751,12 @@ step_release_key() {
     shred -u "$typed" 2>/dev/null || rm -f "$typed"
   fi
   ( umask 077; mkdir -p "$WORK/cards" ) || return 1
+  stale="$(rk_facts stale)"
+  if [ -n "$stale" ]; then
+    err "these release-import facts are not of this developers' set (another set's, or unreadable): remove them, then run this step again:"
+    printf '%s\n' "$stale" | sed 's/^/     /' >&2
+    return 1
+  fi
   for n in 1 2; do
     if [ "$(rk_imported)" -ge "$n" ]; then continue; fi
     rk_insert_card "$n"
@@ -2889,11 +2916,11 @@ step_archive() {
   fi
   # The release key (step r, D29.2): a developers' set made means both release cards must hold it and its forms be proven.
   if [ -e "$WORK/developers/developers.sealed.json" ] \
-     && { [ -e "$WORK/developers/developers-shares.txt" ] || [ "$(rk_imported)" -ne 2 ]; }; then
+     && { [ -e "$WORK/developers/developers-shares.txt" ] || [ "$(rk_imported)" -ne 2 ] || [ -n "$(rk_facts stale)" ]; }; then
     if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
       warn "simulated run: the release key is not on both release cards with its forms proven; the real ceremony refuses this disc."
     else
-      err "the release key is not finished (its forms unproven, or not on both release cards). Finish step r; nothing was burned."
+      err "the release key is not finished (its forms unproven, not on both release cards, or another set's facts in cards/). Finish step r; nothing was burned."
       return 1
     fi
   fi

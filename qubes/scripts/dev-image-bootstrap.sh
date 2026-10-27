@@ -44,7 +44,7 @@ if [ -z "$REPO_DIR" ] && [ -n "$here" ] && [ -r "$here/../requirements.txt" ]; t
   REPO_DIR="$(cd "$here/../.." && pwd)"
 fi
 arch="$(dpkg --print-architecture)"                 # amd64 on the T430
-GO_VERSION="${GO_VERSION:-1.26.6}"
+GO_VERSION="${GO_VERSION:-1.26.10}"
 GO_SHA256="${GO_SHA256:-}"
 
 export DEBIAN_FRONTEND=noninteractive

@@ -101,6 +101,19 @@ out="$(WORKDIR="$W4" TESTS="$HERE" bash -c '
 grep -q "RC=1" <<< "$out" && grep -q "release card 40000003 is already imported: insert the OTHER release card" <<< "$out" \
   && P "card 1 again as card 2: refused" || F "same card twice: $(tail -4 <<< "$out")"
 
+hdr "another set's import facts left in cards/: not counted, refused"
+W5="$(new_work)"
+( umask 077; mkdir -p "$W5/cards" ) && cp "$W/cards/release-import-40000003.json" "$W5/cards/"
+out="$(run_step "$W5")"
+grep -q "RC=1" <<< "$out" && grep -q "not of this developers' set" <<< "$out" && grep -q "release-import-40000003.json" <<< "$out" \
+  && [ ! -e "$W5/cards/release-import-40000004.json" ] && P "a stale fact is refused, naming it, before any card" || F "stale fact: $(tail -5 <<< "$out")"
+out="$(arch "$W5" 0)"
+grep -q "RC=1" <<< "$out" && grep -q "the release key is not finished" <<< "$out" && P "a stale fact: a real burn is refused" || F "stale archive: $(tail -4 <<< "$out")"
+rm -f -- "$W5/cards/release-import-40000003.json"
+out="$(run_step "$W5")"
+grep -q "RC=0" <<< "$out" && [ -s "$W5/cards/release-import-40000003.json" ] && [ -s "$W5/cards/release-import-40000004.json" ] \
+  && P "with it removed, both cards are imported from this set" || F "after removal: $(tail -5 <<< "$out")"
+
 hdr "the archive stages the developers' set and both cards' facts"
 arch "$W" 1 > "$T/arch.out"
 burned="$(ls "$W/mdisc/developers" 2>/dev/null | tr '\n' ' ')"
