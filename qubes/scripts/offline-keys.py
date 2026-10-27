@@ -29,15 +29,14 @@ CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when 
     --yk-keys (#111 step 2).
   * The release key (D29.2/D30: Shamir developers' set, imported onto two release cards) is not implemented (#124).
   * K_A (anchor-policy, regalia-kms#361) is generated, sealed, split and backed up with the others, and its public key
-    is output (ANCHOR-POLICY-ENTRY) for the genesis manifest. The manifest's field name for it is still being settled
-    on #361. No tool takes it yet: sign hands it to nothing until regalia-kms's K_A signer (the policy approvals and
-    rotation-counter increments) exists and is added to the allow-list by a reviewed change. That signer must
-    convert: cryptography's ECDSA sign() returns DER, while the TPM's PolicyAuthorize verification takes r and s as
-    separate parameters, so it needs a conversion with a test vector.
+    is output (ANCHOR-POLICY-ENTRY) for the genesis manifest. sign hands it only to regalia-kms's K_A signer
+    (anchorpolicy approve-first, approve, approve-increment), which is in review there (regalia-kms#464): until that
+    merges, the module these entries name does not exist in a released tree and K_A signs nothing. The signer's r||s
+    form and low-S are its own, tested there.
   * A sealed file made before K_A (four keys) still opens, but holds no K_A, and nothing adds K_A to an existing set:
     K_A comes only with a new set (generate). No ceremony has run, so no such file is in use.
-  * sign hands keys only to regalia-kms's manifest sign and uki.py sign. Any other signing purpose needs a new
-    allow-list entry and a reviewed change here.
+  * sign hands keys only to regalia-kms's manifest sign, uki.py sign and the K_A signer's three subcommands. Any other
+    signing purpose needs a new allow-list entry and a reviewed change here.
 
 THE SHAPE. SLIP-39 splits a 128- or 256-bit master secret and ssss one short line, and neither holds an RSA private
 key. So, as a KMS splits its unseal key and not the keys it protects: one 256-bit OFFLINE MASTER SECRET is split
@@ -77,8 +76,14 @@ regalia-kms tool that checks what it signs (regalia-kms-24, -d9 and -1e on #115)
     every check it makes for a token-held root (the chain, the transition, the measurement step, the typed confirmation);
   * the three boot keys together, only to `uki.py sign --initrd-key-fd {keyfd:pcr-initrd} --system-key-fd
     {keyfd:pcr-system} --secure-boot-key-fd {keyfd:secure-boot} --offline-session {session}`, which makes both PCR 11
-    signatures and the Secure Boot signature and checks each.
-  Each runs as `/usr/bin/python3 -Es -m <module> sign …` from a regalia-kms tree whose digest (every file under
+    signatures and the Secure Boot signature and checks each;
+  * K_A alone, only to `anchorpolicy approve-first|approve|approve-increment --key-fd {keyfd:anchor-policy}
+    --offline-session {session} --root-key {root} --state-dir {state}` (regalia-kms#361), each subcommand its own
+    entry: it refuses a key that is not the pinned K_A, verifies every signature before printing, prints on stdout only.
+  The root's and K_A's tools also take `--root-key {root}`, filled with THIS sealed set's root (never typed), and
+  `--state-dir {state}`, filled with sign's own --state-dir once that directory's marker names that root (checked
+  before a share is read): the root's signing record is the one its shares opened.
+  Each runs as `/usr/bin/python3 -Es -m <module> <subcommand> …` from a regalia-kms tree whose digest (every file under
   deploy/; `tree-digest` prints it) must equal --tool-digest, typed from the ceremony image's build evidence; with its
   environment cleared to PATH and LC_ALL, stdin /dev/null (manifest sign reads its confirmation from /dev/tty), and
   that tree as its working directory. Each key reaches it as a sealed memfd, its number substituted for {keyfd:NAME},
@@ -526,7 +531,8 @@ def _private_key(entry):
 PYTHON = "/usr/bin/python3"
 TOOLS = {
     "manifest": {"module": "deploy.baremetal.manifest", "keys": ("root",),
-                 "required": ("--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}")},
+                 "required": ("--signer", "root", "--key-fd", "{keyfd:root}", "--offline-session", "{session}",
+                              "--root-key", "{root}", "--state-dir", "{state}")},
     "uki": {"module": "deploy.baremetal.uki", "keys": ("pcr-initrd", "pcr-system", "secure-boot"),
             "required": ("--initrd-key-fd", "{keyfd:pcr-initrd}", "--system-key-fd", "{keyfd:pcr-system}",
                          "--secure-boot-key-fd", "{keyfd:secure-boot}", "--offline-session", "{session}"),
@@ -535,6 +541,18 @@ TOOLS = {
             # each name is a real option of the tool; the tools set allow_abbrev=False (regalia-kms#466, #464), so a stale
             # entry cannot become an abbreviation (d9 on #136)
             "exact": ("--initrd", "--initrd-key", "--system-key", "--secure-boot-key")},
+    # K_A's signer (regalia-kms#361 C2, #464): one entry per subcommand, so the session record names the operation the
+    # key was opened for and neither can run the other. Each refuses a key that is not the pinned K_A and verifies
+    # every signature, low-S, before printing; output on stdout only (agreed with regalia-kms-1e on #361)
+    "anchor-first": {"module": "deploy.baremetal.anchorpolicy", "subcommand": "approve-first", "keys": ("anchor-policy",),
+                     "required": ("--key-fd", "{keyfd:anchor-policy}", "--offline-session", "{session}",
+                                  "--root-key", "{root}", "--state-dir", "{state}")},
+    "anchor-approve": {"module": "deploy.baremetal.anchorpolicy", "subcommand": "approve", "keys": ("anchor-policy",),
+                       "required": ("--key-fd", "{keyfd:anchor-policy}", "--offline-session", "{session}",
+                                    "--root-key", "{root}", "--state-dir", "{state}")},
+    "anchor-increment": {"module": "deploy.baremetal.anchorpolicy", "subcommand": "approve-increment", "keys": ("anchor-policy",),
+                         "required": ("--key-fd", "{keyfd:anchor-policy}", "--offline-session", "{session}",
+                                      "--root-key", "{root}", "--state-dir", "{state}")},
 }
 PRIVATE_MARKERS = (b"PRIVATE KEY-----", b"-----BEGIN OPENSSH PRIVATE KEY")
 SCAN_DIRS = ("/tmp", "/dev/shm")      # beside the session's own directory: where else a tool could write (both RAM there)
@@ -560,11 +578,13 @@ def tree_digest(root):
 
 
 def check_command(command):
-    """The command, as typed: one of TOOLS, run as `/usr/bin/python3 -Es -m <module> sign …`, carrying each required
-    argument once and no placeholder it is not entitled to. Returns (the tool's name, the keys it takes)."""
+    """The command, as typed: one of TOOLS, run as `/usr/bin/python3 -Es -m <module> <subcommand> …` (the subcommand
+    `sign` unless the entry names another), carrying each required argument once and no placeholder it is not entitled
+    to. Returns (the tool's name, the keys it takes)."""
     require(command, "--exec needs a command")
-    found = [name for name, tool in TOOLS.items() if list(command[:5]) == [PYTHON, "-Es", "-m", tool["module"], "sign"]]
-    require(found, "--exec runs only %s" % " or ".join("`%s -Es -m %s sign …`" % (PYTHON, t["module"]) for t in TOOLS.values()))
+    found = [name for name, tool in TOOLS.items() if list(command[:5]) == [PYTHON, "-Es", "-m", tool["module"], tool.get("subcommand", "sign")]]
+    require(found, "--exec runs only %s" % " or ".join("`%s -Es -m %s %s …`" % (PYTHON, t["module"], t.get("subcommand", "sign"))
+                                                         for t in TOOLS.values()))
     tool = TOOLS[found[0]]
     rest = list(command[5:])
     pairs = list(zip(tool["required"][::2], tool["required"][1::2]))
@@ -644,7 +664,7 @@ def _leaks_under(top, since, keys_der):
 
 
 def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs=(), now=None, popen=subprocess.Popen,
-         sinks=None):
+         sinks=None, state_dir=None):
     """A signing session (see the module's docstring). Returns (the session record, its path)."""
     import threading
     require(re.fullmatch(r"[A-Za-z][A-Za-z0-9 ._-]{0,63}", who or "") is not None, "--who names the person signing (letters, digits, . _ - and spaces)")
@@ -659,13 +679,23 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
     with open(sealed_path, "rb") as f:
         sealed = json.loads(f.read(1 << 20))
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    # {root} and {state} are filled HERE, never typed: the root is this sealed set's (whose shares are typed), and the
+    # state directory is the one whose marker names that root, checked before a share is read (1e, d9 on #361)
+    root_hex = root_entry_of(sealed)
+    if "{state}" in command:
+        require(state_dir, "this command's signing record is the laptop's state directory: give --state-dir")
+        info = os.stat(state_dir)
+        require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+                "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
+        require(_signing_state_root(state_dir, info) == root_hex,
+                "%s in %s names another root than this sealed set's: another laptop's or another root's directory" % (SIGNING_STATE, state_dir))
     master, indices, identifier = combine(read_shares(stream), sealed)
     try:
         bundle = unseal(master, sealed)
     finally:
         zero(master)
     from cryptography.hazmat.primitives import serialization
-    root = _private_key(bundle["keys"]["root"])
+    root = _private_key(bundle["keys"]["root"])        # the header's: unseal's AES-GCM covers the header it came from
     pems = {n: bytearray(_private_key(bundle["keys"][n]).private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
                                                                        serialization.NoEncryption())) for n in key_names}
     ders = [base64.b64decode(entry["pkcs8"]) for entry in bundle["keys"].values()]
@@ -684,6 +714,7 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
         for name in key_names:
             fds[name] = _memfd(name, pems[name])
         argv = [a.replace("{session}", session_id) for a in command]
+        argv = [root_hex if a == "{root}" else os.path.abspath(state_dir) if a == "{state}" else a for a in argv]
         for name, fd in fds.items():
             argv = [str(fd) if a == "{keyfd:%s}" % name else a for a in argv]
         proc = popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=tool_root,
@@ -1381,6 +1412,13 @@ def verify_card_record(document, pinned_root):
     return card_record_check(record)
 
 
+def root_entry_of(sealed):
+    """The root's raw public key, 64 hex, from the sealed file's public header."""
+    from cryptography.hazmat.primitives import serialization
+    spki = base64.b64decode(sealed["publics"]["root"]["spki"])
+    return serialization.load_der_public_key(spki).public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="command", required=True)
@@ -1400,8 +1438,11 @@ def main(argv=None):
     s.add_argument("--tool-root", required=True, help="the regalia-kms tree the command runs from")
     s.add_argument("--tool-digest", required=True, help="that tree's digest, from the ceremony image's build evidence")
     s.add_argument("--output", action="append", default=[], help="a file the command must write (its SHA-256 is recorded)")
+    s.add_argument("--state-dir", help="the laptop's signing state directory, for a command that takes {state}: its marker must "
+                   "name this sealed set's root")
     s.add_argument("--exec", nargs=argparse.REMAINDER, dest="exec_argv", required=True,
-                   help="/usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …, last on the line")
+                   help="/usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …, or anchorpolicy approve-first|approve|"
+                   "approve-increment …, last on the line")
     t = sub.add_parser("tree-digest", help="the digest of a regalia-kms tree, as --tool-digest takes it")
     t.add_argument("--root", required=True)
     o = sub.add_parser("ownerauth", help="each KMS host's TPM owner authorization, for regalia-kms#242: the k shares on standard input")
@@ -1440,7 +1481,8 @@ def main(argv=None):
             if missing:
                 print("FORMS NOT CHECKED %s (--partial)" % ",".join(str(i + 1) for i in missing))
         elif args.command == "sign":
-            session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.exec_argv, args.tool_root, args.tool_digest, args.output)
+            session, path = sign(args.sealed, args.who, args.out, sys.stdin, args.exec_argv, args.tool_root, args.tool_digest, args.output,
+                                 state_dir=args.state_dir)
             print("SIGNED by %s with %s (shares %s), session %s; record %s" % (session["tool"], ", ".join(session["keys"]),
                   ",".join(str(i) for i in session["share_indices"]), session["session"], path))
         elif args.command == "ownerauth":
