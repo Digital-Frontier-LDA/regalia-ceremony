@@ -201,6 +201,71 @@ class TestMnemonicToAddress(unittest.TestCase):
 
 
 
+def _keccak256_reference(data: bytes) -> bytes:
+    """Keccak-256 (the pre-NIST padding 0x01, which Ethereum uses; SHA3-256 pads 0x06) straight from the Keccak team's
+    specification, in plain Python: an oracle that shares no code with pycryptodome, whose permutation 4.1.0 rewrote."""
+    rc = [0x0000000000000001, 0x0000000000008082, 0x800000000000808A, 0x8000000080008000, 0x000000000000808B,
+          0x0000000080000001, 0x8000000080008081, 0x8000000000008009, 0x000000000000008A, 0x0000000000000088,
+          0x0000000080008009, 0x000000008000000A, 0x000000008000808B, 0x800000000000008B, 0x8000000000008089,
+          0x8000000000008003, 0x8000000000008002, 0x8000000000000080, 0x000000000000800A, 0x800000008000000A,
+          0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008]
+    rot = [[0, 36, 3, 41, 18], [1, 44, 10, 45, 2], [62, 6, 43, 15, 61], [28, 55, 25, 21, 56], [27, 20, 39, 8, 14]]
+    mask = (1 << 64) - 1
+
+    def rol(v, n):
+        return ((v << n) | (v >> (64 - n))) & mask if n else v
+
+    def permute(a):
+        for r in rc:
+            c = [a[x][0] ^ a[x][1] ^ a[x][2] ^ a[x][3] ^ a[x][4] for x in range(5)]
+            d = [c[(x - 1) % 5] ^ rol(c[(x + 1) % 5], 1) for x in range(5)]
+            a = [[a[x][y] ^ d[x] for y in range(5)] for x in range(5)]
+            b = [[0] * 5 for _ in range(5)]
+            for x in range(5):
+                for y in range(5):
+                    b[y][(2 * x + 3 * y) % 5] = rol(a[x][y], rot[x][y])
+            a = [[b[x][y] ^ (~b[(x + 1) % 5][y] & b[(x + 2) % 5][y]) for y in range(5)] for x in range(5)]
+            a[0][0] ^= r
+        return a
+
+    rate = 136
+    msg = bytearray(data) + b"\x01" + b"\x00" * ((-len(data) - 1) % rate)
+    msg[-1] |= 0x80
+    a = [[0] * 5 for _ in range(5)]
+    for off in range(0, len(msg), rate):
+        block = msg[off:off + rate]
+        for i in range(rate // 8):
+            a[i % 5][i // 5] ^= int.from_bytes(block[8 * i:8 * i + 8], "little")
+        a = permute(a)
+    return b"".join(a[i % 5][i // 5].to_bytes(8, "little") for i in range(4))
+
+
+class Keccak256(unittest.TestCase):
+    """The EVM address rests on keccak256, and the ceremony takes it from pycryptodome (pinned in requirements.txt), whose
+    4.1.0 rewrote the Keccak permutation (regalia-zf7). Held three ways: the backend is pycryptodome's, never the eth-hash
+    fallback; two published vectors; and an independent reference across the 136-byte rate's block boundaries."""
+
+    def test_the_backend_is_pycryptodome(self):
+        from Crypto.Hash import keccak                     # not installed = the pinned dependency is missing: fail
+        for data in (b"", b"abc", bytes(range(256))):
+            self.assertEqual(da._keccak256(data), keccak.new(data=data, digest_bits=256).digest())
+
+    def test_published_vectors(self):
+        self.assertEqual(da._keccak256(b"").hex(), "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+        self.assertEqual(da._keccak256(b"abc").hex(), "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45")
+
+    def test_the_reference_agrees_with_the_published_vectors(self):
+        """The oracle's own control: it reproduces both, so an agreement below is not two wrong answers."""
+        self.assertEqual(_keccak256_reference(b"").hex(), "c5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470")
+        self.assertEqual(_keccak256_reference(b"abc").hex(), "4e03657aea45a94fc7d47ba826c8d667c0d1e6e33a64a036ec44f58fa12d6c45")
+
+    def test_it_matches_the_reference_across_block_boundaries(self):
+        for n in (1, 64, 65, 134, 135, 136, 137, 271, 272, 273, 1000):
+            data = bytes((7 * i + n) & 0xFF for i in range(n))
+            with self.subTest(n=n):
+                self.assertEqual(da._keccak256(data), _keccak256_reference(data))
+
+
 class EvmRefusal(unittest.TestCase):
     """REQUIREMENTS B2 — Ethermint/EVM chains must be REFUSED, never guessed at.
 
