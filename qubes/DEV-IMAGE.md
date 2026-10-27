@@ -34,7 +34,7 @@ Then, **inside `dev-regalia`** (it has network; these repos are public, so no cr
 ```
 sudo apt-get update && sudo apt-get install -y git
 git clone https://github.com/Digital-Frontier-LDA/regalia-ceremony.git ~/regalia-ceremony
-# look up the SHA-256 for go1.26.6.linux-amd64.tar.gz at https://go.dev/dl/
+# look up the SHA-256 for go1.26.10.linux-amd64.tar.gz at https://go.dev/dl/
 # (the bootstrap reads qubes/requirements.txt from this checkout)
 sudo GO_SHA256=<paste-that-hash> bash ~/regalia-ceremony/qubes/scripts/dev-image-bootstrap.sh
 source /etc/profile.d/dev-bin.sh             # Go on PATH, SCSH_HOME and CEREMONY_VENV set (or log out/in)
