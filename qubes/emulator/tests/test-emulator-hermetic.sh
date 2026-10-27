@@ -213,9 +213,9 @@ fakedev 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-1/idVendor"; USBUN=1 listrefuse
 fakedev 20a0:4230:ff 1d6b:0002:09; ln -sf "$T/gone" "$T/sys/1-2/idVendor"; USBUN=1 listrefuses; [ $? = 1 ] && grep -q '20a0:4230' "$T/out" \
   && P "EMU_USB_UNCHECKED=1 still refuses the readable listed reader beside an unreadable entry" || F "EMU_USB_UNCHECKED=1 hid a listed reader: $(cat "$T/out")"
 # the parser on this machine's real list (CI's job installs libccid): every reader, the Nitrokey HSM among them
-real="$( ( unset EMU_CCID_PLIST; source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_plist ) )"
+real="$( ( unset EMU_CCID_PLIST; export EMU_RUN="$T/run"; source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_plist ) )"
 if [ -n "$real" ]; then
-  n="$( ( source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_pairs "$real" ) | tee "$T/pairs" | wc -l | tr -d ' ')"
+  n="$( ( export EMU_RUN="$T/run"; source "$EMU/bin/emu-boot.sh" >/dev/null 2>&1; emu_ccid_pairs "$real" ) | tee "$T/pairs" | wc -l | tr -d ' ')"
   [ "$n" -ge 100 ] && grep -qx 20a0:4230 "$T/pairs" && P "this machine's libccid list ($real) reads as $n readers, the Nitrokey HSM 20a0:4230 among them" \
     || F "this machine's libccid list ($real) read as $n readers, or without 20a0:4230"
 else P "no libccid reader list on this machine (the case above covers its absence)"; fi

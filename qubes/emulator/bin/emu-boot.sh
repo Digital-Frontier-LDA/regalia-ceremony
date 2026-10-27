@@ -78,8 +78,8 @@ emu_ccid_pairs() {
 # emu_hex <file> <digits>: the file's value in lower case, when it is exactly that many hex digits
 emu_hex() {
   local v
-  v="$(tr 'A-F' 'a-f' < "$1" 2>/dev/null)" || return 1
-  case "$v" in *[!0-9a-f]*|"") return 1;; esac
+  v="$(tr 'ABCDEF' 'abcdef' < "$1" 2>/dev/null)" || return 1
+  case "$v" in *[!0123456789abcdef]*|"") return 1;; esac   # the set spelled out: a range would follow the locale's collation
   [ "${#v}" = "$2" ] && printf '%s\n' "$v"
 }
 emu_refuse_on_real_readers() {
