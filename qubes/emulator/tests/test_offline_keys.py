@@ -967,9 +967,9 @@ class OwnerAuth(Case):
                 return subprocess.CompletedProcess(argv, 0, json.dumps({"data": "ENC[AES256_GCM,data:x]", "sops": meta}).encode(), b"")
             return run
         for name, meta, reason in (
-                ("a second age recipient", {"age": [mine, {"recipient": "age1" + "q" * 58, "enc": "y"}]}, "2 age recipient"),
-                ("another age recipient instead", {"age": [{"recipient": "age1" + "q" * 58, "enc": "y"}]}, "1 age recipient"),
-                ("no age recipient", {"age": []}, "0 age recipient"),
+                ("a second age recipient", {"age": [mine, {"recipient": "age1" + "q" * 58, "enc": "y"}]}, "is encrypted to 2 age recipient"),
+                ("another age recipient instead", {"age": [{"recipient": "age1" + "q" * 58, "enc": "y"}]}, "is encrypted to 1 age recipient"),
+                ("no age recipient", {"age": []}, "is encrypted to 0 age recipient"),
                 ("a pgp key beside it", {"age": [mine], "pgp": [{"fp": "F" * 40}]}, "also names pgp"),
                 ("a cloud KMS beside it", {"age": [mine], "kms": [{"arn": "arn:x"}]}, "also names kms"),
                 ("an hc_vault beside it", {"age": [mine], "hc_vault": [{"vault_address": "https://v"}]}, "also names hc_vault"),
