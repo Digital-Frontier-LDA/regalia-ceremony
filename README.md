@@ -101,8 +101,8 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     card-record, which signs what step c produces, has no ceremony step yet (#111).
   - The release key's import onto the release cards is not implemented (#124).
   - The card-ceremony record's rules and verifier are in review (#121). Its writer, `offline-keys.py card-record`, is
-    in review too. It signs inputs that no tool makes from the cards yet, and a lost state directory can't be
-    rebuilt yet (regalia-kms#406).
+    in review too. It signs inputs that no tool makes from the cards yet. A lost state directory is rebuilt from the
+    disc (regalia-kms#406); before genesis only the paper sheet bounds that.
   - The owner cards' attestation certificates are produced and checked by `owner-cards.py` (each claim and key), and
     named in the card record by their DER's SHA-256; the chain to Yubico's root is regalia-kms's to check (#400).
   - The release key's tool (#126) and its `ceremony.sh` step r are in review, modelled against a stand-in card only.

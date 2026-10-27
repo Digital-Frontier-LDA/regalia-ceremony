@@ -137,6 +137,28 @@ def sequence_two():
     return second
 
 
+def rebuilt_three():
+    """The record a rebuild signs after losing the state directory that held 1 and 2 (regalia-kms#406): 2's content,
+    sequence 3, superseding 2."""
+    third = sequence_two()
+    third.update(sequence=3, supersedes=ok.card_record_digest(sequence_two()), session="00112233445566778899aabbccddeeff",
+                 at="2026-10-06T12:00:00Z")
+    return third
+
+
+def rebuild_record():
+    """The rebuild's own root-signed record, under its own domain, for the rebuilt state directories below."""
+    entry = {"alg": "ed25519", "key": raw(ROOT)}
+    disc = (json.dumps(signed(sequence_two()), sort_keys=True, indent=1) + "\n").encode()
+    record = {"schema": ok.SCHEMA_REBUILD, "event": "card-record-rebuild",
+              "baseline": {"sequence": 2, "digest": ok.card_record_digest(sequence_two()), "source": "chain"},
+              "disc_record_sha256": __import__("hashlib").sha256(disc).hexdigest(),
+              "rebuilt": {"sequence": 3, "digest": ok.card_record_digest(rebuilt_three())}, "root_entry": entry,
+              "root_fingerprint": ok.root_fingerprint(entry), "session": "00112233445566778899aabbccddeeff",
+              "tool": "card-ceremony-vectors/1", "at": "2026-10-06T12:00:00Z"}
+    return json.dumps({"record": record, "signature": ROOT.sign(ok.REBUILD_DOMAIN + ok.canonical(record)).hex()}, sort_keys=True) + "\n"
+
+
 def signed(record, private=ROOT, domain=ok.RECORD_DOMAIN):
     return {"record": record, "signature": private.sign(domain + ok.canonical(record)).hex()}
 
@@ -159,6 +181,7 @@ def vectors():
     r["owner_keys"][0]["comment"] = "an extra field"
     out.append(("unknown-field.json", signed(r), "owner_keys[0] has an unknown field: comment"))
     out.append(("sequence-2.json", signed(sequence_two()), "ok"))
+    out.append(("rebuilt-3.json", signed(rebuilt_three()), "ok"))
     r = valid_record()
     r["supersedes"] = ok.card_record_digest(valid_record())
     out.append(("first-supersedes.json", signed(r), "the first card record (sequence 1) supersedes nothing: supersedes is \"\""))
@@ -180,12 +203,30 @@ def freshness():
     """The card-record freshness cases (regalia-kms#403), shared with regalia-kms's consumer: each a state directory
     (its marker, or none, and its signing record, verbatim) and the record judged in it. A reader copies a case's
     directory, makes it 0700 and its marker 0600 (git keeps no modes), then runs read_signing_state and
-    card_record_current. Returns {case: (marker text or None, signing record text, record file, expected)}."""
+    card_record_current. Returns {case: (marker text or None, signing record text, record file, expected, rebuild
+    record text or None, the chain's pin or None)}: a rebuilt directory (regalia-kms#406) also holds its rebuild record,
+    and a case with a pin is judged as after genesis, card_record_current(..., pin=)."""
     one, two = log_line(valid_record(), "2026-10-04T12:00:01Z"), log_line(sequence_two(), "2026-10-05T12:00:01Z")
     marker = json.dumps({"schema": ok.SCHEMA_SIGNING_STATE, "root": raw(ROOT)}, sort_keys=True) + "\n"
     other = json.dumps({"schema": ok.SCHEMA_SIGNING_STATE, "root": raw(OTHER_ROOT)}, sort_keys=True) + "\n"
     manifest = json.dumps({"kind": "manifest", "epoch": 1}, sort_keys=True)
-    return {
+    d2, d3 = ok.card_record_digest(sequence_two()), ok.card_record_digest(rebuilt_three())
+    base = json.dumps({"kind": ok.BASELINE_KIND, "sequence": 2, "digest": d2, "key": raw(ROOT), "at": "2026-10-06T12:00:00Z",
+                       "source": "chain"}, sort_keys=True)
+    three = log_line(rebuilt_three(), "2026-10-06T12:00:01Z")
+    rb = rebuild_record()
+    rebuilt = {
+        "current-rebuilt": (marker, base + "\n" + three + "\n", "rebuilt-3.json", "ok", rb, None),
+        "current-rebuilt-pinned": (marker, base + "\n" + three + "\n", "rebuilt-3.json", "ok", rb, (3, d3)),
+        "pin-mismatch": (marker, base + "\n" + three + "\n", "rebuilt-3.json", "this card record is not the one the chain pins (sequence 2)",
+                         rb, (2, d2)),
+        "baseline-not-first": (marker, three + "\n" + base + "\n", "rebuilt-3.json",
+                               "a card-record-baseline line is not the first card line of the signing record", rb, None),
+        "two-baselines": (marker, base + "\n" + base + "\n" + three + "\n", "rebuilt-3.json",
+                          "the signing record holds more than one card-record-baseline line", rb, None),
+        "rebuild-record-missing": (marker, base + "\n" + three + "\n", "rebuilt-3.json", "the signing record has a baseline but", None, None),
+    }
+    plain = {
         "current-1": (marker, one + "\n", "valid.json", "ok"),
         "current-2": (marker, one + "\n" + manifest + "\n" + two + "\n", "sequence-2.json", "ok"),
         "superseded": (marker, one + "\n" + two + "\n", "valid.json", "this card record is not the newest the root signed (sequence 1 of 2)"),
@@ -199,6 +240,7 @@ def freshness():
         "no-marker": (None, one + "\n", "valid.json", "has no regalia-signing-state.json"),
         "marker-other-root": (other, one + "\n", "valid.json", "regalia-signing-state.json names another root than the pinned one"),
     }
+    return dict({case: value + (None, None) for case, value in plain.items()}, **rebuilt)
 
 
 def write(directory):
@@ -210,17 +252,20 @@ def write(directory):
     with open(os.path.join(directory, "root.hex"), "w") as f:
         f.write(raw(ROOT) + "\n")
     cases = freshness()
-    for case, (marker, log, _, _) in cases.items():
+    for case, (marker, log, _, _, rebuild, _) in cases.items():
         where = os.path.join(directory, "freshness", case)
         os.makedirs(where, exist_ok=True)
         if marker is not None:
             with open(os.path.join(where, ok.SIGNING_STATE), "w") as f:
                 f.write(marker)
+        if rebuild is not None:
+            with open(os.path.join(where, ok.REBUILD_RECORD), "w") as f:
+                f.write(rebuild)
         with open(os.path.join(where, ok.SIGNING_RECORD), "w") as f:
             f.write(log)
     with open(os.path.join(directory, "freshness-expect.json"), "w") as f:
-        f.write(json.dumps({case: {"record": record, "expect": expected} for case, (_, _, record, expected) in cases.items()},
-                           sort_keys=True, indent=1) + "\n")
+        f.write(json.dumps({case: dict({"record": record, "expect": expected}, **({"pin": list(pin)} if pin else {}))
+                            for case, (_, _, record, expected, _, pin) in cases.items()}, sort_keys=True, indent=1) + "\n")
     # the owner cards' attestation certificates under the stand-in hierarchy (regalia-kms#400): one directory per card,
     # as the producer lays them out, and the stand-in root and intermediates a test pins in place of Yubico's
     root_pem, intermediates_pem = attestation_hierarchy()
