@@ -99,7 +99,10 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     only from step w, after the disc's `state/` reads back equal (qubes/README.md, "The root's signing state between
     sessions"); the burn and its readback themselves are run by the operator; quitting with a state changed since its last
     step w takes a typed LEAVE WITHOUT BURNING. A real run takes the state from `$WORK/state` only:
-    `CEREMONY_STATE_DIR`, which step a read before, now names another directory in a simulation only. Two sessions that restore the same disc before genesis can still fork;
+    `CEREMONY_STATE_DIR`, which step a read before, now names another directory in a simulation only. The session
+    lines the count is compared with are not signed: each names the root's public key and hashes the log before it,
+    and anyone who can write a disc can compute both. So the count refuses a wrong or older disc, not a forged one;
+    the disc's custody is what keeps it out (raised on #139). Two sessions that restore the same disc before genesis can still fork;
     only the sheet bounds that (as regalia-kms#406 accepts). The card-record writer has no ceremony step yet (#111),
     so the first ceremony's state is not made by `ceremony.sh` either.
   - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed
