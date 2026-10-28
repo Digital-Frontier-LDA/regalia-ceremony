@@ -158,5 +158,35 @@ else
   printf '  \033[32mPASS\033[0m %s directly-executed suites checked for the execute bit\n' "$_x_seen"
 fi
 
+printf '\n\033[1m### a missing dependency fails CI instead of skipping (#166)\033[0m\n'
+# A step test that exits 0 because a tool is missing is green in CI for a test that never ran. Each
+# such exit goes through skip_dep, which REQUIRE_EMULATOR_DEPS=1 (set on CI's run-tests.sh line)
+# turns into a failure. A NEW one written the old way is refused here: the one-line shapes the 32
+# converted exits had. A shape this does not know is not caught, so the count below must not drop.
+_self="$(basename "$0")"     # this file names the patterns it looks for: never count it
+_ungated=$(grep -nE '\{ echo "[^"]*(SKIP|skipping)[^"]*"; exit 0; \}|^[[:space:]]*echo "  \(skipping: .*\)"; exit 0$' "$HERE"/*.sh 2>/dev/null | grep -v "/$_self:")
+if [ -n "$_ungated" ]; then
+  printf '  \033[31mFAIL\033[0m a test skips with exit 0 outside skip_dep, so CI cannot fail it:\n%s\n' "$_ungated"
+  fail=$((fail + 1))
+else
+  printf '  \033[32mPASS\033[0m no test skips with exit 0 outside skip_dep\n'; pass=$((pass + 1))
+fi
+_gated=$(grep -lE '\{ skip_dep "|^[[:space:]]*skip_dep "' "$HERE"/*.sh 2>/dev/null | grep -v "/$_self$" | wc -l | tr -d ' ')
+_defined=$(grep -lE '^skip_dep\(\)\{' "$HERE"/*.sh 2>/dev/null | grep -v "/$_self$" | wc -l | tr -d ' ')
+if [ "$_gated" -lt 20 ]; then        # 21 scripts at #166: a scan that finds none checks nothing
+  printf '  \033[31mFAIL\033[0m only %s scripts call skip_dep (21 did at #166): the pattern no longer matches, or gates were removed\n' "$_gated"
+  fail=$((fail + 1))
+elif [ "$_gated" != "$_defined" ]; then
+  printf '  \033[31mFAIL\033[0m %s scripts call skip_dep but %s define it\n' "$_gated" "$_defined"; fail=$((fail + 1))
+else
+  printf '  \033[32mPASS\033[0m %s scripts gate their dependencies through skip_dep, each defining it\n' "$_gated"; pass=$((pass + 1))
+fi
+if [ -f "$WF" ] && grep -qE '^[[:space:]]*sudo env [^#]*REQUIRE_EMULATOR_DEPS=1[^#]* qubes/emulator/run-tests\.sh' "$WF"; then
+  printf '  \033[32mPASS\033[0m CI runs run-tests.sh with REQUIRE_EMULATOR_DEPS=1\n'; pass=$((pass + 1))
+else
+  printf '  \033[31mFAIL\033[0m CI does not run run-tests.sh with REQUIRE_EMULATOR_DEPS=1: every skip_dep is a silent green there\n'
+  fail=$((fail + 1))
+fi
+
 printf '\n  %d checks passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

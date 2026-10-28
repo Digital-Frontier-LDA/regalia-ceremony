@@ -29,7 +29,11 @@ P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 
-command -v openssl >/dev/null || { echo "  (skipping: openssl not installed)"; exit 0; }
+skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMULATOR_DEPS=1 (CI), so a test that never ran is never green (#166)
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1, and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip"; exit 1; fi
+  echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
+}
+command -v openssl >/dev/null || { skip_dep "openssl not installed"; }
 
 FAKE="$(mktemp -d)"; export PATH="$FAKE:$PATH"
 STATE="$(mktemp -d)"; export STATE
