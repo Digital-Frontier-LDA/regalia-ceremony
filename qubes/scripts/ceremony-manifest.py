@@ -157,8 +157,8 @@ PIV_SLOTS = {"9a", "9c", "9d", "9e"} | {f"{n:02x}" for n in range(0x82, 0x96)}
 PIV_SLOT_NAMES = {"AUTHENTICATION": "9a", "SIGNATURE": "9c", "KEY_MANAGEMENT": "9d", "CARD_AUTH": "9e"}
 PIV_SLOT_NAMES.update({f"RETIRED{n - 0x81}": f"{n:02x}" for n in range(0x82, 0x96)})
 
-# manifest algorithm -> ykman KEY_TYPE name. The manifest's capability table admits exactly these for
-# yubikey-piv; anything else never reaches here because the vendored validator refuses it first.
+# manifest algorithm -> ykman KEY_TYPE name. The vendored capability table also admits ed25519 for
+# yubikey-piv (regalia-kms f14bf8ff); this ceremony has no PIV Ed25519 route, so check_route refuses it.
 YUBIKEY_ALGORITHM = {"p256": "ECCP256", "p384": "ECCP384", "rsa2048": "RSA2048"}
 
 # manifest algorithm -> pkcs11-tool --key-type. The ceremony GENERATES on the card; commission-card's
@@ -368,6 +368,12 @@ def check_route(route: Route) -> str:
                       f"plan the key as yubikey-piv or provision it outside the ceremony")
     if route.backend not in PROVISIONED_BACKENDS:
         raise Refusal(f"{route.path}: backend {route.backend} is not provisioned by this ceremony")
+    # The vendored validator admits token_label (regalia-kms e477e9ab: two PKCS#11 tokens under one serial). This
+    # ceremony finds a card by its serial alone, so a binding that needs the label to tell two tokens apart is
+    # refused rather than provisioned on whichever token answers first.
+    if "token_label" in b:
+        raise Refusal(f"{route.path}: token_label {b['token_label']!r} has no provisioning route in this ceremony, "
+                      f"which finds a card by its serial alone")
     algorithm = key_algorithm(route)
     # Refused HERE, at plan, and not only when record finds no proof: a ceremony that generates a key it
     # can never qualify has made a key it now has to account for (see SIGNATURE_OPERATIONS).
