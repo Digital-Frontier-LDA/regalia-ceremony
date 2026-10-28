@@ -275,6 +275,17 @@ WORKDIR="$CW" PATH="$T/agentshim:$PATH" bash -c 'source "'"$SCRIPTS"'/ceremony.s
   && P "the normal cleanup resets the card, then stops the workdir's gpg-agents, before removing it" || F "cleanup agents: $(cat "$T/gpgconf.calls")"
 out="$(ended "$S2")"
 grep -q "RETURNED" <<< "$out" && P "input ending with no signing state: the menu ends as before" || F "EOF no state: $(tail -3 <<< "$out")"
+# a real run, CEREMONY_STATE_DIR still exported from before #139 (step a took it then): input ending must judge THIS
+# session's state, never the directory that variable names, or an empty one there lets cleanup shred $WORK/state (7e)
+mkdir -p "$T/old-laptop-state"
+out="$(WORKDIR="$S1" OLD="$T/old-laptop-state" PATH="$T/agentshim:$PATH" bash -c '
+    source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+    HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; unset CEREMONY_SIMULATE; export CEREMONY_STATE_DIR="$OLD"
+    trap "echo SHREDDED" EXIT
+    menu_input_ended; echo "RETURNED"' 2>&1 < /dev/null; echo "RC=$?")"
+grep -q "RC=3" <<< "$out" && ! grep -q "SHREDDED\|RETURNED" <<< "$out" && grep -q "the workdir is KEPT, not shredded" <<< "$out" && [ -s "$S1/state/signing-record.jsonl" ] \
+  && P "a real run with CEREMONY_STATE_DIR naming another directory: input ending still keeps this session's unburned state (exit 3)" \
+  || F "EOF with a stray CEREMONY_STATE_DIR: $(tail -4 <<< "$out")"
 out="$(leave "$S2" "")"
 grep -q "RC=0" <<< "$out" && P "a session with no signing state quits freely" || F "no state: $(tail -3 <<< "$out")"
 

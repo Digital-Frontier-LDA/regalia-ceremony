@@ -2685,15 +2685,16 @@ step_state_readback() {
 # state not yet burned and read back, the workdir is KEPT (no shred) and the script exits non-zero, so an operator who
 # comes back can still burn it; an abandoned RAM workdir dies with the qube anyway (d9 on #139). Otherwise it returns.
 menu_input_ended() {
-  STATE_LEAVE="" CEREMONY_SIMULATE=1 state_may_leave </dev/null >/dev/null 2>&1 && return 0
+  state_may_leave noask </dev/null >/dev/null 2>&1 && return 0     # never CEREMONY_SIMULATE: it also moves state_dir (7e on #139)
   err "input ended with the root's signing state NOT burned and read back (step w): the workdir is KEPT, not shredded ($WORK)."
   err "Burn the archive disc and run step w from a new menu on this workdir, or power the qube off to discard it."
   work_agents_stop                        # what cleanup does besides removing the workdir; its evidence comes at the real quit
   trap - EXIT INT TERM
   exit 3
 }
-# state_may_leave: quitting shreds the workdir; a signing state changed since its last read-back burn would be lost
-# with it, so leaving then takes a typed "LEAVE WITHOUT BURNING" (d9 on #139)
+# state_may_leave [noask]: quitting shreds the workdir; a signing state changed since its last read-back burn would be
+# lost with it, so leaving then takes a typed "LEAVE WITHOUT BURNING" (d9 on #139). With noask (the menu's input has
+# ended: no one to type it), such a state is a refusal without the question.
 state_may_leave() {
   local sd now burned answer
   sd="$(state_dir)"
@@ -2701,6 +2702,7 @@ state_may_leave() {
   now="$(sha256sum < "$sd/signing-record.jsonl" | cut -c1-64)"
   burned="$(cat "$WORK/.state-burned" 2>/dev/null)"
   [ "$now" = "$burned" ] && return 0
+  [ "${1:-}" = noask ] && return 1
   err "the root's signing state changed since its last burn was read back (step w): quitting shreds it with the workdir."
   answer="$(state_ask "burn the archive disc and run step w first; or type LEAVE WITHOUT BURNING" STATE_LEAVE)"
   [ "$answer" = "LEAVE WITHOUT BURNING" ] && { warn "leaving without a burned state: the sheet keeps its last count."; return 0; }
