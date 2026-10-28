@@ -1,10 +1,10 @@
 {
   "comment": "Verbatim copies of the custody-manifest contract from Digital-Frontier-LDA/regalia-kms. The ceremony validates with the SAME code CI and the daemon use rather than a re-implementation, because a manifest the ceremony writes and regalia-kms then refuses is the failure this whole tool exists to prevent. Do not edit these files here: re-copy them from upstream, update the digests and the commit below, and let test_ceremony_manifest.py prove the copy. tools/custody_manifest.py reads config/backend-capabilities.json relative to its own location, which is why the upstream tools/ and config/ layout is kept.",
   "upstream": "https://github.com/Digital-Frontier-LDA/regalia-kms",
-  "upstream_commit": "2acd76c49b4117ebde0af768b0ff4d771f54772b",
+  "upstream_commit": "2c5dc9a31bf482be0a0a8632bd280da0a9a33dea",
   "files": {
-    "tools/custody_manifest.py": "sha256:a4f7b229b90329fa329cbb526a945c3770a54a8a2593ad4fbf542e1024cebc4f",
-    "config/backend-capabilities.json": "sha256:ca17f57f4638f5c329857780cbd5e0e74acd7542f234f53203c93edbfe3dddc3",
-    "config/custody-manifest.schema.json": "sha256:36b4eae886a695b9bcefd5388bad53b3402d66fdebcef32563d1a5fb41f865bd"
+    "tools/custody_manifest.py": "sha256:cf4a019ac5cd1396bfded1366eb2afb8157b06b838b62a94f2e83e0d68697b50",
+    "config/backend-capabilities.json": "sha256:9db181b6959f5a0e64219f053f9c34c1b954818c76e9e117ee09cd5ba621a22a",
+    "config/custody-manifest.schema.json": "sha256:dcb666cabcc2b229ded39a463f4af4a8cee6d86782c2ef071c22654b4cb55e1b"
   }
 }

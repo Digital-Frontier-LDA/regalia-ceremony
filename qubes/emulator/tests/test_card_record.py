@@ -183,6 +183,30 @@ class Vectors(unittest.TestCase):
         os.chmod(log, 0o600)
         self.assertEqual(ok.card_record_current(second, root, ok.read_signing_state(d, root))["sequence"], 2)
 
+    def test_the_state_directory_itself_is_the_users_0700_directory_never_a_link(self):
+        """The reader checked the files in the directory, not the directory (7e on #121): a link to another directory,
+        or one others can write, is refused before any file in it is read."""
+        root = make.raw(make.ROOT)
+        d = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, d, True)
+        os.chmod(d, 0o700)
+        marker = os.path.join(d, ok.SIGNING_STATE)
+        with open(marker, "w") as f:
+            json.dump({"schema": ok.SCHEMA_SIGNING_STATE, "root": root}, f)
+        os.chmod(marker, 0o600)
+        with open(os.path.join(d, ok.SIGNING_RECORD), "w") as f:
+            f.write("")
+        os.chmod(os.path.join(d, ok.SIGNING_RECORD), 0o600)
+        self.assertEqual(ok.read_signing_state(d, root), [])
+        link = d + ".link"
+        os.symlink(d, link)
+        self.addCleanup(os.unlink, link)
+        with self.assertRaisesRegex(ok.Refused, re.escape("must be a directory of this user's, mode 0700, not a link")):
+            ok.read_signing_state(link, root)
+        os.chmod(d, 0o750)
+        with self.assertRaisesRegex(ok.Refused, re.escape("must be a directory of this user's, mode 0700, not a link")):
+            ok.read_signing_state(d, root)
+
     def test_the_marker_must_be_the_owners_0600_regular_file(self):
         root = make.raw(make.ROOT)
         d = tempfile.mkdtemp()
@@ -310,6 +334,10 @@ class Rules(unittest.TestCase):
             (lambda r: r["ownerauth_recipients"][1].update(primary=r["ownerauth_recipients"][0]["primary"]),
              "an ownerauth fingerprint is used twice: each owner card has its own primary and its own decryption subkey, or one "
              "card would count twice in the proof (d9 on #121)"),
+            (lambda r: r["release_key"].update(fingerprint=r["ownerauth_recipients"][0]["primary"]),
+             "the release key's fingerprint is an ownerauth fingerprint: the release cards hold no owner card's key (D30.7; 7e on #121)"),
+            (lambda r: r["release_key"].update(fingerprint=r["ownerauth_recipients"][1]["subkey"]),
+             "the release key's fingerprint is an ownerauth fingerprint: the release cards hold no owner card's key (D30.7; 7e on #121)"),
         ]
         for bench in ok.BENCH_YUBIKEYS:
             for where in ("owner", "release"):
