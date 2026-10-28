@@ -2753,6 +2753,185 @@ oa_record_at() {
   python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["record"]["at"].replace(":", ""))' "$1/ownerauth.record.json"
 }
 
+# ---- step r: the release key (ADR-0002 D29.2, D30; regalia-ceremony#124) ----------------------------------------------
+# The developers' Shamir set (D29.4: D13's K-of-N by default, the same holders as every set) seals the release key;
+# its forms are copied and typed back as step o's are; then the key is imported onto both release-specialist cards
+# (developer-keys.py release-import: touch FIXED before the key, read back, the key deleted from a card that fails).
+# The two cards' facts are what card-record --release-import takes. The disc waits for both.
+# release_import_card N SERIAL: the import onto release card N, its shares and PINs from the terminal (a test
+# stands in for the card here; developer-keys.py itself has no test switch).
+release_import_card() {
+  python3 -Es "$HERE/developer-keys.py" release-import --sealed "$WORK/developers/developers.sealed.json" --yubikey-serial "$2" \
+      --out "$WORK/cards" < /dev/tty
+}
+rk_facts() { # rk_facts match|stale: the release-import facts in $WORK/cards that are (or are not) of THIS developers' set
+  # A fact names its set (master_id, slip39_identifier) and its key; a set regenerated with old facts left behind must not
+  # count them, or the step skips a card and the disc accepts.
+  python3 -I -c '
+import glob, json, os, sys
+mode, work = sys.argv[1], sys.argv[2]
+try:
+    with open(os.path.join(work, "developers", "developers.sealed.json")) as f:
+        sealed = json.load(f)
+    want = (sealed["master_id"], sealed["slip39_identifier"], sealed["publics"]["release"]["key"])
+except (OSError, ValueError, KeyError, TypeError):
+    want = None
+for p in sorted(glob.glob(os.path.join(work, "cards", "release-import-*.json"))):
+    try:
+        with open(p) as f:
+            fact = json.load(f)
+        ok = want is not None and (fact["master_id"], fact["slip39_identifier"], fact["key"]) == want
+    except (OSError, ValueError, KeyError, TypeError):
+        ok = False
+    if ok == (mode == "match"):
+        print(p)
+' "$1" "$WORK"
+}
+rk_imported() { # how many release cards hold THIS developers' set (facts of another set do not count)
+  rk_facts match | grep -c . || true
+}
+rk_insert_card() {
+  warn "Insert release card $1 of 2 ALONE (remove any other YubiKey), then type its serial (printed on the card)."
+  read -r -p "   serial of release card $1: " RK_SERIAL
+}
+release_commit_list() {
+  local f
+  warn "COMMIT after the ceremony, beside the offline keys (hsm-backups/developers/): the developers' sealed set and records."
+  for f in "$WORK"/developers/developers.sealed.json "$WORK"/developers/developers.breakglass.age "$WORK"/developers/*.record.json \
+           "$WORK"/cards/release-import-*.json; do
+    [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
+  done
+  return 0
+}
+
+step_release_key() {
+  check_scheme || return 1
+  b "Release key — the developers' set, Shamir $(K)-of-$(N), imported onto both release cards (ADR-0002 D29.2, D30)"
+  local dir="$WORK/developers" rcp="$WORK/breakglass.recipient" typed="$WORK/developers-typed.txt" unverified="" i line n done_cards=0 stale
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made outside it."; return 1; }
+  if [ ! -e "$dir/developers.sealed.json" ]; then
+    [ -s "$rcp" ] || { err "no break-glass recipient in this session ($rcp): make the break-glass key first (step 3, option g)."; return 1; }
+    [ ! -e "$dir" ] || { err "$dir holds a partial generation: remove it (rm -r -- '$dir') and run this step again."; return 1; }
+    ( umask 077; mkdir "$dir" ) || return 1
+    python3 -Es "$HERE/developer-keys.py" generate --threshold "$(K)" --shares "$(N)" --out "$dir" --breakglass-recipient "$rcp" \
+      || { err "the developers' set was NOT generated (reason above)."; return 1; }
+    warn "WRITE the release key's FINGERPRINT (above) BY HAND on the ceremony sheet: the card record and every release check name it."
+  fi
+  if [ -s "$dir/developers-shares.txt" ]; then
+    rm -f "$typed"
+    i=0
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      i=$((i+1)); ( umask 077; printf '%s' "$line" > "$WORK/dsh$i" )
+      record_share "Developers' set — SLIP-39 share $i of $(N) (need $(K))" "$WORK/dsh$i" "$typed" || unverified="$unverified $i"
+      shred -u "$WORK/dsh$i" 2>/dev/null || rm -f "$WORK/dsh$i"
+    done < "$dir/developers-shares.txt"
+    if [ -n "$unverified" ]; then
+      rm -f "$typed"
+      err "forms$unverified were not verified: run this step again (the set is kept; only the forms are redone)."
+      return 1
+    fi
+    if ! python3 -Es "$HERE/developer-keys.py" verify-forms --sealed "$dir/developers.sealed.json" --shares-file "$dir/developers-shares.txt" < "$typed"; then
+      shred -u "$typed" 2>/dev/null || rm -f "$typed"
+      err "the copies typed back do NOT open the developers' set (reason above): run this step again."
+      return 1
+    fi
+    shred -u "$typed" 2>/dev/null || rm -f "$typed"
+  fi
+  ( umask 077; mkdir -p "$WORK/cards" ) || return 1
+  stale="$(rk_facts stale)"
+  if [ -n "$stale" ]; then
+    err "these release-import facts are not of this developers' set (another set's, or unreadable): remove them, then run this step again:"
+    printf '%s\n' "$stale" | sed 's/^/     /' >&2
+    return 1
+  fi
+  for n in 1 2; do
+    if [ "$(rk_imported)" -ge "$n" ]; then continue; fi
+    rk_insert_card "$n"
+    case "$RK_SERIAL" in ''|*[!0-9]*) err "a card's serial is digits: nothing was imported."; return 1;; esac
+    [ ! -e "$WORK/cards/release-import-$RK_SERIAL.json" ] || { err "release card $RK_SERIAL is already imported: insert the OTHER release card."; return 1; }
+    info "type $(K) shares of the DEVELOPERS' set, then Ctrl-D; then the card's PINs when asked:"
+    release_import_card "$n" "$RK_SERIAL" || { err "release card $n ($RK_SERIAL) was NOT imported (reason above): fix that card, then run this step again."; return 1; }
+  done
+  done_cards="$(rk_imported)"
+  [ "$done_cards" -eq 2 ] || { err "$done_cards release cards imported; both are needed."; return 1; }
+  info "release key done: both release cards hold it (touch fixed, not attested); their facts are in $WORK/cards for card-record."
+  release_commit_list
+}
+
+# ---- step c: the owner cards (ADR-0002 D30.7; regalia-ceremony#111 step 2) --------------------------------------------
+# owner-main, then owner-backup: each card's keys generated ON it, its certificate built from them, the card written back
+# with touch fixed on SIG, DEC and AUT, and every slot attested (owner-cards.py enroll, proven on staging 35718625 on
+# 2026-10-05). Then both cards joined into cards.json (card-record's --cards) and owner-cards.gpg (what step a imports).
+# owner_card_enroll ROLE SERIAL: the enrolment of one card, its PINs from the terminal (a test stands in for the card here;
+# owner-cards.py itself has no test switch).
+owner_card_enroll() {
+  python3 -Es "$HERE/owner-cards.py" enroll --role "$1" --yubikey-serial "$2" --name "$OC_NAME" --email "$OC_EMAIL" \
+      --breakglass-recipient "$WORK/breakglass.recipient" --out "$WORK/cards" < /dev/tty
+}
+oc_enrolled() { # oc_enrolled ROLE: the serial of the card this session enrolled in ROLE, or nothing
+  local f
+  for f in "$WORK"/cards/owner-card-*.json; do
+    [ -e "$f" ] || continue
+    python3 -I -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("role") == sys.argv[2] else 1)' "$f" "$1" \
+      && { f="${f##*/owner-card-}"; printf '%s' "${f%.json}"; return 0; }
+  done
+  return 0
+}
+oc_insert_card() {
+  warn "Insert the $1 card ALONE: unplug every other YubiKey, Nitrokey and card reader (owner-cards refuses any), then type its serial."
+  read -r -p "   serial of the $1 card: " OC_SERIAL
+}
+# oc_files: each FINISHED owner card's files (a card's facts .json is written last, and a failed card's outputs are
+# removed), by their exact names, then cards.json and owner-cards.gpg: never a glob that a partial card could match (d9)
+oc_files() {
+  local facts serial base x
+  for facts in "$WORK"/cards/owner-card-*.json; do
+    [ -f "$facts" ] || continue
+    serial="${facts##*/owner-card-}"; serial="${serial%.json}"
+    case "$serial" in ''|*[!0-9]*) continue;; esac
+    base="$WORK/cards/owner-card-$serial"
+    for x in .json .gpg .rev.age .att.der .sig.attest.der .dec.attest.der .aut.attest.der; do printf '%s\n' "$base$x"; done
+  done
+  printf '%s\n' "$WORK/cards/cards.json" "$WORK/cards/owner-cards.gpg"
+}
+owner_cards_commit_list() {
+  local f
+  warn "COMMIT after the ceremony (hsm-backups/cards/): both owner cards' certificates, attestations and facts."
+  while IFS= read -r f; do
+    [ -f "$f" ] && warn "     $(basename "$f")  sha256 $(sha256sum < "$f" | cut -c1-64)"
+  done < <(oc_files)
+  return 0
+}
+
+step_owner_cards() {
+  b "Owner cards — owner-main and owner-backup: keys generated on each card, touch fixed, attested (ADR-0002 D30.7)"
+  local role serial main backup
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made outside it."; return 1; }
+  [ -s "$WORK/breakglass.recipient" ] || { err "no break-glass recipient in this session: make the break-glass key first (step 3, option g); each card's revocation certificate is sealed to it."; return 1; }
+  ( umask 077; mkdir -p "$WORK/cards" ) || return 1
+  if [ -z "${OC_NAME:-}" ]; then read -r -p "   the owner's name on both certificates: " OC_NAME; fi
+  if [ -z "${OC_EMAIL:-}" ]; then read -r -p "   the owner's e-mail on both certificates: " OC_EMAIL; fi
+  [ -n "$OC_NAME" ] && [ -n "$OC_EMAIL" ] || { err "the certificates need a name and an e-mail: nothing was made."; return 1; }
+  for role in owner-main owner-backup; do
+    [ -n "$(oc_enrolled "$role")" ] && { info "the $role card ($(oc_enrolled "$role")) is already enrolled in this session."; continue; }
+    oc_insert_card "$role"
+    serial="$OC_SERIAL"
+    case "$serial" in ''|*[!0-9]*) err "a card's serial is digits: nothing was enrolled."; return 1;; esac
+    [ ! -e "$WORK/cards/owner-card-$serial.json" ] || { err "card $serial is already enrolled as the other owner card: insert the $role card."; return 1; }
+    info "the card's admin PIN, then its user PIN, when asked; touch the card when it blinks:"
+    owner_card_enroll "$role" "$serial" || { err "the $role card ($serial) was NOT enrolled (reason above)."; return 1; }
+    warn "REMOVE the $role card now, and WRITE its primary fingerprint (above) on the ceremony sheet."
+  done
+  main="$(oc_enrolled owner-main)"; backup="$(oc_enrolled owner-backup)"
+  if [ ! -e "$WORK/cards/cards.json" ]; then
+    python3 -Es "$HERE/owner-cards.py" cards --main "$WORK/cards/owner-card-$main.json" --backup "$WORK/cards/owner-card-$backup.json" \
+        --out "$WORK/cards" || { err "the two owner cards could NOT be joined (reason above)."; return 1; }
+  fi
+  info "owner cards done: cards.json (for card-record) and owner-cards.gpg (for step a) are in $WORK/cards."
+  owner_cards_commit_list
+}
+
 step_archive() {
   b "Archive disc (burn, then read every file back and checksum it)"
   info "One writer is enough (ADR-0002 D9): burn, push the tray shut, read the disc back and"
@@ -2811,6 +2990,25 @@ step_archive() {
       warn "simulated run: the offline keys' forms were not proven (offline-shares.txt is still here); the real ceremony refuses this disc."
     else
       err "the offline keys' forms were not proven: $WORK/offline/offline-shares.txt is still here. Finish step o; nothing was burned."
+      return 1
+    fi
+  fi
+  # The owner cards (step c, D30.7): one card enrolled means both, joined, before a real burn
+  if ls "$WORK"/cards/owner-card-*.json >/dev/null 2>&1 && [ ! -e "$WORK/cards/cards.json" ]; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the owner cards are not both enrolled and joined; the real ceremony refuses this disc."
+    else
+      err "the owner cards are not finished (one card enrolled, or not joined). Finish step c; nothing was burned."
+      return 1
+    fi
+  fi
+  # The release key (step r, D29.2): a developers' set made means both release cards must hold it and its forms be proven.
+  if [ -e "$WORK/developers/developers.sealed.json" ] \
+     && { [ -e "$WORK/developers/developers-shares.txt" ] || [ "$(rk_imported)" -ne 2 ] || [ -n "$(rk_facts stale)" ]; }; then
+    if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then
+      warn "simulated run: the release key is not on both release cards with its forms proven; the real ceremony refuses this disc."
+    else
+      err "the release key is not finished (its forms unproven, not on both release cards, or another set's facts in cards/). Finish step r; nothing was burned."
       return 1
     fi
   fi
@@ -2918,6 +3116,23 @@ step_archive() {
     done
   fi
   [ -d "$WORK/offline" ] && offline_commit_list
+  # the owner cards (step c): certificates, attestations and facts public, each revocation sealed to the break-glass key
+  if ls "$WORK"/cards/owner-card-*.json >/dev/null 2>&1; then
+    mkdir -p "$burn/cards"
+    while IFS= read -r art; do
+      [ -f "$art" ] && cp "$art" "$burn/cards/"
+    done < <(oc_files)
+    owner_cards_commit_list
+  fi
+  # the developers' set (step r): its sealed file and break-glass copy are ciphertext, its record and the cards' facts public
+  if [ -d "$WORK/developers" ]; then
+    mkdir -p "$burn/developers"
+    for art in "$WORK"/developers/developers.sealed.json "$WORK"/developers/developers.breakglass.age "$WORK"/developers/*.record.json \
+               "$WORK"/cards/release-import-*.json; do
+      [ -f "$art" ] && cp "$art" "$burn/developers/"
+    done
+    release_commit_list
+  fi
   # the owner authorizations (step a): envelopes are ciphertext, records and the verify log public
   if [ -d "$WORK/ownerauth" ]; then
     mkdir -p "$burn/ownerauth"
@@ -3161,6 +3376,8 @@ main() {
    6) Print break-glass recovery instruction card (DVD-case sized)
    o) Offline keys: the membership root, the 3 boot-image keys and K_A, Shamir $(K)-of-$(N) (ADR-0002 D28; after 3 g)
    a) Owner authorizations: each KMS host's TPM owner auth, to both owner cards + its SOPS recovery copy (after o, card record)
+   c) Owner cards: owner-main and owner-backup, keys generated on each, touch fixed, attested (D30.7; after 3 g)
+   r) Release key: the developers' set, imported onto both release cards (D29.2, D30; after 3 g)
    t) Owner-auth rotation: new owner auths for enrolled hosts, from the archived sealed set (a later session; card record)
 MENU
     [ -n "$CEREMONY_MANIFEST" ] && printf '   m) Manifest: generate a planned YubiKey PIV key + capture its evidence and operation proof\n'
@@ -3182,6 +3399,8 @@ MENU
       9) step_hsm_import;;
       o|O) step_offline_keys;;
       a|A) step_ownerauth;;
+      c|C) step_owner_cards;;
+      r|R) step_release_key;;
       t|T) step_ownerauth_rotate;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;
       q|Q) break;;

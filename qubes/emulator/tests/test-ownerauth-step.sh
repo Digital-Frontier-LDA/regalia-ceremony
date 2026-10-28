@@ -227,7 +227,7 @@ grep -q "RC=1" <<< "$out" && grep -q "owner-auth drill FAILED for node c" <<< "$
   && [ ! -e "$W/ownerauth-recovery.key" ] \
   && P "the last node's copy holding another node's value fails the drill (every node is checked), and the identity is removed" || F "swapped copy: $(tail -6 <<< "$out")"
 cp "$T/c.keep" "$W/ownerauth/ownerauth-c.bg.sops"
-out="$(drill "$W" 'sops(){ cat "$SOPS_AGE_KEY_FILE" > "$T/seen-key"; me=$BASHPID; while read -r k v; do [ "$k" = PPid: ] && kill -INT "$v"; done < /proc/$me/status; }')"
+out="$(drill "$W" 'sops(){ cat "$SOPS_AGE_KEY_FILE" > "$T/seen-key"; me=$BASHPID; p=$(awk "/^PPid:/{print \$2}" /proc/$me/status 2>/dev/null || ps -o ppid= -p "$me"); kill -INT ${p// /}; }')"
 grep -q "RC=130" <<< "$out" && [ -s "$T/seen-key" ] && [ ! -e "$W/ownerauth-recovery.key" ] \
   && P "interrupted with the identity open: it is removed all the same" || F "interrupt: $(tail -6 <<< "$out")"
 rm -f -- "$T/seen-key"
