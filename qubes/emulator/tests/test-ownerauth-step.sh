@@ -190,12 +190,12 @@ grep -q "RC=1" <<< "$out" && grep -q "no owner cards' public keys" <<< "$out" &&
 W5b="$(new_work)"; rm "$W5b/cards/card-record-1.record.json"
 out="$(run_step "$W5b" card2)"
 grep -q "RC=1" <<< "$out" && grep -q "no card record in this session" <<< "$out" && P "no card record: refused" || F "no card record: $(tail -3 <<< "$out")"
-W5c="$(new_work)"
+W5c="$(new_work)"; rm -r -- "$W5c/state"           # a session with no signing state (not restored, no card record made)
 out="$(WORKDIR="$W5c" PATH="$T/shim:$PATH" CEREMONY_STATE_DIR="" bash -c '
     source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
     pause(){ :; }; ask(){ return 0; }; PRINTER=""; HERE="'"$SCRIPTS"'"; WORK="$WORKDIR"; OA_SHARES_FROM="$WORK/two-shares"
     step_ownerauth; echo "RC=$?"' 2>&1)"
-grep -q "RC=1" <<< "$out" && grep -q "CEREMONY_STATE_DIR does not name the laptop's signing state directory" <<< "$out" && [ ! -e "$W5c/ownerauth" ] \
+grep -q "RC=1" <<< "$out" && grep -q "no signing state directory in this session ($W5c/state)" <<< "$out" && [ ! -e "$W5c/ownerauth" ] \
   && P "no signing state directory: refused before anything" || F "no state dir: $(tail -3 <<< "$out")"
 
 hdr "an older card record after an owner-card replacement: refused (d9 on rc#133)"
