@@ -180,6 +180,17 @@ at8="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["record"]
 out="$(rotate "$W8" "oa_utc_now(){ echo $at8; }")"
 grep -q "RC=1" <<< "$out" && grep -q "is not later than the current record's ($at8)" <<< "$out" && [ ! -e "$W8/ownerauth-rotation" ] \
   && P "a clock equal to the current record's at: refused (strictly later)" || F "clock equal: $(tail -4 <<< "$out")"
+# a rotation renews exactly the hosts the current record names (7e on #137): one left out keeps a value the new set no
+# longer holds; one added gets a value no node of the current set was enrolled with
+out="$(rotate "$W8" 'oa_nodes(){ printf a,b; }')"
+grep -q "RC=1" <<< "$out" && grep -q "this rotation is for the hosts a,b, but the current record names a,b,c" <<< "$out" && [ ! -e "$W8/ownerauth-rotation" ] \
+  && P "a rotation that leaves out an enrolled host: refused, nothing made" || F "host left out: $(tail -4 <<< "$out")"
+out="$(rotate "$W8" 'oa_nodes(){ printf d,a,b,c; }')"
+grep -q "RC=1" <<< "$out" && grep -q "this rotation is for the hosts a,b,c,d, but the current record names a,b,c" <<< "$out" && [ ! -e "$W8/ownerauth-rotation" ] \
+  && P "a rotation that adds a host the current record does not name: refused (compared as a set, in any order)" || F "host added: $(tail -4 <<< "$out")"
+out="$(rotate "$W8" 'oa_nodes(){ printf c,a,b; }; oa_utc_now(){ echo 2020-01-01T00:00:00Z; }')"
+grep -q "is not later than the current record's" <<< "$out" && ! grep -q "this rotation is for the hosts" <<< "$out" \
+  && P "the same hosts in another order pass the host check (and reach the clock's)" || F "host order: $(tail -4 <<< "$out")"
 W9="$(later_session)"; W10="$(later_session)"
 out="$(rotate "$W9" "OA_ROTATE_CURRENT=$W10.disc/ownerauth/ownerauth.record.json")"
 grep -q "RC=1" <<< "$out" && grep -q "the record is signed by another root than this sealed set's" <<< "$out" \

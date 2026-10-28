@@ -2646,10 +2646,18 @@ step_ownerauth() {
 
 # ownerauth_make DIR SEALED HOME: the owner authorizations made into DIR under the sealed set SEALED, and both owner
 # cards' proof (GnuPG home HOME), signed by the root. Step a and the rotation run (step t) share it.
+# oa_nodes: the KMS hosts whose owner authorizations steps a and t make, as offline-keys.py --nodes takes them (a
+# simulation may name others in OA_NODES). Step t refuses a rotation whose set is not the current record's (#137).
+oa_nodes() {
+  local nodes="a,b,c"
+  [ "${CEREMONY_SIMULATE:-}" = 1 ] && nodes="${OA_NODES:-$nodes}"
+  printf '%s' "$nodes"
+}
 ownerauth_make() {
-  local dir="$1" sealed="$2" home="$3" card keys="$WORK/cards/owner-cards.gpg" nodes="a,b,c" n
+  local dir="$1" sealed="$2" home="$3" card keys="$WORK/cards/owner-cards.gpg" nodes n
+  nodes="$(oa_nodes)"
   # the three KMS hosts (ADR-0002 D17) and the session's own exported keys; a simulation may name others (3e on #130)
-  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_OWNER_KEYS:-$keys}"; nodes="${OA_NODES:-$nodes}"; fi
+  if [ "${CEREMONY_SIMULATE:-}" = 1 ]; then keys="${OA_OWNER_KEYS:-$keys}"; fi
   [ -s "$keys" ] || { err "no owner cards' public keys ($keys): the owner cards' step exports them (ADR-0002 D30.7, #111 step 2)."; return 1; }
   # the root-signed card record names the two owner cards: ownerauth refuses an export that is not theirs (d9, 1e on #451)
   card="$(oa_card_record)"
@@ -2730,6 +2738,12 @@ step_ownerauth_rotate() {
     local current now
     current="$(python3 -Es "$HERE/offline-keys.py" ownerauth-current --record "$WORK/rotation/current.record.json" --sealed "$sealed")" \
       || { rm -f -- "$WORK/rotation/current.record.json"; err "the current record is not this root's owner-authorization record (reason above): nothing was made."; return 1; }
+    # a rotation makes a new value for every host the current record names, and for no other: a host left out keeps a
+    # value the new set no longer holds, and one added gets a value no node of the current set was enrolled with
+    local current_nodes want
+    current_nodes="${current##* }"; want="$(oa_nodes | tr ',' '\n' | sort | paste -sd, -)"
+    [ "$current_nodes" = "$want" ] \
+      || { err "this rotation is for the hosts $want, but the current record names $current_nodes: a rotation renews exactly the enrolled hosts. Nothing was made."; return 1; }
     current="${current#CURRENT }"; current="${current%% *}"; now="$(oa_utc_now)"
     [[ "$now" > "$current" ]] \
       || { err "this laptop's clock ($now) is not later than the current record's ($current): every node would refuse the new record. Set the clock; nothing was made."; return 1; }
