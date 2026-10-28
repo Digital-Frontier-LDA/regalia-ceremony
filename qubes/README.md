@@ -188,6 +188,14 @@ a rebuild's record) is burned on each archive disc and committed to `hsm-backups
   correction, and type the last count that step w printed for a burned disc. Do not type a number no disc holds.
 - **Two discs that disagree** (a fork), or a lost state: `offline-keys.py card-record --rebuild-from-disc`
   (regalia-kms#406).
+- **Comparing other discs at step t:** the newest disc's files are copied into a new 0700 directory, but each disc
+  given to compare is read where it is mounted, and its `state/` must belong to the user running the ceremony, with
+  mode 0700 (`state-open` refuses anything else; nothing is signed). The archive burns it that way (`umask 077`,
+  `growisofs -R`, which keeps owner and mode; `-r` would reset them), so a disc passes when it is mounted without
+  `uid=`/`mode=` options and read by the same user that burned it. **Drill it in every rehearsal**, before step t:
+  for each disc to compare, `stat -c '%u %a' /mnt/state` must print `$(id -u) 700`. A disc that prints anything
+  else: extract it as this user (`d=$(mktemp -d) && xorriso -osirrox on -indev <drive> -extract / "$d"`), give
+  `"$d/state"` instead, and run the same `stat` on it first.
 - **Residual:** two sessions before genesis that both restore the same disc can still fork. Only the sheet bounds
   that.
 - **Owner cards:** remove the owner card after each owner step (a, t). An OpenPGP card stays PIN-verified until it is
