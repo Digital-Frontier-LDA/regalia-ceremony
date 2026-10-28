@@ -170,8 +170,10 @@ PY_HELPER = "emulator_deps.py"
 def python_green_exits(text):
     """(lineno, source line stripped) of a Python suite's ways to end green without running: a unittest skip outside
     emulator_deps (whose needs/skip_dep fail under REQUIRE_EMULATOR_DEPS=1, #173), and sys.exit(0), sys.exit() or
-    os._exit(0). Read by tokenize, so strings (a stub script written out) and comments are not code. Raises ValueError
-    for a file that does not tokenize."""
+    os._exit(0). Read by tokenize, so strings (a stub script written out) and comments are not code. A skip is ANY name
+    token in PY_SKIPS, after a dot or not, so `from unittest import SkipTest` and a bare `@skip(...)` are reported too
+    (7e on #175), the import line with them. Not seen: an early `return` in a test, which passes it without running
+    the rest. Raises ValueError for a file that does not tokenize."""
     source = text.split("\n")
     try:
         tokens = [t for t in tokenize.generate_tokens(io.StringIO(text).readline)
@@ -181,7 +183,7 @@ def python_green_exits(text):
     found = []
     for i, t in enumerate(tokens):
         after_dot = i > 0 and tokens[i - 1].string == "."
-        hit = t.type == tokenize.NAME and after_dot and t.string in PY_SKIPS
+        hit = t.type == tokenize.NAME and t.string in PY_SKIPS
         if t.type == tokenize.NAME and after_dot and t.string in ("exit", "_exit") and i > 1 and tokens[i - 2].string in ("sys", "os"):
             args = [x.string for x in tokens[i + 1:i + 4]]
             hit = args[:2] == ["(", ")"] or args == ["(", "0", ")"]

@@ -305,6 +305,18 @@ _gx_py 1 'Python, reported: raise unittest.SkipTest' <<'X'
 import unittest
 raise unittest.SkipTest("no sops")
 X
+_gx_py 1 'Python, reported: from unittest import SkipTest, then a bare raise SkipTest' <<'X'
+from unittest import SkipTest
+def test_x(self):
+    raise SkipTest("no sops")
+X
+_gx_py 1 'Python, reported: from unittest import skip, then a bare @skip' <<'X'
+from unittest import skip as _s, TestCase
+from unittest import skip
+class T(TestCase):
+    @skip("later")
+    def test_b(self): pass
+X
 _gx_py 1 'Python, reported: sys.exit(0) and os._exit(0) at code level' <<'X'
 import os, sys
 if not os.path.exists("/opt/vault-bin/age"):

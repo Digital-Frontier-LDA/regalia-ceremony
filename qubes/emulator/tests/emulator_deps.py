@@ -38,9 +38,8 @@ def needs(available, reason):
             def setUp(self):
                 self.fail(message)
             thing.setUp = setUp
-            for name in ("setUpClass", "tearDownClass"):     # never reach code that needs what is missing
-                if name in vars(thing):
-                    setattr(thing, name, classmethod(lambda cls: None))
+            for name in ("setUpClass", "tearDownClass"):     # never reach code that needs what is missing, its own or
+                setattr(thing, name, classmethod(lambda cls: None))  # inherited (7e on #175)
             return thing
 
         @functools.wraps(thing)

@@ -30,6 +30,16 @@ SUITE = textwrap.dedent('''
             deps.skip_dep(self, "gpg is not installed")
             raise RuntimeError("ran past skip_dep")
 
+    class Base(unittest.TestCase):
+        @classmethod
+        def setUpClass(cls):
+            raise RuntimeError("inherited setUpClass needs ykman")
+
+    @deps.needs(False, "ykman is not installed")
+    class Inherits(Base):
+        def test_b(self):
+            raise RuntimeError("ran without ykman")
+
     @deps.needs(False, "sops is not installed")
     class Whole(unittest.TestCase):
         @classmethod
@@ -61,16 +71,16 @@ class Deps(unittest.TestCase):
 
     def test_by_hand_a_missing_dependency_skips(self):
         out = self.run_suite(require=False)
-        self.assertIn("RUN 4 FAIL 0 ERROR 0 SKIP 3", out)
+        self.assertIn("RUN 5 FAIL 0 ERROR 0 SKIP 4", out)
         self.assertIn("age is not installed (REQUIRE_EMULATOR_DEPS=1 makes this a failure)", out)
         self.assertNotIn("ran without", out)
 
     def test_under_require_every_skip_is_a_failure_and_nothing_needing_it_runs(self):
         out = self.run_suite(require=True)
-        self.assertIn("RUN 4 FAIL 3 ERROR 0 SKIP 0", out)
-        for reason in ("age is not installed", "gpg is not installed", "sops is not installed"):
+        self.assertIn("RUN 5 FAIL 4 ERROR 0 SKIP 0", out)
+        for reason in ("age is not installed", "gpg is not installed", "sops is not installed", "ykman is not installed"):
             self.assertIn(reason + ", and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip", out)
-        for ran in ("ran without", "ran past skip_dep", "setUpClass needs sops", "setUp needs sops"):
+        for ran in ("ran without", "ran past skip_dep", "setUpClass needs sops", "setUp needs sops", "inherited setUpClass needs ykman"):
             self.assertNotIn(ran, out)
 
 
