@@ -1,0 +1,9 @@
+# Exits an emulator test may take that can be green before it ran, each with its reason (#166, #167).
+# tools/emulator-green-exits.py reports every other one, and an entry here that matches no line.
+# FILE<TAB>TEXT (the line exactly, indentation stripped)<TAB>REASON
+dress-rehearsal.sh	[ "$fail" -eq 0 ] && { echo "  REAL WIZARD DRIVEN END-TO-END ON THE EMULATORS — no script surprises expected on the day"; exit 0; } \	the verdict, after every check: exit 0 only when fail is 0; the line after it is its exit 1
+test-hsm-bench-lock.sh	hsm_bench_lock_acquire failfast || exit $?	runs only when the acquire failed, so $? is that failure's non-zero status
+test-hsm-import-drill.sh	*) echo "  (skipping: HSM_DRILL_HARDWARE=1 but no SmartCard-HSM-protocol card on the bus)"; exit 0 ;;	owner-run hardware mode (HSM_DRILL_HARDWARE=1), never set in CI; its stub mode runs there
+test-hsm-import-drill.sh	exit 0	the end of the owner-run hardware mode (HSM_DRILL_HARDWARE=1), after its asserts passed; CI runs the stub mode
+test-kms-e2e-orchestrator.sh	exit 0	regalia-d02: CI has no regalia-kms checkout, so this SKIPS GREEN there today (Emulator run 40619629083); remove this entry and use skip_dep when the workflow checks it out
+test-locale-ranges.sh	echo "test-locale-ranges: SKIP: $LOC is not installed (locale-gen $LOC); REQUIRE_UTF8_LOCALE=1 makes this a failure"; exit 0	gated by its own REQUIRE_UTF8_LOCALE=1, which CI sets on the same run-tests.sh line

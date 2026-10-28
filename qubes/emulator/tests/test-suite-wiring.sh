@@ -158,28 +158,116 @@ else
   printf '  \033[32mPASS\033[0m %s directly-executed suites checked for the execute bit\n' "$_x_seen"
 fi
 
-printf '\n\033[1m### a missing dependency fails CI instead of skipping (#166)\033[0m\n'
-# A step test that exits 0 because a tool is missing is green in CI for a test that never ran. Each
-# such exit goes through skip_dep, which REQUIRE_EMULATOR_DEPS=1 (set on CI's run-tests.sh line)
-# turns into a failure. A NEW one written the old way is refused here: the one-line shapes the 32
-# converted exits had. A shape this does not know is not caught, so the count below must not drop.
-_self="$(basename "$0")"     # this file names the patterns it looks for: never count it
-_ungated=$(grep -nE '\{ echo "[^"]*(SKIP|skipping)[^"]*"; exit 0; \}|^[[:space:]]*echo "  \(skipping: .*\)"; exit 0$' "$HERE"/*.sh 2>/dev/null | grep -v "/$_self:")
-if [ -n "$_ungated" ]; then
-  printf '  \033[31mFAIL\033[0m a test skips with exit 0 outside skip_dep, so CI cannot fail it:\n%s\n' "$_ungated"
-  fail=$((fail + 1))
-else
-  printf '  \033[32mPASS\033[0m no test skips with exit 0 outside skip_dep\n'; pass=$((pass + 1))
+printf '\n\033[1m### a missing dependency fails CI instead of skipping (#166, #167)\033[0m\n'
+# A step test that exits 0 because a tool is missing is green in CI for a test that never ran. The one way to skip is
+# skip_dep, which REQUIRE_EMULATOR_DEPS=1 (set on CI's run-tests.sh line) turns into a failure. Matching the spellings
+# of a skip missed the next one written another way, so tools/emulator-green-exits.py reads each test as bash does
+# (strings, heredocs and comments set aside) and reports EVERY exit that can be green before the end: exit 0, a bare
+# exit, exit $x. The deliberate ones are in qubes/emulator/green-exits.allow, one entry per line, each with its reason.
+GX="$HERE/../../../tools/emulator-green-exits.py"; GXA="$HERE/../green-exits.allow"
+gx(){ python3 -I "$GX" "$@" >"$_gx_out" 2>&1; }
+_gx_dir="$(mktemp -d)"; _gx_out="$_gx_dir/out"
+gx --allow "$GXA" "$HERE"/*.sh; _rc=$?
+case "$_rc" in
+  0) printf '  \033[32mPASS\033[0m no emulator test can exit green before it ran, outside skip_dep and the allowlist\n'; pass=$((pass + 1));;
+  1) printf '  \033[31mFAIL\033[0m an exit that can be green before the test ran (use skip_dep, or allowlist it with a reason):\n%s\n' "$(cat "$_gx_out")"
+     fail=$((fail + 1));;
+  *) printf '  \033[31mFAIL\033[0m the green-exit scan could not judge the tests (rc %s): %s\n' "$_rc" "$(cat "$_gx_out")"; fail=$((fail + 1));;
+esac
+# The scan's own fixtures: every spelling a review found the old regex missed is reported, and what is not an early
+# green exit is not. Each body ends with a line of code, as a test does, so its exit is not the last line.
+_gx_case(){ # _gx_case WANT_RC LABEL: the fixture on stdin, scanned alone (with $_gx_allow, when set)
+  local want="$1" label="$2" f="$_gx_dir/fixture.sh" rc
+  { cat; echo 'echo end'; } > "$f"
+  if [ -n "${_gx_allow:-}" ]; then gx --allow "$_gx_allow" "$f"; else gx "$f"; fi; rc=$?
+  if [ "$rc" = "$want" ]; then printf '  \033[32mPASS\033[0m %s\n' "$label"; pass=$((pass + 1))
+  else printf '  \033[31mFAIL\033[0m %s: rc %s, want %s: %s\n' "$label" "$rc" "$want" "$(cat "$_gx_out")"; fail=$((fail + 1)); fi
+}
+_gx_case 1 'reported: { echo "SKIP"; exit 0; }' <<'X'
+command -v ykman >/dev/null 2>&1 || { echo "SKIP: ykman not installed"; exit 0; }
+X
+_gx_case 1 'reported: echo "  (skipping: ...)"; exit 0' <<'X'
+echo "  (skipping: no ykman here)"; exit 0
+X
+_gx_case 1 'reported: the message to stderr (>&2)' <<'X'
+command -v ykman >/dev/null 2>&1 || { echo "ykman not installed" >&2; exit 0; }
+X
+_gx_case 1 'reported: a lower-case "skip"' <<'X'
+command -v ykman >/dev/null 2>&1 || { echo "skip: ykman not installed"; exit 0; }
+X
+_gx_case 1 'reported: printf instead of echo' <<'X'
+command -v ykman >/dev/null 2>&1 || { printf 'SKIP %s\n' ykman; exit 0; }
+X
+_gx_case 1 'reported: single quotes' <<'X'
+command -v ykman >/dev/null 2>&1 || { echo 'SKIP: ykman not installed'; exit 0; }
+X
+_gx_case 1 'reported: || exit 0 with no message' <<'X'
+command -v ykman >/dev/null 2>&1 || exit 0
+X
+_gx_case 1 'reported: an if-block over several lines' <<'X'
+if ! command -v ykman >/dev/null 2>&1; then
+  echo "ykman not installed"
+  exit 0
 fi
-_gated=$(grep -lE '\{ skip_dep "|^[[:space:]]*skip_dep "' "$HERE"/*.sh 2>/dev/null | grep -v "/$_self$" | wc -l | tr -d ' ')
-_defined=$(grep -lE '^skip_dep\(\)\{' "$HERE"/*.sh 2>/dev/null | grep -v "/$_self$" | wc -l | tr -d ' ')
-if [ "$_gated" -lt 20 ]; then        # 21 scripts at #166: a scan that finds none checks nothing
-  printf '  \033[31mFAIL\033[0m only %s scripts call skip_dep (21 did at #166): the pattern no longer matches, or gates were removed\n' "$_gated"
+X
+_gx_case 1 'reported: a bare exit' <<'X'
+command -v ykman >/dev/null 2>&1 || { echo "ykman not installed"; exit; }
+X
+_gx_case 1 'reported: exit with a variable status' <<'X'
+[ -x /opt/vault-bin/age ] || exit "$ok"
+X
+_gx_case 0 'not reported: a non-zero exit' <<'X'
+[ -r "$IMPORT" ] || { echo "no $IMPORT" >&2; exit 1; }
+X
+_gx_case 0 'not reported: skip_dep, and its own definition' <<'X'
+skip_dep(){ # a missing dependency
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1"; exit 1; fi
+  echo "  SKIP: $1"; exit 0
+}
+command -v ykman >/dev/null 2>&1 || { skip_dep "ykman not installed"; }
+X
+_gx_case 0 'not reported: exit 0 in a stub written by printf, a heredoc, a $( ) and a comment' <<'X'
+printf '#!/bin/sh\nexit 0\n' > "$T/shim/gpgconf"
+out="$(bash -c "echo \"$(printf 'exit 0')\"")"
+cat > "$T/shim/pcscd" <<'EOS'
+#!/bin/sh
+exit 0
+EOS
+: # exit 0 here is prose
+X
+GX_LAST="$_gx_dir/last.sh"; printf 'echo run\n[ "$fail" -eq 0 ] || exit 1\nexit 0\n' > "$GX_LAST"
+if gx "$GX_LAST"; then printf '  \033[32mPASS\033[0m not reported: a final exit 0\n'; pass=$((pass + 1))
+else printf '  \033[31mFAIL\033[0m a final exit 0 was reported: %s\n' "$(cat "$_gx_out")"; fail=$((fail + 1)); fi
+printf 'fixture.sh\texit 0\tthe fixture of an allowlisted line\n' > "$_gx_dir/allow"; _gx_allow="$_gx_dir/allow"
+_gx_case 0 'an allowlisted line: accepted' <<'X'
+exit 0
+X
+_gx_case 1 'the same line twice with one entry: the second is reported' <<'X'
+exit 0
+exit 0
+X
+_gx_case 1 'a stale entry (its line gone): reported' <<'X'
+echo nothing here exits
+X
+_gx_allow=""
+_gx_case 2 'a file that ends inside a string: refused, not passed' <<'X'
+echo "never closed
+exit 0
+X
+rm -rf -- "$_gx_dir"
+_gated=$(grep -lE '\{ skip_dep "|^[[:space:]]*skip_dep "|\|\| skip_dep "' "$HERE"/*.sh 2>/dev/null | grep -v "/$(basename "$0")$" | wc -l | tr -d ' ')
+_defs=$(for f in "$HERE"/*.sh; do [ "$f" -ef "$0" ] && continue; awk '/^skip_dep\(\)\{/{p=1} p{print} p&&/^\}$/{exit}' "$f" | cksum; done | grep -v '^4294967295 0$' | sort | uniq -c)
+_defined=$(printf '%s\n' "$_defs" | awk 'NF{n+=$1} END{print n+0}')
+if [ "$_gated" -lt 20 ]; then        # 24 scripts at #167: a scan that finds none checks nothing
+  printf '  \033[31mFAIL\033[0m only %s scripts call skip_dep (24 did at #167): the pattern no longer matches, or gates were removed\n' "$_gated"
   fail=$((fail + 1))
 elif [ "$_gated" != "$_defined" ]; then
   printf '  \033[31mFAIL\033[0m %s scripts call skip_dep but %s define it\n' "$_gated" "$_defined"; fail=$((fail + 1))
+elif [ "$(printf '%s\n' "$_defs" | grep -c .)" != 1 ]; then
+  printf '  \033[31mFAIL\033[0m the %s skip_dep definitions are not all the same text (one would exit 0 under CI):\n%s\n' "$_defined" "$_defs"
+  fail=$((fail + 1))
 else
-  printf '  \033[32mPASS\033[0m %s scripts gate their dependencies through skip_dep, each defining it\n' "$_gated"; pass=$((pass + 1))
+  printf '  \033[32mPASS\033[0m %s scripts gate their dependencies through skip_dep, each defining it identically\n' "$_gated"; pass=$((pass + 1))
 fi
 if [ -f "$WF" ] && grep -qE '^[[:space:]]*sudo env [^#]*REQUIRE_EMULATOR_DEPS=1[^#]* qubes/emulator/run-tests\.sh' "$WF"; then
   printf '  \033[32mPASS\033[0m CI runs run-tests.sh with REQUIRE_EMULATOR_DEPS=1\n'; pass=$((pass + 1))
