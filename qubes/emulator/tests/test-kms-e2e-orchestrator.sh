@@ -13,10 +13,12 @@ if [ -z "$KMS_DIR" ]; then
     if [ -f "$candidate/e2e/run.sh" ]; then KMS_DIR="$candidate"; break; fi
   done
 fi
-if [ -z "$KMS_DIR" ] || [ ! -f "$KMS_DIR/e2e/run.sh" ]; then
-  echo "  (skipping: no regalia-kms checkout — set REGALIA_KMS_DIR to one to check the e2e orchestrator)"
-  exit 0
-fi
+skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMULATOR_DEPS=1 (CI), so a test that never ran is never green (#166)
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1, and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip"; exit 1; fi
+  echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
+}
+[ -n "$KMS_DIR" ] && [ -f "$KMS_DIR/e2e/run.sh" ] \
+  || skip_dep "no regalia-kms checkout — set REGALIA_KMS_DIR to one to check the e2e orchestrator (CI checks one out, #169)"
 E2E="$KMS_DIR/e2e/run.sh"
 pass=0; fail=0
 P(){ echo "  PASS $1"; pass=$((pass+1)); }
