@@ -897,7 +897,12 @@ def yubikey_recipients(keys_path, home, run=subprocess.run):
     return out
 
 
-SOPS_KEY_SOURCES = ("pgp", "kms", "gcp_kms", "azure_kv", "hc_vault", "key_groups")   # every recipient source but age
+# the sops metadata that names no recipient (sops 3.13.1 writes age, lastmodified, mac, version; the rest are its
+# encryption-scope settings). Any other field that is not empty is refused: an allowlist, so a recipient source sops adds
+# later (hckms was one, CodeRabbit on #133) is refused without an edit here.
+SOPS_NOT_RECIPIENTS = frozenset(("age", "lastmodified", "mac", "version", "mac_only_encrypted", "unencrypted_suffix",
+                                 "encrypted_suffix", "unencrypted_regex", "encrypted_regex", "unencrypted_comment_regex",
+                                 "encrypted_comment_regex"))
 
 
 def sops_isolated():
@@ -907,8 +912,8 @@ def sops_isolated():
 
 
 def sops_recipients_only(data, recipient, path):
-    """The SOPS file `data` is encrypted to the age `recipient` alone: one age entry, that recipient, and every other key
-    source absent or empty. Whatever added one (an environment, a configuration, a sops that does more than asked), a
+    """The SOPS file `data` is encrypted to the age `recipient` alone: one age entry, that recipient, and every field
+    outside SOPS_NOT_RECIPIENTS absent or empty. Whatever added one (an environment, a configuration, a sops that does more than asked), a
     copy of every node's TPM owner authorization readable by anyone else is refused."""
     meta = json.loads(data).get("sops")
     require(isinstance(meta, dict), "%s is not a SOPS file" % path)
@@ -916,7 +921,7 @@ def sops_recipients_only(data, recipient, path):
     named = [entry.get("recipient") if isinstance(entry, dict) else None for entry in ages] if isinstance(ages, list) else [None]
     require(named == [recipient], "%s is encrypted to %d age recipient(s) (%s), not to the recovery identity alone" % (
         path, len(named), ", ".join(str(n)[:24] for n in named)))
-    others = [source for source in SOPS_KEY_SOURCES if meta.get(source)]
+    others = sorted(field for field, value in meta.items() if field not in SOPS_NOT_RECIPIENTS and value not in (None, "", [], {}))
     require(not others, "%s also names %s: only the recovery identity may open it" % (path, ", ".join(others)))
 
 

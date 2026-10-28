@@ -973,10 +973,24 @@ class OwnerAuth(Case):
                 ("a pgp key beside it", {"age": [mine], "pgp": [{"fp": "F" * 40}]}, "also names pgp"),
                 ("a cloud KMS beside it", {"age": [mine], "kms": [{"arn": "arn:x"}]}, "also names kms"),
                 ("an hc_vault beside it", {"age": [mine], "hc_vault": [{"vault_address": "https://v"}]}, "also names hc_vault"),
-                ("key groups beside it", {"age": [mine], "key_groups": [{"age": ["age1other"]}]}, "also names key_groups")):
+                ("key groups beside it", {"age": [mine], "key_groups": [{"age": ["age1other"]}]}, "also names key_groups"),
+                ("an hckms key beside it", {"age": [mine], "hckms": [{"key_id": "r:u"}]}, "also names hckms"),
+                ("a source no sops has yet", {"age": [mine], "next_kms": [{"id": "x"}]}, "also names next_kms")):
             with self.subTest(name), self.assertRaisesRegex(ok.Refused, "ownerauth-a.bg.sops " + reason):
                 self.run_oa(nodes=("a",), run=sops_writing(meta))
             self.assertEqual(os.listdir(self.oa), [], "nothing is left behind")
+
+    def test_the_fields_sops_writes_beside_the_recipient_are_accepted(self):
+        # what sops 3.13.1 writes, the scope settings, and empty sources: none of them names a recipient
+        mine = {"recipient": self.recovery_recipient(), "enc": "x"}
+        meta = {"age": [mine], "lastmodified": "2026-10-28T00:00:00Z", "mac": "ENC[x]", "version": "3.13.1",
+                "unencrypted_suffix": "_unencrypted", "pgp": None, "kms": [], "hc_vault": ""}
+        def run(argv, input=None, capture_output=True, **kw):
+            if argv[0] != "sops":
+                return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"data": "ENC[AES256_GCM,data:x]", "sops": meta}).encode(), b"")
+        self.run_oa(nodes=("a",), run=run)
+        self.assertTrue(os.path.exists(os.path.join(self.oa, "ownerauth-a.bg.sops")))
 
     def test_sops_runs_with_path_alone_from_the_root_directory(self):
         seen = []
