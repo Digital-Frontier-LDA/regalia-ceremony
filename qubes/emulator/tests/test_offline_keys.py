@@ -119,7 +119,7 @@ class Generate(Case):
         self.assertEqual(sealed["publics"], record["publics"])
         # the record verifies under the root entry it names
         with open(self.path("offline-keys.record.json"), "rb") as f:
-            self.assertEqual(ok.verify_record(json.loads(f.read()))["master_id"], sealed["master_id"])
+            self.assertEqual(ok.verify_record(json.loads(f.read()), ok.sealed_root(self.path("offline-keys.sealed.json")))["master_id"], sealed["master_id"])
 
     def test_k_shares_open_the_sealed_file_and_k_minus_1_do_not(self):
         from shamir_mnemonic import combine_mnemonics
@@ -189,11 +189,11 @@ class Generate(Case):
         changed = json.loads(json.dumps(document))
         changed["record"]["threshold"] = 1
         with self.assertRaisesRegex(ok.Refused, "does not verify"):
-            ok.verify_record(changed)
+            ok.verify_record(changed, ok.sealed_root(self.path("offline-keys.sealed.json")))
         other = json.loads(json.dumps(document))
         other["record"]["root_entry"]["key"] = "00" * 32
         with self.assertRaises(ok.Refused):
-            ok.verify_record(other)
+            ok.verify_record(other, ok.sealed_root(self.path("offline-keys.sealed.json")))
 
     def test_the_record_prefix_is_never_a_membership_signing_input(self):
         """d9's amendment on #111: a record signature can never be read as a manifest signature, nor the reverse."""
@@ -459,7 +459,7 @@ if "nooutput" not in args:
         out = []
         for name in found:
             with open(os.path.join(self.session_dir, name)) as f:
-                out.append(ok.verify_record(json.load(f)))
+                out.append(ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json"))))
         return out
 
     def test_the_root_goes_only_to_manifest_sign_as_a_sealed_memfd_and_the_session_is_recorded(self):
@@ -493,7 +493,7 @@ if "nooutput" not in args:
                 self.assertEqual(f.read().split()[2:], ["--root-key", root_hex, "--state-dir", os.path.abspath(self.state),
                                                        "--key-fd", hashlib.sha256(self.pem("anchor-policy")).hexdigest()])
             with open(path) as f:
-                recorded = ok.verify_record(json.load(f))
+                recorded = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
             self.assertEqual((recorded["tool"], recorded["keys"]), (tool, ["anchor-policy"]))
         for reason, command in (
                 ("--exec runs only", self.command("anchorpolicy", subcommand="sign")),
@@ -658,7 +658,7 @@ if "nooutput" not in args:
         records = [n for n in os.listdir(self.out) if n.startswith("forms-verified-")]
         self.assertEqual(len(records), 1)
         with open(self.path(records[0])) as f:
-            record = ok.verify_record(json.load(f))
+            record = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
         self.assertEqual((record["event"], record["checked"], record["not_checked"]), ("forms-verified", [1, 2, 3, 4], [5]))
         self.assertEqual(record["root_entry"], self.record["root_entry"])
 
@@ -781,7 +781,7 @@ class OwnerAuth(Case):
         import hmac
         record = self.run_oa()
         with open(os.path.join(self.oa, "ownerauth.record.json")) as f:
-            verified = ok.verify_record(json.load(f))
+            verified = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
         self.assertEqual(verified["schema"], "regalia.ownerauth-record/v1")
         self.assertEqual(verified["root_entry"], self.record["root_entry"], "signed by the ceremony's root")
         self.assertEqual(len(record["yk_recipients"]), 2)
@@ -811,14 +811,14 @@ class OwnerAuth(Case):
         rec = os.path.join(self.oa, "ownerauth.record.json")
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope"):
             self.summary(rec)
-        self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000, gnupghome=self.homes[0], run=self.card(1000)), ["a", "b", "c"])
+        self.assertEqual(ok.ownerauth_verify(rec, self.oa, 1000, sealed_path=self.sealed, gnupghome=self.homes[0], run=self.card(1000)), ["a", "b", "c"])
         with self.assertRaisesRegex(ok.Refused, "not yet proven"):
             self.summary(rec)          # the backup card has not opened them yet
-        ok.ownerauth_verify(rec, self.oa, 1001, gnupghome=self.homes[1], run=self.card(1001))
+        ok.ownerauth_verify(rec, self.oa, 1001, sealed_path=self.sealed, gnupghome=self.homes[1], run=self.card(1001))
         # the result signed by the root (regalia-kms-d9 on #120), opened from the k shares
         self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
         with open(os.path.join(self.oa, "ownerauth-verified.record.json")) as f:
-            signed = ok.verify_record(json.load(f))
+            signed = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
         self.assertEqual((signed["event"], signed["nodes"], sorted(c["serial"] for c in signed["cards"])),
                          ("ownerauth-verified", ["a", "b", "c"], ["1000", "1001"]))
         self.assertEqual(signed["root_entry"], self.record["root_entry"])
@@ -837,9 +837,9 @@ class OwnerAuth(Case):
         self.addCleanup(shutil.rmtree, stranger, True)
         self.addCleanup(subprocess.run, ["gpgconf", "--homedir", stranger, "--kill", "all"], capture_output=True)
         with self.assertRaisesRegex(ok.Refused, "the card inserted is 7, not the 9 typed"):
-            ok.ownerauth_verify(rec, self.oa, 9, gnupghome=stranger, run=self.card(7))
+            ok.ownerauth_verify(rec, self.oa, 9, sealed_path=self.sealed, gnupghome=stranger, run=self.card(7))
         with self.assertRaisesRegex(ok.Refused, "YubiKey 9 did NOT open: a"):
-            ok.ownerauth_verify(rec, self.oa, 9, gnupghome=stranger, run=self.card(9))
+            ok.ownerauth_verify(rec, self.oa, 9, sealed_path=self.sealed, gnupghome=stranger, run=self.card(9))
         env = os.path.join(self.oa, "ownerauth-a.yk.gpg")
         value = self.gpg_decrypt(env, self.homes[0])
         argv = ["gpg", "--homedir", self.homes[0], "--batch", "--trust-model", "always", "--output", env + ".new", "--encrypt"]
@@ -851,7 +851,7 @@ class OwnerAuth(Case):
         subprocess.run(argv, input=value, check=True, capture_output=True)
         os.replace(env + ".new", env)
         with self.assertRaisesRegex(ok.Refused, "is not the file the record names"):
-            ok.ownerauth_verify(rec, self.oa, 1, gnupghome=self.homes[0], run=self.card(1))
+            ok.ownerauth_verify(rec, self.oa, 1, sealed_path=self.sealed, gnupghome=self.homes[0], run=self.card(1))
         shutil.rmtree(self.oa)
         os.mkdir(self.oa)
         self.run_oa(nodes=("a",))
@@ -864,14 +864,14 @@ class OwnerAuth(Case):
                 return subprocess.CompletedProcess(argv, 0, ("ab" * 32 + "\n").encode(), ("[GNUPG:] DECRYPTION_KEY %s X u\n" % subkey).encode())
             return real(argv, *a, **k)
         with self.assertRaisesRegex(ok.Refused, "its value is not the one the record checks"):
-            ok.ownerauth_verify(rec, self.oa, 1, run=self.card(1, other_value))
+            ok.ownerauth_verify(rec, self.oa, 1, sealed_path=self.sealed, run=self.card(1, other_value))
 
         def other_key(argv, *a, **k):
             if "--decrypt" in argv:
                 return subprocess.CompletedProcess(argv, 0, b"", ("[GNUPG:] DECRYPTION_KEY %s X u\n" % ("F" * 40)).encode())
             return real(argv, *a, **k)
         with self.assertRaisesRegex(ok.Refused, "opened by a key the record does not name"):
-            ok.ownerauth_verify(rec, self.oa, 1, run=self.card(1, other_key))
+            ok.ownerauth_verify(rec, self.oa, 1, sealed_path=self.sealed, run=self.card(1, other_key))
 
     def test_refusals_leave_nothing_half_made(self):
         from shamir_mnemonic import generate_mnemonics
@@ -929,6 +929,49 @@ class OwnerAuth(Case):
             json.dump(forged, f)
         with self.assertRaisesRegex(ok.Refused, "the signature does not verify under the pinned root"):
             self.run_oa()
+
+    def test_a_record_self_signed_by_another_root_is_refused_by_every_verifier(self):
+        """7e, 2026-10-28: verify_record checked a record under the root_entry it names itself, so a record any key signs,
+        naming that key, verified in ownerauth-verify, in --summary (where the real root then SIGNED ownerauth-verified
+        over it) and in verify-record. Every verifier now takes the sealed set's root and refuses another."""
+        import contextlib
+        import io
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        self.run_oa(nodes=("a",))
+        rec = os.path.join(self.oa, "ownerauth.record.json")
+        record = json.load(open(rec))["record"]
+        stranger = ed25519.Ed25519PrivateKey.generate()
+        theirs = stranger.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+        record["root_entry"] = {"alg": "ed25519", "key": theirs}
+        record["root_fingerprint"] = ok.root_fingerprint(record["root_entry"])
+        document = {"record": record, "signature": stranger.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}
+        forged = os.path.join(self.d, "forged.record.json")
+        with open(forged, "w") as f:
+            json.dump(document, f)
+        self.assertEqual(ok.verify_record(document, theirs)["root_entry"]["key"], theirs, "its signature is valid: under its own root")
+        another = "the record is signed by another root than this sealed set's"
+        with self.assertRaisesRegex(ok.Refused, another):
+            ok.verify_record(document, ok.sealed_root(self.sealed))
+        for missing in (None, "", record["root_entry"]):
+            with self.assertRaisesRegex(ok.Refused, "verified under the pinned root"):
+                ok.verify_record(document, missing)
+        with self.assertRaisesRegex(ok.Refused, another):
+            ok.ownerauth_record_of(forged, self.sealed)
+        with self.assertRaisesRegex(ok.Refused, another):
+            ok.ownerauth_verify(forged, self.oa, 1000, sealed_path=self.sealed, gnupghome=self.homes[0], run=self.card(1000))
+        self.assertFalse(os.path.exists(os.path.join(self.oa, ok.VERIFY_LOG)), "nothing was logged for it")
+        with self.assertRaisesRegex(ok.Refused, another):
+            self.summary(forged)
+        self.assertFalse(os.path.exists(os.path.join(self.oa, "ownerauth-verified.record.json")), "the root signed nothing about it")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ok.main(["verify-record", "--record", forged, "--sealed", self.sealed]), 1)
+        self.assertIn(another, err.getvalue())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(ok.main(["verify-record", "--record", rec, "--sealed", self.sealed]), 0)
+        self.assertIn("under the pinned root %s (the sealed set's)" % ok.sealed_root(self.sealed), out.getvalue())
 
     def test_only_the_newest_card_record_counts(self):
         """d9 on rc#133: after an owner-card replacement (record 2 names other cards), record 1 still verifies but would
@@ -1144,7 +1187,7 @@ class OwnerAuth(Case):
             self.summary(rec)
         self.assertFalse(os.path.exists(os.path.join(self.oa, "ownerauth-verified.record.json")), "nothing signed")
         for n, home in enumerate(self.homes):
-            ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n))
+            ok.ownerauth_verify(rec, self.oa, 1000 + n, sealed_path=self.sealed, gnupghome=home, run=self.card(1000 + n))
         with open(log) as f:
             real = [json.loads(line) for line in f][-3:]
         self.assertTrue(all(re.fullmatch(r"[0-9a-f]{64}", e["mac"]) for e in real))
@@ -1199,7 +1242,7 @@ class OwnerAuth(Case):
         log = os.path.join(self.oa, ok.VERIFY_LOG)
         for n, home in enumerate(self.homes):
             if n != 1:
-                ok.ownerauth_verify(rec, self.oa, 1000 + n, gnupghome=home, run=self.card(1000 + n))
+                ok.ownerauth_verify(rec, self.oa, 1000 + n, sealed_path=self.sealed, gnupghome=home, run=self.card(1000 + n))
         claim = {"serial": "1001", "subkey": subkeys[1], "proven": ["a"], "failed": {}, "session": record["session"],
                  "record_sha256": record_sha, "at": "2026-10-04T00:00:00Z"}
         claim["mac"] = ok.entry_mac(key0, claim)                         # card 0's own key, claiming card 1
@@ -1207,7 +1250,7 @@ class OwnerAuth(Case):
             f.write(json.dumps(claim) + "\n")
         with self.assertRaisesRegex(ok.Refused, "not yet proven to open every envelope: the YubiKeys with subkeys %s" % subkeys[1][-16:]):
             self.summary(rec)
-        ok.ownerauth_verify(rec, self.oa, 1001, gnupghome=self.homes[1], run=self.card(1001))
+        ok.ownerauth_verify(rec, self.oa, 1001, sealed_path=self.sealed, gnupghome=self.homes[1], run=self.card(1001))
         self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
 
     def test_the_summary_takes_the_shares(self):
@@ -1216,9 +1259,9 @@ class OwnerAuth(Case):
         import contextlib
         import io
         err = io.StringIO()
-        with contextlib.redirect_stderr(err):
-            self.assertEqual(ok.main(["ownerauth-verify", "--record", rec, "--dir", self.oa, "--summary"]), 1)
-        self.assertIn("--summary takes --sealed and the k shares", err.getvalue())
+        with contextlib.redirect_stderr(err), self.assertRaises(SystemExit):
+            ok.main(["ownerauth-verify", "--record", rec, "--dir", self.oa, "--summary"])
+        self.assertIn("the following arguments are required: --sealed", err.getvalue())
 
     def test_a_record_that_fails_to_write_leaves_no_envelope(self):
         """coderabbitai on #120: the record is written inside the cleanup scope, and a partial record is removed."""
