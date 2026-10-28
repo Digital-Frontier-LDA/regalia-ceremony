@@ -21,10 +21,11 @@ hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 [ -r "$IMPORT" ] || { echo "no hsm-import-key-nojvm.sh at $IMPORT" >&2; exit 1; }
 
 . "$(cd "$HERE/../../.." && pwd)/tools/ceremony-python.sh" 2>/dev/null || true
-if ! ceremony_python_require cryptography 2>/dev/null; then
-  printf '  (skipping: no interpreter here can import `cryptography`, which the encoder needs)\n'
-  exit 0
-fi
+skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMULATOR_DEPS=1 (CI), so a test that never ran is never green (#166)
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1, and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip"; exit 1; fi
+  echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
+}
+ceremony_python_require cryptography 2>/dev/null || skip_dep "no interpreter here can import cryptography, which the encoder needs"
 
 T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
 # A real secp256r1 PKCS#12 and a real DKEK share, built the way the ceremony builds them.

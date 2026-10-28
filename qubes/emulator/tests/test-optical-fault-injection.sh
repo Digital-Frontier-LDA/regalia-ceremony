@@ -37,12 +37,11 @@ hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 
 sha256(){ sha256sum "$@" 2>/dev/null || shasum -a 256 "$@"; }
 
-if ! command -v xorriso >/dev/null 2>&1; then
-  hdr "optical-verify fault injection"
-  S "xorriso not installed — skipping (runs on the Linux emulator/CI host)"
-  printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
-  exit 0
-fi
+skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMULATOR_DEPS=1 (CI), so a test that never ran is never green (#166)
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1, and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip"; exit 1; fi
+  echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
+}
+command -v xorriso >/dev/null 2>&1 || skip_dep "xorriso not installed (it runs on the Linux emulator/CI host)"
 
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 export EMU_OPTICAL_DIR="$W/optical"

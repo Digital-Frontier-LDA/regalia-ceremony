@@ -15,11 +15,15 @@ P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
 
-command -v ssss-split >/dev/null 2>&1 || { echo "  (skipping: ssss not installed)"; exit 0; }
+skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMULATOR_DEPS=1 (CI), so a test that never ran is never green (#166)
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1, and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip"; exit 1; fi
+  echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
+}
+command -v ssss-split >/dev/null 2>&1 || { skip_dep "ssss not installed"; }
 # The vault image pins age 1.3.2 in /opt/vault-bin; AGE_BIN_DIR points at another copy for tests.
 for d in "${AGE_BIN_DIR:-}" /opt/vault-bin; do [ -n "$d" ] && [ -x "$d/age-keygen" ] && PATH="$d:$PATH"; done
 if ! grep -q '^AGE-SECRET-KEY-PQ-1' <<< "$(age-keygen -pq 2>/dev/null)"; then
-  echo "  (skipping: no age >= 1.3 here; set AGE_BIN_DIR to an age 1.3 directory)"; exit 0
+  skip_dep "no age >= 1.3 here; set AGE_BIN_DIR to an age 1.3 directory"
 fi
 
 FAKE="$(mktemp -d)"; export PATH="$FAKE:$PATH"

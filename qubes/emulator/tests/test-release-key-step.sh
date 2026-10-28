@@ -13,8 +13,12 @@ pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
-python3 -Es -c 'import shamir_mnemonic, cryptography, yubikit.openpgp' 2>/dev/null || { echo "  SKIP: python3 lacks shamir-mnemonic, cryptography or yubikey-manager"; exit 0; }
-command -v age >/dev/null && command -v age-keygen >/dev/null || { echo "  SKIP: age is not installed"; exit 0; }
+skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMULATOR_DEPS=1 (CI), so a test that never ran is never green (#166)
+  if [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then echo "  FAIL: $1, and REQUIRE_EMULATOR_DEPS=1: this test must run here, not skip"; exit 1; fi
+  echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
+}
+python3 -Es -c 'import shamir_mnemonic, cryptography, yubikit.openpgp' 2>/dev/null || { skip_dep "python3 lacks shamir-mnemonic, cryptography or yubikey-manager"; }
+command -v age >/dev/null && command -v age-keygen >/dev/null || { skip_dep "age is not installed"; }
 PY_TEST="$(command -v python3)"; export PY_TEST          # the interpreter checked above (ceremony.sh sets its own PATH)
 export CEREMONY_SIMULATE=1 CEREMONY_ALLOW_NONTMPFS=1 CEREMONY_ALLOW_SWAP=1 CEREMONY_THRESHOLD=2 CEREMONY_SHARES=3
 T="$(mktemp -d)"; export T; trap 'rm -rf -- "$T"' EXIT
