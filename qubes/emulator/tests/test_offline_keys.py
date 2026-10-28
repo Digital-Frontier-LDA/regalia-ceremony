@@ -1339,6 +1339,22 @@ class StateDir(Case):
                 with self.assertRaisesRegex(ok.Refused, re.escape(reason)):
                     ok.state_status(self.state, self.sealed)
 
+    def test_lines_and_their_offsets_are_cut_by_one_rule(self):
+        """Lines and session-line offsets both split at \\n only (CodeRabbit on #139). Before, the lines came from
+        str.splitlines(), which also splits at \\r and U+2028: a log joined by \\r read as two lines, and a JSON string
+        holding a raw U+2028 (valid JSON) was refused as torn."""
+        joined = (json.dumps({"kind": "anchor-first", "node_id": "a"}) + "\r" + json.dumps({"kind": "anchor-first", "node_id": "b"}) + "\n").encode()
+        with self.assertRaisesRegex(ok.Refused, "line 1 of the signing record is not JSON"):
+            ok._signing_record_lines(joined)
+        first = ('{"kind": "anchor-first", "note": "a\u2028b"}' + "\n").encode()
+        self.assertIn("\u2028".encode(), first)                  # raw in the bytes, not escaped
+        session = {"kind": ok.SESSION_KIND, "sequence": 1, "at": "2026-10-05T12:01:00Z", "prev": hashlib.sha256(first).hexdigest(),
+                   "key": self.root}
+        data = first + (json.dumps(session) + "\n").encode()
+        lines = ok._signing_record_lines(data)
+        self.assertEqual([line["kind"] for line in lines], ["anchor-first", ok.SESSION_KIND])
+        self.assertEqual(ok.session_lines_of(data, lines, self.root), [session])
+
     def test_a_log_changed_while_it_is_opened_is_not_appended_to(self):
         real = ok._append_line
         log = os.path.join(self.state, ok.SIGNING_RECORD)

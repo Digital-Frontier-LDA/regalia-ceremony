@@ -1542,14 +1542,29 @@ def _signing_record_bytes(state_dir, info):
         return f.read(MAX_SIGNING_RECORD + 1)
 
 
-def _signing_record_lines(data):
-    """The signing record's bytes as its lines (whatever JSON each holds), by one rule for the reader and the writer:
-    whole (at most MAX_SIGNING_RECORD), UTF-8, each line JSON."""
+def _signing_record_split(data):
+    """The signing record's bytes as (offset, text) per line, split at b"\\n" only, as its writers end each line. The
+    one rule for its lines and their offsets: str.splitlines() also splits at \\r, \\x85, U+2028 and others, so a session
+    line's offset taken another way would hash a different prefix than the line it judges (CodeRabbit on #139)."""
     require(len(data) <= MAX_SIGNING_RECORD, "%s is larger than %d bytes: refused whole, never read in part" % (SIGNING_RECORD, MAX_SIGNING_RECORD))
     try:
-        texts = data.decode("utf-8").splitlines()
+        data.decode("utf-8")
     except UnicodeDecodeError:
         raise Refused("%s is not UTF-8" % SIGNING_RECORD) from None
+    pieces = data.split(b"\n")
+    if pieces and pieces[-1] == b"":
+        pieces.pop()                                          # the newline that ends the last line
+    split, at = [], 0
+    for piece in pieces:
+        split.append((at, piece.decode("utf-8")))
+        at += len(piece) + 1
+    return split
+
+
+def _signing_record_lines(data):
+    """The signing record's bytes as its lines (whatever JSON each holds), by one rule for the reader and the writer:
+    whole (at most MAX_SIGNING_RECORD), UTF-8, each line JSON, lines as _signing_record_split cuts them."""
+    texts = [text for _, text in _signing_record_split(data)]
     lines = []
     for i, text in enumerate(texts):
         try:
@@ -2049,10 +2064,8 @@ SESSION_KIND = "session"
 def session_lines_of(data, lines, root):
     """The log's session lines (`data` its bytes, `lines` their JSON), each judged: exactly {kind, sequence, at, prev,
     key}, sequences 1..S without a gap, `prev` the SHA-256 of the bytes before that line, `key` the root."""
-    offsets, at = [], 0
-    for text in data.split(b"\n")[:len(lines)]:
-        offsets.append(at)
-        at += len(text) + 1
+    offsets = [offset for offset, _ in _signing_record_split(data)]
+    require(len(offsets) == len(lines), "the signing record's lines are not the ones judged")
     found = []
     for line, offset in zip(lines, offsets):
         if not (isinstance(line, dict) and line.get("kind") == SESSION_KIND):

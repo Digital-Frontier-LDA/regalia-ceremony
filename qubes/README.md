@@ -175,7 +175,7 @@ Nothing persists on the ceremony laptop, so the root's signing state (`state/`: 
 a rebuild's record) is burned on each archive disc and committed to `hsm-backups/state/`.
 
 - **First ceremony:** the card record's writer creates it, as session 0.
-- **A later session:** step t (or any step that signs) restores it from the NEWEST disc's `state/`, mounted
+- **A later session:** step t (today the only later-session step that signs) restores it from the NEWEST disc's `state/`, mounted
   read-only, and asks for the sheet's session count. An older disc, a disc newer than the sheet, a fork or (after
   genesis) a disc the chain's pin does not match are refused, and nothing is signed. The session then records
   itself as session S+1.
