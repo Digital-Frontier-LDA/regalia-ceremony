@@ -2794,7 +2794,7 @@ ownerauth_make() {
     # the card's stubs, for the decryption key; a card gpg cannot see is said as such, not as a failed decryption
     gpg --homedir "$home" --batch --card-status >/dev/null 2>&1 \
       || { err "gpg cannot see a card: is owner card $n inserted, and is pcscd running? Nothing was checked."; return 1; }
-    python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" \
+    python3 -Es "$HERE/offline-keys.py" ownerauth-verify --record "$dir/ownerauth.record.json" --dir "$dir" --sealed "$sealed" \
         --yubikey-serial "$OA_SERIAL" --gnupghome "$home" \
       || { err "owner card $n ($OA_SERIAL) did NOT open every envelope (reason above): run this step again with it."; return 1; }
   done

@@ -10,9 +10,10 @@ to the break-glass key.
                                      --exec /usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …
                                           (the k shares on standard input, one per line)
     python3 -Es offline-keys.py tree-digest --root DIR
-    python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-keys FILE --breakglass-recipient FILE --out DIR
+    python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-keys FILE --breakglass-recipient FILE
+                                   --card-record FILE --state-dir DIR --out DIR
                                           (the k shares on standard input: the root signs the record)
-    python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
+    python3 -Es offline-keys.py ownerauth-verify --record FILE --sealed FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary --sealed FILE   (the k shares on standard input:
                                           the entries are authenticated and the root signs ownerauth-verified.record.json)
     python3 -Es offline-keys.py card-record --sealed FILE --cards FILE --release-import FILE --release-import FILE
@@ -21,7 +22,7 @@ to the break-glass key.
                                      --state-dir EMPTY --out DIR (--chain C --tool-root DIR --tool-digest HEX | --before-genesis)
                                           (a lost state dir; after genesis the chain bounds it, before it only the sheet)
                                           (the k shares on standard input; the confirmation from the terminal)
-    python3 -Es offline-keys.py verify-record --record FILE
+    python3 -Es offline-keys.py verify-record --record FILE --sealed FILE
 
 
 CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):
@@ -1124,13 +1125,8 @@ def ownerauth_record_of(record_path, sealed_path):
     """An owner-authorization record signed by the root of THIS sealed set (its public header), not merely by the root
     the record names itself (ed and 95 on regalia-kms#447), its `at` in the records' form. Returns the record."""
     with open(record_path, "rb") as f:
-        record = verify_record(json.loads(f.read(1 << 20)))
+        record = verify_record(json.loads(f.read(1 << 20)), sealed_root(sealed_path))
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
-    with open(sealed_path, "rb") as f:
-        sealed = json.loads(f.read(1 << 20))
-    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
-    require(record["root_entry"] == {"alg": "ed25519", "key": root_entry_of(sealed)},
-            "the record is signed by another root than this sealed set's: its origin is not this ceremony's")
     require(isinstance(record.get("at"), str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record["at"]) is not None,
             "the record's at is not %Y-%m-%dT%H:%M:%SZ")
     return record
@@ -1169,15 +1165,16 @@ def card_serial(gnupghome=None, run=subprocess.run):
     return found[0].decode()
 
 
-def ownerauth_verify(record_path, directory, serial, gnupghome=None, now=None, run=subprocess.run):
+def ownerauth_verify(record_path, directory, serial, *, sealed_path, gnupghome=None, now=None, run=subprocess.run):
     """With ONE owner card inserted (gpg reaching it through scdaemon, in the operator's GnuPG home or
     `gnupghome`): every node's .yk.gpg is decrypted to a pipe, never shown, and must be 64 hex and a newline whose check
     value is the record's, from a file whose SHA-256 is the record's, decrypted by a subkey the record names (gpg's
     DECRYPTION_KEY status line) (regalia-kms-d9 on #120: the envelopes are proven to open, not assumed to). The result,
-    good or not, is appended to DIR/ownerauth-verify.jsonl. Returns the nodes proven."""
+    good or not, is appended to DIR/ownerauth-verify.jsonl. The record must be signed by the root of the sealed set at
+    `sealed_path` (its public header). Returns the nodes proven."""
     import hmac
     with open(record_path, "rb") as f:
-        record = verify_record(json.loads(f.read(1 << 20)))
+        record = verify_record(json.loads(f.read(1 << 20)), sealed_root(sealed_path))
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
     require(re.fullmatch(r"[0-9]{1,12}", str(serial)) is not None, "--yubikey-serial is the inserted YubiKey's serial")
     card = card_serial(gnupghome, run)
@@ -1253,12 +1250,13 @@ def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
     import hmac
     with open(record_path, "rb") as f:
         record_bytes = f.read(1 << 20)
-    record = verify_record(json.loads(record_bytes))
-    require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
-    record_sha = hashlib.sha256(record_bytes).hexdigest()
     with open(sealed_path, "rb") as f:
         sealed = json.loads(f.read(1 << 20))
-    require(sealed.get("schema") == SCHEMA_SEALED and sealed["master_id"] == record["master_id"], "not the sealed file of this record's set")
+    require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    record = verify_record(json.loads(record_bytes), root_entry_of(sealed))      # before the root signs anything about it
+    require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
+    record_sha = hashlib.sha256(record_bytes).hexdigest()
+    require(sealed["master_id"] == record["master_id"], "not the sealed file of this record's set")
     master, indices, identifier = combine(read_shares(stream), sealed)
     try:
         bundle = unseal(master, sealed)
@@ -1312,18 +1310,22 @@ def write_record(out, stem, root, record):
     return path
 
 
-def verify_record(document):
-    """A record's signature under the root entry it names. Returns the record, or Refused."""
+def verify_record(document, root):
+    """A record's signature under `root`, the PINNED root (64 hex: the sealed set's public header, sealed_root), never
+    under the root entry the record names itself: any key can sign a record naming itself, so that proves nothing about
+    who signed it (7e, 2026-10-28; ed and 95 on regalia-kms#447). Returns the record, or Refused."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import ed25519
+    require(isinstance(root, str) and re.fullmatch(r"[0-9a-f]{64}", root) is not None,
+            "a record is verified under the pinned root (64 hex), never under the root it names itself")
     require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not an offline-key record")
     record = document["record"]
     require(record.get("schema") in (SCHEMA_RECORD, SCHEMA_OWNERAUTH), "schema must be %s or %s" % (SCHEMA_RECORD, SCHEMA_OWNERAUTH))
-    entry = record["root_entry"]
-    require(entry.get("alg") == "ed25519" and re.fullmatch(r"[0-9a-f]{64}", entry.get("key", "")) is not None, "the root entry is not an Ed25519 key")
+    require(record.get("root_entry") == {"alg": "ed25519", "key": root},
+            "the record is signed by another root than this sealed set's: its origin is not this ceremony's")
     try:
-        ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(entry["key"])).verify(bytes.fromhex(document["signature"]),
-                                                                                     RECORD_DOMAIN + canonical(record))
+        ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(root)).verify(bytes.fromhex(document["signature"]),
+                                                                               RECORD_DOMAIN + canonical(record))
     except (InvalidSignature, ValueError):
         raise Refused("the record's signature does not verify under its root entry") from None
     return record
@@ -2178,6 +2180,14 @@ def state_open(state_dir, sealed_path, typed, others=(), pin=None, now=None):
     return sessions + 1, newest
 
 
+def sealed_root(sealed_path):
+    """The pinned root (64 hex) of the sealed offline-key file at `sealed_path`: its public header's, needing no share."""
+    with open(sealed_path, "rb") as f:
+        sealed = json.loads(f.read(1 << 20))
+    require(isinstance(sealed, dict) and sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
+    return root_entry_of(sealed)
+
+
 def root_entry_of(sealed):
     """The root's raw public key, 64 hex, from the sealed file's public header."""
     from cryptography.hazmat.primitives import serialization
@@ -2271,9 +2281,11 @@ def main(argv=None):
     ov.add_argument("--gnupghome", help="the GnuPG home that reaches the inserted card (default: the operator's)")
     ov.add_argument("--yubikey-serial", help="the inserted YubiKey's serial, as ykman reports it")
     ov.add_argument("--summary", action="store_true", help="refuse unless every YubiKey has opened every envelope")
-    ov.add_argument("--sealed", help="with --summary (required there): the sealed file; the k shares on stdin, and the root signs the result")
-    v = sub.add_parser("verify-record")
+    ov.add_argument("--sealed", required=True, help="the sealed file: its public header pins the root the record must be "
+                    "signed by; with --summary also the k shares on stdin, and the root signs the result")
+    v = sub.add_parser("verify-record", help="a record, verified under the root of the sealed set given (never the root it names)")
     v.add_argument("--record", required=True)
+    v.add_argument("--sealed", required=True, help="the sealed file whose public header pins the root")
     args = ap.parse_args(argv)
     try:
         if args.command == "generate":
@@ -2339,13 +2351,12 @@ def main(argv=None):
             print("RECORD %s (root %s)" % (os.path.join(args.out, "ownerauth.record.json"), record["root_fingerprint"]))
         elif args.command == "ownerauth-verify":
             if args.summary:
-                require(args.sealed, "--summary takes --sealed and the k shares: the log's entries are authenticated with them")
                 for subkey, serial in sorted(ownerauth_summary(args.record, args.dir, args.sealed, sys.stdin).items()):
                     print("PROVEN YubiKey %s (subkey …%s) opens every node's envelope" % (serial, subkey[-16:]))
                 print("OWNERAUTH ENVELOPES PROVEN for both owner cards")
             else:
                 require(args.yubikey_serial, "--yubikey-serial names the inserted YubiKey")
-                proven = ownerauth_verify(args.record, args.dir, args.yubikey_serial, args.gnupghome)
+                proven = ownerauth_verify(args.record, args.dir, args.yubikey_serial, sealed_path=args.sealed, gnupghome=args.gnupghome)
                 print("YubiKey %s opens %s" % (args.yubikey_serial, ", ".join(proven)))
         elif args.command == "card-record" and args.rebuild_from_disc:
             require(not args.first_card_record, "--rebuild-from-disc and --first-card-record are different first steps: one, not both")
@@ -2379,9 +2390,9 @@ def main(argv=None):
             print(tree_digest(args.root))
         else:
             with open(args.record, "rb") as f:
-                record = verify_record(json.loads(f.read(1 << 20)))
-            print("VERIFIED %s at %s, root %s, fingerprint %s" % (record["event"], record["at"], record["root_entry"]["key"],
-                                                                  root_fingerprint(record["root_entry"])))
+                record = verify_record(json.loads(f.read(1 << 20)), sealed_root(args.sealed))
+            print("VERIFIED %s at %s, under the pinned root %s (the sealed set's), fingerprint %s" % (
+                record["event"], record["at"], record["root_entry"]["key"], root_fingerprint(record["root_entry"])))
     except (Refused, OSError, ValueError, KeyError) as error:
         print("offline-keys: REFUSED: %s" % error, file=sys.stderr)
         return 1
