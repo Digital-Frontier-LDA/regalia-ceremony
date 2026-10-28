@@ -20,6 +20,11 @@ import types
 import unittest
 import unittest.mock
 
+_deps_spec = importlib.util.spec_from_file_location(        # a missing dependency fails under REQUIRE_EMULATOR_DEPS=1 (#173)
+    "emulator_deps", os.path.join(os.path.dirname(os.path.abspath(__file__)), "emulator_deps.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+_deps_spec.loader.exec_module(deps)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -84,7 +89,7 @@ class Case(unittest.TestCase):
 
 
 class Fingerprint(unittest.TestCase):
-    @unittest.skipUnless(HAVE_GPG, "gpg is not installed here (the emulator job has it)")
+    @deps.needs(HAVE_GPG, "gpg is not installed here (the emulator job has it)")
     def test_the_v4_fingerprint_is_gpgs(self):
         """The fingerprint the cards are given is gpg's own for the same key and creation time."""
         for i in range(3):
@@ -238,7 +243,7 @@ class FakeCard:
     fail_delete = False
 
 
-@unittest.skipUnless(KEY_REF is not None, "yubikey-manager is not installed here (the emulator job has it)")
+@deps.needs(KEY_REF is not None, "yubikey-manager is not installed here (the emulator job has it)")
 class ReleaseImport(Case):
     SERIAL = "40000003"
 

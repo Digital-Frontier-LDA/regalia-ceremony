@@ -23,6 +23,12 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import importlib.util
+
+_deps_spec = importlib.util.spec_from_file_location(        # a missing dependency fails under REQUIRE_EMULATOR_DEPS=1 (#173)
+    "emulator_deps", os.path.join(os.path.dirname(os.path.abspath(__file__)), "emulator_deps.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+_deps_spec.loader.exec_module(deps)
 
 _SCRIPTS = os.environ.get("CEREMONY_SCRIPTS") or os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
 SCRIPT = os.path.join(_SCRIPTS, "seed-to-pkcs12.py")
@@ -47,7 +53,7 @@ def run(*args, env=None):
                           env={**base, **(env or {})})
 
 
-@unittest.skipUnless(have_openssl(), "openssl not installed")
+@deps.needs(have_openssl(), "openssl not installed")
 class SeedToPkcs12Test(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
