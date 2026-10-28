@@ -178,7 +178,9 @@ a rebuild's record) is burned on each archive disc and committed to `hsm-backups
 - **A later session:** step t (today the only later-session step that signs) restores it from the NEWEST disc's `state/`, mounted
   read-only, and asks for the sheet's session count. An older disc, a disc newer than the sheet, a fork or (after
   genesis) a disc the chain's pin does not match are refused, and nothing is signed. The session then records
-  itself as session S+1.
+  itself as session S+1. The session lines are not signed by the root (each names its public key and the SHA-256
+  of the log before it, which anyone can compute), so the count tells a wrong or older disc from the right one, not
+  a forged disc from a real one: keep the discs in custody.
 - **Writing the sheet:** do **not** write S+1 when the session opens. Burn the archive disc, run its checksum
   readback, mount the disc's `state/` read-only, and run **step w**. Only when it prints `WRITE ON THE SHEET AND ON
   THE DISC LABEL: SESSIONS n` do the sheet and the disc label take n. So the sheet always names a disc that exists
