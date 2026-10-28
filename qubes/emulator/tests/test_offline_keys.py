@@ -993,14 +993,21 @@ class OwnerAuth(Case):
         self.assertTrue(os.path.exists(os.path.join(self.oa, "ownerauth-a.bg.sops")))
 
     def test_sops_runs_with_path_alone_from_the_root_directory(self):
-        seen = []
+        # a stand-in sops that records what it was given and answers with a valid copy, so it is this assertion, not a
+        # failing real sops, that decides whether the caller's environment and directory reach it (TEAMLEAD on #133)
+        seen, mine = [], {"recipient": self.recovery_recipient(), "enc": "x"}
         def run(argv, input=None, capture_output=True, **kw):
-            if argv[0] == "sops":
-                seen.append(kw)
-            return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
-        with unittest.mock.patch.dict(os.environ, {"SOPS_AGE_RECIPIENTS": "age1" + "q" * 58, "SOPS_PGP_FP": "F" * 40}):
+            if argv[0] != "sops":
+                return subprocess.run(argv, input=input, capture_output=capture_output, **kw)
+            seen.append(kw)
+            return subprocess.CompletedProcess(argv, 0, json.dumps({"data": "ENC[AES256_GCM,data:x]", "sops": {"age": [mine]}}).encode(), b"")
+        hostile = {"SOPS_AGE_RECIPIENTS": "age1" + "q" * 58, "SOPS_PGP_FP": "F" * 40, "GNUPGHOME": "/elsewhere",
+                   "AWS_PROFILE": "other", "SOPS_KMS_ARN": "arn:x"}
+        with unittest.mock.patch.dict(os.environ, hostile):
             self.run_oa(nodes=("a",), run=run)
-        self.assertEqual(seen, [{"env": {"PATH": os.environ["PATH"]}, "cwd": "/"}])
+        self.assertEqual(len(seen), 1, "sops ran once, for the one node")
+        self.assertEqual(seen[0].get("cwd"), "/", "sops runs from /, where no .sops.yaml is found")
+        self.assertEqual(seen[0].get("env"), {"PATH": os.environ["PATH"]}, "sops is given PATH and nothing else")
 
     def test_a_sops_environment_or_configuration_adds_no_recipient(self):
         # the real sops, given every way the caller could add a recipient: the copy is still the recovery identity's alone
