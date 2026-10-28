@@ -18,6 +18,11 @@ import sys
 import tempfile
 import unittest
 
+_deps_spec = importlib.util.spec_from_file_location(        # a missing dependency fails under REQUIRE_EMULATOR_DEPS=1 (#173)
+    "emulator_deps", os.path.join(os.path.dirname(os.path.abspath(__file__)), "emulator_deps.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+_deps_spec.loader.exec_module(deps)
+
 _SCRIPTS = os.environ.get("CEREMONY_SCRIPTS") or os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
 SCRIPT = os.path.join(_SCRIPTS, "slip39-mint.py")
 
@@ -30,7 +35,7 @@ def have_lib():
         return False
 
 
-@unittest.skipUnless(have_lib(), "shamir-mnemonic not installed")
+@deps.needs(have_lib(), "shamir-mnemonic not installed")
 class TestMint(unittest.TestCase):
     def _run(self, *args, stdin=None, env=None):
         run_env = None

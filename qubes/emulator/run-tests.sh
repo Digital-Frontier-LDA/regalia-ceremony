@@ -99,6 +99,7 @@ python3 "$HERE/tests/test_schsm_crypto.py" || suite_failed "test_schsm_crypto.py
 python3 "$HERE/tests/test_derive_address.py" || suite_failed "test_derive_address.py"
 python3 "$HERE/tests/test_yubikey_attestation_verify.py" || suite_failed "test_yubikey_attestation_verify.py"
 python3 "$HERE/tests/test_slip39_mint.py" || suite_failed "test_slip39_mint.py"
+python3 "$HERE/tests/test_emulator_deps.py" || suite_failed "test_emulator_deps.py"
 python3 "$HERE/tests/test_offline_keys.py" || suite_failed "test_offline_keys.py"
 python3 "$HERE/tests/test_card_record.py" || suite_failed "test_card_record.py"
 python3 "$HERE/tests/test_card_record_writer.py" || suite_failed "test_card_record_writer.py"

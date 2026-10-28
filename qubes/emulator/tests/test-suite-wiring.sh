@@ -167,7 +167,7 @@ printf '\n\033[1m### a missing dependency fails CI instead of skipping (#166, #1
 GX="$HERE/../../../tools/emulator-green-exits.py"; GXA="$HERE/../green-exits.allow"
 gx(){ python3 -I "$GX" "$@" >"$_gx_out" 2>&1; }
 _gx_dir="$(mktemp -d)"; _gx_out="$_gx_dir/out"
-gx --allow "$GXA" "$HERE"/*.sh; _rc=$?
+gx --allow "$GXA" "$HERE"/*.sh "$HERE"/test_*.py "$HERE"/emulator_deps.py; _rc=$?
 case "$_rc" in
   0) printf '  \033[32mPASS\033[0m no emulator test can exit green before it ran, outside skip_dep and the allowlist\n'; pass=$((pass + 1));;
   1) printf '  \033[31mFAIL\033[0m an exit that can be green before the test ran (use skip_dep, or allowlist it with a reason):\n%s\n' "$(cat "$_gx_out")"
@@ -273,6 +273,59 @@ _gx_allow=""
 _gx_case 2 'a file that ends inside a string: refused, not passed' <<'X'
 echo "never closed
 exit 0
+X
+# The Python suites (#173): a unittest skip outside emulator_deps is green in CI for a test that never ran.
+_gx_py(){ # _gx_py WANT_RC LABEL: the Python fixture on stdin, scanned alone
+  local want="$1" label="$2" f="$_gx_dir/test_fixture.py" rc
+  cat > "$f"; gx "$f"; rc=$?
+  if [ "$rc" = "$want" ]; then printf '  \033[32mPASS\033[0m %s\n' "$label"; pass=$((pass + 1))
+  else printf '  \033[31mFAIL\033[0m %s: rc %s, want %s: %s\n' "$label" "$rc" "$want" "$(cat "$_gx_out")"; fail=$((fail + 1)); fi
+}
+_gx_py 1 'Python, reported: self.skipTest' <<'X'
+import unittest
+class T(unittest.TestCase):
+    def test_x(self):
+        self.skipTest("age not installed")
+X
+_gx_py 1 'Python, reported: @unittest.skipUnless' <<'X'
+import shutil, unittest
+@unittest.skipUnless(shutil.which("age"), "age not installed")
+class T(unittest.TestCase):
+    pass
+X
+_gx_py 1 'Python, reported: @unittest.skipIf and @unittest.skip' <<'X'
+import unittest
+class T(unittest.TestCase):
+    @unittest.skipIf(True, "no gpg")
+    def test_a(self): pass
+    @unittest.skip("later")
+    def test_b(self): pass
+X
+_gx_py 1 'Python, reported: raise unittest.SkipTest' <<'X'
+import unittest
+raise unittest.SkipTest("no sops")
+X
+_gx_py 1 'Python, reported: sys.exit(0) and os._exit(0) at code level' <<'X'
+import os, sys
+if not os.path.exists("/opt/vault-bin/age"):
+    sys.exit(0)
+os._exit(0)
+X
+_gx_py 0 'Python, not reported: deps.needs / deps.skip_dep, a skip in a string or a comment, sys.exit(1)' <<'X'
+import sys
+STUB = """#!/usr/bin/env python3
+import sys
+sys.exit(0)
+"""
+# self.skipTest("only a comment")
+@deps.needs(False, "age not installed")
+def test_a(self):
+    deps.skip_dep(self, "gpg not installed")
+    sys.exit(1)
+X
+_gx_py 2 'Python, a file that does not tokenize: refused, not passed' <<'X'
+def broken(:
+    """never closed
 X
 rm -rf -- "$_gx_dir"
 _gated=$(grep -lE '\{ skip_dep "|^[[:space:]]*skip_dep "|\|\| skip_dep "' "$HERE"/*.sh 2>/dev/null | grep -v "/$(basename "$0")$" | wc -l | tr -d ' ')

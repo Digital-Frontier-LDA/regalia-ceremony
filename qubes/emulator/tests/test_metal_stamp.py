@@ -18,6 +18,11 @@ import sys
 import tempfile
 import unittest
 
+_deps_spec = importlib.util.spec_from_file_location(        # a missing dependency fails under REQUIRE_EMULATOR_DEPS=1 (#173)
+    "emulator_deps", os.path.join(os.path.dirname(os.path.abspath(__file__)), "emulator_deps.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+_deps_spec.loader.exec_module(deps)
+
 _SCRIPTS = os.environ.get("CEREMONY_SCRIPTS") or os.path.join(os.path.dirname(__file__), "..", "..", "scripts")
 SCRIPT = os.path.join(_SCRIPTS, "metal-stamp-worksheet.py")
 
@@ -35,7 +40,7 @@ def a_real_share():
     return sm.generate_mnemonics(1, [(2, 3)], b"0123456789abcdef", b"")[0][0]
 
 
-@unittest.skipUnless(have_lib(), "shamir-mnemonic not installed")
+@deps.needs(have_lib(), "shamir-mnemonic not installed")
 class TestMetalStampVerify(unittest.TestCase):
     def _verify(self, prefixes_text):
         with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as tf:

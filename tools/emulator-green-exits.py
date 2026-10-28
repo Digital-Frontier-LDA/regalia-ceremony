@@ -20,15 +20,20 @@ exits. `return` is not reported: no emulator test is sourced, and at the top lev
 an error for `return` and runs on (measured, #167). Not seen: a command NAME quoted (`"exit" 0`) or built from a
 variable (`$cmd 0`), and a non-final `exec` (its status is the command's, so it is not green by itself).
 
+A Python suite (FILE ending .py) is read by tokenize instead and reports a unittest skip outside emulator_deps.py
+(skipTest, skipUnless, skipIf, skip, SkipTest) and sys.exit(0), sys.exit() or os._exit(0) (#173).
+
 Exit 0: nothing reported. 1: findings (printed FILE:LINE: TEXT). 2: a file or the allowlist could not be read.
 
 ALLOWLIST: one entry per line, `FILE<TAB>TEXT<TAB>REASON`, FILE the test's basename, TEXT the line exactly as it
 stands with its indentation stripped; blank lines and lines starting with # are ignored. REASON must not be empty.
 """
 import collections
+import io
 import os
 import re
 import sys
+import tokenize
 
 EXIT = re.compile(r"(?<![\w$.-])exit(?![\w-])[ \t]*([^\s;&|)}]*)")
 # trap and eval run a string as code IN THIS SHELL, so an exit in it ends the test (bash -c or sh -c does not: its
@@ -158,6 +163,33 @@ def green_exits(text):
     return found
 
 
+PY_SKIPS = {"skipTest", "skipUnless", "skipIf", "skip", "SkipTest"}
+PY_HELPER = "emulator_deps.py"
+
+
+def python_green_exits(text):
+    """(lineno, source line stripped) of a Python suite's ways to end green without running: a unittest skip outside
+    emulator_deps (whose needs/skip_dep fail under REQUIRE_EMULATOR_DEPS=1, #173), and sys.exit(0), sys.exit() or
+    os._exit(0). Read by tokenize, so strings (a stub script written out) and comments are not code. Raises ValueError
+    for a file that does not tokenize."""
+    source = text.split("\n")
+    try:
+        tokens = [t for t in tokenize.generate_tokens(io.StringIO(text).readline)
+                  if t.type not in (tokenize.COMMENT, tokenize.NL, tokenize.NEWLINE, tokenize.INDENT, tokenize.DEDENT)]
+    except (tokenize.TokenError, IndentationError, SyntaxError) as error:
+        raise ValueError("it does not tokenize (%s)" % error) from None
+    found = []
+    for i, t in enumerate(tokens):
+        after_dot = i > 0 and tokens[i - 1].string == "."
+        hit = t.type == tokenize.NAME and after_dot and t.string in PY_SKIPS
+        if t.type == tokenize.NAME and after_dot and t.string in ("exit", "_exit") and i > 1 and tokens[i - 2].string in ("sys", "os"):
+            args = [x.string for x in tokens[i + 1:i + 4]]
+            hit = args[:2] == ["(", ")"] or args == ["(", "0", ")"]
+        if hit and (t.start[0], source[t.start[0] - 1].strip()) not in found:
+            found.append((t.start[0], source[t.start[0] - 1].strip()))
+    return found
+
+
 def read_allowlist(path):
     allowed = collections.Counter()
     with open(path, encoding="utf-8") as f:
@@ -186,7 +218,10 @@ def main(argv):
             with open(path, encoding="utf-8", errors="strict") as f:
                 text = f.read()
             try:
-                exits = green_exits(text)
+                if path.endswith(".py"):
+                    exits = [] if os.path.basename(path) == PY_HELPER else python_green_exits(text)
+                else:
+                    exits = green_exits(text)
             except ValueError as error:
                 raise ValueError("%s: %s" % (path, error)) from None
             for no, line in exits:

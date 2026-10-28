@@ -37,6 +37,11 @@ import sys
 import tempfile
 import unittest
 
+_deps_spec = importlib.util.spec_from_file_location(        # a missing dependency fails under REQUIRE_EMULATOR_DEPS=1 (#173)
+    "emulator_deps", os.path.join(os.path.dirname(os.path.abspath(__file__)), "emulator_deps.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+_deps_spec.loader.exec_module(deps)
+
 HERE = pathlib.Path(__file__).resolve().parent
 SCRIPTS = HERE.parent.parent / "scripts"
 SCRIPT = SCRIPTS / "ceremony-manifest.py"
@@ -414,7 +419,7 @@ class VendoredContract(unittest.TestCase):
     def test_vendored_files_match_upstream_when_available(self):
         upstream = os.environ.get("REGALIA_KMS_DIR")
         if not upstream:
-            self.skipTest("REGALIA_KMS_DIR not set; upstream comparison needs a regalia-kms checkout")
+            deps.skip_dep(self, "REGALIA_KMS_DIR not set; upstream comparison needs a regalia-kms checkout")
         pins = json.loads((VENDOR / "PINS.json").read_text(encoding="utf-8"))
         for rel, want in pins["files"].items():
             got = "sha256:" + hashlib.sha256((pathlib.Path(upstream) / rel).read_bytes()).hexdigest()
