@@ -10,9 +10,10 @@ to the break-glass key.
                                      --exec /usr/bin/python3 -Es -m deploy.baremetal.(manifest|uki) sign …
                                           (the k shares on standard input, one per line)
     python3 -Es offline-keys.py tree-digest --root DIR
-    python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-keys FILE --breakglass-recipient FILE --out DIR
+    python3 -Es offline-keys.py ownerauth --sealed FILE --nodes a,b,c --yk-keys FILE --breakglass-recipient FILE
+                                   --card-record FILE --state-dir DIR --out DIR
                                           (the k shares on standard input: the root signs the record)
-    python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
+    python3 -Es offline-keys.py ownerauth-verify --record FILE --sealed FILE --dir DIR --yubikey-serial N [--gnupghome DIR]   (each YubiKey)
     python3 -Es offline-keys.py ownerauth-verify --record FILE --dir DIR --summary --sealed FILE   (the k shares on standard input:
                                           the entries are authenticated and the root signs ownerauth-verified.record.json)
     python3 -Es offline-keys.py card-record --sealed FILE --cards FILE --release-import FILE --release-import FILE
@@ -21,7 +22,7 @@ to the break-glass key.
                                      --state-dir EMPTY --out DIR (--chain C --tool-root DIR --tool-digest HEX | --before-genesis)
                                           (a lost state dir; after genesis the chain bounds it, before it only the sheet)
                                           (the k shares on standard input; the confirmation from the terminal)
-    python3 -Es offline-keys.py verify-record --record FILE
+    python3 -Es offline-keys.py verify-record --record FILE --sealed FILE
 
 
 CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):

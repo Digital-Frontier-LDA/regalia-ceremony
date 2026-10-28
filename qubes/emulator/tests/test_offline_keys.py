@@ -12,6 +12,7 @@ import importlib.util
 import itertools
 import json
 import os
+import argparse
 import re
 import shutil
 import subprocess
@@ -1431,6 +1432,30 @@ class StateDir(Case):
         with contextlib.redirect_stdout(out):
             self.assertEqual(ok.main(["state-status", "--state-dir", self.state, "--sealed", self.sealed]), 0)
         self.assertIn("SESSIONS 1", out.getvalue())
+
+class UsageNamesEveryRequiredOption(unittest.TestCase):
+    """#176: --sealed became required and the module's usage text kept the old commands, so a copied example failed.
+    Every usage line names each required option of its subcommand, read from the parser main() builds."""
+
+    def test_each_usage_line_names_its_subcommands_required_options(self):
+        class Built(Exception):
+            pass
+
+        def capture(parser, *a, **k):
+            raise Built(parser)
+
+        with unittest.mock.patch.object(argparse.ArgumentParser, "parse_args", autospec=True, side_effect=capture):
+            with self.assertRaises(Built) as got:
+                ok.main([])
+        sub = next(a for a in got.exception.args[0]._actions if isinstance(a, argparse._SubParsersAction))
+        # an example runs from its command to the next one or a blank line: its continuation lines are part of it
+        lines = re.findall(r"python3 -Es offline-keys\.py (\S+)(.*?)(?=python3 -Es offline-keys\.py |\n\s*\n)", ok.__doc__, re.S)
+        self.assertIn("verify-record", {name for name, _ in lines})
+        for name, rest in lines:
+            required = [a.option_strings[0] for a in sub.choices[name]._actions if a.required and a.option_strings]
+            for option in required:
+                self.assertRegex(rest, r"(^|\s|\[|\()%s(\s|$)" % re.escape(option), "%s's usage omits %s" % (name, option))
+
 
 if __name__ == "__main__":
     unittest.main()
