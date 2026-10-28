@@ -6,3 +6,4 @@ test-hsm-bench-lock.sh	hsm_bench_lock_acquire failfast || exit $?	runs only when
 test-hsm-import-drill.sh	*) echo "  (skipping: HSM_DRILL_HARDWARE=1 but no SmartCard-HSM-protocol card on the bus)"; exit 0 ;;	owner-run hardware mode (HSM_DRILL_HARDWARE=1), never set in CI; its stub mode runs there
 test-hsm-import-drill.sh	exit 0	the end of the owner-run hardware mode (HSM_DRILL_HARDWARE=1), after its asserts passed; CI runs the stub mode
 test-locale-ranges.sh	echo "test-locale-ranges: SKIP: $LOC is not installed (locale-gen $LOC); REQUIRE_UTF8_LOCALE=1 makes this a failure"; exit 0	gated by its own REQUIRE_UTF8_LOCALE=1, which CI sets on the same run-tests.sh line
+test_derive_address.py	@unittest.skipUnless(	#173: cosmpy, an independent BIP32/secp256k1 cross-check, is not installed in CI; whether to pin it there is still open

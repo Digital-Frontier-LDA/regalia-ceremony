@@ -20,6 +20,11 @@ import tempfile
 import unittest
 import unittest.mock
 
+_deps_spec = importlib.util.spec_from_file_location(        # a missing dependency fails under REQUIRE_EMULATOR_DEPS=1 (#173)
+    "emulator_deps", os.path.join(os.path.dirname(os.path.abspath(__file__)), "emulator_deps.py"))
+deps = importlib.util.module_from_spec(_deps_spec)
+_deps_spec.loader.exec_module(deps)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(HERE, "..", "..", "scripts", "offline-keys.py")
 _loader = importlib.machinery.SourceFileLoader("offline_keys", SCRIPT)
@@ -157,7 +162,7 @@ class Generate(Case):
         with self.assertRaisesRegex(ok.Refused, "does not open"):
             ok.unseal(master, altered)
 
-    @unittest.skipUnless(HAVE_AGE, "age is not installed here (the emulator job installs it)")
+    @deps.needs(HAVE_AGE, "age is not installed here (the emulator job installs it)")
     def test_the_break_glass_key_opens_the_backup_and_nothing_is_in_the_clear(self):
         from shamir_mnemonic import combine_mnemonics
         self.generate(k=2, n=3)
@@ -673,7 +678,7 @@ def _load_cards_vectors():
     return module
 
 
-@unittest.skipUnless(HAVE_AGE and HAVE_GPG and HAVE_SOPS, "age, gpg or sops is not installed here (the emulator job has all three)")
+@deps.needs(HAVE_AGE and HAVE_GPG and HAVE_SOPS, "age, gpg or sops is not installed here (the emulator job has all three)")
 class OwnerAuth(Case):
     """regalia-kms#242's owner authorizations, in the format #242's reader takes (agreed with regalia-kms-95): per node,
     64 hex and a newline, with gpg to the two OWNER cards' OpenPGP decryption subkeys (D30.7, the card record's
