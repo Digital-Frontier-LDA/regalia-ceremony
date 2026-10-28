@@ -8,7 +8,8 @@ of such a skip (`{ echo SKIP; exit 0; }`, `echo "(skipping: ...)"; exit 0`) miss
 >&2, printf, single quotes, `|| exit 0`, an if-block, a bare `exit`. So this does not look for skips at all. It reads
 each file as bash does, with quoted strings, heredoc bodies and comments set aside (a stub's `printf 'exit 0'` is not
 the test's exit), and reports EVERY `exit` whose status is not a non-zero literal: `exit 0`, a bare `exit`,
-`exit $rc`, `exit $?`. Three are not reported:
+`exit $rc`, `exit $?`, `exit 256` (0 to the shell), and a trap or eval whose string takes one (`trap 'exit 0' EXIT`
+turns every later `exit 1` green; `bash -c 'exit 0'` is not reported: it ends only the child shell). Three are not reported:
   - the file's last line of code: how a test ends, by definition not before it ran;
   - the body of skip_dep(), the one way to skip, which REQUIRE_EMULATOR_DEPS=1 turns into a failure;
   - a line the allowlist names, by file and exact text, with its reason.
@@ -16,7 +17,8 @@ Each entry excuses ONE line: a second line of the same text needs its own entry.
 reported too: a stale entry would excuse the next line written to match it.
 A file that ends inside a string or a heredoc is refused (exit 2): a file read wrongly must not pass as one with no
 exits. `return` is not reported: no emulator test is sourced, and at the top level of an executed script bash prints
-an error for `return` and runs on (measured, #167).
+an error for `return` and runs on (measured, #167). Not seen: a command NAME quoted (`"exit" 0`) or built from a
+variable (`$cmd 0`), and a non-final `exec` (its status is the command's, so it is not green by itself).
 
 Exit 0: nothing reported. 1: findings (printed FILE:LINE: TEXT). 2: a file or the allowlist could not be read.
 
@@ -29,6 +31,20 @@ import re
 import sys
 
 EXIT = re.compile(r"(?<![\w$.-])exit(?![\w-])[ \t]*([^\s;&|)}]*)")
+# trap and eval run a string as code IN THIS SHELL, so an exit in it ends the test (bash -c or sh -c does not: its
+# exit ends only the child, measured). The string is set aside with the other strings, so it is read from the source.
+RUNS_STRING = re.compile(r"(?<![\w$.-])(?:trap|eval)(?![\w-])")
+STRING_ARG = re.compile(r"(?<![\w$.-])(?:trap|eval)[ \t]+(?:--[ \t]+)?(?:'([^']*)'|\"((?:[^\"\\]|\\.)*)\"|(\S+))")
+
+
+def failing(status):
+    """A status that cannot be green: a literal 1..255 (exit 256 is 0 to the shell, 7e)."""
+    return re.fullmatch(r"[1-9][0-9]{0,2}", status) is not None and int(status) <= 255
+
+
+def green_in(code):
+    """Does this code take an exit that can be green?"""
+    return any(not failing(m.group(1)) for m in EXIT.finditer(code))
 SKIP_DEP = re.compile(r"^[ \t]*skip_dep\(\)[ \t]*\{")
 
 
@@ -75,7 +91,8 @@ def code_lines(text):
                 i += 1
                 continue
             if c == "\\":
-                code.append("  ")
+                nxt = line[i + 1:i + 2]
+                code.append(" " + (nxt if (nxt.isalnum() or nxt == "_") else " "))   # \exit runs exit (7e)
                 i += 2
                 continue
             if line.startswith("$'", i):
@@ -87,7 +104,7 @@ def code_lines(text):
                 stack.append(["sq", 0])
             elif c == '"':
                 stack.append(["dq", 0])
-            elif c == "#" and (i == 0 or line[i - 1] in " \t;&|(){"):
+            elif c == "#" and (i == 0 or line[i - 1] in " \t;&|()"):     # a word start: never ${#x} (7e)
                 break
             elif line.startswith("$(", i) and len(stack) > 1:
                 stack.append(["code", 1])
@@ -132,10 +149,12 @@ def green_exits(text):
             continue
         if no == last:
             continue
-        for m in EXIT.finditer(code):
-            if not re.fullmatch(r"[1-9][0-9]*", m.group(1)):
-                found.append((no, source[no - 1].strip()))
-                break
+        runs_green = False
+        if RUNS_STRING.search(code):
+            for m in STRING_ARG.finditer(source[no - 1]):
+                runs_green = runs_green or green_in(next(g for g in m.groups() if g is not None))
+        if green_in(code) or runs_green:            # trap 'exit 0' EXIT turns every later exit 1 green (7e)
+            found.append((no, source[no - 1].strip()))
     return found
 
 

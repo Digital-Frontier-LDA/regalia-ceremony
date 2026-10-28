@@ -216,6 +216,26 @@ X
 _gx_case 1 'reported: exit with a variable status' <<'X'
 [ -x /opt/vault-bin/age ] || exit "$ok"
 X
+_gx_case 1 'reported: an exit after ${#...} (not a comment)' <<'X'
+[ ${#t[@]} -eq 0 ] && exit 0
+X
+_gx_case 1 'reported: an escaped \exit' <<'X'
+command -v ykman >/dev/null 2>&1 || \exit 0
+X
+_gx_case 1 'reported: exit 256 (0 to the shell)' <<'X'
+command -v ykman >/dev/null 2>&1 || exit 256
+X
+_gx_case 1 "reported: trap 'exit 0' EXIT (every later exit 1 green)" <<'X'
+trap 'exit 0' EXIT
+X
+_gx_case 1 'reported: eval of an exit 0' <<'X'
+command -v ykman >/dev/null 2>&1 || eval "exit 0"
+X
+_gx_case 0 'not reported: ${#...} with no exit, exit 255, a trap that only cleans up, bash -c exit 0 (a child)' <<'X'
+n=${#t[@]}; [ "$n" -gt 0 ] || exit 255
+trap 'rm -rf -- "$T"' EXIT
+bash -c 'exit 0' && echo "the child's exit ends only the child"
+X
 _gx_case 0 'not reported: a non-zero exit' <<'X'
 [ -r "$IMPORT" ] || { echo "no $IMPORT" >&2; exit 1; }
 X
