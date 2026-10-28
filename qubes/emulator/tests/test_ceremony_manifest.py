@@ -525,6 +525,25 @@ class Plan(Case):
         self.write_manifest(m)
         self.refuses(self.run_tool("plan", self.manifest), "yubikey-openpgp has no provisioning route")
 
+    def test_refuses_ed25519_on_a_piv_slot(self):
+        """The vendored validator admits ed25519 on yubikey-piv since regalia-kms f14bf8ff; the ceremony has no route."""
+        m = fleet_manifest()
+        piv = copy.deepcopy(m["objects"][0])
+        piv.update(id="piv-ed25519", algorithm="ed25519", bindings=[b for b in piv["bindings"] if b["backend"] == "yubikey-piv"])
+        for b in piv["bindings"]:
+            b["object_id"] = "9e"
+        m["objects"].append(piv)
+        self.write_manifest(m)
+        self.refuses(self.run_tool("plan", self.manifest), "yubikey-piv cannot generate ed25519")
+
+    def test_refuses_a_token_label(self):
+        """The vendored validator admits token_label since regalia-kms e477e9ab; the ceremony finds a card by serial."""
+        m = fleet_manifest()
+        nk = next(b for b in m["objects"][0]["bindings"] if b["backend"] == "nitrokey-pkcs11")
+        nk["token_label"] = "regalia-a"
+        self.write_manifest(m)
+        self.refuses(self.run_tool("plan", self.manifest), "token_label 'regalia-a' has no provisioning route in this ceremony")
+
     def test_refuses_a_slot_that_is_not_a_piv_key_slot(self):
         m = fleet_manifest()
         m["objects"][0]["bindings"][1]["object_id"] = "f9"

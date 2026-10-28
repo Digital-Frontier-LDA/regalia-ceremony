@@ -65,6 +65,19 @@ jobs:
           # any script in that checkout can read it. Neither job pushes.
           persist-credentials: false
 
+      # test-kms-e2e-orchestrator drives regalia-kms's e2e/run.sh; with no checkout it skipped green here (#169).
+      # The repository is public, so no token is needed. Pinned to a regalia-kms main commit at least 7 days old.
+      # It is checked out under the workspace (checkout allows no other path), then moved out of this tree:
+      # test-doc-map and test-locale-ranges walk every *.md and *.sh under it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Digital-Frontier-LDA/regalia-kms
+          ref: 2c5dc9a31bf482be0a0a8632bd280da0a9a33dea
+          path: ci-regalia-kms
+          persist-credentials: false
+      - name: Move the regalia-kms checkout out of this tree
+        run: mv ci-regalia-kms "$RUNNER_TEMP/regalia-kms" && test -f "$RUNNER_TEMP/regalia-kms/e2e/run.sh"
+
       - name: Install the ceremony toolchain + emulator stack (apt)
         run: |
           sudo apt-get update
@@ -138,7 +151,7 @@ jobs:
         run: |
           sudo apt-get install -y -qq --no-install-recommends locales >/dev/null
           sudo locale-gen en_US.UTF-8 >/dev/null
-          sudo env REQUIRE_TPM_SIM=1 REQUIRE_UTF8_LOCALE=1 REQUIRE_EMULATOR_DEPS=1 qubes/emulator/run-tests.sh
+          sudo env REQUIRE_TPM_SIM=1 REQUIRE_UTF8_LOCALE=1 REQUIRE_EMULATOR_DEPS=1 REGALIA_KMS_DIR="$RUNNER_TEMP/regalia-kms" qubes/emulator/run-tests.sh
 
       - name: Show emulator logs on failure
         if: failure()

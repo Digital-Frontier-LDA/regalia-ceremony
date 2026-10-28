@@ -449,6 +449,7 @@ def generate(threshold, shares, out, recipient_file, now=None, run=subprocess.ru
               "files": files, "operation_proof": proofs, "tool": TOOL, "at": at}
     signature = keys["root"].sign(RECORD_DOMAIN + canonical(record))      # the root, in this session (D28, 24's re-plan)
     write(FILES[3], canonical({"record": record, "signature": signature.hex()}) + b"\n", 0o644)
+    _fsync_dir(out)                    # the four names (one of them renamed in) survive a power cut too (7e on #126)
     del keys
     return record
 
@@ -1439,6 +1440,8 @@ def card_record_check(record):
     fprs = [r[f] for r in record["ownerauth_recipients"] for f in ("primary", "subkey")]
     require(len(set(fprs)) == len(fprs), "an ownerauth fingerprint is used twice: each owner card has its own primary and its own "
             "decryption subkey, or one card would count twice in the proof (d9 on #121)")
+    require(rel["fingerprint"] not in fprs, "the release key's fingerprint is an ownerauth fingerprint: the release cards hold no "
+            "owner card's key (D30.7; 7e on #121)")
     certs = [v for k in owners for v in k["attestation_sha256"].values()]
     require(len(set(certs)) == len(certs), "an attestation certificate is named twice: each key has its own")
     every_serial = sorted(serials | set(rel["cards"]))
@@ -1465,7 +1468,7 @@ MAX_SIGNING_RECORD = 1 << 22             # 4 MiB: a larger signing record is ref
 def _marker_for(state_dir, pinned_root):
     """The state directory's marker, checked (O_NOFOLLOW, a 0600 regular file of the directory's owner, exactly
     {schema, root}, root the pinned one). Returns the directory's stat."""
-    info = os.stat(state_dir)
+    info = _state_dir_info(state_dir)
     require(_signing_state_root(state_dir, info) == pinned_root,
             "%s names another root than the pinned one: another laptop's or another root's directory" % SIGNING_STATE)
     return info
@@ -1633,16 +1636,19 @@ def append_card_record_line(state_dir, record, now=None):
 def _append_line(state_dir, line, follows):
     """One line appended to the signing record and synced, after `follows` has judged the lines already there (read
     whole, by the reader's rule): the directory this user's 0700 one, the log its owner's 0600 regular file."""
+    import fcntl
     import stat as _stat
-    info = os.stat(state_dir)
-    require(os.path.isdir(state_dir) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
-            "the state directory %s must be a directory of this user's, mode 0700" % state_dir)
+    info = _state_dir_info(state_dir)
     # every line under the root the directory's marker names (CodeRabbit on #121)
     root = _signing_state_root(state_dir, info)
     require(line["key"] == root, "this %s is signed for another root than %s names: nothing was appended"
             % ({"card-record": "card record", "session": "session line"}.get(line["kind"], "baseline"), SIGNING_STATE))
     fd = os.open(os.path.join(state_dir, SIGNING_RECORD), os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
     try:
+        try:                                    # two writers judging the same lines would both append (7e on #128)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Refused("another process is writing %s: nothing was appended; run one signing step at a time" % SIGNING_RECORD) from None
         log_info = os.fstat(fd)
         require(_stat.S_ISREG(log_info.st_mode) and log_info.st_uid == info.st_uid and _stat.S_IMODE(log_info.st_mode) == 0o600,
                 "%s must be a regular file of the directory's owner, mode 0600: nothing was appended" % SIGNING_RECORD)
@@ -1790,6 +1796,8 @@ def release_from_imports(paths):
         require(isinstance(fact, dict) and fact.get("schema") == SCHEMA_RELEASE_IMPORT, "%s is not a release card's import facts" % path)
         require(fact.get("imported") is True and fact.get("attested") is False and fact.get("touch") == "fixed",
                 "%s does not record a key imported with a fixed touch policy" % path)
+        require(all(isinstance(fact.get(k), str) for k in ("serial", "key", "fingerprint")),
+                "%s does not name the card's serial, key and fingerprint (7e on #128)" % path)
         facts.append(fact)
     require(facts[0].get("serial") != facts[1].get("serial"), "both --release-import files are for card %s: give each release card's"
             % facts[0].get("serial"))
@@ -1799,10 +1807,21 @@ def release_from_imports(paths):
             "cards": [facts[0]["serial"], facts[1]["serial"]], "imported": True, "attested": False}
 
 
+def _state_dir_info(path):
+    """The state directory's own stat, as the reader and the writer both require it: not a link (lstat), a directory
+    of this user's, mode 0700 (7e on #121: the reader checked only the files in it)."""
+    import stat as _stat
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        raise Refused("the state directory %s cannot be read (%s)" % (path, error)) from None
+    require(_stat.S_ISDIR(info.st_mode) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            "the state directory %s must be a directory of this user's, mode 0700, not a link" % path)
+    return info
+
+
 def _state_dir(path):
-    info = os.stat(path)
-    require(os.path.isdir(path) and info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
-            "the state directory %s must be a directory of this user's, mode 0700" % path)
+    _state_dir_info(path)
     return path
 
 

@@ -10,6 +10,7 @@ import importlib.machinery
 import importlib.util
 import io
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -102,6 +103,42 @@ class Writer(unittest.TestCase):
     def current(self, path):
         with open(path) as f:
             return ok.card_record_current(json.load(f), self.root, ok.read_signing_state(self.state, self.root))
+
+    def test_an_import_fact_without_its_serial_key_or_fingerprint_is_refused(self):
+        """A missing field was a KeyError (7e on #128): refused like every other malformed fact."""
+        for field in ("serial", "key", "fingerprint"):
+            with self.subTest(field=field):
+                with open(self.imports[0]) as f:
+                    fact = json.load(f)
+                del fact[field]
+                broken = os.path.join(self.d, "broken-%s.json" % field)
+                with open(broken, "w") as f:
+                    json.dump(fact, f)
+                with self.assertRaisesRegex(ok.Refused, re.escape("does not name the card's serial, key and fingerprint")):
+                    ok.release_from_imports([broken, self.imports[1]])
+
+    def test_a_second_writer_is_refused_while_one_holds_the_log(self):
+        """Two writers judging the same lines would both append (7e on #128): the second is refused, nothing written."""
+        import fcntl
+        self.sign(first=True)
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+        before = open(log, "rb").read()
+        with open(log, "rb") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX)
+            with self.assertRaisesRegex(ok.Refused, "another process is writing signing-record.jsonl: nothing was appended"):
+                self.sign()
+        self.assertEqual(open(log, "rb").read(), before)
+        self.assertEqual(self.sign()[0]["sequence"], 2, "released, the next run appends")
+
+    def test_generate_makes_its_directory_entries_durable(self):
+        """A file's own fsync does not make its name survive a power cut (7e on #126)."""
+        out = os.path.join(self.d, "gen2")
+        os.mkdir(out, 0o700)
+        recipient = os.path.join(self.d, "bg.recipient")
+        run = subprocess.run if HAVE_AGE else fake_age
+        with unittest.mock.patch.object(ok, "_fsync_dir", wraps=ok._fsync_dir) as synced:
+            ok.generate(2, 3, out, recipient, run=run)
+        self.assertIn(unittest.mock.call(out), synced.call_args_list)
 
     def test_the_first_run_makes_the_marker_and_record_one(self):
         record, path = self.sign(first=True)
