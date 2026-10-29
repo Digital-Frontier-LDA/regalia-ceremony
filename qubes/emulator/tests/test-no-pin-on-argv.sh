@@ -12,6 +12,7 @@
 #   3  every non-test script: no token-tool option takes a secret from a shell variable on argv
 #   4  the emulator's sc-hsm-tool refuses a PIN on its command line, so a regression fails the suites
 #   5  no script takes a PIN on its OWN command line; nitrokey-qualify.sh refuses --pin and --so-pin
+#   6  ykman (no env: form) gets a YubiKey PIN or PUK on its standard input, never as an option value
 #
 # NO HARDWARE CAN BE REACHED. Every tool that talks to a card is a stub first on PATH, and PC/SC
 # itself is pointed at a socket that does not exist, so a tool this list forgot cannot find a reader
@@ -173,6 +174,28 @@ grep -q -- "^ARGV sc-hsm-tool .*--initialize --so-pin env:REGALIA_SO_PIN --pin e
   && ! grep -q '^INHERITED ' "$T/calls" \
   && P "with HSM_USER_PIN and HSM_SO_PIN set it initialises, both delivered in the environment, neither in any argv, and no child inherits the source variables" \
   || F "provisioning from the environment: $(grep -c '^ARGV' "$T/calls") calls, leaks: $(leaks "$T/calls" "$PIN_A" "$SO_PIN"); $(tail -2 <<< "$out")"
+
+hdr "6  ykman: a YubiKey PIN or PUK goes on its standard input, never on its command line (#98)"
+# ykman has no env:NAME form. With -P/-p/-n left out it asks, and takes one line per question from
+# a stdin that is not a terminal. So no non-test script may give ykman one of those options at all:
+# a line that RUNS ykman (not one that prints a command for the operator) with a value option.
+yk="$(cd "$ROOT" && find . \( -name '*.sh' -o -name '*.py' \) -not -path './.git/*' -not -path './qubes/emulator/*' -print0 | sort -z \
+      | xargs -0 grep -nE -- 'ykman[^|#]* piv access change-(pin|puk)[^|#]* (-P|-p|-n|--pin|--puk|--new-pin|--new-puk)( |=)' /dev/null || true)"
+[ -z "$yk" ] && P "no script gives ykman a PIN or PUK as an option value" || F "ykman with a PIN on its command line: $yk"
+grep -qE -- 'ykman[^|#]* piv access change-(pin|puk)[^|#]* (-P|-p|-n|--pin|--puk|--new-pin|--new-puk)( |=)' \
+  <<< '      ykman --device "$serial" piv access change-pin -P 123456 -n "$pin" >/dev/null' \
+  && P "the instrument: the old form of the call is matched" || F "the ykman sweep does not match the form it exists to catch"
+grep -q 'printf .%s\\n%s\\n. "\$cur" "\$new" | ykman --device "\$serial" piv access "\$verb"' "$ROOT/qubes/scripts/ceremony.sh" \
+  && P "ceremony.sh sends both values to ykman on a pipe from a shell builtin" || F "ceremony.sh's yk_piv_change no longer pipes the values to ykman"
+YK="$ROOT/qubes/emulator/bin/ykman"
+out="$(printf '%s\n%s\n' 123456 "$PIN_A" | env EMU_YKMAN_STATE="$T/yk" bash "$YK" --device 1 piv access change-pin 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ! grep -qF "$PIN_A" <<< "$out" && P "the emulator's ykman takes the two values on stdin, and prints neither" || F "stdin form (exit $rc): $out"
+for opt in -P -n; do
+  out="$(printf '%s\n%s\n' 123456 "$PIN_A" | env EMU_YKMAN_STATE="$T/yk" bash "$YK" --device 1 piv access change-pin "$opt" "$PIN_A" 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q "on the command line" <<< "$out" && ! grep -qF "$PIN_A" <<< "$out" && P "…and refuses $opt, without repeating the value" || F "ykman model $opt (exit $rc): $out"
+done
+out="$(env EMU_YKMAN_STATE="$T/yk" bash "$YK" --device 1 piv access change-puk < /dev/null 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q "the real tool would prompt" <<< "$out" && P "…and fails when nothing is on stdin (the real tool would prompt)" || F "empty stdin (exit $rc): $out"
 
 echo; echo "test-no-pin-on-argv: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
