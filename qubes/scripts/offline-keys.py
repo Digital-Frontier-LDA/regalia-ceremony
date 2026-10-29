@@ -72,7 +72,7 @@ k-of-n with SLIP-39 (shamir-mnemonic, pinned), and the five keys are sealed unde
   * offline-keys.record.json      what was made (the publics, k and n, the SLIP-39 identifier, the master id, both
                                   files' SHA-256, and that each key signed a fresh challenge its published public key
                                   verifies), signed by the new root key in this same session, over
-                                  RECORD_DOMAIN + its canonical bytes. RECORD_DOMAIN can never begin a membership
+                                  RECORD_DOMAIN + its canonical bytes. No record domain can begin a membership
                                   signing input (regalia-kms: b"regalia-membership/v1\\0"), nor the reverse.
 
 THE KEYS. root: Ed25519 (regalia-kms root-key.json takes {"alg": "ed25519", "key": "<hex>"}); pcr-initrd, pcr-system,
@@ -134,7 +134,12 @@ import time
 SCHEMA_BUNDLE = "regalia.offline-keys/v1"
 SCHEMA_SEALED = "regalia.offline-keys-sealed/v1"
 SCHEMA_RECORD = "regalia.offline-keys-record/v1"
-RECORD_DOMAIN = b"regalia-ceremony-record/v1\0"
+# regalia-avz: each root-signed record kind signs under its own domain, its schema NUL-terminated, so a signature of one
+# kind can never verify as another, whatever a verifier's field checks. The domain shared until then is retired and
+# accepted nowhere (RETIRED_RECORD_DOMAIN: tests only). A verifier takes the domain of the kind ITS CALLER names, never
+# of the schema the record carries: an input that chose its domain would choose its verifier.
+RETIRED_RECORD_DOMAIN = b"regalia-ceremony-record/v1\0"
+RECORD_DOMAIN = b"regalia.offline-keys-record/v1\0"     # SCHEMA_RECORD's: generate, forms-verified, session, ownerauth-verified
 MEMBERSHIP_DOMAIN = b"regalia-membership/v1\0"       # regalia-kms deploy/baremetal/membership.py DOMAIN
 KEYS = (("root", "ed25519"), ("pcr-initrd", "rsa-2048"), ("pcr-system", "rsa-2048"), ("secure-boot", "rsa-2048"),
         ("anchor-policy", "ecdsa-p256"),     # K_A, the anchor policy authority (regalia-kms#361, ADR-0002 D28 via regalia#567)
@@ -510,7 +515,7 @@ def verify_forms(sealed_path, shares_path, stream, partial=False, now=None):
               "not_checked": [i + 1 for i in missing], "slip39_identifier": sealed["slip39_identifier"], "master_id": sealed["master_id"],
               "root_entry": {"alg": "ed25519", "key": root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()},
               "tool": TOOL, "at": at}
-    write_record(out, "forms-verified-%s" % at.replace(":", ""), root, record)
+    write_record(out, "forms-verified-%s" % at.replace(":", ""), root, record, RECORD_DOMAIN)
     del root
     size = os.path.getsize(shares_path)
     with open(shares_path, "r+b") as f:
@@ -814,7 +819,7 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
     except Refused as refusal:
         session["tool_digest_after"] = "refused: %s" % refusal
     # recorded first, whatever happened (regalia-kms-d9 on #115): every refusal below names a record that exists
-    record_path = write_record(out, "session-%s-%s" % (at.replace(":", ""), tool), root, session)
+    record_path = write_record(out, "session-%s-%s" % (at.replace(":", ""), tool), root, session, RECORD_DOMAIN)
     del root
     require(exit_status == 0, "the command exited %d: the session is recorded (%s), nothing it wrote is vouched for" % (exit_status, record_path))
     require(not session["key_material_found"], "KEY MATERIAL LEFT IN %s by the command: %s. Recorded (%s); destroy those files and this RAM "
@@ -829,6 +834,7 @@ def sign(sealed_path, who, out, stream, command, tool_root, tool_digest, outputs
 # ---- the TPM owner authorizations (regalia-kms#242) -------------------------------------------------------
 
 SCHEMA_OWNERAUTH = "regalia.ownerauth-record/v1"
+OWNERAUTH_DOMAIN = b"regalia.ownerauth-record/v1\0"
 OWNERAUTH_LABEL = b"regalia-ownerauth/v1\0"
 
 
@@ -1037,7 +1043,7 @@ def ownerauth(sealed_path, nodes, yk_keys, card_record_path, state_dir, out, str
                       "root_fingerprint": root_fingerprint(entry), "session": session, "verify_keys": verify_sha,
                       "share_indices": indices, "slip39_identifier": identifier, "master_id": sealed["master_id"], "tool": TOOL,
                       "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
-            write_record(out, "ownerauth", root, record)     # inside the cleanup: a failed record leaves no envelope behind
+            write_record(out, "ownerauth", root, record, OWNERAUTH_DOMAIN)     # inside the cleanup: a failed record leaves no envelope behind
         except BaseException:
             for path in written:              # nothing half-made is left: every file this run wrote, by its exact name
                 if os.path.lexists(path):
@@ -1075,6 +1081,9 @@ def entry_mac(key, entry):
 
 
 SCHEMA_CARD_RECORD = "regalia.card-ceremony-record/v1"
+CARD_RECORD_DOMAIN = b"regalia.card-ceremony-record/v1\0"
+# the kinds verify_record and write_record take, each with its own domain (verify_card_record takes CARD_RECORD_DOMAIN)
+RECORD_DOMAINS = {SCHEMA_RECORD: RECORD_DOMAIN, SCHEMA_OWNERAUTH: OWNERAUTH_DOMAIN}
 
 
 def owner_card_subkeys(card_record_path, sealed, state_dir, pin=None):
@@ -1125,7 +1134,7 @@ def ownerauth_record_of(record_path, sealed_path):
     """An owner-authorization record signed by the root of THIS sealed set (its public header), not merely by the root
     the record names itself (ed and 95 on regalia-kms#447), its `at` in the records' form. Returns the record."""
     with open(record_path, "rb") as f:
-        record = verify_record(json.loads(f.read(1 << 20)), sealed_root(sealed_path))
+        record = verify_record(json.loads(f.read(1 << 20)), sealed_root(sealed_path), SCHEMA_OWNERAUTH)
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
     require(isinstance(record.get("at"), str) and re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", record["at"]) is not None,
             "the record's at is not %Y-%m-%dT%H:%M:%SZ")
@@ -1174,7 +1183,7 @@ def ownerauth_verify(record_path, directory, serial, *, sealed_path, gnupghome=N
     `sealed_path` (its public header). Returns the nodes proven."""
     import hmac
     with open(record_path, "rb") as f:
-        record = verify_record(json.loads(f.read(1 << 20)), sealed_root(sealed_path))
+        record = verify_record(json.loads(f.read(1 << 20)), sealed_root(sealed_path), SCHEMA_OWNERAUTH)
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
     require(re.fullmatch(r"[0-9]{1,12}", str(serial)) is not None, "--yubikey-serial is the inserted YubiKey's serial")
     card = card_serial(gnupghome, run)
@@ -1253,7 +1262,7 @@ def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
     with open(sealed_path, "rb") as f:
         sealed = json.loads(f.read(1 << 20))
     require(sealed.get("schema") == SCHEMA_SEALED, "not a sealed offline-key file")
-    record = verify_record(json.loads(record_bytes), root_entry_of(sealed))      # before the root signs anything about it
+    record = verify_record(json.loads(record_bytes), root_entry_of(sealed), SCHEMA_OWNERAUTH)      # before the root signs anything about it
     require(record.get("schema") == SCHEMA_OWNERAUTH, "not an owner-authorization record")
     record_sha = hashlib.sha256(record_bytes).hexdigest()
     require(sealed["master_id"] == record["master_id"], "not the sealed file of this record's set")
@@ -1289,15 +1298,17 @@ def ownerauth_summary(record_path, directory, sealed_path, stream, now=None):
                 "verify_log_sha256": log_sha, "share_indices": indices, "slip39_identifier": identifier, "master_id": record["master_id"],
                 "root_entry": record["root_entry"], "tool": TOOL,
                 "at": (now or datetime.datetime.now(datetime.timezone.utc)).strftime("%Y-%m-%dT%H:%M:%SZ")}
-    write_record(directory, "ownerauth-verified", root, verified)
+    write_record(directory, "ownerauth-verified", root, verified, RECORD_DOMAIN)
     del root
     return seen
 
 
-def write_record(out, stem, root, record):
-    """OUT/<stem>.record.json: `record` signed by the root over RECORD_DOMAIN, never overwriting. Returns the path."""
+def write_record(out, stem, root, record, domain):
+    """OUT/<stem>.record.json: `record` signed by the root over `domain`, its kind's (RECORD_DOMAIN or OWNERAUTH_DOMAIN:
+    the caller built the record and names its kind), never overwriting. Returns the path."""
+    require(RECORD_DOMAINS.get(record.get("schema")) == domain, "a record is signed under its own kind's domain")
     path = os.path.join(out, stem + ".record.json")
-    signature = root.sign(RECORD_DOMAIN + canonical(record))
+    signature = root.sign(domain + canonical(record))
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644)
     try:
         with os.fdopen(fd, "wb") as f:
@@ -1310,25 +1321,39 @@ def write_record(out, stem, root, record):
     return path
 
 
-def verify_record(document, root):
-    """A record's signature under `root`, the PINNED root (64 hex: the sealed set's public header, sealed_root), never
-    under the root entry the record names itself: any key can sign a record naming itself, so that proves nothing about
-    who signed it (7e, 2026-10-28; ed and 95 on regalia-kms#447). Returns the record, or Refused."""
+def verify_record(document, root, kind):
+    """A record of `kind` (SCHEMA_RECORD or SCHEMA_OWNERAUTH, the CALLER's: regalia-avz) and its signature under that
+    kind's domain and `root`, the PINNED root (64 hex: the sealed set's public header, sealed_root), never under the root
+    entry the record names itself: any key can sign a record naming itself, so that proves nothing about who signed it
+    (7e, 2026-10-28; ed and 95 on regalia-kms#447). Returns the record, or Refused."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import ed25519
     require(isinstance(root, str) and re.fullmatch(r"[0-9a-f]{64}", root) is not None,
             "a record is verified under the pinned root (64 hex), never under the root it names itself")
     require(isinstance(document, dict) and set(document) == {"record", "signature"}, "not an offline-key record")
+    require(kind in RECORD_DOMAINS, "a record is verified as one kind, %s or %s" % (SCHEMA_RECORD, SCHEMA_OWNERAUTH))
     record = document["record"]
-    require(record.get("schema") in (SCHEMA_RECORD, SCHEMA_OWNERAUTH), "schema must be %s or %s" % (SCHEMA_RECORD, SCHEMA_OWNERAUTH))
+    require(isinstance(record, dict) and record.get("schema") == kind, "schema must be %s" % kind)
     require(record.get("root_entry") == {"alg": "ed25519", "key": root},
             "the record is signed by another root than this sealed set's: its origin is not this ceremony's")
     try:
         ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(root)).verify(bytes.fromhex(document["signature"]),
-                                                                               RECORD_DOMAIN + canonical(record))
+                                                                               RECORD_DOMAINS[kind] + canonical(record))
     except (InvalidSignature, ValueError):
         raise Refused("the record's signature does not verify under its root entry") from None
     return record
+
+
+def verify_any_record(document, root):
+    """The verify CLI's: the record as whichever kind verifies it, each tried as verify_record does, under its own domain.
+    A record is refused unless one kind takes it whole. Returns the record, or the first kind's Refused."""
+    refusals = []
+    for kind in sorted(RECORD_DOMAINS):
+        try:
+            return verify_record(document, root, kind)
+        except Refused as refused:
+            refusals.append("as %s: %s" % (kind, refused))
+    raise Refused("; ".join(refusals))
 
 
 SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
@@ -1457,7 +1482,7 @@ def card_record_check(record):
 
 def card_record_digest(record):
     """A card record's digest, as `supersedes` and the signing record name it: SHA-256 of its canonical bytes (the form
-    the signature covers, without RECORD_DOMAIN), 64 hex (regalia-kms#403)."""
+    the signature covers, without its domain), 64 hex (regalia-kms#403)."""
     return hashlib.sha256(canonical(record)).hexdigest()
 
 
@@ -1757,7 +1782,7 @@ def card_record_current(document, pinned_root, signing_lines, pin=None, note=Non
 
 def verify_card_record(document, pinned_root):
     """A card-ceremony record as regalia-kms reads it: exactly {record, signature}, signed under the PINNED root (the
-    record's root_entry must name it), over RECORD_DOMAIN and the canonical record, and every rule of
+    record's root_entry must name it), over CARD_RECORD_DOMAIN and the canonical record, and every rule of
     card_record_check. Returns the record, or Refused."""
     from cryptography.exceptions import InvalidSignature
     from cryptography.hazmat.primitives.asymmetric import ed25519
@@ -1770,7 +1795,7 @@ def verify_card_record(document, pinned_root):
     _ascii(record, "the record")
     try:
         ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(pinned_root)).verify(bytes.fromhex(document["signature"]),
-                                                                                      RECORD_DOMAIN + canonical(record))
+                                                                                      CARD_RECORD_DOMAIN + canonical(record))
     except (InvalidSignature, ValueError):
         raise Refused("the signature does not verify under the pinned root") from None
     return card_record_check(record)
@@ -1916,7 +1941,7 @@ def card_record(sealed_path, cards_path, release_paths, state_dir, out, stream, 
     from cryptography.hazmat.primitives import serialization
     require(root.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex() == root_hex,
             "the sealed root is not the one its header publishes")
-    signed = canonical({"record": record, "signature": root.sign(RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
+    signed = canonical({"record": record, "signature": root.sign(CARD_RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
     del root
     pending_path = os.path.join(out, "card-record-%d.pending.json" % sequence)
     final_path = os.path.join(out, "card-record-%d.record.json" % sequence)
@@ -2014,7 +2039,7 @@ def card_record_rebuild(sealed_path, disc_record, state_dir, out, stream, pin=No
                "disc_record_sha256": disc_sha, "rebuilt": {"sequence": n + 1, "digest": new_digest}, "root_entry": entry,
                "root_fingerprint": root_fingerprint(entry), "session": record["session"], "tool": TOOL, "at": stamp}
     signed_rebuild = canonical({"record": rebuild, "signature": root.sign(REBUILD_DOMAIN + canonical(rebuild)).hex()}) + b"\n"
-    signed = canonical({"record": record, "signature": root.sign(RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
+    signed = canonical({"record": record, "signature": root.sign(CARD_RECORD_DOMAIN + canonical(record)).hex()}) + b"\n"
     del root
 
     def write_new(path, data, mode):
@@ -2390,7 +2415,7 @@ def main(argv=None):
             print(tree_digest(args.root))
         else:
             with open(args.record, "rb") as f:
-                record = verify_record(json.loads(f.read(1 << 20)), sealed_root(args.sealed))
+                record = verify_any_record(json.loads(f.read(1 << 20)), sealed_root(args.sealed))
             print("VERIFIED %s at %s, under the pinned root %s (the sealed set's), fingerprint %s" % (
                 record["event"], record["at"], record["root_entry"]["key"], root_fingerprint(record["root_entry"])))
     except (Refused, OSError, ValueError, KeyError) as error:

@@ -125,7 +125,7 @@ class Generate(Case):
         self.assertEqual(sealed["publics"], record["publics"])
         # the record verifies under the root entry it names
         with open(self.path("offline-keys.record.json"), "rb") as f:
-            self.assertEqual(ok.verify_record(json.loads(f.read()), ok.sealed_root(self.path("offline-keys.sealed.json")))["master_id"], sealed["master_id"])
+            self.assertEqual(ok.verify_record(json.loads(f.read()), ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD)["master_id"], sealed["master_id"])
 
     def test_k_shares_open_the_sealed_file_and_k_minus_1_do_not(self):
         from shamir_mnemonic import combine_mnemonics
@@ -195,18 +195,72 @@ class Generate(Case):
         changed = json.loads(json.dumps(document))
         changed["record"]["threshold"] = 1
         with self.assertRaisesRegex(ok.Refused, "does not verify"):
-            ok.verify_record(changed, ok.sealed_root(self.path("offline-keys.sealed.json")))
+            ok.verify_record(changed, ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD)
         other = json.loads(json.dumps(document))
         other["record"]["root_entry"]["key"] = "00" * 32
         with self.assertRaises(ok.Refused):
-            ok.verify_record(other, ok.sealed_root(self.path("offline-keys.sealed.json")))
+            ok.verify_record(other, ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD)
 
-    def test_the_record_prefix_is_never_a_membership_signing_input(self):
-        """d9's amendment on #111: a record signature can never be read as a manifest signature, nor the reverse."""
-        self.assertFalse(ok.RECORD_DOMAIN.startswith(ok.MEMBERSHIP_DOMAIN))
-        self.assertFalse(ok.MEMBERSHIP_DOMAIN.startswith(ok.RECORD_DOMAIN))
-        self.assertTrue(ok.RECORD_DOMAIN.endswith(b"\0") and ok.MEMBERSHIP_DOMAIN.endswith(b"\0"))
-        self.assertNotIn(b"\0", ok.RECORD_DOMAIN[:-1])
+    def test_no_signing_domain_is_a_prefix_of_another(self):
+        """d9's amendment on #111, widened by regalia-avz: a signature under one domain can never be read under another.
+        Each is one NUL-terminated name, none begins another, and the retired one is none of them."""
+        domains = {"record": ok.RECORD_DOMAIN, "ownerauth": ok.OWNERAUTH_DOMAIN, "card": ok.CARD_RECORD_DOMAIN,
+                   "rebuild": ok.REBUILD_DOMAIN, "membership": ok.MEMBERSHIP_DOMAIN, "verify-entry": ok.VERIFY_ENTRY_DOMAIN,
+                   "retired": ok.RETIRED_RECORD_DOMAIN}
+        for name, domain in domains.items():
+            self.assertTrue(domain.endswith(b"\0"), name)
+            self.assertNotIn(b"\0", domain[:-1], name)
+            for other, theirs in domains.items():
+                if other != name:
+                    self.assertFalse(theirs.startswith(domain), "%s begins %s" % (other, name))
+        self.assertEqual(ok.RECORD_DOMAINS, {ok.SCHEMA_RECORD: ok.RECORD_DOMAIN, ok.SCHEMA_OWNERAUTH: ok.OWNERAUTH_DOMAIN})
+        self.assertEqual(ok.RECORD_DOMAIN, ("%s\0" % ok.SCHEMA_RECORD).encode())
+        self.assertEqual(ok.OWNERAUTH_DOMAIN, ("%s\0" % ok.SCHEMA_OWNERAUTH).encode())
+        self.assertEqual(ok.CARD_RECORD_DOMAIN, ("%s\0" % ok.SCHEMA_CARDS).encode())
+
+    def test_a_record_verifies_only_as_its_callers_kind_under_that_kinds_domain(self):
+        """regalia-avz: verify_record takes the domain of the kind its CALLER names. A record verifies only as that kind,
+        signed under that kind's domain: never under another kind's, the card record's, the rebuild's or the retired
+        one, and a record claiming another kind is refused even signed under the kind it claims."""
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        private = ed25519.Ed25519PrivateKey.generate()
+        root = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
+        every = (ok.RECORD_DOMAIN, ok.OWNERAUTH_DOMAIN, ok.CARD_RECORD_DOMAIN, ok.REBUILD_DOMAIN, ok.MEMBERSHIP_DOMAIN,
+                 ok.RETIRED_RECORD_DOMAIN)
+
+        def document(schema, domain):
+            record = {"schema": schema, "root_entry": {"alg": "ed25519", "key": root}}
+            return {"record": record, "signature": private.sign(domain + ok.canonical(record)).hex()}
+
+        for kind, own in ok.RECORD_DOMAINS.items():
+            self.assertEqual(ok.verify_record(document(kind, own), root, kind)["schema"], kind)
+            self.assertEqual(ok.verify_any_record(document(kind, own), root)["schema"], kind)
+            for domain in every:
+                if domain != own:
+                    with self.assertRaisesRegex(ok.Refused, "does not verify", msg=(kind, domain)):
+                        ok.verify_record(document(kind, domain), root, kind)
+                    with self.assertRaises(ok.Refused, msg=(kind, domain)):
+                        ok.verify_any_record(document(kind, domain), root)
+            for claimed, theirs in ok.RECORD_DOMAINS.items():
+                if claimed != kind:
+                    with self.assertRaisesRegex(ok.Refused, "schema must be %s" % kind, msg=(kind, claimed)):
+                        ok.verify_record(document(claimed, theirs), root, kind)
+        for kind in (ok.SCHEMA_CARDS, "regalia-ceremony-record/v1", None):
+            with self.assertRaisesRegex(ok.Refused, "verified as one kind"):
+                ok.verify_record(document(ok.SCHEMA_RECORD, ok.RECORD_DOMAIN), root, kind)
+
+    def test_a_record_is_written_only_under_its_own_kinds_domain(self):
+        """regalia-avz: write_record refuses a domain that is not the record's own kind's, so no writer can sign a
+        record under another kind's domain, the card record's or the retired one."""
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        private = ed25519.Ed25519PrivateKey.generate()
+        for kind, own in ok.RECORD_DOMAINS.items():
+            for domain in (ok.RECORD_DOMAIN, ok.OWNERAUTH_DOMAIN, ok.CARD_RECORD_DOMAIN, ok.RETIRED_RECORD_DOMAIN):
+                if domain != own:
+                    with self.assertRaisesRegex(ok.Refused, "its own kind's domain"):
+                        ok.write_record(self.d, "x", private, {"schema": kind}, domain)
+            self.assertFalse(os.path.exists(os.path.join(self.d, "x.record.json")))
 
     def test_refusals_before_anything_is_generated(self):
         for k, n in ((1, 3), (4, 3), (2, 17)):
@@ -465,7 +519,7 @@ if "nooutput" not in args:
         out = []
         for name in found:
             with open(os.path.join(self.session_dir, name)) as f:
-                out.append(ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json"))))
+                out.append(ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD))
         return out
 
     def test_the_root_goes_only_to_manifest_sign_as_a_sealed_memfd_and_the_session_is_recorded(self):
@@ -499,7 +553,7 @@ if "nooutput" not in args:
                 self.assertEqual(f.read().split()[2:], ["--root-key", root_hex, "--state-dir", os.path.abspath(self.state),
                                                        "--key-fd", hashlib.sha256(self.pem("anchor-policy")).hexdigest()])
             with open(path) as f:
-                recorded = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
+                recorded = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD)
             self.assertEqual((recorded["tool"], recorded["keys"]), (tool, ["anchor-policy"]))
         for reason, command in (
                 ("--exec runs only", self.command("anchorpolicy", subcommand="sign")),
@@ -664,7 +718,7 @@ if "nooutput" not in args:
         records = [n for n in os.listdir(self.out) if n.startswith("forms-verified-")]
         self.assertEqual(len(records), 1)
         with open(self.path(records[0])) as f:
-            record = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
+            record = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD)
         self.assertEqual((record["event"], record["checked"], record["not_checked"]), ("forms-verified", [1, 2, 3, 4], [5]))
         self.assertEqual(record["root_entry"], self.record["root_entry"])
 
@@ -748,7 +802,7 @@ class OwnerAuth(Case):
         ok.append_card_record_line(self.state, record)
         path = os.path.join(self.d, name)
         with open(path, "w") as f:
-            json.dump({"record": record, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}, f)
+            json.dump({"record": record, "signature": root.sign(ok.CARD_RECORD_DOMAIN + ok.canonical(record)).hex()}, f)
         return path
 
     def run_oa(self, nodes=("a", "b", "c"), shares=None, run=subprocess.run, yk=None):
@@ -787,7 +841,7 @@ class OwnerAuth(Case):
         import hmac
         record = self.run_oa()
         with open(os.path.join(self.oa, "ownerauth.record.json")) as f:
-            verified = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
+            verified = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_OWNERAUTH)
         self.assertEqual(verified["schema"], "regalia.ownerauth-record/v1")
         self.assertEqual(verified["root_entry"], self.record["root_entry"], "signed by the ceremony's root")
         self.assertEqual(len(record["yk_recipients"]), 2)
@@ -824,7 +878,7 @@ class OwnerAuth(Case):
         # the result signed by the root (regalia-kms-d9 on #120), opened from the k shares
         self.assertEqual(sorted(self.summary(rec).values()), ["1000", "1001"])
         with open(os.path.join(self.oa, "ownerauth-verified.record.json")) as f:
-            signed = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")))
+            signed = ok.verify_record(json.load(f), ok.sealed_root(self.path("offline-keys.sealed.json")), ok.SCHEMA_RECORD)
         self.assertEqual((signed["event"], signed["nodes"], sorted(c["serial"] for c in signed["cards"])),
                          ("ownerauth-verified", ["a", "b", "c"], ["1000", "1001"]))
         self.assertEqual(signed["root_entry"], self.record["root_entry"])
@@ -930,7 +984,7 @@ class OwnerAuth(Case):
         self.assertEqual(os.listdir(self.oa), [], "nothing was encrypted")
         from cryptography.hazmat.primitives.asymmetric import ed25519
         forged = json.load(open(self.card_record))
-        forged["signature"] = ed25519.Ed25519PrivateKey.generate().sign(ok.RECORD_DOMAIN + ok.canonical(forged["record"])).hex()
+        forged["signature"] = ed25519.Ed25519PrivateKey.generate().sign(ok.CARD_RECORD_DOMAIN + ok.canonical(forged["record"])).hex()
         with open(self.card_record, "w") as f:
             json.dump(forged, f)
         with self.assertRaisesRegex(ok.Refused, "the signature does not verify under the pinned root"):
@@ -951,17 +1005,17 @@ class OwnerAuth(Case):
         theirs = stranger.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw).hex()
         record["root_entry"] = {"alg": "ed25519", "key": theirs}
         record["root_fingerprint"] = ok.root_fingerprint(record["root_entry"])
-        document = {"record": record, "signature": stranger.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}
+        document = {"record": record, "signature": stranger.sign(ok.OWNERAUTH_DOMAIN + ok.canonical(record)).hex()}
         forged = os.path.join(self.d, "forged.record.json")
         with open(forged, "w") as f:
             json.dump(document, f)
-        self.assertEqual(ok.verify_record(document, theirs)["root_entry"]["key"], theirs, "its signature is valid: under its own root")
+        self.assertEqual(ok.verify_record(document, theirs, ok.SCHEMA_OWNERAUTH)["root_entry"]["key"], theirs, "its signature is valid: under its own root")
         another = "the record is signed by another root than this sealed set's"
         with self.assertRaisesRegex(ok.Refused, another):
-            ok.verify_record(document, ok.sealed_root(self.sealed))
+            ok.verify_record(document, ok.sealed_root(self.sealed), ok.SCHEMA_OWNERAUTH)
         for missing in (None, "", record["root_entry"]):
             with self.assertRaisesRegex(ok.Refused, "verified under the pinned root"):
-                ok.verify_record(document, missing)
+                ok.verify_record(document, missing, ok.SCHEMA_OWNERAUTH)
         with self.assertRaisesRegex(ok.Refused, another):
             ok.ownerauth_record_of(forged, self.sealed)
         with self.assertRaisesRegex(ok.Refused, another):
@@ -1100,7 +1154,7 @@ class OwnerAuth(Case):
         root = ok._private_key(ok.unseal(ok.combine(self.all[:2], sealed)[0], sealed)["keys"]["root"])
         bad = dict(record, at="5 Oct 2026 10:00")
         with open(os.path.join(self.d, "bad-at.json"), "w") as f:
-            json.dump({"record": bad, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(bad)).hex()}, f)
+            json.dump({"record": bad, "signature": root.sign(ok.OWNERAUTH_DOMAIN + ok.canonical(bad)).hex()}, f)
         with self.assertRaisesRegex(ok.Refused, "the record's at is not"):
             ok.ownerauth_record_of(os.path.join(self.d, "bad-at.json"), self.sealed)
 

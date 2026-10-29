@@ -79,9 +79,10 @@ class Vectors(unittest.TestCase):
         with open(os.path.join(VECTORS, "root.hex")) as f:
             root = f.read().strip()
         self.assertEqual(sorted(expect), sorted(n for n in os.listdir(VECTORS) if n.endswith(".json") and n not in ("expect.json", "freshness-expect.json")))
-        self.assertEqual(sorted(expect), ["bad-signature.json", "first-supersedes.json", "missing-owner-backup.json", "other-root.json",
-                                          "rebuilt-3.json", "release-is-owner.json", "sequence-2.json", "unknown-field.json", "valid.json",
-                                          "wrong-domain.json"])
+        self.assertEqual(sorted(expect), ["bad-signature.json", "first-supersedes.json", "missing-owner-backup.json",
+                                          "offline-keys-domain.json", "other-root.json", "ownerauth-domain.json",
+                                          "rebuild-domain.json", "rebuilt-3.json", "release-is-owner.json", "retired-domain.json",
+                                          "sequence-2.json", "unknown-field.json", "valid.json", "wrong-domain.json"])
         for name, expected in sorted(expect.items()):
             with self.subTest(vector=name), open(os.path.join(VECTORS, name)) as f:
                 document = json.load(f)
@@ -99,7 +100,7 @@ class Vectors(unittest.TestCase):
             with open(os.path.join(VECTORS, name)) as f:
                 document = json.load(f)
             key = ed25519.Ed25519PublicKey.from_public_bytes(bytes.fromhex(document["record"]["root_entry"]["key"]))
-            key.verify(bytes.fromhex(document["signature"]), ok.RECORD_DOMAIN + ok.canonical(document["record"]))
+            key.verify(bytes.fromhex(document["signature"]), ok.CARD_RECORD_DOMAIN + ok.canonical(document["record"]))
 
     def test_the_signing_record_chains_the_two_card_records(self):
         """regalia-kms#403: sequence-2 supersedes valid.json by digest, and the signing record holds both, in order."""

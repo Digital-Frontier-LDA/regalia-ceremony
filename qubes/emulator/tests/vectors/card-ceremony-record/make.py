@@ -159,7 +159,7 @@ def rebuild_record():
     return json.dumps({"record": record, "signature": ROOT.sign(ok.REBUILD_DOMAIN + ok.canonical(record)).hex()}, sort_keys=True) + "\n"
 
 
-def signed(record, private=ROOT, domain=ok.RECORD_DOMAIN):
+def signed(record, private=ROOT, domain=ok.CARD_RECORD_DOMAIN):
     return {"record": record, "signature": private.sign(domain + ok.canonical(record)).hex()}
 
 
@@ -171,6 +171,10 @@ def vectors():
     out.append(("bad-signature.json", bad, "the signature does not verify under the pinned root"))
     out.append(("wrong-domain.json", signed(valid_record(), domain=b"regalia-membership/v1\0"),
                 "the signature does not verify under the pinned root"))
+    # regalia-avz: the domain the card record was signed under before it had its own, and every other record kind's
+    for name, domain in (("retired-domain.json", ok.RETIRED_RECORD_DOMAIN), ("offline-keys-domain.json", ok.RECORD_DOMAIN),
+                         ("ownerauth-domain.json", ok.OWNERAUTH_DOMAIN), ("rebuild-domain.json", ok.REBUILD_DOMAIN)):
+        out.append((name, signed(valid_record(), domain=domain), "the signature does not verify under the pinned root"))
     r = valid_record()
     r["release_key"]["key"] = r["owner_keys"][0]["key"]
     out.append(("release-is-owner.json", signed(r), "the release key is an owner key: the release cards hold no owner key (D30.7)"))

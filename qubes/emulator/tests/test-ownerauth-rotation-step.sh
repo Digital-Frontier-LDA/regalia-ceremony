@@ -88,7 +88,7 @@ for i, (primary, subkey) in enumerate(cards):
 record.update(root_entry=entry, root_fingerprint=ok.root_fingerprint(entry), sequence=n, supersedes=lines[-1]["digest"] if lines else "")
 ok.card_record_check(record)
 ok.append_card_record_line(state, record)
-json.dump({"record": record, "signature": root.sign(ok.RECORD_DOMAIN + ok.canonical(record)).hex()}, open(w + "/cards/card-record-%d.record.json" % n, "w"))
+json.dump({"record": record, "signature": root.sign(ok.CARD_RECORD_DOMAIN + ok.canonical(record)).hex()}, open(w + "/cards/card-record-%d.record.json" % n, "w"))
 PY2
 }
 
