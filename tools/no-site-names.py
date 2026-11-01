@@ -30,6 +30,12 @@ def self_test():
     a, _, b, c = WORDS
     bad = [p for p in (a, a.upper(), a.capitalize(), b + "2", b + ".boot.key", "%s_MAC" % c.upper(),
                        "from" + b.capitalize(), "x-%s-y" % c, 'station = "%s"' % c.capitalize()) if not hits(p)]
+    # An independent copy of the words (reversed, not ROT13), so a mutated WORDS cannot test itself.
+    control = [w[::-1] for w in ("nobsil", "aobsil", "otrop", "arbmioc")]
+    if sorted(control) != sorted(WORDS):
+        bad.append("WORDS differs from the control list")
+    for word in control:                       # every listed word, so none of them can go untested
+        bad += [p for p in (word, word.capitalize(), word.upper() + "_X", "from" + word.capitalize()) if not hits(p)]
     good = [p for p in ("Trans" + b[:4] + "Opener", "trans" + b[:4] + "ation", "alder birch cedar") if hits(p)]
     scan_ok = scan_control()
     if bad or good or not scan_ok:
