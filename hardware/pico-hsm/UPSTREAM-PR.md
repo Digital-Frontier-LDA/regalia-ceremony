@@ -13,8 +13,8 @@
 > **FILED:** <https://github.com/polhenarejos/pico-keys-sdk/pull/26> (pico-keys-sdk) and <https://github.com/polhenarejos/pico-hsm/pull/135> (pico-hsm).
 >
 > **How to use this file.** The PR is two patch series (6 commits onto `polhenarejos/pico-hsm` at
-> `1ad8444`, 8 inside the `pico-keys-sdk` submodule at `843a3dc`), kept in the operators' private
-> repository while GHSA-wq3w-g2fj-q2jq is unpublished. Everything below the line is intended as the PR body.
+> `1ad8444`, 8 inside the `pico-keys-sdk` submodule at `843a3dc`). The `.patch` files are not kept in this
+> repository; the two upstream PRs linked above are public. Everything below the line is intended as the PR body.
 > Filing notes: the pico-keys-sdk patch carries most of the substance; the pico-hsm patch is
 > the INITIALIZE reset path plus the submodule bump.
 

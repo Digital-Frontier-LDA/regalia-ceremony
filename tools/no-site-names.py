@@ -16,7 +16,7 @@ import re
 import subprocess
 import sys
 
-WORDS = [codecs.decode(w, "rot13") for w in ("yvfoba", "cbegb", "pbvzoen")]
+WORDS = [codecs.decode(w, "rot13") for w in ("yvfoba", "yvfobn", "cbegb", "pbvzoen")]
 _ANY = "|".join(WORDS)
 _CAPS = "|".join([w.capitalize() for w in WORDS] + [w.upper() for w in WORDS])
 PATTERN = re.compile(r"(?<![a-zA-Z])(?i:%s)|(?<=[a-z])(?:%s)" % (_ANY, _CAPS))
@@ -27,28 +27,52 @@ def hits(text):
 
 
 def self_test():
-    a, b, c = WORDS
+    a, _, b, c = WORDS
     bad = [p for p in (a, a.upper(), a.capitalize(), b + "2", b + ".boot.key", "%s_MAC" % c.upper(),
                        "from" + b.capitalize(), "x-%s-y" % c, 'station = "%s"' % c.capitalize()) if not hits(p)]
     good = [p for p in ("Trans" + b[:4] + "Opener", "trans" + b[:4] + "ation", "alder birch cedar") if hits(p)]
-    if bad or good:
-        print("self-test FAILED: missed %r, flagged %r" % (bad, good))
+    scan_ok = scan_control()
+    if bad or good or not scan_ok:
+        print("self-test FAILED: missed %r, flagged %r, scan control %s" % (bad, good, "ok" if scan_ok else "FAILED"))
         return 1
     print("self-test OK")
     return 0
 
 
-def scan(root):
+def scan_control():
+    """A throwaway repository with a planted name in a path, a symlink target and a content line, and one
+    clean file: the scan must find exactly the three."""
+    import tempfile
+    a, _, b, c = WORDS
+    with tempfile.TemporaryDirectory() as d:
+        subprocess.run(["git", "init", "-q", d], check=True)
+        for rel, text in (("clean.txt", "nothing here\n"), ("content.txt", "x\n%s.boot.key\n" % b),
+                          (os.path.join(a.capitalize(), "f"), "\n")):
+            os.makedirs(os.path.dirname(os.path.join(d, rel)), exist_ok=True)
+            with open(os.path.join(d, rel), "w") as f:
+                f.write(text)
+        os.symlink("../%s/target" % c, os.path.join(d, "link"))
+        subprocess.run(["git", "-C", d, "add", "-A"], check=True)
+        found = scan(d, minimum=0)
+    got = sorted(x.split(":")[0].split(" (")[0] for x in found)
+    return got == sorted(["%s/f" % a.capitalize(), "content.txt", "link"]) and any("(symlink target)" in x for x in found)
+
+
+def scan(root, minimum=50):
     listed = subprocess.run(["git", "-C", root, "ls-files", "-z"], capture_output=True, check=True).stdout
     paths = [p for p in listed.decode("utf-8").split("\0") if p]
-    if len(paths) < 50:
+    if len(paths) < minimum:
         print("git ls-files listed %d files: the scan would prove nothing" % len(paths))
         return 2
     found = ["%s (path): %s" % (rel, h) for rel in paths for h in hits(rel)]
     scanned = 0
     for rel in paths:
         path = os.path.join(root, rel)
-        if not os.path.isfile(path) or os.path.islink(path):
+        if os.path.islink(path):                   # a tracked symlink: its target is content too
+            found.extend("%s (symlink target): %s" % (rel, h) for h in hits(os.readlink(path)))
+            scanned += 1
+            continue
+        if not os.path.isfile(path):
             continue
         with open(path, "rb") as f:
             data = f.read()
@@ -59,6 +83,8 @@ def scan(root):
         scanned += 1
         for lineno, line in enumerate(text.splitlines(), 1):
             found.extend("%s:%d: %s" % (rel, lineno, h) for h in hits(line))
+    if minimum == 0:                               # the self-test's control: quiet, so no planted name reaches a log
+        return found
     for line in found:
         print(line)
     print("%d files scanned, %d site-name hits" % (scanned, len(found)))
