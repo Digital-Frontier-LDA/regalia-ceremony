@@ -78,11 +78,9 @@ Requires a key at id `31` **on secp256k1** plus a matching pinned pubkey. A `pri
 
 ## A third firmware fix was required to get here
 
-Refusing writes to `FILE_DATA_FUNC` files (the original memory-safety guard) **breaks scsh
-provisioning**: `SmartCardHSM.js` aborts with `GPError ... Unexpected SW1/SW2=6581`. OpenSC
-ignores the same failure, which is why it only appeared under scsh. Changed to accept-and-discard
-(pico-keys-sdk `3af823e`) — still never writes through the function pointer, only the reported
-status changes.
+A third fix (pico-keys-sdk `3af823e`) was needed before scsh provisioning completed. It concerns
+GHSA-wq3w-g2fj-q2jq, which is unpublished upstream; its details are kept in the operators' private
+repository until the advisory is published.
 
 ## Bench recovery note: no SRST on this rig
 

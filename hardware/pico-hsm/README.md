@@ -10,14 +10,11 @@ exercise is to prove that a card can be replaced.
 
 ## What the patches contain
 
-Two patch files, because the fix now spans the main firmware and the SDK submodule:
-
-`0001-firmware-fixes.patch` — six commits against `polhenarejos/pico-hsm` at `1ad8444`, exported
-with `git format-patch`. Apply with `git am`.
-
-`0001-pico-keys-sdk-fixes.patch` — five commits against `polhenarejos/pico-keys-sdk` at
-`843a3dc` (the merge-base with upstream). Apply with `git am` **inside the `pico-keys-sdk`
-submodule** after checking out `843a3dc` (or a descendant that contains it).
+The patch files themselves are **not published here** while the upstream advisory
+GHSA-wq3w-g2fj-q2jq is unpublished: one of the fixes in the series addresses it. They are kept in the
+operators' private repository and return when the advisory is published. The commits are described
+below; the series is six commits against `polhenarejos/pico-hsm` at `1ad8444` and five against
+`polhenarejos/pico-keys-sdk` at `843a3dc`.
 
 **`cfc04a1` — reset the device after INITIALIZE DEVICE.** Without it the card completes the wipe
 but does not come back on the USB bus on its own, so every re-provisioning needed a physical
@@ -41,7 +38,7 @@ commits below). The full forensic basis is in the next section; in short: the wa
 path wedges the boot intermittently, so the reset now goes through `AIRCR.SYSRESETREQ` with the
 flash mutex held and no watchdog fallback, and core1's start is verified and watched.
 
-SDK side (`0001-pico-keys-sdk-fixes.patch`): **`78e9f30`** bounds the USB blackout during
+SDK side: **`78e9f30`** bounds the USB blackout during
 multi-sector erases (one sector per critical section); **`ba531cb`** adds
 `low_flash_quiesce()`, launch-time core1 verification with retry + bounded chip reset, and the
 core1 dead-man's switch. The intermediate `ea8325b`/`a4b305d` pair (CCID reset over USB and its

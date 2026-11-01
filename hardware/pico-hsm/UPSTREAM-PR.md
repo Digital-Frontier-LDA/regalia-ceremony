@@ -1,7 +1,7 @@
 # Draft — upstream PR description (links the issue in `UPSTREAM-ISSUE.md`)
 
 > **⚠️ SUPERSEDED IN PART (2026-08-05).** A reproduction on unmodified upstream firmware
-> disproved several claims in this draft. Read `UPSTREAM-REPRO-STOCK.md` first, and treat the
+> disproved several claims in this draft. Read the stock-firmware reproduction (held in the operators' private repository until GHSA-wq3w-g2fj-q2jq is published) first, and treat the
 > per-bug text below as the *original* report, not the current understanding. Corrections:
 > Bug 1 is a panic **during** INITIALIZE (not a dead card after it) and the `pico-hsm#9`
 > attribution was wrong; the Bug 4 END-timeout was **never observed** (core1 is orphaned by the
@@ -12,10 +12,9 @@
 
 > **FILED:** <https://github.com/polhenarejos/pico-keys-sdk/pull/26> (pico-keys-sdk) and <https://github.com/polhenarejos/pico-hsm/pull/135> (pico-hsm).
 >
-> **How to use this file.** The PR is the two patch series in this directory:
-> `0001-firmware-fixes.patch` (6 commits, apply with `git am` onto `polhenarejos/pico-hsm` at
-> `1ad8444`) and `0001-pico-keys-sdk-fixes.patch` (8 commits, apply with `git am` inside the
-> `pico-keys-sdk` submodule at `843a3dc`). Everything below the line is intended as the PR body.
+> **How to use this file.** The PR is two patch series (6 commits onto `polhenarejos/pico-hsm` at
+> `1ad8444`, 8 inside the `pico-keys-sdk` submodule at `843a3dc`), kept in the operators' private
+> repository while GHSA-wq3w-g2fj-q2jq is unpublished. Everything below the line is intended as the PR body.
 > Filing notes: the pico-keys-sdk patch carries most of the substance; the pico-hsm patch is
 > the INITIALIZE reset path plus the submodule bump.
 

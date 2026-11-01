@@ -105,13 +105,13 @@ printf 'scheme = [broken\n' > "$T/bad.toml"
 [ "$(rc "$T/bad.toml")" = 2 ] && P "unreadable TOML exits 2" || F "bad TOML exit $(rc "$T/bad.toml")"
 
 hdr "guided --new: asks, checks as it goes, writes a private file that re-checks"
-ans='4\n6\n\nexecutor\nsafe\ncapital\n\nprincipal\nn\n\nbox\ncapital\n\ntech\ny\n\nbox\ncapital\n\ntech\ny\n\nbank\nnorth\n\nprincipal, bank\ny\n\nbank\ncentre\n\nbank2\ny\n\nrelative\ncentre\n\nrelative\nn\nCoimbra\n'
+ans='4\n6\n\nexecutor\nsafe\ncapital\n\nprincipal\nn\n\nbox\ncapital\n\ntech\ny\n\nbox\ncapital\n\ntech\ny\n\nbank\nnorth\n\nprincipal, bank\ny\n\nbank\ncentre\n\nbank2\ny\n\nrelative\ncentre\n\nrelative\nn\nCedar\n'
 out="$(printf "$ans" | python3 "$CK" --new "$T/new.toml" 2>&1 | sed $'s/\033\\[[0-9;]*m//g')"
 grep -q 'FAIL capital now holds 3 sites' <<< "$out" && P "warns the moment a region goes over n-k" || F "no live region warning: $out"
 grep -q '^PLAN FAILED' <<< "$out" && P "ends in the full check (PLAN FAILED here)" || F "no final check"
 [ -f "$T/new.toml" ] && [ "$(stat -c %a "$T/new.toml")" = 600 ] && P "writes the plan, mode 0600" || F "plan not written 0600"
 [ "$(rc "$T/new.toml")" = 1 ] && P "the written plan re-checks the same (exit 1)" || F "written plan re-check differs"
-grep -q 'station = "Coimbra"' "$T/new.toml" && P "the station is recorded" || F "station missing"
+grep -q 'station = "Cedar"' "$T/new.toml" && P "the station is recorded" || F "station missing"
 [ "$(grep -c '^logged = true' "$T/new.toml")" = 4 ] && P "the four logged answers are recorded" || F "logged flags: $(grep '^logged' "$T/new.toml" | tr '\n' ' ')"
 printf '4\n6\n' | python3 "$CK" --new "$T/new.toml" >/dev/null 2>&1; [ $? = 2 ] && P "refuses to overwrite an existing plan" || F "overwrote a plan"
 printf '4\n6\n' | python3 "$CK" --new "$T/short.toml" >/dev/null 2>&1; e=$?

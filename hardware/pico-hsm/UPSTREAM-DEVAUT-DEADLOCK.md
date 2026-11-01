@@ -4,8 +4,8 @@
 **Status:** root-caused, fixed, verified on hardware. Fix committed as pico-hsm `9094c0b`.
 
 This is the actual reason the staging card could never complete provisioning. It is a different
-and more fundamental defect than the `FILE_DATA_FUNC` write bug documented in
-`UPSTREAM-REPRO-STOCK.md` — that one killed the card mid-command; this one made provisioning
+and more fundamental defect than the one under GHSA-wq3w-g2fj-q2jq (unpublished; its reproduction is
+held privately) — that one killed the card mid-command; this one made provisioning
 impossible even when the card survived.
 
 ## The deadlock

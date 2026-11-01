@@ -1,7 +1,7 @@
 # Draft — upstream issue for `polhenarejos/pico-keys-sdk` (+ `polhenarejos/pico-hsm`)
 
 > **⚠️ SUPERSEDED IN PART (2026-08-05).** A reproduction on unmodified upstream firmware
-> disproved several claims in this draft. Read `UPSTREAM-REPRO-STOCK.md` first, and treat the
+> disproved several claims in this draft. Read the stock-firmware reproduction (held in the operators' private repository until GHSA-wq3w-g2fj-q2jq is published) first, and treat the
 > per-bug text below as the *original* report, not the current understanding. Corrections:
 > Bug 1 is a panic **during** INITIALIZE (not a dead card after it) and the `pico-hsm#9`
 > attribution was wrong; the Bug 4 END-timeout was **never observed** (core1 is orphaned by the
