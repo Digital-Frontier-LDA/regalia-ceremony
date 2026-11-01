@@ -145,7 +145,7 @@ class FirmwareInvariantSourceTests(unittest.TestCase):
         self.assertNotEqual(0, result.returncode, result.stdout)
         self.assertIn("does not clear WATCHDOG_CTRL_ENABLE_BITS", result.stdout)
 
-    def test_a_file_data_func_guard_that_errors_is_the_defect_not_the_fix(self):
+    def test_an_invariant_5_guard_that_errors_is_the_defect_not_the_fix(self):
         # Returning an error maps to SW=6581 and aborts Smart Card Shell initialisation — the
         # thing the guard was written to stop. The token is present either way.
         with tempfile.TemporaryDirectory() as scratch:
@@ -178,7 +178,7 @@ class FirmwareInvariantSourceTests(unittest.TestCase):
         for detector in (
             "fs scan does NOT validate chain links",
             "no preinit watchdog disarm",
-            "FILE_DATA_FUNC guard missing",
+            "invariant 5: the guarded write path is missing",
         ):
             self.assertIn(detector, result.stdout,
                           f"comment-only fixture did not trip the {detector!r} detector")

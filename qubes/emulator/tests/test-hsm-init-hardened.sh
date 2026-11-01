@@ -222,7 +222,7 @@ else
   F "the child inherited a PIN: $(grep -o 'SO=.* USER=.*' "$BIN/stdin.txt" | head -1)"
 fi
 
-hdr "a Pico gets NO label write to EF 2F03 (GHSA-wq3w-g2fj-q2jq); a Nitrokey still does"
+hdr "a Pico gets NO label write; a Nitrokey still does"
 out="$(run_init "${PINS[@]}" STUB_CHR=ESPICOHSMTR000 -- --reader 0 --expect-serial ESPICOHSMTR)"
 [ -n "$(init_apdu)" ] && [ -z "$(label_apdu)" ] && P "Pico by serial: INITIALIZE sent, no 00D72F03" || F "Pico by serial: label=$(label_apdu) init=$(init_apdu)"
 grep -q "label: NOT written — this is a Pico" <<< "$out" && P "says why the label was skipped" || F "no Pico label message: $(tail -3 <<< "$out")"

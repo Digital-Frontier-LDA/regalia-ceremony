@@ -112,25 +112,24 @@ else
     P "rescue.c reboots through the vetted reset path, not a raw watchdog_reboot()"
 fi
 
-# 5. The FILE_DATA_FUNC guard must accept-and-DISCARD rather than error.
-#    Returning an error maps to SW=6581, which makes the Smart Card Shell abort initialisation
-#    where OpenSC merely ignores it. So the token being present says nothing: a guard that returns
-#    an error is the failure this invariant exists to prevent, and it contains the token too.
+# 5. The guarded write path must accept-and-DISCARD rather than error (the operators' private record
+#    has the reason). An error maps to SW=6581, which makes the Smart Card Shell abort initialisation
+#    where OpenSC merely ignores it, so the token being present says nothing on its own.
 guard_start="$(grep -nE 'if[[:space:]]*\(.*FILE_DATA_FUNC' <<<"$flash_code" | head -1 | cut -d: -f1)"
 if [ -z "$guard_start" ]; then
     if grep -q 'FILE_DATA_FUNC' <<<"$flash_code"; then
-        F "FILE_DATA_FUNC appears in flash.c but not as a guard condition — the write path is not protected"
+        F "invariant 5: the token appears in flash.c but not as a guard condition"
     else
-        F "FILE_DATA_FUNC guard missing — a function pointer can be written as a flash address"
+        F "invariant 5: the guarded write path is missing"
     fi
 else
     guard_body="$(tail -n +"$guard_start" <<<"$flash_code" | head -6)"
     # An error return is a numeric/symbolic status; discarding looks like `return 0;`, `return;`
     # or falling through. CCID_ERR/SW_/0x65xx/-1 are the shapes that reach the host as 6581.
     if grep -qE 'return[[:space:]]+(-[0-9]|0x6|CCID_ERR|SW_|PICOKEY_ERR|[A-Z_]*ERR[A-Z_]*)' <<<"$guard_body"; then
-        F "the FILE_DATA_FUNC guard RETURNS AN ERROR — that maps to SW=6581 and aborts Smart Card Shell initialisation; it must accept and discard"
+        F "invariant 5: the guarded write path RETURNS AN ERROR — SW=6581 aborts Smart Card Shell initialisation; it must accept and discard"
     else
-        P "FILE_DATA_FUNC guard accepts and discards in the flash write path"
+        P "invariant 5: the guarded write path accepts and discards"
     fi
 fi
 
