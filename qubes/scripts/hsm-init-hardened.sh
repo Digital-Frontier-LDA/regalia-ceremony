@@ -155,11 +155,8 @@ if [ -n "$EXPECT_SERIAL" ]; then
 fi
 
 # ---- a Pico gets NO label write ------------------------------------------------------------------
-# The label goes to EF 2F03 (TokenInfo). On a Pico HSM that file is GENERATED (FILE_DATA_FUNC): stock
-# firmware accepts the write, stores it over the generator, and from then on every SELECT of 2F03
-# runs the stored bytes and hard-faults the card (GHSA-wq3w-g2fj-q2jq, measured on an RP2350,
-# 2026-09-28); our fixed firmware refuses it with 6986. So a Pico is initialised without it and shows
-# its own label ('Pico-HSM'). A Pico is: an expected serial starting ESP, or a blank board identified
+# The label goes to EF 2F03 (TokenInfo). A Pico HSM is initialised without it (the operators' private
+# record has the reason) and shows its own label ('Pico-HSM'). A Pico is: an expected serial starting ESP, or a blank board identified
 # by HSM_EXPECT_BOARD.
 IS_PICO=0
 case "$EXPECT_SERIAL" in ESP*) IS_PICO=1;; esac
@@ -246,8 +243,8 @@ case "$sw" in
 esac
 
 case "$( [ "$IS_PICO" = 1 ] && echo pico || printf '%s' "${lsw:-}" | tr 'a-f' 'A-F')" in
-  pico) say "label: NOT written — this is a Pico, where writing EF 2F03 corrupts its generated TokenInfo"
-        say "       (GHSA-wq3w-g2fj-q2jq); it keeps its own label, 'Pico-HSM'" ;;
+  pico) say "label: NOT written — this is a Pico"
+        say "       it keeps its own label, 'Pico-HSM'" ;;
   9000) say "label: '$LABEL' written to EF 2F03" ;;
   # A KNOWN ERROR IS NOT COSMETIC. The label is what `pkcs11-tool -L` shows and what the drills and
   # the restore match on, so a card that answered 6982 and a script that says "complete" disagree

@@ -32,7 +32,7 @@ SO_PIN="${HSM_SO_PIN:-3537363231383830}"
 USER_PIN="${HSM_USER_PIN:-648219}"
 STAGING="${HSM_STAGING_DIR:-$HOME/.local/share/akash-hsm-staging}"
 # Resolved RELATIVE TO THIS REPO. These previously pointed into a personal worktree
-# ($HOME/code/Akash-Console-hsmfix/...), which meant the suite ran for exactly one person on
+# ($HOME/code/<one private checkout>/...), which meant the suite ran for exactly one person on
 # exactly one machine and reported a clean skip for everyone else.
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null

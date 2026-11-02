@@ -348,7 +348,7 @@ and never enumerates. That is why the state survives every reset: the reset re-r
 the same corrupt structure is read back out of flash, and the same pointer faults again.
 
 This is the SAME CLASS as the `scan_region()` defect already documented in
-UPSTREAM-REPRO-STOCK.md, where a chain link accepted by the scan yielded
+the stock-firmware reproduction (held privately), where a chain link accepted by the scan yielded
 `file->data = 0x2000D5A5` (SRAM). Same failure, different garbage value — and it is precisely what
 `polhenarejos/pico-keys-sdk#30`'s `flash_range_in_fs()` validation exists to prevent. That this
 still happens with #30 applied means its coverage does not reach this access path.

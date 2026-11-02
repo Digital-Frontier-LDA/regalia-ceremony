@@ -78,7 +78,7 @@ unproven — and our own rig can decide it.**
 1. Build pico-hsm firmware against current `pico-keys-sdk`, **without** our 15 carried patches, so
    what is measured is upstream's fix and not ours.
 2. Run `tools/hsm-bug6-powerloss.sh` with the usual cut delays on a registered staging board.
-3. Compare against the recorded stock-firmware runs in `UPSTREAM-REPRO-STOCK.md`.
+3. Compare against the recorded stock-firmware runs (held in the operators' private repository).
 4. Look for `INFO: flash redo restored` in the trace: it distinguishes "the cut did no damage" from
    "the cut did damage and the journal undid it", and only the second is evidence about the journal.
 
@@ -119,5 +119,5 @@ re-attaching from dom0 (or, optionally, the dom0 service in `qubes/bench/`).
 PRs 26, 27, 28, 29, 31 and 34 were **closed unmerged**; 30, 32 and 33 are still open. Upstream did
 not take our approach and has since written its own. That matters for the rebase: some of our 15
 patches may now be redundant, and some may conflict with the journal, since
-`0001-pico-keys-sdk-fixes.patch` touches `src/fs/low_flash.c` — the same file the journal rewrites.
+our pico-keys-sdk patch series touches `src/fs/low_flash.c` — the same file the journal rewrites.
 Deciding which to drop is part of the build in step 1, not a separate exercise.
