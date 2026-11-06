@@ -104,6 +104,13 @@ answer to fails silently, and only on recovery day.
 - Nitrokey: the PIN-binding proof in `step_payload` presents the escrowed user PIN to the card.
 - YubiKey: `step_yubikey_ops` sets the PIN and PUK from step 0's values, never from a prompt, and
   proves the PIN before generating. Test: `test-ceremony-yubikey-factory-card.sh`.
+- YubiKey: a PIN or PUK must be one a person can type back. `yk_piv_change` refuses any value,
+  current or new, that is not 6 to 8 printable ASCII characters with no space anywhere, and it does
+  so before `ykman` runs. The card itself accepts any 6 to 8 bytes, so six spaces, or a value with a
+  pasted trailing space, would set a PIN nobody can reproduce. The rule also covers the *current*
+  value, so a card someone else gave a PIN containing a space cannot be changed by this script. That
+  refusal is deliberate: it fails closed. Reset that card's PIN by hand to one that follows the rule,
+  then run the step again. Test: `test-ceremony-yubikey-factory-card.sh`.
 
 **5. Two YubiKeys never share a PIN.** Continuity is multi-enrollment (ADR-0002 D5), and that is
 worth something only if the tokens fail independently. Step 0 holds one credential set per

@@ -128,6 +128,22 @@ EOF
     ;;
   piv)
     case "${2:-}" in
+      access)
+        # A PIN or PUK change takes its values on STANDARD INPUT, one per line, as the real ykman does
+        # when the options are left out and stdin is not a terminal. A value option is refused loudly:
+        # no caller here may put a PIN on a command line, where /proc shows it to every local user (#98).
+        case "${3:-}" in
+          change-pin|change-puk)
+            for a in "${@:4}"; do case "$a" in
+              -P|-p|-n|--pin|--puk|--new-pin|--new-puk|--pin=*|--puk=*|--new-pin=*|--new-puk=*)
+                echo "ykman(model): piv access $3 was given $a on the command line; send the current and the new value on stdin, one per line" >&2; exit 2;;
+            esac; done
+            cur=""; new=""
+            [ -t 0 ] || { IFS= read -r cur || true; IFS= read -r new || true; }
+            [ -n "$cur" ] && [ -n "$new" ] || { echo "ykman(model): piv access $3 got no current/new value on stdin (the real tool would prompt)" >&2; exit 1; }
+            echo "[EMULATED] ykman piv access $3: value changed" ;;
+          *) echo "[EMULATED] ykman piv ${*:2}" ;;
+        esac ;;
       info)
         cat <<EOF
 PIV version: 5.4.3 [EMULATED]
