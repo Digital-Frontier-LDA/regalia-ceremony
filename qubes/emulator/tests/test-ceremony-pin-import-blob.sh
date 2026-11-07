@@ -3,10 +3,14 @@
 # host (ADR-0002 D21), so the PIN is never typed at the site or carried in clear. pin_blob_for:
 #   - refuses unless the TYPED fingerprint prefix matches the public key (a substituted key would
 #     receive the PIN), and leaves no blob when it refuses (not even an earlier attempt's);
+#   - refuses a key that is not ECC P-256 (an RSA-3072 import key from before regalia-kms#671), saying so;
 #   - is offered after step 0 loads the PINs, from any source (generated, chosen, hand-edited file);
-#   - takes the PIN on file descriptor 3, never argv;
-#   - writes RSA-OAEP SHA-256, which a TPM-resident key opens with tpm2_rsadecrypt (proven here with
-#     swtpm when tpm2-tools and swtpm are installed, as regalia-kms seal-hsm-pin.sh --from-blob does).
+#   - takes the PIN on file descriptor 3, never argv, and leaves no PIN file behind;
+#   - writes a v2 blob (regalia-kms PIN-IMPORT-DESIGN.md): a TPM2 duplication of a sealed object
+#     holding the PIN, made offline with tpm2_duplicate --tcti none, which a TPM-resident P-256 key
+#     opens with TPM2_Import + TPM2_Load + TPM2_Unseal (proven here with swtpm when tpm2-tools and swtpm
+#     are installed, as regalia-kms seal-hsm-pin.sh --from-blob does), and no other TPM does;
+#   - builds the parent's public area from its own pinned template, byte for byte the TPM's.
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins (ykman, pkcs11-tool, sc-hsm-tool) first, as under run-tests.sh (#104)
 set -uo pipefail
@@ -22,26 +26,41 @@ skip_dep(){ # a missing dependency: a skip by hand, a failure where REQUIRE_EMUL
   echo "  SKIP: $1 (REQUIRE_EMULATOR_DEPS=1 makes this a failure)"; exit 0
 }
 command -v openssl >/dev/null || { skip_dep "openssl not installed"; }
+command -v tpm2_duplicate >/dev/null || { skip_dep "tpm2_duplicate (tpm2-tools) not installed: step 0 wraps PINs with it, offline"; }
 T="$(mktemp -d)"
+TESTS="$HERE"     # ceremony.sh sets HERE to its own directory
 # shellcheck disable=SC1090
 source "$SCRIPTS/ceremony.sh"
+# shellcheck source=pin-import-tpm.sh
+. "$TESTS/pin-import-tpm.sh"
 # After sourcing: ceremony.sh installs its own EXIT trap, which would replace this one.
-stop_tpm(){ [ -f "$T.pid" ] && kill "$(cat "$T.pid")" 2>/dev/null; rm -f "$T.pid"; }
-trap 'stop_tpm; rm -rf "$T"' EXIT
+trap 'pit_stop; rm -rf "$T"' EXIT
+WORK="$T/work"; mkdir -p "$WORK"; chmod 700 "$WORK"
 PIN="7310048261"
+hexof(){ printf '%s' "$1" | od -An -tx1 | tr -d ' \n'; }
 
-# A test-only RSA-3072 key pair standing in for a host's import key (generated here, never committed).
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$T/host.key" 2>/dev/null
+# A test-only P-256 key pair standing in for a host's import key where there is no TPM (generated here, never committed).
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$T/host.key" 2>/dev/null
 openssl pkey -in "$T/host.key" -pubout -out "$T/host.pub.pem"
 FP="$(openssl pkey -pubin -in "$T/host.pub.pem" -outform der | sha256sum | cut -d' ' -f1)"
 
-hdr "the right fingerprint: a blob that only the host key opens"
+hdr "the right fingerprint: a v2 blob"
 pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/a.blob" 3< <(printf '%s' "$PIN") >/dev/null 2>&1 && [ -s "$T/a.blob" ] \
   && P "blob written ($(wc -c < "$T/a.blob") bytes)" || F "no blob for the right fingerprint"
-got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
-  -pkeyopt rsa_mgf1_md:sha256 -in "$T/a.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-[ "$got" = "$(printf '%s' "$PIN" | od -An -tx1 | tr -d ' \n')" ] && P "it decrypts (RSA-OAEP SHA-256) to exactly the PIN's bytes, no newline" || F "decrypted bytes $got"
+[ "$(head -c 113 "$T/a.blob")" = "regalia-pin-blob v2 tpm2-import nist-p256 sha256=$FP" ] \
+  && [ "$(head -c 114 "$T/a.blob" | tail -c 1 | od -An -tx1 | tr -d ' \n')" = 0a ] && P "the v2 header names the key's full fingerprint" || F "header: $(head -c 114 "$T/a.blob" | tr -c '[:print:]' '?')"
+sizes="$(python3 -I -c '
+import sys; b=open(sys.argv[1],"rb").read()[114:]; o=0; out=[]
+for _ in range(3):
+    s=int.from_bytes(b[o:o+2],"big"); out.append(s); o+=2+s
+print(" ".join(map(str,out)), "rest", len(b)-o)' "$T/a.blob")"
+[[ "$sizes" =~ ^[0-9]+\ [0-9]+\ 68\ rest\ 0$ ]] && P "then exactly three TPM2B parts, the seed a P-256 point ($sizes)" || F "parts: $sizes"
 grep -qF "$PIN" "$T/a.blob" && F "the PIN is visible in the blob" || P "the PIN is not visible in the blob"
+python3 -I -c 'import sys,hashlib; b=open(sys.argv[1],"rb").read(); sys.exit(hashlib.sha256(sys.argv[2].encode()).digest() in b)' "$T/a.blob" "$PIN" \
+  && P "the blob does not carry sha256(PIN) (a 10-digit PIN would not survive it)" || F "sha256(PIN) is in the blob"
+pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/a2.blob" 3< <(printf '%s' "$PIN") >/dev/null 2>&1
+cmp -s "$T/a.blob" "$T/a2.blob" && F "two blobs of one PIN are identical" || P "two blobs of one PIN differ (fresh seed and seedValue each time)"
+[ -z "$(ls -A "$WORK")" ] && P "nothing is left in the RAM workdir (no PIN file, no key copy)" || F "left in the workdir: $(ls -A "$WORK")"
 pin_blob_for "$T/host.pub.pem" "$(tr a-f A-F <<< "${FP:0:8}"):${FP:8:8}" "$T/b.blob" 3< <(printf '%s' "$PIN") >/dev/null 2>&1 \
   && P "the typed prefix may be upper case or grouped with colons" || F "a formatted prefix was refused"
 
@@ -58,33 +77,46 @@ out="$(pin_blob_for "$T/junk.pem" "${FP:0:16}" "$T/e.blob" 3< <(printf '%s' "$PI
 printf 'blob from an earlier attempt' > "$T/f.blob"
 out="$(pin_blob_for "$T/host.pub.pem" "$other" "$T/f.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
 [ "$rc" != 0 ] && [ ! -e "$T/f.blob" ] && P "a refusal also removes an earlier attempt's blob at that name" || F "a stale blob survived a refusal"
+# an import key from before regalia-kms#671 (RSA-3072), with its RIGHT fingerprint typed: refused by its type
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$T/rsa.key" 2>/dev/null
+openssl pkey -in "$T/rsa.key" -pubout -out "$T/rsa.pub.pem"
+RFP="$(openssl pkey -pubin -in "$T/rsa.pub.pem" -outform der | sha256sum | cut -d' ' -f1)"
+out="$(pin_blob_for "$T/rsa.pub.pem" "${RFP:0:16}" "$T/g.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'not an ECC P-256 public key' <<< "$out" && grep -q 'regalia-kms#671' <<< "$out" && grep -q -- '--replace-import-key' <<< "$out" \
+  && [ ! -e "$T/g.blob" ] && P "an RSA-3072 import key (before #671) is refused, saying what to do; no blob" || F "RSA key: rc=$rc $out"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$T/p384.key" 2>/dev/null
+openssl pkey -in "$T/p384.key" -pubout -out "$T/p384.pub.pem"
+PFP="$(openssl pkey -pubin -in "$T/p384.pub.pem" -outform der | sha256sum | cut -d' ' -f1)"
+out="$(pin_blob_for "$T/p384.pub.pem" "${PFP:0:16}" "$T/h.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'not an ECC P-256 public key' <<< "$out" && [ ! -e "$T/h.blob" ] && P "a P-384 key is refused; no blob" || F "P-384 key: rc=$rc"
+[ -z "$(ls -A "$WORK")" ] && P "no refusal leaves anything in the RAM workdir" || F "left in the workdir: $(ls -A "$WORK")"
 # The offer comes after step 0 has LOADED the PINs, so the hand-edited (e) file gets it too, not only
 # generated or chosen PINs.
 body="$(declare -f step_set_pins)"
 grep -q 'offer_pin_blobs' <<< "$body" && ! declare -f generate_pins | grep -q 'offer_pin_blobs' \
   && [ "$(grep -n 'done < "$pfile"' <<< "$body" | cut -d: -f1)" -lt "$(grep -n 'offer_pin_blobs' <<< "$body" | cut -d: -f1)" ] \
   && P "blobs are offered after the PIN file is loaded, whatever its source" || F "the blob offer is not after the PIN load in step_set_pins"
-grep -q -- '-in /dev/fd/3' "$SCRIPTS/ceremony.sh" && grep -q 'pin_blob_for "$pub" "$typed" "$dir/$file" 3< <(printf' "$SCRIPTS/ceremony.sh" \
-  && P "the PIN reaches openssl on a file descriptor, never argv" || F "the PIN may be on argv"
+grep -q 'cat <&3 > "$d/pin"' "$SCRIPTS/ceremony.sh" && grep -q 'pin_blob_for "$pub" "$typed" "$dir/$file" 3< <(printf' "$SCRIPTS/ceremony.sh" \
+  && fn="$(declare -f pin_blob_for)" && ! grep -qE 'tpm2_duplicate[^|]*\$PIN|printf[^|]*\$PIN' <<< "$fn" \
+  && P "the PIN reaches tpm2_duplicate through a 0600 file in the RAM workdir, never argv" || F "the PIN may be on argv"
 
 hdr "a TPM-resident key opens the ceremony's blob (swtpm, as at the host)"
-if command -v swtpm >/dev/null && command -v tpm2_rsadecrypt >/dev/null; then
-  mkdir -p "$T/tpm"; port=$((24000 + RANDOM % 2000))
-  swtpm socket --tpm2 --tpmstate "dir=$T/tpm" --server "type=tcp,port=$port" --ctrl "type=tcp,port=$((port+1))" \
-    --flags not-need-init,startup-clear --daemon --pid "file=$T.pid"; sleep 1
-  export TPM2TOOLS_TCTI="swtpm:port=$port"
-  fl(){ tpm2_flushcontext -t >/dev/null 2>&1; tpm2_flushcontext -s >/dev/null 2>&1; }
-  # the same template as regalia-kms seal-hsm-pin.sh --init-import-key
-  fl; tpm2_createprimary -Q -C o -g sha256 -G ecc256:aes128cfb -c "$T/p.ctx" \
-  && tpm2_create -Q -C "$T/p.ctx" -G rsa3072 -a 'fixedtpm|fixedparent|sensitivedataorigin|userwithauth|decrypt' -u "$T/k.pub" -r "$T/k.priv" \
-  && fl && tpm2_load -Q -C "$T/p.ctx" -u "$T/k.pub" -r "$T/k.priv" -c "$T/k.ctx" \
-  && tpm2_evictcontrol -Q -C o -c "$T/k.ctx" 0x81000101 >/dev/null && fl \
-  && tpm2_readpublic -Q -c 0x81000101 -f pem -o "$T/tpm.pub.pem"
-  TFP="$(openssl pkey -pubin -in "$T/tpm.pub.pem" -outform der | sha256sum | cut -d' ' -f1)"
-  pin_blob_for "$T/tpm.pub.pem" "${TFP:0:16}" "$T/t.blob" 3< <(printf '%s' "$PIN") >/dev/null 2>&1
-  got="$(tpm2_rsadecrypt -c 0x81000101 -s oaep -o /dev/stdout "$T/t.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-  [ "$got" = "$(printf '%s' "$PIN" | od -An -tx1 | tr -d ' \n')" ] && P "tpm2_rsadecrypt inside the (software) TPM recovers exactly the PIN's bytes" || F "the TPM gave bytes $got"
-  stop_tpm
+if pit_available; then
+  if pit_start "$T/host-tpm"; then
+    TFP="$(openssl pkey -pubin -in "$PIT_DIR/host.pub.pem" -outform der | sha256sum | cut -d' ' -f1)"
+    # the parent's public area as step 0 rebuilds it (from its pinned template and the verified point)
+    hex="$(openssl pkey -pubin -in "$PIT_DIR/host.pub.pem" -outform der | od -An -tx1 -v | tr -d ' \n')"
+    printf '%b' "$(sed 's/../\\x&/g' <<< "${PIN_IMPORT_PARENT_TEMPLATE}0020${hex:54:64}0020${hex:118:64}")" > "$T/rebuilt"
+    cmp -s "$T/rebuilt" "$PIT_DIR/host.tpm2b" && P "step 0's pinned template is the TPM's own public area, byte for byte" || F "the pinned template differs from the TPM's"
+    pin_blob_for "$PIT_DIR/host.pub.pem" "${TFP:0:16}" "$T/t.blob" 3< <(printf '%s' "$PIN") >/dev/null 2>&1
+    [ "$(pit_open "$T/t.blob")" = "$(hexof "$PIN")" ] && P "TPM2_Import + Load + Unseal inside the (software) TPM recovers exactly the PIN's bytes" || F "the TPM gave bytes $(pit_open "$T/t.blob")"
+    [ -z "$(pit_open "$T/a.blob")" ] && P "a blob made for another key is refused by this TPM" || F "a blob for another key opened here"
+    python3 -I -c 'import sys; b=bytearray(open(sys.argv[1],"rb").read()); b[200]^=0xFF; open(sys.argv[2],"wb").write(b)' "$T/t.blob" "$T/bad.blob"
+    [ -z "$(pit_open "$T/bad.blob")" ] && P "an altered blob is refused by the TPM" || F "an altered blob opened"
+  else
+    F "the software TPM or its import key could not be set up"
+  fi
+  pit_stop
 elif [ "${REQUIRE_TPM_SIM:-0}" = 1 ]; then
   F "REQUIRE_TPM_SIM=1 but swtpm or tpm2-tools is missing: the TPM case must run here, not skip"
 else

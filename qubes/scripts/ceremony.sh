@@ -1786,20 +1786,39 @@ elif has_date(p):
 ' 3<<< "$1"
 }
 
-# Encrypt one HSM user PIN to a KMS host's TPM import key (ADR-0002 D21; regalia-kms
-# seal-hsm-pin.sh --init-import-key / --from-blob). The PIN arrives on file descriptor 3, never argv.
+# Wrap one HSM user PIN to a KMS host's TPM import key (ADR-0002 D21; regalia-kms
+# seal-hsm-pin.sh --init-import-key / --from-blob; regalia-kms PIN-IMPORT-DESIGN.md). The PIN arrives
+# on file descriptor 3, never argv.
 # The public key is authenticated first: the operator TYPES the start of the fingerprint they copied
 # by hand at the host's console, and a mismatch refuses (a substituted key would receive the PIN).
 #   pin_blob_for <public-key.pem> <typed fingerprint prefix> <out.blob>   3< <(printf '%s' "$pin")
 # (printf, not a here-string: a here-string appends a newline, and the blob must hold exactly the PIN)
+#
+# Since regalia-kms#671 the import key is an ECC P-256 storage key (the DL360's SLB9665 has no RSA-3072),
+# and the blob is a TPM2 DUPLICATION of a sealed object holding the PIN, made here offline with no TPM
+# (tpm2_duplicate --tcti none), which the host's TPM takes with TPM2_Import. About 128-bit security
+# (P-256, AES-128, SHA-256). Format v2:
+#   "regalia-pin-blob v2 tpm2-import nist-p256 sha256=<the key's fingerprint>\n"
+#   TPM2B_PUBLIC | TPM2B_PRIVATE | TPM2B_ENCRYPTED_SECRET      (tpm2_duplicate's -u, -r, -s)
+# The fingerprint covers the key's POINT only, so the rest of the parent's public area (the template,
+# which decides the outer wrap's cipher) is never read from the medium: it is rebuilt here from the
+# template below and the verified point. It must stay the one seal-hsm-pin.sh --init-import-key creates.
+# The DER SubjectPublicKeyInfo of an uncompressed P-256 point: these 26 bytes, 04, X (32), Y (32).
+PIN_IMPORT_P256_SPKI_PREFIX=3059301306072a8648ce3d020106082a8648ce3d030107034200
+# TPM2B_PUBLIC up to the point: size 90, type ECC, nameAlg SHA-256, attributes
+# fixedtpm|fixedparent|sensitivedataorigin|userwithauth|noda|restricted|decrypt (0x00030472), empty
+# authPolicy, AES-128-CFB, scheme NULL, curve NIST P-256, kdf NULL.
+PIN_IMPORT_PARENT_TEMPLATE=005a0023000b000304720000000600800043001000030010
 pin_blob_for() {
-  local src="$1" typed="$2" out="$3" fp pub
+  local src="$1" typed="$2" out="$3" fp pub hex d rc
   # A refusal must leave NO blob: an earlier attempt's file at the same name could be copied to the
   # wrong host as if it were this one.
   rm -f "$out"
   [ -r "$src" ] || { err "cannot read the public key $src"; return 1; }
+  command -v tpm2_duplicate >/dev/null 2>&1 \
+    || { err "tpm2_duplicate (tpm2-tools) is required to wrap a PIN to a host's TPM; it runs with no TPM (--tcti none)"; return 1; }
   # Read the key ONCE into the RAM workdir, as canonical DER, and use only that copy: a file or
-  # symlink on removable media could change between the fingerprint check and the encryption.
+  # symlink on removable media could change between the fingerprint check and the wrapping.
   pub="$(mktemp "${WORK:-/tmp}/import-pub.XXXXXX")" || return 1
   openssl pkey -pubin -in "$src" -outform der -out "$pub" 2>/dev/null || { err "$src is not a public key"; rm -f "$pub"; return 1; }
   fp="$(sha256sum < "$pub" | cut -d' ' -f1)"
@@ -1807,9 +1826,26 @@ pin_blob_for() {
   typed="$(tr 'A-F' 'a-f' <<< "${typed//[[:space:]:]/}")"
   [[ "$typed" =~ ^[0-9a-f]{16,64}$ ]] || { err "type at least the first 16 hex characters of the fingerprint you wrote down"; rm -f "$pub"; return 1; }
   [ "${fp:0:${#typed}}" = "$typed" ] || { err "fingerprint MISMATCH: this public key is not the one you recorded at the host. Nothing was encrypted."; rm -f "$pub"; return 1; }
-  openssl pkeyutl -encrypt -pubin -keyform DER -inkey "$pub" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 \
-    -pkeyopt rsa_mgf1_md:sha256 -in /dev/fd/3 -out "$out" 2>/dev/null || { err "encryption to $src failed"; rm -f "$out" "$pub"; return 1; }
+  hex="$(od -An -tx1 -v "$pub" | tr -d ' \n')"
   rm -f "$pub"
+  if [ "${#hex}" != 182 ] || [ "${hex:0:54}" != "${PIN_IMPORT_P256_SPKI_PREFIX}04" ]; then
+    err "$src is not an ECC P-256 public key. A host's import key made before regalia-kms#671 is RSA-3072:"
+    err "  re-run seal-hsm-pin.sh --init-import-key --replace-import-key on that host (a new fingerprint), or type its PIN there. Nothing was encrypted."
+    return 1
+  fi
+  d="$(mktemp -d "${WORK:-/tmp}/pin-blob.XXXXXX")" || return 1
+  chmod 700 "$d"
+  printf '%b' "$(sed 's/../\\x&/g' <<< "${PIN_IMPORT_PARENT_TEMPLATE}0020${hex:54:64}0020${hex:118:64}")" > "$d/parent"
+  # tpm2_duplicate seeks its input, so the PIN is a 0600 file in the RAM workdir (where pins.env
+  # already is), removed as soon as the tool returns
+  (umask 077; cat <&3 > "$d/pin")
+  tpm2_duplicate --tcti none -U "$d/parent" -G keyedhash -k "$d/pin" -a 'userwithauth|noda' \
+    -u "$d/obj.pub" -r "$d/obj.dpriv" -s "$d/obj.seed" >/dev/null 2>&1; rc=$?
+  rm -f "$d/pin"
+  if [ "$rc" != 0 ]; then err "wrapping to $src failed (tpm2_duplicate)"; rm -rf "$d"; return 1; fi
+  { printf 'regalia-pin-blob v2 tpm2-import nist-p256 sha256=%s\n' "$fp"; cat "$d/obj.pub" "$d/obj.dpriv" "$d/obj.seed"; } > "$out" \
+    || { err "cannot write $out"; rm -rf "$d"; rm -f "$out"; return 1; }
+  rm -rf "$d"
   [ -s "$out" ] || { err "empty blob"; rm -f "$out"; return 1; }
 }
 
