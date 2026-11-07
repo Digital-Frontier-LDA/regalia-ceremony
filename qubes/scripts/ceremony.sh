@@ -1855,6 +1855,9 @@ pin_blob_for() {
     -u "$d/obj.pub" -r "$d/obj.dpriv" -s "$d/obj.seed" 2>&1 >/dev/null)"; rc=$?
   # What the tool said is shown only on failure, and with every line that holds the PIN removed (the
   # patterns come from the PIN file itself, never argv): it can then reach no terminal or log.
+  # Matching the whole PIN is enough: tpm2_duplicate only seals the -k file and has no path that prints
+  # it, so this is a backstop against a verbatim echo, and a 4-digit-substring rule would drop ordinary
+  # diagnostics (response codes, offsets) while still missing an encoded copy (hex, base64).
   errout="$(LC_ALL=C grep -v -F -f "$d/pin" <<< "$errout" || true)"
   rm -f "$d/pin"
   if [ "$rc" != 0 ]; then

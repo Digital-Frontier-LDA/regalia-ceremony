@@ -96,10 +96,14 @@ out="$(WORK="" pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/w.blob" 3< <(prin
 [ "$rc" != 0 ] && grep -q 'RAM workdir (WORK) is not set up' <<< "$out" && [ ! -e "$T/w.blob" ] && P "WORK unset: refused, no fallback to /tmp" || F "WORK unset: rc=$rc $out"
 out="$(WORK="$T/not-there" pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/w.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'RAM workdir (WORK) is not set up' <<< "$out" && [ ! -e "$T/not-there" ] && P "WORK not a directory: refused" || F "WORK missing: rc=$rc $out"
-for bad in "" "12345" "73100482610000000" "7310a48261" " 7310048261" "$(printf '7310048261\n')x"; do
+# $'...' keeps the newlines (a $(...) would strip a trailing one), and printf '%s' passes them on as they are:
+# a good first line with more after it, and a good PIN with a trailing newline, are refused by the
+# no-newline rule alone (grep -x accepts the first line of each)
+for bad in "" "12345" "73100482610000000" "7310a48261" " 7310048261" $'7310048261\nx' $'7310048261\n'; do
   out="$(pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/p.blob" 3< <(printf '%s' "$bad") 2>&1)"; rc=$?
-  [ "$rc" != 0 ] && grep -q 'empty or not 6-16 digits' <<< "$out" && [ ! -e "$T/p.blob" ] && ! grep -qF "${bad:-@@none@@}" <<< "$out" \
-    && P "PIN '$(printf '%s' "$bad" | tr '0-9' '#########')' refused before wrapping; not echoed" || F "PIN of form $(printf '%s' "$bad" | od -An -c | tr -s ' '): rc=$rc $out"
+  first="${bad%%$'\n'*}"     # grep -F takes each line of its pattern as a pattern: look for the digits' line
+  [ "$rc" != 0 ] && grep -q 'empty or not 6-16 digits' <<< "$out" && [ ! -e "$T/p.blob" ] && ! grep -qF "${first:-@@none@@}" <<< "$out" \
+    && P "PIN '$(printf '%s' "$bad" | tr '0-9' '#' | tr '\n' '~')' refused before wrapping; not echoed" || F "PIN of form $(printf '%s' "$bad" | od -An -c | tr -s ' '): rc=$rc $out"
 done
 out="$(pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/p.blob" 3< <(printf '%s\n' "$PIN") 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'empty or not 6-16 digits' <<< "$out" && P "a PIN with a trailing newline is refused (the blob must hold exactly the PIN)" || F "PIN+newline: rc=$rc"
