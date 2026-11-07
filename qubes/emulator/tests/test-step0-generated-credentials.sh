@@ -12,7 +12,7 @@ pass=0; fail=0
 P(){ printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 F(){ printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 hdr(){ printf '\n\033[1m### %s\033[0m\n' "$1"; }
-T="$(mktemp -d)"; trap 'rm -rf "$T"' EXIT
+T="$(mktemp -d)"; trap 'declare -F pit_stop >/dev/null && pit_stop; rm -rf "$T"' EXIT
 
 # drive <mode> <workdir>: mode = gen-ok | gen-wrong | typed. Prints the (ANSI-stripped) screen,
 # then DRIVER: lines describing what was shown.
@@ -202,19 +202,38 @@ grep -q "a YubiKey PIN is 8 digits" <<< "$out" && P "a 6-digit YubiKey PIN is re
 [ "$(field hsm_a_user_pin "$W")" = 7310048261 ] && [ "$(field hsm_b_user_pin "$W")" = 5512096374 ] && [ "$(field yubikey_a_piv_pin "$W")" = 90817263 ] \
   && P "only the accepted PINs are stored" || F "a refused PIN was stored"
 
-hdr "typed-blob: HSM A's PIN is written as a TPM import blob for its host (ADR-0002 D21)"
-openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out "$T/host.key" 2>/dev/null
-openssl pkey -in "$T/host.key" -pubout -out "$T/host.pub.pem"
-fp="$(openssl pkey -pubin -in "$T/host.pub.pem" -outform der | sha256sum | cut -c1-16)"
-W="$T/blob"; mkdir -p "$W"; out="$(BLOB_PUB="$T/host.pub.pem" BLOB_FP="$fp" drive typed-blob "$W")"
-grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed-blob path failed: $(tail -10 <<< "$out")"
-[ -s "$W.blobs/pin-hsm_a.blob" ] && P "pin-hsm_a.blob written" || F "no blob for HSM A"
-[ ! -e "$W.blobs/pin-hsm_b.blob" ] && P "HSM B skipped (no public key given)" || F "a blob for a skipped HSM"
-[ -s "$W.blobs/pin-yubikey_b.blob" ] && P "pin-yubikey_b.blob written (YubiKey PIV PINs go to the TPM too)" || F "no blob for YubiKey B"
-got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-yubikey_b.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-[ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field yubikey_b_piv_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the YubiKey blob opens to exactly YubiKey B's PIV PIN" || F "the YubiKey blob does not open to its PIN"
-got="$(openssl pkeyutl -decrypt -inkey "$T/host.key" -pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha256 -pkeyopt rsa_mgf1_md:sha256 -in "$W.blobs/pin-hsm_a.blob" 2>/dev/null | od -An -tx1 | tr -d ' \n')"
-[ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field hsm_a_user_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the blob opens to exactly HSM A's PIN bytes" || F "the blob does not open to HSM A's PIN"
+hdr "typed-blob: HSM A's PIN is written as a TPM import blob for its host (ADR-0002 D21; v2, regalia-kms#671)"
+# The host's import key: an ECC P-256 storage key in a software TPM when there is one (the blob is then
+# opened as the host opens it), else a P-256 key pair made here (the blob's form is checked, not opened).
+# shellcheck source=pin-import-tpm.sh
+. "$HERE/pin-import-tpm.sh"
+if ! command -v tpm2_duplicate >/dev/null; then
+  if [ "${REQUIRE_TPM_SIM:-0}" = 1 ] || [ "${REQUIRE_EMULATOR_DEPS:-0}" = 1 ]; then F "tpm2_duplicate (tpm2-tools) is missing: step 0 cannot write a PIN blob here"
+  else echo "  (skipping typed-blob: tpm2_duplicate (tpm2-tools) not installed; CI sets REQUIRE_TPM_SIM=1)"; fi
+else
+  tpm_host=0
+  if pit_available && pit_start "$T/host-tpm"; then tpm_host=1; cp "$PIT_DIR/host.pub.pem" "$T/host.pub.pem"
+  elif [ "${REQUIRE_TPM_SIM:-0}" = 1 ]; then F "REQUIRE_TPM_SIM=1 but the software TPM could not be set up"
+  else openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$T/host.key" 2>/dev/null; openssl pkey -in "$T/host.key" -pubout -out "$T/host.pub.pem"; fi
+  fp="$(openssl pkey -pubin -in "$T/host.pub.pem" -outform der | sha256sum | cut -c1-16)"
+  W="$T/blob"; mkdir -p "$W"; out="$(BLOB_PUB="$T/host.pub.pem" BLOB_FP="$fp" drive typed-blob "$W")"
+  grep -q "RC=0" <<< "$out" && P "step 0 succeeds" || F "typed-blob path failed: $(tail -10 <<< "$out")"
+  [ -s "$W.blobs/pin-hsm_a.blob" ] && P "pin-hsm_a.blob written" || F "no blob for HSM A"
+  [ ! -e "$W.blobs/pin-hsm_b.blob" ] && P "HSM B skipped (no public key given)" || F "a blob for a skipped HSM"
+  [ -s "$W.blobs/pin-yubikey_b.blob" ] && P "pin-yubikey_b.blob written (YubiKey PIV PINs go to the TPM too)" || F "no blob for YubiKey B"
+  ok=1; for b in pin-hsm_a pin-yubikey_b; do h="$(head -c 113 "$W.blobs/$b.blob" 2>/dev/null | tr -c '[:print:]' '?')"; grep -q "^regalia-pin-blob v2 tpm2-import nist-p256 sha256=$fp" <<< "$h" || ok=0; done
+  [ "$ok" = 1 ] && P "both are v2 blobs for that host's key (header and fingerprint)" || F "a blob is not v2 for that key"
+  grep -qF "$(field hsm_a_user_pin "$W")" "$W.blobs/pin-hsm_a.blob" && F "HSM A's PIN is visible in its blob" || P "HSM A's PIN is not visible in its blob"
+  if [ "$tpm_host" = 1 ]; then
+    got="$(pit_open "$W.blobs/pin-yubikey_b.blob")"
+    [ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field yubikey_b_piv_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the YubiKey blob unseals in the host's (software) TPM to exactly YubiKey B's PIV PIN" || F "the YubiKey blob does not open to its PIN"
+    got="$(pit_open "$W.blobs/pin-hsm_a.blob")"
+    [ -n "$got" ] && [ "$got" = "$(printf '%s' "$(field hsm_a_user_pin "$W")" | od -An -tx1 | tr -d ' \n')" ] && P "the blob unseals in the host's (software) TPM to exactly HSM A's PIN bytes" || F "the blob does not open to HSM A's PIN"
+    pit_stop
+  else
+    echo "  (the blobs were not opened: no software TPM here; CI sets REQUIRE_TPM_SIM=1)"
+  fi
+fi
 
 hdr "an existing pins.env is loaded as before (hand-made files still work)"
 W="$T/file"; mkdir -p "$W"
