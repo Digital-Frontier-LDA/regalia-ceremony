@@ -122,6 +122,21 @@ out="$(PATH="$T/stubbin:$PATH" pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/s
   && P "a tpm2_duplicate failure shows its exit status and its stderr" || F "stderr not shown: rc=$rc $out"
 ! grep -qF "$PIN" <<< "$out" && ! grep -q 'leak:' <<< "$out" && P "a stderr line holding the PIN is dropped, never shown" || F "the PIN reached the terminal: $out"
 [ -z "$(ls -A "$WORK")" ] && P "and nothing is left in the RAM workdir after the failure" || F "left in the workdir: $(ls -A "$WORK")"
+# TSS2_LOG at trace makes the TSS log marshalled buffers (the PIN, in hex), past the whole-PIN filter:
+# set in the caller, neither it nor TSS2_LOGFILE may reach tpm2_duplicate. A stub records what it gets;
+# a control variable shows the record is the caller's environment
+mkdir -p "$T/envbin"
+cat > "$T/envbin/tpm2_duplicate" <<STUB
+#!/bin/sh
+env | grep -E '^(TSS2_|PIT_ENV_MARK=)' > "$T/dup.env"
+exit 3
+STUB
+chmod +x "$T/envbin/tpm2_duplicate"; rm -f "$T/dup.env"
+out="$(export TSS2_LOG='all+trace' TSS2_LOGFILE="$T/tss.log" PIT_ENV_MARK=1; PATH="$T/envbin:$PATH" \
+  pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/e.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [ -f "$T/dup.env" ] && grep -qx 'PIT_ENV_MARK=1' "$T/dup.env" && ! grep -qE '^TSS2_LOG(FILE)?=' "$T/dup.env" \
+  && P "TSS2_LOG and TSS2_LOGFILE set by the caller do not reach tpm2_duplicate" \
+  || F "the TSS logging settings reached tpm2_duplicate: rc=$rc env: $(cat "$T/dup.env" 2>/dev/null)"
 out="$( (unset CEREMONY_SIMULATE; PATH="$T/stubbin:$PATH" guard_no_stubs) 2>&1)"; rc=$?
 case "$T" in /tmp/*|/private/tmp/*|/var/folders/*|*/.cache/*|*/T/tmp.*)
   [ "$rc" != 0 ] && grep -q "'tpm2_duplicate' resolves to $T/stubbin/tpm2_duplicate" <<< "$out" \

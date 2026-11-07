@@ -1851,7 +1851,9 @@ pin_blob_for() {
   if [ ! -s "$d/pin" ] || [ "$(wc -l < "$d/pin" | tr -d ' ')" != 0 ] || ! LC_ALL=C grep -Eqx '[0-9]{6,16}' "$d/pin"; then
     err "the PIN for $src is empty or not 6-16 digits (no newline). Nothing was encrypted."; rm -rf "$d"; return 1
   fi
-  errout="$(tpm2_duplicate --tcti none -U "$d/parent" -G keyedhash -k "$d/pin" -a 'userwithauth|noda' \
+  # TSS2_LOG at trace would have the TSS log marshalled buffers (the sealed PIN, in hex) to stderr or to
+  # TSS2_LOGFILE, which the whole-PIN filter below would not catch: neither reaches the tool
+  errout="$(env -u TSS2_LOG -u TSS2_LOGFILE tpm2_duplicate --tcti none -U "$d/parent" -G keyedhash -k "$d/pin" -a 'userwithauth|noda' \
     -u "$d/obj.pub" -r "$d/obj.dpriv" -s "$d/obj.seed" 2>&1 >/dev/null)"; rc=$?
   # What the tool said is shown only on failure, and with every line that holds the PIN removed (the
   # patterns come from the PIN file itself, never argv): it can then reach no terminal or log.
