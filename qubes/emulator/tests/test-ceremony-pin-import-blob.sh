@@ -90,6 +90,40 @@ PFP="$(openssl pkey -pubin -in "$T/p384.pub.pem" -outform der | sha256sum | cut 
 out="$(pin_blob_for "$T/p384.pub.pem" "${PFP:0:16}" "$T/h.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'not an ECC P-256 public key' <<< "$out" && [ ! -e "$T/h.blob" ] && P "a P-384 key is refused; no blob" || F "P-384 key: rc=$rc"
 [ -z "$(ls -A "$WORK")" ] && P "no refusal leaves anything in the RAM workdir" || F "left in the workdir: $(ls -A "$WORK")"
+
+hdr "the RAM workdir, the PIN's form, and what tpm2_duplicate says"
+out="$(WORK="" pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/w.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'RAM workdir (WORK) is not set up' <<< "$out" && [ ! -e "$T/w.blob" ] && P "WORK unset: refused, no fallback to /tmp" || F "WORK unset: rc=$rc $out"
+out="$(WORK="$T/not-there" pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/w.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'RAM workdir (WORK) is not set up' <<< "$out" && [ ! -e "$T/not-there" ] && P "WORK not a directory: refused" || F "WORK missing: rc=$rc $out"
+for bad in "" "12345" "73100482610000000" "7310a48261" " 7310048261" "$(printf '7310048261\n')x"; do
+  out="$(pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/p.blob" 3< <(printf '%s' "$bad") 2>&1)"; rc=$?
+  [ "$rc" != 0 ] && grep -q 'empty or not 6-16 digits' <<< "$out" && [ ! -e "$T/p.blob" ] && ! grep -qF "${bad:-@@none@@}" <<< "$out" \
+    && P "PIN '$(printf '%s' "$bad" | tr '0-9' '#########')' refused before wrapping; not echoed" || F "PIN of form $(printf '%s' "$bad" | od -An -c | tr -s ' '): rc=$rc $out"
+done
+out="$(pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/p.blob" 3< <(printf '%s\n' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'empty or not 6-16 digits' <<< "$out" && P "a PIN with a trailing newline is refused (the blob must hold exactly the PIN)" || F "PIN+newline: rc=$rc"
+mkdir -p "$T/stubbin"
+cat > "$T/stubbin/tpm2_duplicate" <<'STUB'
+#!/bin/sh
+# a failing tpm2_duplicate that also tries to print the PIN it was given
+while [ $# -gt 0 ]; do [ "$1" = -k ] && k="$2"; shift; done
+echo "ERROR: simulated failure for the test" >&2
+printf 'leak: %s\n' "$(cat "$k")" >&2
+exit 3
+STUB
+chmod +x "$T/stubbin/tpm2_duplicate"
+out="$(PATH="$T/stubbin:$PATH" pin_blob_for "$T/host.pub.pem" "${FP:0:16}" "$T/s.blob" 3< <(printf '%s' "$PIN") 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'tpm2_duplicate exit 3' <<< "$out" && grep -q 'tpm2_duplicate: ERROR: simulated failure for the test' <<< "$out" && [ ! -e "$T/s.blob" ] \
+  && P "a tpm2_duplicate failure shows its exit status and its stderr" || F "stderr not shown: rc=$rc $out"
+! grep -qF "$PIN" <<< "$out" && ! grep -q 'leak:' <<< "$out" && P "a stderr line holding the PIN is dropped, never shown" || F "the PIN reached the terminal: $out"
+[ -z "$(ls -A "$WORK")" ] && P "and nothing is left in the RAM workdir after the failure" || F "left in the workdir: $(ls -A "$WORK")"
+out="$( (unset CEREMONY_SIMULATE; PATH="$T/stubbin:$PATH" guard_no_stubs) 2>&1)"; rc=$?
+case "$T" in /tmp/*|/private/tmp/*|/var/folders/*|*/.cache/*|*/T/tmp.*)
+  [ "$rc" != 0 ] && grep -q "'tpm2_duplicate' resolves to $T/stubbin/tpm2_duplicate" <<< "$out" \
+    && P "guard_no_stubs refuses a real ceremony whose tpm2_duplicate is a stub under a temp dir" || F "guard_no_stubs let a stub tpm2_duplicate through: rc=$rc $out" ;;
+  *) echo "  (skipping the guard case: this test's temp dir $T is not under a path guard_no_stubs treats as a stub)" ;;
+esac
 # The offer comes after step 0 has LOADED the PINs, so the hand-edited (e) file gets it too, not only
 # generated or chosen PINs.
 body="$(declare -f step_set_pins)"

@@ -301,7 +301,8 @@ init_work() {
 guard_no_stubs() {
   [ "${CEREMONY_SIMULATE:-}" = 1 ] && return 0
   local t p
-  for t in age-plugin-yubikey sc-hsm-tool pkcs11-tool ip lp; do
+  # tpm2_duplicate receives the path of a PIN file (step 0, pin_blob_for: regalia-kms#671)
+  for t in age-plugin-yubikey sc-hsm-tool pkcs11-tool ip lp tpm2_duplicate; do
     p="$(command -v "$t" 2>/dev/null)" || continue
     case "$p" in
       /tmp/*|/private/tmp/*|/var/folders/*|*/.cache/*|*/T/tmp.*)
@@ -1810,16 +1811,20 @@ PIN_IMPORT_P256_SPKI_PREFIX=3059301306072a8648ce3d020106082a8648ce3d030107034200
 # authPolicy, AES-128-CFB, scheme NULL, curve NIST P-256, kdf NULL.
 PIN_IMPORT_PARENT_TEMPLATE=005a0023000b000304720000000600800043001000030010
 pin_blob_for() {
-  local src="$1" typed="$2" out="$3" fp pub hex d rc
+  local src="$1" typed="$2" out="$3" fp pub hex d rc errout line
   # A refusal must leave NO blob: an earlier attempt's file at the same name could be copied to the
   # wrong host as if it were this one.
   rm -f "$out"
+  # The PIN file and the key copy go in the RAM workdir and nowhere else: no fallback to /tmp (a disk,
+  # perhaps, and not what cleanup() removes).
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] && [ ! -L "$WORK" ] \
+    || { err "the RAM workdir (WORK) is not set up: refusing to write a PIN anywhere else. Nothing was encrypted."; return 1; }
   [ -r "$src" ] || { err "cannot read the public key $src"; return 1; }
   command -v tpm2_duplicate >/dev/null 2>&1 \
     || { err "tpm2_duplicate (tpm2-tools) is required to wrap a PIN to a host's TPM; it runs with no TPM (--tcti none)"; return 1; }
   # Read the key ONCE into the RAM workdir, as canonical DER, and use only that copy: a file or
   # symlink on removable media could change between the fingerprint check and the wrapping.
-  pub="$(mktemp "${WORK:-/tmp}/import-pub.XXXXXX")" || return 1
+  pub="$(mktemp "$WORK/import-pub.XXXXXX")" || return 1
   openssl pkey -pubin -in "$src" -outform der -out "$pub" 2>/dev/null || { err "$src is not a public key"; rm -f "$pub"; return 1; }
   fp="$(sha256sum < "$pub" | cut -d' ' -f1)"
   [ -s "$pub" ] || { err "$src is not a public key"; rm -f "$pub"; return 1; }
@@ -1833,16 +1838,30 @@ pin_blob_for() {
     err "  re-run seal-hsm-pin.sh --init-import-key --replace-import-key on that host (a new fingerprint), or type its PIN there. Nothing was encrypted."
     return 1
   fi
-  d="$(mktemp -d "${WORK:-/tmp}/pin-blob.XXXXXX")" || return 1
+  d="$(mktemp -d "$WORK/pin-blob.XXXXXX")" || return 1
   chmod 700 "$d"
   printf '%b' "$(sed 's/../\\x&/g' <<< "${PIN_IMPORT_PARENT_TEMPLATE}0020${hex:54:64}0020${hex:118:64}")" > "$d/parent"
   # tpm2_duplicate seeks its input, so the PIN is a 0600 file in the RAM workdir (where pins.env
   # already is), removed as soon as the tool returns
-  (umask 077; cat <&3 > "$d/pin")
-  tpm2_duplicate --tcti none -U "$d/parent" -G keyedhash -k "$d/pin" -a 'userwithauth|noda' \
-    -u "$d/obj.pub" -r "$d/obj.dpriv" -s "$d/obj.seed" >/dev/null 2>&1; rc=$?
+  if ! (umask 077; cat <&3 > "$d/pin"); then
+    err "the PIN could not be read for $src. Nothing was encrypted."; rm -rf "$d"; return 1
+  fi
+  # Exactly one line of 6-16 ASCII digits, no newline: a SmartCard-HSM user PIN (6-16) or a YubiKey PIV
+  # PIN (6-8), as seal-hsm-pin.sh accepts them. Checked in the file, so the PIN reaches no argv.
+  if [ ! -s "$d/pin" ] || [ "$(wc -l < "$d/pin" | tr -d ' ')" != 0 ] || ! LC_ALL=C grep -Eqx '[0-9]{6,16}' "$d/pin"; then
+    err "the PIN for $src is empty or not 6-16 digits (no newline). Nothing was encrypted."; rm -rf "$d"; return 1
+  fi
+  errout="$(tpm2_duplicate --tcti none -U "$d/parent" -G keyedhash -k "$d/pin" -a 'userwithauth|noda' \
+    -u "$d/obj.pub" -r "$d/obj.dpriv" -s "$d/obj.seed" 2>&1 >/dev/null)"; rc=$?
+  # What the tool said is shown only on failure, and with every line that holds the PIN removed (the
+  # patterns come from the PIN file itself, never argv): it can then reach no terminal or log.
+  errout="$(LC_ALL=C grep -v -F -f "$d/pin" <<< "$errout" || true)"
   rm -f "$d/pin"
-  if [ "$rc" != 0 ]; then err "wrapping to $src failed (tpm2_duplicate)"; rm -rf "$d"; return 1; fi
+  if [ "$rc" != 0 ]; then
+    err "wrapping to $src failed (tpm2_duplicate exit $rc):"
+    while IFS= read -r line; do [ -n "$line" ] && err "  tpm2_duplicate: $line"; done <<< "$errout"
+    rm -rf "$d"; return 1
+  fi
   { printf 'regalia-pin-blob v2 tpm2-import nist-p256 sha256=%s\n' "$fp"; cat "$d/obj.pub" "$d/obj.dpriv" "$d/obj.seed"; } > "$out" \
     || { err "cannot write $out"; rm -rf "$d"; rm -f "$out"; return 1; }
   rm -rf "$d"
