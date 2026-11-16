@@ -6,7 +6,7 @@
 # FORGED records (each refused before any regalia-kms code runs). And the typed second channel for K_A
 # (CEREMONY_GENESIS_TYPED_ANCHOR_CHECK, default 1; the owner's decision is pending) and the tree-digest gate.
 # regalia-kms stands in as a tree whose deploy/baremetal/manifest.py logs its argv and writes --out: what kms itself does
-# with the record is pinned by test_genesis_record_contract.py (against kms's own code with REGALIA_KMS_TREE).
+# with the record is pinned by test_genesis_record_contract.py (against kms's own code, REGALIA_KMS_GENESIS_DIR).
 export PCSCLITE_CSOCK_NAME="${PCSCLITE_CSOCK_NAME:-/nonexistent/regalia-no-pcscd.comm}"   # no real card, even run by hand (#104)
 PATH="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd):$PATH"   # the emulator stand-ins first, as under run-tests.sh (#104)
 set -uo pipefail

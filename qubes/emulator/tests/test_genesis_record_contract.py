@@ -12,8 +12,11 @@ announced to regalia-kms first (#134):
   * publics["anchor-policy"] = {alg: ecdsa-p256, spki}, its point equal to anchor_policy_entry {alg, key: 04||X||Y};
   * operation_proof["anchor-policy"] == "verified".
 offline-keys.py genesis_record is the ceremony's own copy of those rules (the genesis step runs it before any kms code).
-With REGALIA_KMS_TREE set to a regalia-kms checkout, every case below is also judged by kms's own offline_keys_record,
-and the two must agree; without it those cross-checks say SKIP and are not counted.
+With REGALIA_KMS_GENESIS_DIR set to a regalia-kms checkout at or after regalia-kms#438 (6fe15615), every case below
+is also judged by kms's own offline_keys_record, and the two must agree. CI's emulator job checks one out for this test
+alone (REGALIA_KMS_DIR, the other suites' checkout, stays on its own older pin). Without it the cross-checks say SKIP
+on a developer's machine, but test_regalia_kms_judges_every_case FAILS under REQUIRE_EMULATOR_DEPS=1 (CI), and a
+checkout from before #438 fails everywhere: a rename or a stale pin cannot quietly turn the contract off again.
 """
 import os as _hermetic_os  # no real card, even run by hand (#104): no pcscd, the emulator stand-ins first
 _hermetic_os.environ.setdefault("PCSCLITE_CSOCK_NAME", "/nonexistent/regalia-no-pcscd.comm")
@@ -53,8 +56,8 @@ KMS_OFFLINE_KEYS_FIELDS = ("schema", "event", "threshold", "shares", "slip39_ide
 
 
 def _kms():
-    """regalia-kms's manifest module from REGALIA_KMS_TREE, or None."""
-    tree = os.environ.get("REGALIA_KMS_TREE")
+    """regalia-kms's manifest module from REGALIA_KMS_GENESIS_DIR, or None."""
+    tree = os.environ.get("REGALIA_KMS_GENESIS_DIR")
     if not tree:
         return None
     sys.path.insert(0, tree)
@@ -85,7 +88,7 @@ class Contract(unittest.TestCase):
         return {"record": record, "signature": (key or self.root_key).sign(domain + ok.canonical(record)).hex()}
 
     def verdict(self, document):
-        """(ours, kms's): None when accepted, else the refusal's text; kms's is "SKIP" without REGALIA_KMS_TREE."""
+        """(ours, kms's): None when accepted, else the refusal's text; kms's is "SKIP" without REGALIA_KMS_GENESIS_DIR."""
         try:
             ok.genesis_record(copy.deepcopy(document), self.root)
             ours = None
@@ -106,6 +109,22 @@ class Contract(unittest.TestCase):
         if theirs != "SKIP":
             self.assertEqual(theirs is None, accepted, "regalia-kms offline_keys_record disagrees: %s" % theirs)
         return ours
+
+    # ---- the cross-check itself runs ----
+
+    def test_regalia_kms_judges_every_case(self):
+        """The contract is only a contract when kms's own code judges it. CI sets REGALIA_KMS_GENESIS_DIR and
+        REQUIRE_EMULATOR_DEPS=1, so there a missing checkout FAILS here instead of every case quietly saying SKIP (as
+        it did before #187's review: the test read a variable CI never set, and CI's kms predated #438). A checkout
+        without offline_keys_record, a regalia-kms from before #438 (6fe15615), fails anywhere."""
+        if KMS is None:
+            deps.skip_dep(self, "REGALIA_KMS_GENESIS_DIR is not set: regalia-kms's own offline_keys_record judged no "
+                                "case of the genesis contract")
+        self.assertTrue(callable(getattr(KMS, "offline_keys_record", None)) and callable(getattr(KMS, "root_key", None)),
+                        "REGALIA_KMS_GENESIS_DIR=%s has no offline_keys_record: a regalia-kms from before #438 (6fe15615), "
+                        "so the contract is not checked against the code that runs at genesis"
+                        % os.environ.get("REGALIA_KMS_GENESIS_DIR"))
+        self.assertEqual(self.verdict(self.document), (None, None), "the generated record, judged by both sides")
 
     # ---- the pinned values ----
 
@@ -270,5 +289,6 @@ class Contract(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print("regalia-kms cross-check: %s" % ("ON (%s)" % os.environ["REGALIA_KMS_TREE"] if KMS else "SKIP (REGALIA_KMS_TREE unset)"))
+    print("regalia-kms cross-check: %s" % ("ON (%s)" % os.environ["REGALIA_KMS_GENESIS_DIR"] if KMS
+                                           else "SKIP (REGALIA_KMS_GENESIS_DIR unset)"))
     unittest.main(verbosity=2)

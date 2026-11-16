@@ -109,8 +109,9 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
   - Genesis (`ceremony.sh` step g, #134) runs regalia-kms's `manifest propose --genesis` from the image's regalia-kms
     tree (by the digest the kit pins), with `--offline-keys-record` set to the session's `offline-keys.record.json`,
     after `offline-keys.py genesis-check` has verified that record as kms takes it (the format contract, pinned by
-    `test_genesis_record_contract.py`). Tested against a stand-in kms tree; kms's own record check is compared only
-    when `REGALIA_KMS_TREE` names a checkout (CI's kms pin predates regalia-kms#438). `manifest sign --genesis` is
+    `test_genesis_record_contract.py`). Tested against a stand-in kms tree, and every contract case is also judged by
+    kms's own record check from `REGALIA_KMS_GENESIS_DIR`, a checkout at or after regalia-kms#438 that CI pins for
+    this test alone; in CI a missing or older checkout fails the suite, never skips it. `manifest sign --genesis` is
     shown, not run, by the step. Whether the typed ANCHOR-POLICY-ENTRY second channel stays is the owner's decision,
     pending on #134: it is built behind `CEREMONY_GENESIS_TYPED_ANCHOR_CHECK` (default 1, on: K_A's fingerprint is
     written on the sheet at step o and typed back at step g); 0 turns it off, loudly.
