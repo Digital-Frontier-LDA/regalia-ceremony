@@ -1923,7 +1923,9 @@ def card_record(sealed_path, cards_path, release_paths, state_dir, out, stream, 
     marker agreed with regalia-kms-1e require (rc#111's writer requirements):
       * first=True (--first-card-record): the state directory holds no marker and no signing record; the marker
         {schema, root} is created (O_EXCL, O_NOFOLLOW, 0600) before the first line. manifest sign never creates one,
-        so this is the first signing step of a laptop's state directory;
+        so this is the first signing step of a laptop's state directory. A first run that crashed after the marker
+        is finished the same way, also when its log exists EMPTY: _append_line creates the log before it writes the
+        line, so a crash between the two leaves a zero-byte log beside the marker, and no line is history;
       * otherwise the directory is read through its marker (read_signing_state), must hold a card-record line, and the
         sequence and supersedes continue its log: never from OUT;
       * card_record_check, then the operator types the sequence and the record's digest, then the root signs;
@@ -1944,8 +1946,13 @@ def card_record(sealed_path, cards_path, release_paths, state_dir, out, stream, 
     marker_path = os.path.join(state_dir, SIGNING_STATE)
     log_path = os.path.join(state_dir, SIGNING_RECORD)
     if first:
-        require(not os.path.lexists(log_path), "--first-card-record is for a state directory with no signing record; %s holds one. "
-                "If the first run got as far as the log line, run again WITHOUT --first-card-record to release it" % state_dir)
+        # an empty log counts as none only beside the marker (the order _append_line makes them in), and only a regular,
+        # zero-byte file: a log holding anything, a partial line included, is history and is refused here
+        empty = (os.path.lexists(log_path) and os.path.lexists(marker_path)
+                 and _stat.S_ISREG(os.lstat(log_path).st_mode) and os.lstat(log_path).st_size == 0)
+        require(not os.path.lexists(log_path) or empty, "--first-card-record is for a state directory with no signing record; "
+                "%s holds one. If the first run got as far as the log line, run again WITHOUT --first-card-record to release it"
+                % state_dir)
         if os.path.lexists(marker_path):        # only a first run that crashed after the marker, before its line, leaves this
             _marker_for(state_dir, root_hex)
         card_lines = []

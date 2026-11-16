@@ -3106,8 +3106,10 @@ step_card_record() {
         state_restore "$sealed" || return 1;;
       *) err "neither FIRST nor RESTORE was typed: nothing was signed."; return 1;;
     esac
-  elif [ ! -e "$sd/signing-record.jsonl" ]; then
-    first=(--first-card-record)        # a first run that stopped after the marker, before its line: the writer finishes it
+  elif [ ! -s "$sd/signing-record.jsonl" ]; then
+    # a first run that stopped after the marker, before its line (no log, or the empty one a crash between the log's
+    # creation and its first line leaves): the writer finishes it as the first, and refuses a log that is not empty
+    first=(--first-card-record)
   fi
   before="$(oa_card_record)"
   info "the record below names the owner cards and the release cards: compare each serial and key with the ceremony sheet."
@@ -3410,6 +3412,12 @@ step_archive() {
     done < <(oc_files)
     owner_cards_commit_list
   fi
+  # the card records (step k) and any rebuild record: root-signed, public, and what --rebuild-from-disc reads back
+  # (DISC/cards/card-record-N.record.json) after the workdir is gone. A pending one (*.pending.json) never goes.
+  for art in "$WORK"/cards/card-record-*.record.json; do
+    [ -f "$art" ] || continue
+    mkdir -p "$burn/cards" && cp "$art" "$burn/cards/"
+  done
   # the developers' set (step r): its sealed file and break-glass copy are ciphertext, its record and the cards' facts public
   if [ -d "$WORK/developers" ]; then
     mkdir -p "$burn/developers"

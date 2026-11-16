@@ -118,6 +118,7 @@ python3 -Es -c 'import json,sys; a=json.load(open(sys.argv[1]))["record"]; b=jso
 grep -q "not the newest the root signed" <<< "$(current "$W/cards/card-record-1.record.json" "$W/state")" \
   && grep -q "CURRENT 2" <<< "$(current "$W/cards/card-record-2.record.json" "$W/state")" \
   && P "record 1 is now superseded; record 2 is current" || F "supersede: $(current "$W/cards/card-record-1.record.json" "$W/state")"
+WK2="$W"                               # records 1 and 2: the archive case below stages them
 
 hdr "a first run that stopped after the marker, before its line: finished as the first, without the question"
 W="$(new_work)"
@@ -133,6 +134,35 @@ PY2
 out="$(CARD_RECORD_FIRST=bogus run_k "$W")"
 grep -q "RC=0" <<< "$out" && [ -s "$W/cards/card-record-1.record.json" ] && [ "$(lines "$W")" = 1 ] && ! grep -q "type FIRST" <<< "$out" \
   && P "the marker alone: record 1 signed as the first (--first-card-record), no FIRST question" || F "marker only: $(tail -8 <<< "$out")"
+
+hdr "a first run that stopped after its log was made, before the line (an empty log): finished as the first"
+W="$(new_work)"
+( umask 077; mkdir "$W/state" )
+python3 -Es - "$SCRIPTS/offline-keys.py" "$W" <<'PY3'
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("ok", sys.argv[1]); ok = importlib.util.module_from_spec(importlib.util.spec_from_loader("ok", loader)); loader.exec_module(ok)
+w = sys.argv[2]; fd = os.open(os.path.join(w, "state", ok.SIGNING_STATE), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+os.write(fd, ok.canonical({"schema": ok.SCHEMA_SIGNING_STATE, "root": ok.sealed_root(os.path.join(w, "offline", "offline-keys.sealed.json"))}) + b"\n")
+os.close(fd)
+PY3
+( umask 077; : > "$W/state/signing-record.jsonl" )
+out="$(CARD_RECORD_FIRST=bogus run_k "$W")"
+grep -q "RC=0" <<< "$out" && [ -s "$W/cards/card-record-1.record.json" ] && [ "$(lines "$W")" = 1 ] && ! grep -q "type FIRST" <<< "$out" \
+  && P "an empty log beside the marker: record 1 signed as the first, no FIRST question" || F "empty log: $(tail -8 <<< "$out")"
+
+hdr "the archive: the released card records go on the disc, a pending one never"
+W="$WK2"
+printf '{}\n' > "$W/cards/card-record-3.pending.json"
+printf '0123456789abcdef\n' > "$W/escrow-mac.kcv"
+out="$(WORKDIR="$W" bash -c '
+  source "'"$SCRIPTS"'/ceremony.sh" >/dev/null 2>&1; trap - EXIT INT TERM
+  pause(){ :; }; ask(){ return 0; }; PRINTER=""; WORK="$WORKDIR"
+  CEREMONY_SIMULATE=1 step_archive; echo "RC=$?"' 2>&1)"
+staged="$(ls "$W/mdisc/cards" 2>/dev/null | tr '\n' ' ')"
+grep -q "card-record-1.record.json" <<< "$staged" && grep -q "card-record-2.record.json" <<< "$staged" \
+  && cmp -s "$W/cards/card-record-2.record.json" "$W/mdisc/cards/card-record-2.record.json" \
+  && P "card records 1 and 2 are staged in cards/, byte for byte" || F "card records not staged (staged: $staged; $(tail -4 <<< "$out"))"
+! grep -q "pending" <<< "$staged" && P "the pending record is not staged" || F "a pending record is staged: $staged"
 
 hdr "refusals: nothing signed, nothing created"
 W="$(new_work)"
