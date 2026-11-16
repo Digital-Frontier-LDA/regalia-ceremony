@@ -71,6 +71,17 @@ out="$(run_step "$W" copy)"
 grep -q "RC=0" <<< "$out" && grep -q "already proven" <<< "$out" && ! grep -q "ROOT-ENTRY" <<< "$out" \
   && P "run again: nothing is generated twice" || F "re-run: $(tail -5 <<< "$out")"
 
+hdr "K_A's fingerprint goes on the sheet while the typed second channel is on (#134; the default)"
+fp="$(python3 -Es -c 'import hashlib,json,sys; print(hashlib.sha256(bytes.fromhex(json.load(open(sys.argv[1]))["record"]["anchor_policy_entry"]["key"])).hexdigest())' "$W/offline/offline-keys.record.json")"
+W1="$(new_work)"; out="$(run_step "$W1" copy)"
+fp1="$(python3 -Es -c 'import hashlib,json,sys; print(hashlib.sha256(bytes.fromhex(json.load(open(sys.argv[1]))["record"]["anchor_policy_entry"]["key"])).hexdigest())' "$W1/offline/offline-keys.record.json")"
+grep -q "RC=0" <<< "$out" && grep -q "^ANCHOR-POLICY-FINGERPRINT $fp1 " <<< "$out" && grep -q "WRITE ANCHOR-POLICY-FINGERPRINT" <<< "$out" \
+  && P "step o shows K_A's fingerprint and asks for it on the sheet" || F "no ANCHOR-POLICY-FINGERPRINT to write: $(grep -i anchor <<< "$out")"
+[ "$fp" != "$fp1" ] && P "each set has its own K_A" || F "two sets, one K_A fingerprint"
+W2="$(new_work)"; out="$(CEREMONY_GENESIS_TYPED_ANCHOR_CHECK=0 run_step "$W2" copy)"
+grep -q "RC=0" <<< "$out" && ! grep -q "WRITE ANCHOR-POLICY-FINGERPRINT" <<< "$out" \
+  && P "with the typed channel off (0), the sheet is not asked for it" || F "switch off: $(grep -i anchor <<< "$out")"
+
 hdr "a form not verified: the keys are kept, the forms redone"
 W="$(new_work)"
 out="$(run_step "$W" refuse:2)"

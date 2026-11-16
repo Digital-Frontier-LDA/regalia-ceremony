@@ -23,6 +23,8 @@ to the break-glass key.
                                           (a lost state dir; after genesis the chain bounds it, before it only the sheet)
                                           (the k shares on standard input; the confirmation from the terminal)
     python3 -Es offline-keys.py verify-record --record FILE --sealed FILE
+    python3 -Es offline-keys.py genesis-check --record offline-keys.record.json --sealed FILE [--typed-anchor]
+                                          (#134: as regalia-kms propose --genesis takes it; the typed K_A fingerprint on stdin)
 
 
 CURRENT LIMITATIONS (2026-10-04; each item is tracked, and is removed here when it is lifted):
@@ -319,6 +321,13 @@ def anchor_policy_entry(keys):
     from cryptography.hazmat.primitives import serialization
     point = keys["anchor-policy"].public_key().public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint)
     return {"alg": "ecdsa-p256", "key": point.hex()}
+
+
+def anchor_fingerprint(entry):
+    """K_A's fingerprint as the operator writes it on the ceremony sheet at step o and types it back at the genesis step
+    (regalia-ceremony#134): SHA-256 of the 65-byte uncompressed P-256 point, 64 hex, the value regalia-kms's
+    `propose --genesis` shows beside K_A."""
+    return hashlib.sha256(bytes.fromhex(entry["key"])).hexdigest()
 
 
 def root_entry(keys):
@@ -1356,6 +1365,63 @@ def verify_any_record(document, root):
     raise Refused("; ".join(refusals))
 
 
+# ---- the genesis step's check of offline-keys.record.json (regalia-ceremony#134) -------------------------------------
+# THE FORMAT CONTRACT with regalia-kms (deploy/baremetal/manifest.py offline_keys_record, on kms main since #438, 6fe15615;
+# `propose --genesis` requires --offline-keys-record and reads K_A from it only). Any change to the generation record's
+# format is announced to regalia-kms first (#134); test_genesis_record_contract.py pins every item below.
+GENESIS_RECORD_FIELDS = ("schema", "event", "threshold", "shares", "slip39_identifier", "master_id", "publics", "root_entry",
+                         "anchor_policy_entry", "root_fingerprint", "files", "operation_proof", "tool", "at")
+
+
+def genesis_record(document, root):
+    """The generation record `document` as regalia-kms's propose --genesis takes it, checked here first so the ceremony
+    refuses a missing, forged or wrong record before any regalia-kms code runs: exactly {record, signature}, the signature
+    128 hex by the PINNED root `root` (64 hex, the sealed set's header) over RECORD_DOMAIN + canonical(record); exactly the
+    14 fields; event "generate"; root_fingerprint the root's; threshold <= shares, counts; at and master_id strings;
+    anchor_policy_entry a typed P-256 point equal to publics["anchor-policy"]'s SPKI; operation_proof["anchor-policy"]
+    "verified". Returns the record, or Refused."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    require(isinstance(document, dict) and isinstance(document.get("signature"), str)
+            and re.fullmatch(r"[0-9a-f]{128}", document["signature"]) is not None, "the offline-keys record's signature is not 128 hex")
+    record = verify_record(document, root, SCHEMA_RECORD)
+    _exact(record, GENESIS_RECORD_FIELDS, "the offline-keys record")
+    require(record["event"] == "generate", "the offline-keys record is not a generation record (event %r): genesis takes K_A "
+            "from the record step o wrote, never from a forms-verified, session or ownerauth-verified one" % (record["event"],))
+    require(record["root_fingerprint"] == root_fingerprint(record["root_entry"]), "the offline-keys record's root_fingerprint is not the root's")
+    require(all(type(record[k]) is int for k in ("threshold", "shares")) and 1 <= record["threshold"] <= record["shares"],
+            "the offline-keys record's threshold and shares are not counts with threshold <= shares")
+    require(isinstance(record["at"], str) and isinstance(record["master_id"], str), "the offline-keys record's at and master_id are not strings")
+    entry = record["anchor_policy_entry"]
+    _exact(entry, ("alg", "key"), "the offline-keys record's anchor_policy_entry")
+    require(entry["alg"] == "ecdsa-p256" and isinstance(entry["key"], str) and re.fullmatch(r"04[0-9a-f]{128}", entry["key"]) is not None,
+            "the offline-keys record's anchor_policy_entry is not a typed ecdsa-p256 point (04 || X || Y, 130 hex)")
+    published = record["publics"].get("anchor-policy") if isinstance(record["publics"], dict) else None
+    require(isinstance(published, dict) and published.get("alg") == "ecdsa-p256" and isinstance(published.get("spki"), str),
+            "the offline-keys record publishes no ecdsa-p256 anchor-policy key")
+    try:
+        public = serialization.load_der_public_key(base64.b64decode(published["spki"], validate=True))
+        require(isinstance(public, ec.EllipticCurvePublicKey) and isinstance(public.curve, ec.SECP256R1), "")
+        point = public.public_bytes(serialization.Encoding.X962, serialization.PublicFormat.UncompressedPoint).hex()
+    except (ValueError, TypeError, Refused):
+        raise Refused("the offline-keys record's published anchor-policy key is not a P-256 public key") from None
+    require(point == entry["key"], "the offline-keys record's anchor_policy_entry is not its published anchor-policy key")
+    proof = record["operation_proof"]
+    require(isinstance(proof, dict) and proof.get("anchor-policy") == "verified",
+            "the offline-keys record shows no generation proof for K_A (operation_proof[\"anchor-policy\"] is not \"verified\")")
+    return record
+
+
+def typed_anchor_matches(record, typed):
+    """The typed second channel (#134): `typed`, K_A's fingerprint as the operator read it off the ceremony SHEET, equal to
+    the verified record's. Compared in constant time; never shown first."""
+    import hmac
+    typed = (typed or "").strip().lower()
+    require(re.fullmatch(r"[0-9a-f]{64}", typed) is not None, "the ANCHOR-POLICY-FINGERPRINT typed is not 64 hex: nothing was proposed")
+    require(hmac.compare_digest(typed.encode(), anchor_fingerprint(record["anchor_policy_entry"]).encode()),
+            "the ANCHOR-POLICY-FINGERPRINT typed from the sheet is not this record's K_A: nothing was proposed")
+
+
 SCHEMA_CARDS = "regalia.card-ceremony-record/v1"
 CARD_ROLES = ("owner-main", "owner-backup")     # ADR-0002 D30.7: the OWNER pair, not the developer cards
 # The bench's staging YubiKeys (the memory of 2026-10-01; D28.5/D30: never a bench serial in the ceremony). One list,
@@ -2308,6 +2374,12 @@ def main(argv=None):
     ov.add_argument("--summary", action="store_true", help="refuse unless every YubiKey has opened every envelope")
     ov.add_argument("--sealed", required=True, help="the sealed file: its public header pins the root the record must be "
                     "signed by; with --summary also the k shares on stdin, and the root signs the result")
+    gc = sub.add_parser("genesis-check", help="the genesis step's check (#134): offline-keys.record.json as regalia-kms's propose "
+                        "--genesis takes it, under the sealed set's root; prints ROOT-KEY, the --root-key it takes")
+    gc.add_argument("--record", required=True)
+    gc.add_argument("--sealed", required=True, help="the sealed file whose public header pins the root")
+    gc.add_argument("--typed-anchor", action="store_true", help="also read K_A's fingerprint, typed from the ceremony sheet, "
+                    "as one line on standard input, and refuse unless it is the record's")
     v = sub.add_parser("verify-record", help="a record, verified under the root of the sealed set given (never the root it names)")
     v.add_argument("--record", required=True)
     v.add_argument("--sealed", required=True, help="the sealed file whose public header pins the root")
@@ -2319,6 +2391,8 @@ def main(argv=None):
             print("ROOT-FINGERPRINT %s  (sha256 of the raw 32-byte Ed25519 key, as enrol check and manifest sign --genesis take it)"
                   % record["root_fingerprint"])
             print("ANCHOR-POLICY-ENTRY %s  (K_A, pinned in the genesis manifest: regalia-kms#361)" % json.dumps(record["anchor_policy_entry"], sort_keys=True))
+            print("ANCHOR-POLICY-FINGERPRINT %s  (sha256 of K_A's 65-byte point, as propose --genesis shows it)"
+                  % anchor_fingerprint(record["anchor_policy_entry"]))
             for name, pub in sorted(record["publics"].items()):
                 if "recipient" in pub:
                     print("KEY %s %s recipient %s" % (name, pub["alg"], pub["recipient"]))
@@ -2411,6 +2485,17 @@ def main(argv=None):
                 print("CARD RECORD %d SIGNED by the root (%s): %s; digest %s, in %s"
                       % (record["sequence"], record["root_fingerprint"], path, card_record_digest(record),
                          os.path.join(args.state_dir, SIGNING_RECORD)))
+        elif args.command == "genesis-check":
+            root = sealed_root(args.sealed)
+            with open(args.record, "rb") as f:
+                record = genesis_record(json.loads(f.read(1 << 20)), root)
+            if args.typed_anchor:
+                typed_anchor_matches(record, sys.stdin.readline())
+            print("VERIFIED the generation record of %s (sealed set %s, %d of %d shares), signed by the sealed set's root %s"
+                  % (record["at"], record["master_id"], record["threshold"], record["shares"], root_fingerprint(record["root_entry"])))
+            # regalia-kms's --root-key takes the Ed25519 root as its bare 64 hex: a typed entry there is P-256 only
+            # (membership.root_entries), and the genesis root is one Ed25519 key (D28)
+            print("ROOT-KEY %s" % root)
         elif args.command == "tree-digest":
             print(tree_digest(args.root))
         else:

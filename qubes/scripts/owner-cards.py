@@ -41,7 +41,7 @@ CURRENT LIMITATIONS (2026-10-05):
   * The attestation chain to Yubico's root is not checked here, only each leaf's claims and keys: regalia-kms's reader
     (#400) checks the chain at genesis. A card that fails any check is left with its keys; reset its OpenPGP applet
     (ykman openpgp reset) before it is used again.
-  * ceremony.sh step c runs it for both cards and joins them; card-record has no ceremony step yet (#111).
+  * ceremony.sh step c runs it for both cards and joins them; step k signs the card record from cards.json (#111).
 """
 import argparse
 import base64
