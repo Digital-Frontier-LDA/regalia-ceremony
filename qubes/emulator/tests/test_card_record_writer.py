@@ -261,6 +261,37 @@ class Writer(unittest.TestCase):
         self.assertEqual((record["sequence"], self.recovered, os.path.basename(path)), (1, True, "card-record-1.record.json"))
         self.assertEqual(self.current(path)["sequence"], 1)
 
+    def test_a_first_run_that_crashed_with_an_empty_log_is_finished_as_the_first(self):
+        """CodeRabbit on #187: _append_line creates the log (O_CREAT) before it writes the line, so a crash between the
+        two leaves a zero-byte log beside the marker. Neither path took it: --first-card-record refused an existing log
+        and a plain run refused a log with no line. The empty log is no history: the rerun with the flag finishes it."""
+        def crash(state_dir, *args, **kwargs):
+            os.close(os.open(os.path.join(state_dir, ok.SIGNING_RECORD), os.O_WRONLY | os.O_CREAT, 0o600))
+            raise OSError("power cut")
+        with unittest.mock.patch.object(ok, "append_card_record_line", side_effect=crash):
+            with self.assertRaises(OSError):
+                self.sign(first=True)
+        self.assertEqual(os.path.getsize(os.path.join(self.state, ok.SIGNING_RECORD)), 0)
+        with self.assertRaisesRegex(ok.Refused, "has a marker but no card-record line"):
+            self.sign()
+        record, path = self.sign(first=True)
+        self.assertEqual((record["sequence"], os.path.basename(path)), (1, "card-record-1.record.json"))
+        self.assertEqual(os.listdir(self.out), ["card-record-1.record.json"])
+        self.assertEqual(self.current(path)["sequence"], 1)
+
+    def test_a_log_that_is_not_empty_is_history_even_without_a_line(self):
+        self.sign(first=True)
+        log = os.path.join(self.state, ok.SIGNING_RECORD)
+        for content in (b"\n", b'{"kind": "card-rec'):            # a newline, a partial line: neither is empty
+            with open(log, "wb") as f:
+                f.write(content)
+            with self.assertRaisesRegex(ok.Refused, "--first-card-record is for a state directory with no signing record"):
+                self.sign(first=True)
+        os.unlink(os.path.join(self.state, ok.SIGNING_STATE))
+        open(log, "wb").close()                                  # empty, but no marker beside it: not a crash this writer left
+        with self.assertRaisesRegex(ok.Refused, "--first-card-record is for a state directory with no signing record"):
+            self.sign(first=True)
+
     def test_the_two_release_imports_are_two_cards(self):
         with self.assertRaisesRegex(ok.Refused, "both --release-import files are for card 40000003"):
             self.sign(first=True, imports=[self.imports[0], self.imports[0]])

@@ -174,7 +174,7 @@ qvm-usb attach vault sys-usb:<device-id>     # qvm-usb list to find it
 Nothing persists on the ceremony laptop, so the root's signing state (`state/`: the marker, `signing-record.jsonl`,
 a rebuild's record) is burned on each archive disc and committed to `hsm-backups/state/`.
 
-- **First ceremony:** the card record's writer creates it, as session 0.
+- **First ceremony:** the card record's writer creates it, as session 0, at `ceremony.sh` step k (the operator types FIRST).
 - **A later session:** step t (today the only later-session step that signs) restores it from the NEWEST disc's `state/`, mounted
   read-only, and asks for the sheet's session count. An older disc, a disc newer than the sheet, a fork or (after
   genesis) a disc the chain's pin does not match are refused, and nothing is signed. The session then records

@@ -2584,7 +2584,12 @@ step_offline_keys() {
     python3 -Es "$HERE/offline-keys.py" generate --threshold "$(K)" --shares "$(N)" --out "$dir" --breakglass-recipient "$rcp" \
       || { err "the offline keys were NOT generated (reason above)."; return 1; }
     warn "ROOT-ENTRY above is the membership root's pin for regalia-kms root-key.json; it goes on the disc in the record."
-    warn "ANCHOR-POLICY-ENTRY above is K_A's public key, the genesis manifest's anchor_policy_key (regalia-kms#361)."
+    warn "ANCHOR-POLICY-ENTRY above is K_A's public key, the genesis manifest's anchor_policy_key (regalia-kms#361): genesis"
+    warn "(step g) takes it from this session's signed record, offline-keys.record.json, never typed."
+    if [ "${CEREMONY_GENESIS_TYPED_ANCHOR_CHECK:-1}" != 0 ]; then
+      warn "WRITE ANCHOR-POLICY-FINGERPRINT (above, 64 hex) BY HAND on the ceremony sheet too: genesis (step g) asks for it"
+      warn "typed, from that sheet, as a second channel beside the record (CEREMONY_GENESIS_TYPED_ANCHOR_CHECK=1, #134)."
+    fi
     warn "WRITE ROOT-FINGERPRINT (above, 64 hex) BY HAND on the ceremony sheet: the first manifest's signing"
     warn "(manifest sign --genesis) and every host's enrol check ask for it typed, from that sheet, never from a screen."
   fi
@@ -2770,7 +2775,7 @@ ownerauth_make() {
   [ -s "$keys" ] || { err "no owner cards' public keys ($keys): the owner cards' step exports them (ADR-0002 D30.7, #111 step 2)."; return 1; }
   # the root-signed card record names the two owner cards: ownerauth refuses an export that is not theirs (d9, 1e on #451)
   card="$(oa_card_record)"
-  [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (card-record)."; return 1; }
+  [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (step k)."; return 1; }
   # only the NEWEST card record the root signed counts (d9 on rc#133), by the laptop's signing state directory
   [ -d "$(state_dir)" ] \
     || { err "no signing state directory in this session ($(state_dir)): the card record makes it, or a later session restores it from the disc. Nothing was made."; return 1; }
@@ -3058,6 +3063,163 @@ step_owner_cards() {
   owner_cards_commit_list
 }
 
+# ---- step k: the card record (regalia-ceremony#111, regalia-ceremony-oo0; regalia-kms#403, #408) ----------------------
+# The root signs what steps c and r made: the owner cards' facts (cards.json) and both release cards' import facts, as
+# the next card-ceremony record in $WORK/cards (card-record-N.record.json), logged in the laptop's signing state
+# directory before it is released (offline-keys.py card-record). The FIRST card record ever also creates that
+# directory's marker (--first-card-record): the operator says so by typing FIRST, since a later session that forgot to
+# restore its state from the newest disc must never start a second history (a fork). A later session restores it here
+# (state_restore) and signs the next record, superseding the last. Steps a and g (genesis) read the newest record.
+# card_record_sign SEALED STATE [--first-card-record]: the writer, the k shares on stdin; its confirmation (the sequence
+# and the digest's first 8 hex) typed at the terminal (a test stands in for the terminal here; offline-keys.py itself
+# has no test switch).
+card_record_sign() {
+  local sealed="$1" sd="$2" fact1="" fact2=""
+  shift 2
+  { read -r fact1; read -r fact2; } < <(rk_facts match)
+  python3 -Es "$HERE/offline-keys.py" card-record --sealed "$sealed" --cards "$WORK/cards/cards.json" \
+      --release-import "$fact1" --release-import "$fact2" --state-dir "$sd" --out "$WORK/cards" "$@" < "$(oa_shares_in)"
+}
+card_record_sealed() { # the sealed set the root signs from: step o's in this session, else a later session's archived copy
+  if [ -s "$WORK/offline/offline-keys.sealed.json" ]; then printf '%s' "$WORK/offline/offline-keys.sealed.json"
+  elif [ -s "$WORK/rotation/offline-keys.sealed.json" ]; then printf '%s' "$WORK/rotation/offline-keys.sealed.json"; fi
+}
+step_card_record() {
+  b "Card record — the root signs the owner cards' and the release cards' facts (regalia-ceremony#111; regalia-kms#403)"
+  local sealed sd answer before after first=()
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made outside it."; return 1; }
+  sealed="$(card_record_sealed)"
+  [ -n "$sealed" ] || { err "no offline keys in this session ($WORK/offline/offline-keys.sealed.json): run step o first (the root signs this record)."; return 1; }
+  [ -s "$WORK/cards/cards.json" ] || { err "no owner cards' facts ($WORK/cards/cards.json): run step c first (both owner cards)."; return 1; }
+  [ "$(rk_imported)" -eq 2 ] || { err "$(rk_imported) release cards hold this developers' set ($WORK/cards/release-import-*.json): run step r first (both release cards)."; return 1; }
+  [ -z "$(rk_facts stale)" ] || { err "release-import facts of another set are in $WORK/cards: step r names them; remove them first."; return 1; }
+  sd="$(state_dir)"
+  if [ ! -e "$sd/signing-record.jsonl" ] && [ ! -e "$sd/regalia-signing-state.json" ]; then
+    warn "this session has no signing state ($sd). If an archive disc carries a state/ directory, this is NOT the first card"
+    warn "record: it is restored from the NEWEST disc first. Only the very first card record of this root starts a new one."
+    answer="$(state_ask "type FIRST if no disc carries a state/ directory yet, or RESTORE to restore it from the newest disc" CARD_RECORD_FIRST)"
+    case "$answer" in
+      FIRST)
+        [ -e "$sd" ] || ( umask 077; mkdir "$sd" ) || return 1
+        first=(--first-card-record);;
+      RESTORE)
+        state_restore "$sealed" || return 1;;
+      *) err "neither FIRST nor RESTORE was typed: nothing was signed."; return 1;;
+    esac
+  elif [ ! -s "$sd/signing-record.jsonl" ]; then
+    # a first run that stopped after the marker, before its line (no log, or the empty one a crash between the log's
+    # creation and its first line leaves): the writer finishes it as the first, and refuses a log that is not empty
+    first=(--first-card-record)
+  fi
+  before="$(oa_card_record)"
+  info "the record below names the owner cards and the release cards: compare each serial and key with the ceremony sheet."
+  info "type $(K) shares of the OFFLINE keys' set (the root signs the record), then Ctrl-D; then the sequence and the digest's first 8 hex:"
+  card_record_sign "$sealed" "$sd" ${first[@]+"${first[@]}"} \
+    || { err "the card record was NOT signed (reason above). Fix it, then run this step again: a run that stopped half-way is finished or discarded by the next."; return 1; }
+  after="$(oa_card_record)"
+  [ -n "$after" ] && [ "$after" != "$before" ] || { err "no new card record was released in $WORK/cards: nothing was signed."; return 1; }
+  python3 -Es "$HERE/offline-keys.py" state-status --state-dir "$sd" --sealed "$sealed" | sed 's/^/     /'
+  warn "WRITE the card record's SEQUENCE and DIGEST (above) BY HAND on the ceremony sheet: genesis (step g) asks you to check both."
+  warn "COMMIT after the ceremony (hsm-backups/cards/): $(basename "$after")  sha256 $(sha256sum < "$after" | cut -c1-64)"
+}
+
+# ---- step g: the genesis manifest, proposed (regalia-ceremony#134, regalia-htl; regalia-kms#361, #438) ---------------
+# regalia-kms's `manifest propose --genesis` writes epoch 1 UNSIGNED, taking K_A from this session's offline-keys.record.json
+# (--offline-keys-record) and nowhere else, the owner's keys from the newest card record (--card-record, step k) and the
+# laptop's signing state (--state-dir). Before any regalia-kms code runs, this step refuses a missing record, one the
+# sealed set's root did not sign, or one that is not the generation record kms takes (offline-keys.py genesis-check: the
+# format contract of #134, pinned by test_genesis_record_contract.py). The image's regalia-kms tree is run only once its
+# digest equals the one the ceremony kit pins (typed, as state_restore takes it). `manifest sign --genesis` comes after,
+# through offline-keys.py sign (the k shares), and is shown, not run, here.
+#
+# THE TYPED SECOND CHANNEL (#134; the owner's decision is PENDING, recommendation: keep). With
+# CEREMONY_GENESIS_TYPED_ANCHOR_CHECK=1 (the default) the operator also types K_A's ANCHOR-POLICY-FINGERPRINT from the
+# ceremony SHEET (written by hand at step o), never shown here first, and the step refuses unless it is the verified
+# record's. 0 drops that channel (the signed record alone then names K_A), loudly; any other value is refused.
+genesis_typed_anchor_check() {
+  case "${CEREMONY_GENESIS_TYPED_ANCHOR_CHECK:-1}" in
+    1) return 0;;
+    0) return 1;;
+    *) return 2;;
+  esac
+}
+genesis_tool_ok() { # genesis_tool_ok ROOT DIGEST: the image's regalia-kms tree, by the digest the kit pins
+  local root="$1" digest="$2" got
+  [ -n "$root" ] && [ -d "$root" ] && [ ! -L "$root" ] && [ -f "$root/deploy/baremetal/manifest.py" ] \
+    || { err "'$root' is not a regalia-kms tree (no deploy/baremetal/manifest.py): nothing was proposed."; return 1; }
+  case "$digest" in *[!0-9a-f]*|'') err "the tree's digest is 64 lowercase hex, from the image's build evidence: nothing was proposed."; return 1;; esac
+  got="$(python3 -Es "$HERE/offline-keys.py" tree-digest --root "$root")" || { err "the tree's digest could not be computed: nothing was proposed."; return 1; }
+  [ "$got" = "$digest" ] || { err "the regalia-kms tree's digest is $got, not the kit's $digest: it is not the reviewed tree. Nothing was proposed."; return 1; }
+}
+genesis_propose() { # genesis_propose TOOL_ROOT ARGS...: regalia-kms's propose --genesis from its tree (the operator types at the console)
+  # -I, and the digest-checked tree is the ONLY directory added to the module path (never the working directory): as
+  # `python3 -m deploy.baremetal.manifest` run from that tree, without what -m would also take from the cwd
+  local root="$1"; shift
+  python3 -I -c 'import runpy, sys; sys.path.insert(0, sys.argv[1]); sys.argv = [sys.argv[0]] + sys.argv[2:]; runpy.run_module("deploy.baremetal.manifest", run_name="__main__", alter_sys=True)' \
+      "$root" propose --genesis "$@"
+}
+step_genesis() {
+  b "Genesis — epoch 1 proposed by regalia-kms, K_A from this session's offline-keys record (regalia-ceremony#134; regalia-kms#361)"
+  local dir="$WORK/genesis" record="$WORK/offline/offline-keys.record.json" sealed="$WORK/offline/offline-keys.sealed.json"
+  local typed_check card sd root_key tool_root tool_digest measurements system_pub nodes node n=0 args=() typed out rc
+  [ -n "${WORK:-}" ] && [ -d "$WORK" ] || { err "no session workdir: nothing is made outside it."; return 1; }
+  genesis_typed_anchor_check; typed_check=$?
+  [ "$typed_check" -ne 2 ] || { err "CEREMONY_GENESIS_TYPED_ANCHOR_CHECK is 1 (the typed second channel, the default) or 0, not '${CEREMONY_GENESIS_TYPED_ANCHOR_CHECK}': nothing was proposed."; return 1; }
+  [ -s "$sealed" ] || { err "no offline keys in this session ($sealed): genesis takes K_A from the session that generated it (step o)."; return 1; }
+  [ -e "$record" ] || { err "no offline-keys generation record ($record): step o writes it. Genesis takes K_A from it only: nothing was proposed."; return 1; }
+  [ -f "$record" ] && [ ! -L "$record" ] || { err "$record is not a plain file: nothing was proposed."; return 1; }
+  card="$(oa_card_record)"
+  [ -n "$card" ] || { err "no card record in this session ($WORK/cards/card-record-N.record.json): sign it first (step k)."; return 1; }
+  sd="$(state_dir)"
+  [ -f "$sd/regalia-signing-state.json" ] || { err "no signing state in this session ($sd): step k makes it (or restores it). Nothing was proposed."; return 1; }
+  [ ! -e "$dir/genesis.unsigned.json" ] || { err "$dir/genesis.unsigned.json exists: nothing is overwritten (remove it to propose again)."; return 1; }
+  if [ "$typed_check" -eq 0 ]; then
+    info "K_A's fingerprint is typed from the ceremony SHEET (the ANCHOR-POLICY-FINGERPRINT written at step o), not from a screen."
+    typed="$(state_ask "type the ANCHOR-POLICY-FINGERPRINT from the ceremony sheet (64 hex)" GENESIS_TYPED_ANCHOR)"
+    root_key="$(printf '%s\n' "$typed" | python3 -Es "$HERE/offline-keys.py" genesis-check --record "$record" --sealed "$sealed" --typed-anchor)" \
+      || { err "the offline-keys record was REFUSED (reason above): nothing was proposed."; return 1; }
+  else
+    warn "CEREMONY_GENESIS_TYPED_ANCHOR_CHECK=0: the typed second channel for K_A is OFF (the owner's decision on #134 is pending)."
+    warn "K_A is then named by the root-signed record alone; the ceremony log records that this run skipped the typed check."
+    root_key="$(python3 -Es "$HERE/offline-keys.py" genesis-check --record "$record" --sealed "$sealed" </dev/null)" \
+      || { err "the offline-keys record was REFUSED (reason above): nothing was proposed."; return 1; }
+  fi
+  printf '%s\n' "$root_key" | grep -v '^ROOT-KEY ' | sed 's/^/   /'
+  root_key="$(printf '%s\n' "$root_key" | sed -n 's/^ROOT-KEY //p')"
+  [ "${#root_key}" -eq 64 ] && [ -n "${root_key##*[!0-9a-f]*}" ] || { err "the record's check named no root (64 hex): nothing was proposed."; return 1; }
+  tool_root="$(state_ask "the image's regalia-kms tree (e.g. /usr/lib/regalia-kms)" GENESIS_TOOL_ROOT)"
+  tool_digest="$(state_ask "that tree's digest, from the image's build evidence (64 hex)" GENESIS_TOOL_DIGEST)"
+  genesis_tool_ok "$tool_root" "$tool_digest" || return 1
+  measurements="$(state_ask "the measurements document epoch 1 commits to" GENESIS_MEASUREMENTS)"
+  system_pub="$(state_ask "the root's own copy of the system-phase PCR key's public half (PEM)" GENESIS_SYSTEM_PUB)"
+  nodes="$(state_ask "the enrolment directory: one directory per node, each with bundle.json, keep.json and activation.json" GENESIS_NODES)"
+  for f in "$measurements" "$system_pub"; do
+    [ -n "$f" ] && [ -f "$f" ] && [ ! -L "$f" ] || { err "'$f' is not a plain file: nothing was proposed."; return 1; }
+  done
+  [ -n "$nodes" ] && [ -d "$nodes" ] && [ ! -L "$nodes" ] || { err "'$nodes' is not a directory: nothing was proposed."; return 1; }
+  for node in "$nodes"/*/; do
+    node="${node%/}"
+    [ -d "$node" ] && [ ! -L "$node" ] || continue
+    for f in bundle.json keep.json activation.json; do
+      [ -f "$node/$f" ] && [ ! -L "$node/$f" ] || { err "$node has no $f (enrol init, challenge and activate write the three): nothing was proposed."; return 1; }
+    done
+    args+=(--node "$node/bundle.json" "$node/keep.json" "$node/activation.json"); n=$((n+1))
+  done
+  [ "$n" -gt 0 ] || { err "no node in '$nodes': nothing was proposed."; return 1; }
+  [ -e "$dir" ] || ( umask 077; mkdir "$dir" ) || return 1
+  out="$dir/genesis.unsigned.json"
+  info "regalia-kms checks every node, the card record and the offline-keys record, then shows epoch 1: read every field,"
+  info "check the card record's sequence and digest against the sheet, then type the two owner cards' serials, as printed ON THE CARDS."
+  genesis_propose "$tool_root" --root-key "$root_key" --offline-keys-record "$record" --card-record "$card" --state-dir "$sd" \
+      --measurements "$measurements" --system-pub "$system_pub" "${args[@]}" --out "$out"
+  rc=$?
+  [ "$rc" -eq 0 ] && [ -s "$out" ] || { err "regalia-kms did NOT propose the genesis manifest (reason above): nothing to sign."; return 1; }
+  info "genesis proposed, UNSIGNED: $out  sha256 $(sha256sum < "$out" | cut -c1-64)"
+  warn "NEXT, on this laptop: the offline root signs it, the fingerprint typed from the sheet (k shares on stdin):"
+  # isolation-exempt: displayed, not run here; offline-keys.py sign's --exec takes exactly /usr/bin/python3 -Es -m (check_command)
+  show "python3 -Es $HERE/offline-keys.py sign --sealed $sealed --who '<NAME>' --out $dir --tool-root $tool_root --tool-digest $tool_digest --state-dir $sd --output $dir/genesis.signed.json --exec /usr/bin/python3 -Es -m deploy.baremetal.manifest sign --genesis --proposal $out --out $dir/genesis.signed.json --signer root --key-fd '{keyfd:root}' --offline-session '{session}' --root-key '{root}' --state-dir '{state}'"
+}
+
 step_archive() {
   b "Archive disc (burn, then read every file back and checksum it)"
   info "One writer is enough (ADR-0002 D9): burn, push the tray shut, read the disc back and"
@@ -3148,7 +3310,7 @@ step_archive() {
       warn "simulated run: the owner authorizations are not proven by both owner cards; the real ceremony refuses this disc."
     else
       err "the owner authorizations are not proven by both owner cards (no ownerauth-verified.record.json; step a skipped, failed or unfinished). Run step a; nothing was burned."
-      err "step a needs the owner cards' exported keys and the card record, so the owner cards' step (#111 step 2) and card-record come before this disc."
+      err "step a needs the owner cards' exported keys and the card record, so the owner cards (step c), the release cards (step r) and the card record (step k) come before this disc."
       return 1
     fi
   fi
@@ -3250,6 +3412,12 @@ step_archive() {
     done < <(oc_files)
     owner_cards_commit_list
   fi
+  # the card records (step k) and any rebuild record: root-signed, public, and what --rebuild-from-disc reads back
+  # (DISC/cards/card-record-N.record.json) after the workdir is gone. A pending one (*.pending.json) never goes.
+  for art in "$WORK"/cards/card-record-*.record.json; do
+    [ -f "$art" ] || continue
+    mkdir -p "$burn/cards" && cp "$art" "$burn/cards/"
+  done
   # the developers' set (step r): its sealed file and break-glass copy are ciphertext, its record and the cards' facts public
   if [ -d "$WORK/developers" ]; then
     mkdir -p "$burn/developers"
@@ -3511,6 +3679,8 @@ main() {
    a) Owner authorizations: each KMS host's TPM owner auth, to both owner cards + its SOPS recovery copy (after o, card record)
    c) Owner cards: owner-main and owner-backup, keys generated on each, touch fixed, attested (D30.7; after 3 g)
    r) Release key: the developers' set, imported onto both release cards (D29.2, D30; after 3 g)
+   k) Card record: the root signs the owner and release cards' facts (#111; after o, c and r; before a)
+   g) Genesis: epoch 1 proposed by regalia-kms, K_A from the offline-keys record (#134; after k and the nodes' enrolment)
    t) Owner-auth rotation: new owner auths for enrolled hosts, from the archived sealed set (a later session; card record)
    w) After the archive's readback: the disc's signing state checked, then what the sheet and the disc label take
 MENU
@@ -3535,6 +3705,8 @@ MENU
       a|A) step_ownerauth;;
       c|C) step_owner_cards;;
       r|R) step_release_key;;
+      k|K) step_card_record;;
+      g|G) step_genesis;;
       t|T) step_ownerauth_rotate;;
       w|W) step_state_readback;;
       m|M) if [ -n "$CEREMONY_MANIFEST" ]; then step_manifest_yubikey; else warn "pick 1-9 or q"; fi;;

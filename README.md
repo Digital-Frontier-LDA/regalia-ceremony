@@ -90,8 +90,8 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     cards (#123).
   - The owner authorizations run as `ceremony.sh` step a, to the OWNER pair (ADR-0002 D30.7), with a SOPS recovery copy
     opened by the offline set's shares; the disc waits for both owner cards' proof. The step needs the owner cards'
-    exported keys and the card record, which no step makes yet (#122, #111 step 2). So no real disc that
-    holds the offline keys can be burned until the owner cards' step exists: the cards come first.
+    exported keys (step c) and the card record (step k, below). Neither has run on a real card, so no real disc that
+    holds the offline keys has been burned: the cards come first (#123).
   - The root's signing state lives in the session's RAM (`$WORK/state`) and travels on the archive disc (`state/`),
     since no ceremony profile persists anything. A later session restores it from the newest disc. The sheet's
     session count is typed, and an older disc is refused by name; other discs are compared, so a newer one or a fork
@@ -103,8 +103,18 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     lines the count is compared with are not signed: each names the root's public key and hashes the log before it,
     and anyone who can write a disc can compute both. So the count refuses a wrong or older disc, not a forged one;
     the disc's custody is what keeps it out (raised on #139). Two sessions that restore the same disc before genesis can still fork;
-    only the sheet bounds that (as regalia-kms#406 accepts). The card-record writer has no ceremony step yet (#111),
-    so the first ceremony's state is not made by `ceremony.sh` either.
+    only the sheet bounds that (as regalia-kms#406 accepts). The first ceremony's state is made by `ceremony.sh` step k,
+    the card record (#111): the operator types FIRST for the very first record, or RESTORE to restore the newest disc
+    first; nothing on the laptop can tell a forgotten restore from a first ceremony, so that answer is the operator's.
+  - Genesis (`ceremony.sh` step g, #134) runs regalia-kms's `manifest propose --genesis` from the image's regalia-kms
+    tree (by the digest the kit pins), with `--offline-keys-record` set to the session's `offline-keys.record.json`,
+    after `offline-keys.py genesis-check` has verified that record as kms takes it (the format contract, pinned by
+    `test_genesis_record_contract.py`). Tested against a stand-in kms tree, and every contract case is also judged by
+    kms's own record check from `REGALIA_KMS_GENESIS_DIR`, a checkout at or after regalia-kms#438 that CI pins for
+    this test alone; in CI a missing or older checkout fails the suite, never skips it. `manifest sign --genesis` is
+    shown, not run, by the step. Whether the typed ANCHOR-POLICY-ENTRY second channel stays is the owner's decision,
+    pending on #134: it is built behind `CEREMONY_GENESIS_TYPED_ANCHOR_CHECK` (default 1, on: K_A's fingerprint is
+    written on the sheet at step o and typed back at step g); 0 turns it off, loudly.
   - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed
     file, but each node's switch is regalia-kms's `enrol ownerauth --rotate-from`, which is in review there. Neither
     side has run on hardware. The sealed file is authenticated only by the shares opening it; the step does not check
@@ -117,7 +127,7 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     each attestation, then joins both cards into the card record's input. It enrolled staging YubiKey 35718625
     on 2026-10-05 (regalia-kms-24's bench, #111), after two runs that found and fixed real-card faults; not yet run on
     the ceremony laptop or a production card. `ceremony.sh` step c runs it for both owner cards and joins them;
-    card-record, which signs what step c produces, has no ceremony step yet (#111).
+    step k signs the card record from what steps c and r produce (#111).
   - The release key's import onto the release cards is not implemented (#124).
   - The card-ceremony record's rules and verifier are in review (#121). Its writer, `offline-keys.py card-record`, is
     in review too. It signs inputs that no tool makes from the cards yet. A lost state directory is rebuilt from the
