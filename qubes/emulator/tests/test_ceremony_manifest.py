@@ -520,7 +520,9 @@ class Plan(Case):
     def test_refuses_openpgp(self):
         m = fleet_manifest()
         m["objects"][0]["algorithm"] = "rsa2048"
-        m["objects"][0]["bindings"][1].update(backend="yubikey-openpgp", object_id="sig")
+        # A hex object_id: since regalia-kms d7702de0 (#713) the vendored validator refuses any other spelling
+        # for yubikey-openpgp, and this case is about the ceremony's own refusal, which runs after it.
+        m["objects"][0]["bindings"][1].update(backend="yubikey-openpgp", object_id="01")
         m["objects"][0]["bindings"][2]["object_id"] = "9a"
         self.write_manifest(m)
         self.refuses(self.run_tool("plan", self.manifest), "yubikey-openpgp has no provisioning route")
@@ -583,12 +585,19 @@ class Plan(Case):
             self.assertIn(why, str(caught.exception))
 
     def test_refuses_one_slot_bound_twice(self):
+        """Since regalia-kms d7702de0 (#713) the vendored validator refuses this too, and through the CLI it
+        refuses first. The ceremony's own rule (check_fleet, which also re-checks the result of record) is
+        held independently and proven in-process, as the touch rule above is."""
         m = fleet_manifest()
         other = copy.deepcopy(m["objects"][0])
         other["id"] = "second-signer"
         m["objects"].append(other)
         self.write_manifest(m)
-        self.refuses(self.run_tool("plan", self.manifest), "one slot holds one key")
+        self.refuses(self.run_tool("plan", self.manifest), "hardware slot is also assigned to 'release-signing-key'")
+        module = load_tool()
+        with self.assertRaises(module.Refusal) as caught:
+            module.check_fleet(m)
+        self.assertIn("one slot holds one key", str(caught.exception))
 
 
 class YubicoAttestation(Case):

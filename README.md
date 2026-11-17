@@ -110,9 +110,9 @@ What has and has not been proven on hardware is in [`qubes/PROOF-OF-WORKS.md`](q
     tree (by the digest the kit pins), with `--offline-keys-record` set to the session's `offline-keys.record.json`,
     after `offline-keys.py genesis-check` has verified that record as kms takes it (the format contract, pinned by
     `test_genesis_record_contract.py`). Tested against a stand-in kms tree, and every contract case is also judged by
-    kms's own record check from `REGALIA_KMS_GENESIS_DIR`, a checkout at or after regalia-kms#438 that CI pins for
-    this test alone; in CI a missing or older checkout fails the suite, never skips it. `manifest sign --genesis` is
-    shown, not run, by the step. Whether the typed ANCHOR-POLICY-ENTRY second channel stays is the owner's decision,
+    kms's own record check from `REGALIA_KMS_GENESIS_DIR`, a checkout at or after regalia-kms#438 (in CI, the same
+    checkout as the other suites, pinned to the commit the vendored manifest contract is copied from); in CI a missing
+    or older checkout fails the suite, never skips it. `manifest sign --genesis` is shown, not run, by the step. Whether the typed ANCHOR-POLICY-ENTRY second channel stays is the owner's decision,
     pending on #134: it is built behind `CEREMONY_GENESIS_TYPED_ANCHOR_CHECK` (default 1, on: K_A's fingerprint is
     written on the sheet at step o and typed back at step g); 0 turns it off, loudly.
   - Rotating the owner authorizations (`ceremony.sh` step t, #135) makes and proves a new set from the archived sealed
