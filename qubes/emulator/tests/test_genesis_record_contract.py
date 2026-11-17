@@ -13,8 +13,8 @@ announced to regalia-kms first (#134):
   * operation_proof["anchor-policy"] == "verified".
 offline-keys.py genesis_record is the ceremony's own copy of those rules (the genesis step runs it before any kms code).
 With REGALIA_KMS_GENESIS_DIR set to a regalia-kms checkout at or after regalia-kms#438 (6fe15615), every case below
-is also judged by kms's own offline_keys_record, and the two must agree. CI's emulator job checks one out for this test
-alone (REGALIA_KMS_DIR, the other suites' checkout, stays on its own older pin). Without it the cross-checks say SKIP
+is also judged by kms's own offline_keys_record, and the two must agree. CI's emulator job points it at the
+same checkout as REGALIA_KMS_DIR (regalia-ceremony-h6e moved that pin past #438). Without it the cross-checks say SKIP
 on a developer's machine, but test_regalia_kms_judges_every_case FAILS under REQUIRE_EMULATOR_DEPS=1 (CI), and a
 checkout from before #438 fails everywhere: a rename or a stale pin cannot quietly turn the contract off again.
 """
