@@ -70,16 +70,18 @@ applied() {
 }
 flag() { sed -n "s/.*--$1 \([^ ]*\).*/\1/p" <<<"$2"; }
 
-# values_in LINE VAR — the policy words a document lists for VAR on LINE: the {…} set when the line
-# uses braces, otherwise everything after VAR up to the next ';'. Only policy words are kept, so
-# "(default)" and the surrounding prose drop out.
+# values_in LINE VAR — every value a document lists for VAR on LINE: each comma-separated entry of
+# the {…} set when the line uses braces, otherwise each `backticked` value after VAR up to the next
+# ';'. Every listed entry is kept, known policy word or not, so a list that advertises a value the
+# ceremony refuses (say `sometimes`) does not match the accepted set. "(default)" and the prose
+# around the list are not backticked, so they are not entries.
 values_in() {
   local rest="${1#*"$2"}"
+  rest="${rest#\`}"   # the variable name's own closing backtick
   case "$rest" in
-    *'{'*) rest="${rest#*\{}"; rest="${rest%%\}*}" ;;
-    *) rest="${rest%%;*}" ;;
-  esac
-  grep -oE '[a-z]+' <<<"$rest" | grep -xE 'never|always|cached|once' | sort -u | paste -sd' ' -
+    *'{'*) rest="${rest#*\{}"; rest="${rest%%\}*}"; tr ',' '\n' <<<"$rest" | tr -d ' `' ;;
+    *) rest="${rest%%;*}"; grep -oE '`[^`]+`' <<<"$rest" | tr -d '`' ;;
+  esac | sed '/^$/d' | sort -u | paste -sd' ' -
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -124,7 +126,7 @@ done
 # ---------------------------------------------------------------------------------------------
 # check_doc NAME FILE DEFAULT_RE TOUCH_RE PIN_RE — one document against the applied policy.
 check_doc() {
-  local name="$1" file="$2" def_re="$3" touch_re="$4" pin_re="$5" line var want got n
+  local name="$1" file="$2" def_re="$3" touch_re="$4" pin_re="$5" line var want got n scan_rc
 
   hdr "$name states the applied default"
   # spec: ceremony-yubikey-identity/default-policy-is-stated-and-applied
@@ -143,10 +145,18 @@ check_doc() {
     # 'no physical touch' forms are allowed, and only those words are removed before matching: a
     # touch claim sharing a line with an allowed phrase is still caught (dropping the whole line
     # let one through).
-    n="$(grep -n '' "$file" | perl -ne '($l = $_) =~ s/\bno (?:physical )?touch(?: prompt)?//gi;
+    # The scan's own status is checked: a scan that could not run (no perl, an unreadable file)
+    # prints nothing, and nothing must not read as a pass.
+    n="$(set -o pipefail; grep -n '' "$file" | perl -ne '($l = $_) =~ s/\bno (?:physical )?touch(?: prompt)?//gi;
           print if $l =~ /touch-decrypt|touch prompt|tap the|touch the (?:yubikey|token|key)|requires? a touch|touch to (?:decrypt|confirm)/i')"
-    [ -z "$n" ] && P "$name describes no touch the default does not perform" \
-      || F "$name describes a touch the default (touch=never) does not perform: $n"
+    scan_rc=$?
+    if [ "$scan_rc" -ne 0 ]; then
+      F "$name: the touch-claim scan did not run (rc=$scan_rc), so its absence of findings proves nothing"
+    elif [ -z "$n" ]; then
+      P "$name describes no touch the default does not perform"
+    else
+      F "$name describes a touch the default (touch=never) does not perform: $n"
+    fi
   fi
 
   hdr "$name: PIN cadence matches the default"
