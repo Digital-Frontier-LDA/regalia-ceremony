@@ -236,6 +236,14 @@ to verify. That deliberate display is the only time a secret reaches the termina
 ever receives ciphertext (the payload QR sheet), blank forms and instructions. The workdir is tmpfs
 in RAM, shredded on exit.
 
+**Touch/PIN policy overrides.** The YubiKey step applies `pin=once, touch=never` by default
+(no physical touch; the PIN is entered once per plugin session). Only the PIN axis is
+overridable:
+
+- `CEREMONY_YUBI_PIN_POLICY` ∈ `once` (default), `always`
+- `CEREMONY_YUBI_TOUCH_POLICY` ∈ `never` (default; any other value is refused, because the
+  YubiKey runs in a remote KMS where nobody can touch it, PIN-only per ADR-0002)
+
 **Recovery instruction card (menu step 6 / `make-recovery-card.py`):** prints a
 DVD-case-sized card with the break-glass *procedure* — how to reconstruct from the Shamir
 shares + archive disc — with a dashed cut-guide + corner crop marks. Cut along the line and slip
