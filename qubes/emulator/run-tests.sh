@@ -206,6 +206,9 @@ say "CEREMONY two-YubiKey registration (running the real wizard step twice prese
 "$HERE/tests/test-ceremony-yubikey-factory-card.sh" || suite_failed "test-ceremony-yubikey-factory-card.sh"
 "$HERE/tests/test-ceremony-credential-separation.sh" || suite_failed "test-ceremony-credential-separation.sh"
 
+say "YUBIKEY policy docs (the applied touch/PIN default and both overrides match the written procedure)"
+"$HERE/tests/test-yubikey-policy-docs.sh" || suite_failed "test-yubikey-policy-docs.sh"
+
 say "CEREMONY Tier-0 payload step (encrypt + archival QR; never print an unproven or empty payload)"
 "$HERE/tests/test-payload-step.sh" || suite_failed "test-payload-step.sh"
 
