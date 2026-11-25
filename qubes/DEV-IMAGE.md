@@ -29,6 +29,37 @@ qvm-volume resize dev-regalia:root 30g       # room for Go + VS Code + node
 qvm-run -a dev-regalia xterm                 # or open Terminal from the app menu
 ```
 
+### Or: `dev-vm-create.sh` (sized for you)
+
+`qubes/scripts/dev-vm-create.sh` runs the same dom0 sequence, plus `vcpus`, `memory` and a private
+volume resize, with the sizes as knobs. Copy it into dom0 the usual Qubes way (`qvm-run --pass-io`
+from the qube holding the checkout), then:
+
+```
+# dom0
+DRY_RUN=1 bash dev-vm-create.sh               # print the commands; change nothing
+bash dev-vm-create.sh                         # defaults, sized to this machine
+VCPUS=8 MAXMEM=57344 ROOT_SIZE=80g bash dev-vm-create.sh
+qvm-run -a dev-regalia xterm
+```
+
+| Knob | Default |
+|---|---|
+| `VM` / `TEMPLATE` / `LABEL` | `dev-regalia` / `debian-12` / `blue` |
+| `ROOT_SIZE` / `PRIVATE_SIZE` | `60g` / `40g` |
+| `VCPUS` | host CPUs − 2, at least 2 (from `xl info`) |
+| `MAXMEM` | host RAM in MiB − 6144, at least 4096 (leaves ~6 GiB for dom0 and the sys-* qubes) |
+| `MEMORY` | `4096` (initial MiB; must not exceed `MAXMEM`) |
+| `DRY_RUN` | unset: execute. `1`: print only |
+
+It prints the values it detected before acting. It is idempotent: an existing `dev-regalia` is not
+recreated; its prefs are reapplied and its volumes grown, and a volume already at or above the
+requested size is skipped with a notice (`qvm-volume resize` only grows). Shut the VM down first.
+
+It keeps the boundary above: it refuses `VM=vault-tools` and `TEMPLATE=vault-tools`, and refuses to
+modify an existing qube that is not a StandaloneVM (so it never re-attaches a netvm to a template
+built by the alternative below). It never touches the ceremony template.
+
 Then, **inside `dev-regalia`** (it has network; these repos are public, so no credentials needed):
 
 ```
